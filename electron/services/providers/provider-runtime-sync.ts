@@ -7,12 +7,16 @@ import { getProviderConfig, getProviderDefaultModel } from '../../utils/provider
 import {
   ensureAnthropicMessagesModelMaxTokens,
   ensureOpenClawProviderAgentRuntimePins,
+  installManagedAgentOpenAiApiKey,
   migrateAllAgentAuthProfilesToSqlite,
   pruneInvalidApiProviderEntries,
+  removeManagedAgentOpenAiCredentials,
   removeProviderFromOpenClaw,
   removeProviderKeyFromOpenClaw,
+  restoreManagedAgentAuthProfiles,
   saveOAuthTokenToOpenClaw,
   saveProviderKeyToOpenClaw,
+  snapshotManagedAgentAuthProfiles,
   OPENAI_CODEX_OAUTH_PROVIDER_CONFIG,
   setOpenClawDefaultModel,
   setOpenClawDefaultModelWithOverride,
@@ -27,6 +31,17 @@ import {
 } from '../../shared/pi-ai-model-cost';
 import { logger } from '../../utils/logger';
 import { listAgentsSnapshot } from '../../utils/agent-config';
+import {
+  isUclawManagedDistribution,
+  UCLAW_AUTH_ACCOUNT_ID,
+  UCLAW_PROVIDER_ID,
+} from '../../utils/junfeiai-distribution';
+import { assertManagedRuntimeStartAllowed } from '../../gateway/managed-runtime-mutation-barrier';
+import {
+  isOpenAiProviderIdentity,
+  resolveValidUclawManagedRelayToken,
+  withProviderMutationLock,
+} from './provider-mutation-lock';
 
 /** OpenClaw Codex OAuth hooks only apply to the canonical `openai` provider id. */
 const OPENAI_OAUTH_RUNTIME_PROVIDER = 'openai';
@@ -217,48 +232,100 @@ export async function syncProviderApiKeyToRuntime(
   await saveProviderKeyToOpenClaw(ock, apiKey);
 }
 
-export async function syncAllProviderAuthToRuntime(): Promise<void> {
-  await migrateAllAgentAuthProfilesToSqlite();
-  const accounts = await listProviderAccounts();
-  for (const account of accounts) {
-    const runtimeProviderKey = await resolveRuntimeProviderKey({
-      id: account.id,
-      name: account.label,
-      type: account.vendorId,
-      baseUrl: account.baseUrl,
-      model: account.model,
-      fallbackModels: account.fallbackModels,
-      fallbackProviderIds: account.fallbackAccountIds,
-      enabled: account.enabled,
-      createdAt: account.createdAt,
-      updatedAt: account.updatedAt,
-    });
-
-    const secret = await getProviderSecret(account.id);
-    if (!secret) {
-      continue;
+/** Install one strict managed key and restore the frozen stores if installation fails. */
+async function installManagedOpenAiApiKeyToRuntime(apiKey: string): Promise<void> {
+  const snapshot = await snapshotManagedAgentAuthProfiles();
+  try {
+    await installManagedAgentOpenAiApiKey(snapshot, apiKey);
+  } catch (cause) {
+    try {
+      await restoreManagedAgentAuthProfiles(snapshot);
+    } catch (rollbackCause) {
+      throw new AggregateError(
+        [cause, rollbackCause],
+        'Failed to install the managed OpenAI credential and restore Agent auth profiles',
+        { cause: rollbackCause },
+      );
     }
-
-    if (secret.type === 'api_key') {
-      await saveProviderKeyToOpenClaw(runtimeProviderKey, secret.apiKey);
-      continue;
-    }
-
-    if (secret.type === 'local' && secret.apiKey) {
-      await saveProviderKeyToOpenClaw(runtimeProviderKey, secret.apiKey);
-      continue;
-    }
-
-    if (secret.type === 'oauth') {
-      await saveOAuthTokenToOpenClaw(runtimeProviderKey, {
-        access: secret.accessToken,
-        refresh: secret.refreshToken,
-        expires: secret.expiresAt,
-        email: secret.email,
-        projectId: secret.subject,
-      });
-    }
+    throw cause;
   }
+}
+
+/** Reconcile the managed OpenAI credential before ordinary Provider auth synchronization. */
+async function syncManagedOpenAiAuthToRuntime(
+  accounts: Awaited<ReturnType<typeof listProviderAccounts>>,
+): Promise<boolean> {
+  if (!isUclawManagedDistribution()) {
+    return false;
+  }
+
+  const account = accounts.find((candidate) => candidate.id === UCLAW_PROVIDER_ID);
+  const authSecret = await getProviderSecret(UCLAW_AUTH_ACCOUNT_ID, { migrate: false });
+  const relaySecret = await getProviderSecret(UCLAW_PROVIDER_ID, { migrate: false });
+  const relayToken = resolveValidUclawManagedRelayToken(account, authSecret, relaySecret);
+
+  if (relayToken) {
+    await installManagedOpenAiApiKeyToRuntime(relayToken);
+  } else {
+    // A failed cleanup must reject startup synchronization so Gateway cannot
+    // continue with a stale managed OpenAI profile.
+    await removeManagedAgentOpenAiCredentials();
+  }
+  return true;
+}
+
+export async function syncAllProviderAuthToRuntime(): Promise<void> {
+  await withProviderMutationLock(async () => {
+    // Crash recovery markers must block startup synchronization before it can
+    // rewrite the exact runtime generations preserved for managed recovery.
+    await assertManagedRuntimeStartAllowed();
+    await migrateAllAgentAuthProfilesToSqlite();
+    const accounts = await listProviderAccounts();
+    const managedOpenAiReconciled = await syncManagedOpenAiAuthToRuntime(accounts);
+    for (const account of accounts) {
+      if (managedOpenAiReconciled && isOpenAiProviderIdentity(account)) {
+        continue;
+      }
+
+      const runtimeProviderKey = await resolveRuntimeProviderKey({
+        id: account.id,
+        name: account.label,
+        type: account.vendorId,
+        baseUrl: account.baseUrl,
+        model: account.model,
+        fallbackModels: account.fallbackModels,
+        fallbackProviderIds: account.fallbackAccountIds,
+        enabled: account.enabled,
+        createdAt: account.createdAt,
+        updatedAt: account.updatedAt,
+      });
+
+      const secret = await getProviderSecret(account.id);
+      if (!secret) {
+        continue;
+      }
+
+      if (secret.type === 'api_key') {
+        await saveProviderKeyToOpenClaw(runtimeProviderKey, secret.apiKey);
+        continue;
+      }
+
+      if (secret.type === 'local' && secret.apiKey) {
+        await saveProviderKeyToOpenClaw(runtimeProviderKey, secret.apiKey);
+        continue;
+      }
+
+      if (secret.type === 'oauth') {
+        await saveOAuthTokenToOpenClaw(runtimeProviderKey, {
+          access: secret.accessToken,
+          refresh: secret.refreshToken,
+          expires: secret.expiresAt,
+          email: secret.email,
+          projectId: secret.subject,
+        });
+      }
+    }
+  });
 }
 
 async function syncProviderSecretToRuntime(
@@ -516,7 +583,9 @@ async function syncAgentModelsToRuntime(agentIds?: Set<string>): Promise<void> {
 }
 
 export async function syncAgentModelOverrideToRuntime(agentId: string): Promise<void> {
-  await syncAgentModelsToRuntime(new Set([agentId]));
+  await withProviderMutationLock(async () => {
+    await syncAgentModelsToRuntime(new Set([agentId]));
+  });
 }
 
 export async function syncSavedProviderToRuntime(

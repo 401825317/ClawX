@@ -9,10 +9,11 @@
  * equivalents could stall for 500 ms – 2 s+ per call, causing "Not
  * Responding" hangs.
  */
-import { access, mkdir, readFile, readdir, writeFile } from 'fs/promises';
+import { access, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from 'fs/promises';
 import { constants, readdirSync, readFileSync, existsSync } from 'fs';
-import { dirname, join } from 'path';
+import { basename, dirname, join } from 'path';
 import { homedir } from 'os';
+import { createHash } from 'node:crypto';
 import { listConfiguredAgentIds } from './agent-config';
 import { getOpenClawResolvedDir } from './paths';
 import {
@@ -38,14 +39,23 @@ import {
 } from '../shared/providers/types';
 import { inferCustomModelContextWindow, inferCustomModelInputModalities } from '../shared/providers/model-capabilities';
 import {
+  UCLAW_LEGACY_PROVIDER_IDS,
+  UCLAW_MANAGED_PROVIDER_ID,
+} from '../../shared/junfeiai-endpoints';
+import { isOpenAiProviderIdentity } from '../services/providers/provider-mutation-lock';
+import {
   CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
   CLAWX_OPENAI_IMAGE_PROVIDER_KEY,
 } from './openclaw-image-relay-constants';
 import {
+  guardManagedAuthProfilesSqliteWrite,
   migrateAuthProfilesJsonToSqliteIfNeeded,
   readAuthProfilesFromSqlite,
   readAuthProfilesJson,
+  restoreAuthProfilesSqlitePrimaryRows,
+  snapshotAuthProfilesSqlitePrimaryRows,
   writeAuthProfilesToSqlite,
+  type AuthProfilesSqlitePrimaryRowsSnapshot,
   type PersistedAuthProfilesStore,
 } from './openclaw-auth-sqlite';
 
@@ -315,6 +325,96 @@ async function writeJsonFile(filePath: string, data: unknown): Promise<void> {
   await writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
 }
 
+type ManagedFileGeneration = Readonly<
+  | { exists: false }
+  | { exists: true; contentHash: string }
+>;
+
+let managedAtomicWriteSequence = 0;
+
+function isManagedFileMissingError(error: unknown): boolean {
+  return error instanceof Error && (error as NodeJS.ErrnoException).code === 'ENOENT';
+}
+
+function managedFileGeneration(content: Buffer | null): ManagedFileGeneration {
+  return content === null
+    ? { exists: false }
+    : { exists: true, contentHash: createHash('sha256').update(content).digest('hex') };
+}
+
+function sameManagedFileGeneration(
+  left: ManagedFileGeneration,
+  right: ManagedFileGeneration,
+): boolean {
+  return left.exists === right.exists
+    && (!left.exists || (right.exists && left.contentHash === right.contentHash));
+}
+
+async function readManagedFileState(filePath: string): Promise<{
+  content: Buffer | null;
+  generation: ManagedFileGeneration;
+}> {
+  try {
+    const content = await readFile(filePath);
+    return { content, generation: managedFileGeneration(content) };
+  } catch (cause) {
+    if (isManagedFileMissingError(cause)) {
+      return { content: null, generation: managedFileGeneration(null) };
+    }
+    throw cause;
+  }
+}
+
+async function assertManagedFileGeneration(
+  filePath: string,
+  expected: ManagedFileGeneration,
+): Promise<void> {
+  const current = await readManagedFileState(filePath);
+  if (!sameManagedFileGeneration(current.generation, expected)) {
+    throw new Error(`Managed file changed after snapshot at ${filePath}`);
+  }
+}
+
+/** Replace a managed file without exposing a partially written generation. */
+async function replaceManagedFileAtomically(
+  filePath: string,
+  content: Buffer,
+  mode: number,
+  expectedCurrent: ManagedFileGeneration,
+): Promise<void> {
+  const directory = dirname(filePath);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const tempPath = join(
+    directory,
+    `.${basename(filePath)}.uclaw-${process.pid}-${Date.now()}-${++managedAtomicWriteSequence}.tmp`,
+  );
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  let renamed = false;
+
+  try {
+    handle = await open(tempPath, 'wx', mode);
+    await handle.writeFile(content);
+    await handle.chmod(mode);
+    await handle.sync();
+    await handle.close();
+    handle = null;
+
+    // Re-check immediately before the atomic replacement to narrow the CAS window.
+    await assertManagedFileGeneration(filePath, expectedCurrent);
+    await rename(tempPath, filePath);
+    renamed = true;
+  } finally {
+    if (handle) {
+      await handle.close().catch(() => undefined);
+    }
+    if (!renamed) {
+      await unlink(tempPath).catch((cause: unknown) => {
+        if (!isManagedFileMissingError(cause)) throw cause;
+      });
+    }
+  }
+}
+
 // ── Types ────────────────────────────────────────────────────────
 
 interface AuthProfileEntry {
@@ -416,6 +516,371 @@ function removeProfileFromStore(
 
 function getAuthProfilesPath(agentId = 'main'): string {
   return join(homedir(), '.openclaw', 'agents', agentId, 'agent', AUTH_PROFILE_FILENAME);
+}
+
+interface ManagedAgentAuthProfilesFileSnapshot {
+  agentId: string;
+  filePath: string;
+  originalContent: Buffer | null;
+  originalMode: number | null;
+  beforeGeneration: ManagedFileGeneration;
+  appliedGeneration?: ManagedFileGeneration;
+  sqlite: AuthProfilesSqlitePrimaryRowsSnapshot;
+  jsonStore: AuthProfilesStore;
+  sqliteStore: AuthProfilesStore;
+}
+
+interface ManagedAgentAuthProfilesSnapshotState {
+  agents: ManagedAgentAuthProfilesFileSnapshot[];
+}
+
+declare const managedAgentAuthProfilesSnapshotBrand: unique symbol;
+
+export type ManagedAgentAuthProfilesSnapshot = {
+  readonly [managedAgentAuthProfilesSnapshotBrand]: true;
+};
+
+const managedAgentAuthProfilesSnapshots = new WeakMap<object, ManagedAgentAuthProfilesSnapshotState>();
+
+function createManagedAgentAuthProfilesSnapshot(
+  state: ManagedAgentAuthProfilesSnapshotState,
+): ManagedAgentAuthProfilesSnapshot {
+  const snapshot = Object.freeze({}) as ManagedAgentAuthProfilesSnapshot;
+  managedAgentAuthProfilesSnapshots.set(snapshot, state);
+  return snapshot;
+}
+
+function requireManagedAgentAuthProfilesSnapshot(
+  snapshot: ManagedAgentAuthProfilesSnapshot,
+): ManagedAgentAuthProfilesSnapshotState {
+  const state = managedAgentAuthProfilesSnapshots.get(snapshot);
+  if (!state) throw new Error('Invalid managed Agent auth-profiles snapshot');
+  return state;
+}
+
+function parseManagedAuthProfilesJson(content: Buffer | null): AuthProfilesStore | null {
+  if (!content) return null;
+  try {
+    const parsed = JSON.parse(content.toString('utf8')) as unknown;
+    if (!isPlainRecord(parsed) || !isPlainRecord(parsed.profiles)) return null;
+    return parsed as unknown as AuthProfilesStore;
+  } catch {
+    return null;
+  }
+}
+
+function managedAuthProfilesStoreBaselines(
+  jsonStore: AuthProfilesStore | null,
+  sqliteStore: AuthProfilesStore | null,
+): { jsonStore: AuthProfilesStore; sqliteStore: AuthProfilesStore } {
+  const emptyStore: AuthProfilesStore = { version: AUTH_STORE_VERSION, profiles: {} };
+  return {
+    // A missing compatibility store inherits the existing source so making it
+    // authoritative cannot hide unrelated Provider credentials.
+    jsonStore: structuredClone(jsonStore ?? sqliteStore ?? emptyStore),
+    sqliteStore: structuredClone(sqliteStore ?? jsonStore ?? emptyStore),
+  };
+}
+
+function managedOpenAiProviderIds(additionalProviderIds: Iterable<string>): Set<string> {
+  return new Set([
+    UCLAW_MANAGED_PROVIDER_ID,
+    ...UCLAW_LEGACY_PROVIDER_IDS,
+    ...additionalProviderIds,
+  ]);
+}
+
+/** Freeze every managed auth target and its exact JSON and SQLite primary state. */
+export async function snapshotManagedAgentAuthProfiles(): Promise<ManagedAgentAuthProfilesSnapshot> {
+  const discoveredAgentIds = await discoverAgentIds();
+  const agentIds = discoveredAgentIds.length > 0 ? [...discoveredAgentIds] : ['main'];
+  const agents: ManagedAgentAuthProfilesFileSnapshot[] = [];
+
+  for (const agentId of agentIds) {
+    const filePath = getAuthProfilesPath(agentId);
+    let originalContent: Buffer | null;
+    let beforeGeneration: ManagedFileGeneration;
+    let originalMode: number | null = null;
+    try {
+      const fileState = await readManagedFileState(filePath);
+      originalContent = fileState.content;
+      beforeGeneration = fileState.generation;
+      if (originalContent !== null) {
+        originalMode = (await stat(filePath)).mode & 0o777;
+      }
+    } catch (cause) {
+      throw new Error(`Failed to snapshot auth profiles for agent "${agentId}" at ${filePath}`, { cause });
+    }
+
+    let sqlite: AuthProfilesSqlitePrimaryRowsSnapshot;
+    try {
+      sqlite = snapshotAuthProfilesSqlitePrimaryRows(agentId);
+    } catch (cause) {
+      throw new Error(`Failed to snapshot SQLite auth profiles for agent "${agentId}"`, { cause });
+    }
+    const jsonStore = parseManagedAuthProfilesJson(originalContent);
+    if (sqlite.storeRow && !sqlite.parsedStore) {
+      throw new Error(`Invalid SQLite auth profile store for agent "${agentId}"`);
+    }
+    if (originalContent && !jsonStore) {
+      throw new Error(`Invalid auth-profiles.json for agent "${agentId}" at ${filePath}`);
+    }
+    const baselines = managedAuthProfilesStoreBaselines(jsonStore, sqlite.parsedStore);
+    agents.push({
+      agentId,
+      filePath,
+      originalContent,
+      originalMode,
+      beforeGeneration,
+      sqlite,
+      ...baselines,
+    });
+  }
+
+  return createManagedAgentAuthProfilesSnapshot({ agents });
+}
+
+function buildManagedOpenAiClearedStore(
+  original: AuthProfilesStore,
+  managedProviderIds: ReadonlySet<string>,
+): AuthProfilesStore {
+  const store = structuredClone(original);
+  const removedProfileIds = new Set<string>(
+    [...managedProviderIds].map((providerId) => `${providerId}:default`),
+  );
+  for (const [profileId, profile] of Object.entries(store.profiles)) {
+    if (
+      !managedProviderIds.has(profile.provider)
+      && normalizeAuthProfileProviderKey(profile.provider) !== UCLAW_MANAGED_PROVIDER_ID
+    ) {
+      continue;
+    }
+    delete store.profiles[profileId];
+    removedProfileIds.add(profileId);
+  }
+
+  if (store.order) {
+    for (const [provider, profileIds] of Object.entries(store.order)) {
+      if (
+        managedProviderIds.has(provider)
+        || normalizeAuthProfileProviderKey(provider) === UCLAW_MANAGED_PROVIDER_ID
+      ) {
+        delete store.order[provider];
+        continue;
+      }
+      const retainedProfileIds = profileIds.filter((profileId) => !removedProfileIds.has(profileId));
+      if (retainedProfileIds.length > 0) {
+        store.order[provider] = retainedProfileIds;
+      } else {
+        delete store.order[provider];
+      }
+    }
+  }
+
+  if (store.lastGood) {
+    for (const [provider, profileId] of Object.entries(store.lastGood)) {
+      if (
+        managedProviderIds.has(provider)
+        || normalizeAuthProfileProviderKey(provider) === UCLAW_MANAGED_PROVIDER_ID
+        || removedProfileIds.has(profileId)
+      ) {
+        delete store.lastGood[provider];
+      }
+    }
+  }
+
+  if (store.usageStats) {
+    for (const profileId of removedProfileIds) {
+      delete store.usageStats[profileId];
+    }
+  }
+
+  return store;
+}
+
+function buildStrictManagedOpenAiStore(
+  original: AuthProfilesStore,
+  apiKey: string,
+  managedProviderIds: ReadonlySet<string>,
+): AuthProfilesStore {
+  const store = buildManagedOpenAiClearedStore(original, managedProviderIds);
+
+  store.profiles['openai:default'] = { type: 'api_key', provider: 'openai', key: apiKey };
+  if (!store.order) store.order = {};
+  if (!store.lastGood) store.lastGood = {};
+  store.order.openai = ['openai:default'];
+  store.lastGood.openai = 'openai:default';
+  return store;
+}
+
+async function applyManagedAgentAuthProfiles(
+  snapshot: ManagedAgentAuthProfilesSnapshot,
+  action: string,
+  transform: (store: AuthProfilesStore) => AuthProfilesStore,
+  skipUnchanged = false,
+): Promise<void> {
+  const state = requireManagedAgentAuthProfilesSnapshot(snapshot);
+  const writes = state.agents.flatMap((agent) => {
+    const jsonStore = transform(agent.jsonStore);
+    const sqliteStore = transform(agent.sqliteStore);
+    if (
+      skipUnchanged
+      && JSON.stringify(jsonStore) === JSON.stringify(agent.jsonStore)
+      && JSON.stringify(sqliteStore) === JSON.stringify(agent.sqliteStore)
+    ) {
+      return [];
+    }
+    const serializedJson = Buffer.from(JSON.stringify(jsonStore, null, 2), 'utf8');
+    return [{
+      agent,
+      sqliteStore,
+      serializedJson,
+      appliedGeneration: managedFileGeneration(serializedJson),
+    }];
+  });
+
+  // Freeze every JSON generation before the first JSON or SQLite mutation.
+  for (const { agent } of writes) {
+    try {
+      await assertManagedFileGeneration(agent.filePath, agent.beforeGeneration);
+    } catch (cause) {
+      throw new Error(
+        `Auth profiles changed after snapshot for agent "${agent.agentId}" at ${agent.filePath}`,
+        { cause },
+      );
+    }
+  }
+
+  for (const {
+    agent,
+    sqliteStore,
+    serializedJson,
+    appliedGeneration,
+  } of writes) {
+    try {
+      // Record the expected generation before either write so an ambiguous
+      // filesystem result can still be rolled back without exposing content.
+      agent.appliedGeneration = appliedGeneration;
+      guardManagedAuthProfilesSqliteWrite(agent.sqlite);
+      writeAuthProfilesToSqlite(sqliteStore, agent.agentId, agent.sqlite);
+      await replaceManagedFileAtomically(
+        agent.filePath,
+        serializedJson,
+        0o600,
+        agent.beforeGeneration,
+      );
+    } catch (cause) {
+      throw new Error(`Failed to ${action} auth profiles for agent "${agent.agentId}"`, { cause });
+    }
+  }
+}
+
+/** Strictly replace all OpenAI credentials in every frozen agent target. */
+export async function installManagedAgentOpenAiApiKey(
+  snapshot: ManagedAgentAuthProfilesSnapshot,
+  apiKey: string,
+  additionalProviderIds: Iterable<string> = [],
+): Promise<void> {
+  const normalizedApiKey = apiKey.trim();
+  if (!normalizedApiKey) throw new Error('Managed OpenAI API key must not be empty');
+  const managedProviderIds = managedOpenAiProviderIds(additionalProviderIds);
+  await applyManagedAgentAuthProfiles(
+    snapshot,
+    'install managed',
+    (store) => buildStrictManagedOpenAiStore(store, normalizedApiKey, managedProviderIds),
+  );
+}
+
+async function restoreManagedAuthProfilesJson(
+  agent: ManagedAgentAuthProfilesFileSnapshot,
+): Promise<void> {
+  const current = await readManagedFileState(agent.filePath);
+  if (sameManagedFileGeneration(current.generation, agent.beforeGeneration)) return;
+  if (
+    !agent.appliedGeneration
+    || !sameManagedFileGeneration(current.generation, agent.appliedGeneration)
+  ) {
+    throw new Error(`Refusing to overwrite concurrently changed auth profiles at ${agent.filePath}`);
+  }
+
+  if (agent.originalContent === null) {
+    try {
+      await assertManagedFileGeneration(agent.filePath, agent.appliedGeneration);
+      await unlink(agent.filePath);
+    } catch (cause) {
+      if (!isManagedFileMissingError(cause)) throw cause;
+    }
+    return;
+  }
+
+  await replaceManagedFileAtomically(
+    agent.filePath,
+    agent.originalContent,
+    agent.originalMode ?? 0o600,
+    agent.appliedGeneration,
+  );
+}
+
+/** Restore all frozen SQLite rows and JSON files before reporting aggregated failures. */
+export async function restoreManagedAgentAuthProfiles(
+  snapshot: ManagedAgentAuthProfilesSnapshot,
+): Promise<void> {
+  const state = requireManagedAgentAuthProfilesSnapshot(snapshot);
+  const failures: Error[] = [];
+  for (const agent of state.agents) {
+    try {
+      restoreAuthProfilesSqlitePrimaryRows(agent.sqlite);
+    } catch (cause) {
+      failures.push(new Error(`Failed to restore SQLite auth profiles for agent "${agent.agentId}"`, { cause }));
+    }
+    try {
+      await restoreManagedAuthProfilesJson(agent);
+    } catch (cause) {
+      failures.push(new Error(
+        `Failed to restore auth-profiles.json for agent "${agent.agentId}" at ${agent.filePath}`,
+        { cause },
+      ));
+    }
+  }
+
+  if (failures.length > 0) {
+    throw new AggregateError(failures, 'Failed to restore one or more managed auth profile stores');
+  }
+}
+
+/** Remove every managed OpenAI credential from Agent JSON and SQLite stores. */
+export async function removeManagedAgentOpenAiCredentialsFromSnapshot(
+  snapshot: ManagedAgentAuthProfilesSnapshot,
+  additionalProviderIds: Iterable<string> = [],
+): Promise<void> {
+  const managedProviderIds = managedOpenAiProviderIds(additionalProviderIds);
+  try {
+    await applyManagedAgentAuthProfiles(
+      snapshot,
+      'remove managed',
+      (store) => buildManagedOpenAiClearedStore(store, managedProviderIds),
+      true,
+    );
+  } catch (cause) {
+    try {
+      await restoreManagedAgentAuthProfiles(snapshot);
+    } catch (rollbackCause) {
+      throw new AggregateError(
+        [cause, rollbackCause],
+        'Failed to remove managed OpenAI credentials and restore the previous Agent auth stores',
+        { cause: rollbackCause },
+      );
+    }
+    throw cause;
+  }
+}
+
+/** Freeze Agent auth targets and remove every managed OpenAI credential. */
+export async function removeManagedAgentOpenAiCredentials(
+  additionalProviderIds: Iterable<string> = [],
+): Promise<void> {
+  const snapshot = await snapshotManagedAgentAuthProfiles();
+  await removeManagedAgentOpenAiCredentialsFromSnapshot(snapshot, additionalProviderIds);
 }
 
 async function readAuthProfiles(agentId = 'main'): Promise<AuthProfilesStore> {
@@ -2742,7 +3207,7 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
 /**
  * Update a provider entry in every discovered agent's models.json.
  */
-type AgentModelProviderEntry = {
+export type AgentModelProviderEntry = {
   baseUrl?: string;
   api?: string;
   models?: Array<{
@@ -2755,7 +3220,301 @@ type AgentModelProviderEntry = {
   apiKey?: string;
   /** When true, pi-ai sends Authorization: Bearer instead of x-api-key */
   authHeader?: boolean;
+  [key: string]: unknown;
 };
+
+interface ManagedAgentModelsFileSnapshot {
+  agentId: string;
+  filePath: string;
+  originalContent: Buffer | null;
+  originalMode: number | null;
+  beforeGeneration: ManagedFileGeneration;
+  appliedGeneration?: ManagedFileGeneration;
+  document: Record<string, unknown>;
+}
+
+interface ManagedAgentModelsFilesSnapshotState {
+  files: ManagedAgentModelsFileSnapshot[];
+}
+
+declare const managedAgentModelsFilesSnapshotBrand: unique symbol;
+
+export type ManagedAgentModelsFilesSnapshot = {
+  readonly [managedAgentModelsFilesSnapshotBrand]: true;
+};
+
+const managedAgentModelsFilesSnapshots = new WeakMap<object, ManagedAgentModelsFilesSnapshotState>();
+
+function createManagedAgentModelsFilesSnapshot(
+  state: ManagedAgentModelsFilesSnapshotState,
+): ManagedAgentModelsFilesSnapshot {
+  const snapshot = Object.freeze({}) as ManagedAgentModelsFilesSnapshot;
+  managedAgentModelsFilesSnapshots.set(snapshot, state);
+  return snapshot;
+}
+
+function requireManagedAgentModelsFilesSnapshot(
+  snapshot: ManagedAgentModelsFilesSnapshot,
+): ManagedAgentModelsFilesSnapshotState {
+  const state = managedAgentModelsFilesSnapshots.get(snapshot);
+  if (!state) throw new Error('Invalid managed Agent models snapshot');
+  return state;
+}
+
+function isManagedAgentModelProvider(
+  providerId: string,
+  entry: unknown,
+  managedProviderIds: ReadonlySet<string>,
+): boolean {
+  return managedProviderIds.has(providerId)
+    || isOpenAiProviderIdentity({
+      ...(isPlainRecord(entry) ? entry : {}),
+      id: providerId,
+    });
+}
+
+function parseManagedAgentModelsDocument(
+  agentId: string,
+  filePath: string,
+  content: Buffer,
+): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content.toString('utf8'));
+  } catch (cause) {
+    throw new Error(`Invalid models.json for managed agent "${agentId}" at ${filePath}`, { cause });
+  }
+
+  if (!isPlainRecord(parsed) || (parsed.providers !== undefined && !isPlainRecord(parsed.providers))) {
+    throw new Error(`Invalid models.json for managed agent "${agentId}" at ${filePath}`);
+  }
+  return parsed;
+}
+
+/**
+ * Freeze the configured agent targets and preload their exact models.json state.
+ * Only ENOENT is treated as a file that did not previously exist.
+ */
+export async function snapshotManagedAgentModelsFiles(): Promise<ManagedAgentModelsFilesSnapshot> {
+  const discoveredAgentIds = await discoverAgentIds();
+  const agentIds = discoveredAgentIds.length > 0 ? discoveredAgentIds : ['main'];
+  const files: ManagedAgentModelsFileSnapshot[] = [];
+
+  for (const agentId of agentIds) {
+    const filePath = join(homedir(), '.openclaw', 'agents', agentId, 'agent', 'models.json');
+    let fileState: Awaited<ReturnType<typeof readManagedFileState>>;
+    try {
+      fileState = await readManagedFileState(filePath);
+    } catch (cause) {
+      throw new Error(`Failed to read models.json for managed agent "${agentId}" at ${filePath}`, { cause });
+    }
+
+    const { content: originalContent, generation: beforeGeneration } = fileState;
+    if (originalContent === null) {
+      files.push({
+        agentId,
+        filePath,
+        originalContent: null,
+        originalMode: null,
+        beforeGeneration,
+        document: {},
+      });
+      continue;
+    }
+
+    const document = parseManagedAgentModelsDocument(agentId, filePath, originalContent);
+    let originalMode: number;
+    try {
+      originalMode = (await stat(filePath)).mode & 0o777;
+    } catch (cause) {
+      throw new Error(`Failed to read models.json permissions for managed agent "${agentId}" at ${filePath}`, { cause });
+    }
+    files.push({
+      agentId,
+      filePath,
+      originalContent,
+      originalMode,
+      beforeGeneration,
+      document,
+    });
+  }
+
+  return createManagedAgentModelsFilesSnapshot({ files });
+}
+
+/** Discover canonical and historical managed OpenAI ids without reading mutable files again. */
+export function getManagedAgentOpenAiProviderIds(
+  snapshot: ManagedAgentModelsFilesSnapshot,
+): string[] {
+  const state = requireManagedAgentModelsFilesSnapshot(snapshot);
+  const managedProviderIds = managedOpenAiProviderIds([]);
+  const discovered = new Set<string>();
+
+  for (const file of state.files) {
+    if (!isPlainRecord(file.document.providers)) continue;
+    for (const [providerId, entry] of Object.entries(file.document.providers)) {
+      if (isManagedAgentModelProvider(providerId, entry, managedProviderIds)) {
+        discovered.add(providerId);
+      }
+    }
+  }
+
+  return [...discovered].sort();
+}
+
+async function applyManagedAgentModelsFiles(
+  snapshot: ManagedAgentModelsFilesSnapshot,
+  action: string,
+  transform: (document: Record<string, unknown>) => Record<string, unknown>,
+  skipUnchanged = false,
+): Promise<void> {
+  const state = requireManagedAgentModelsFilesSnapshot(snapshot);
+  const serializedFiles = state.files.flatMap((file) => {
+    const document = transform(structuredClone(file.document));
+    if (skipUnchanged && JSON.stringify(document) === JSON.stringify(file.document)) {
+      return [];
+    }
+    const content = Buffer.from(JSON.stringify(document, null, 2), 'utf8');
+    return [{
+      file,
+      content,
+      appliedGeneration: managedFileGeneration(content),
+    }];
+  });
+
+  // Freeze every target before the first multi-Agent write.
+  for (const { file } of serializedFiles) {
+    try {
+      await assertManagedFileGeneration(file.filePath, file.beforeGeneration);
+    } catch (cause) {
+      throw new Error(
+        `models.json changed after snapshot for managed agent "${file.agentId}" at ${file.filePath}`,
+        { cause },
+      );
+    }
+  }
+
+  for (const { file, content, appliedGeneration } of serializedFiles) {
+    try {
+      file.appliedGeneration = appliedGeneration;
+      await replaceManagedFileAtomically(
+        file.filePath,
+        content,
+        file.originalMode ?? 0o600,
+        file.beforeGeneration,
+      );
+    } catch (cause) {
+      throw new Error(`Failed to ${action} models.json for managed agent "${file.agentId}" at ${file.filePath}`, { cause });
+    }
+  }
+}
+
+/**
+ * Strictly install the managed OpenAI provider into every frozen agent target.
+ * The existing OpenAI entry is replaced rather than merged so personal fields
+ * cannot survive a successful managed-account takeover.
+ */
+export async function updateManagedAgentModelProviderStrict(
+  snapshot: ManagedAgentModelsFilesSnapshot,
+  entry: AgentModelProviderEntry,
+  additionalProviderIds: Iterable<string> = [],
+): Promise<void> {
+  const managedProviderIds = managedOpenAiProviderIds(additionalProviderIds);
+  await applyManagedAgentModelsFiles(snapshot, 'update managed', (document) => {
+    const providers = isPlainRecord(document.providers)
+      ? { ...document.providers }
+      : {};
+    for (const [providerId, existingEntry] of Object.entries(providers)) {
+      if (isManagedAgentModelProvider(providerId, existingEntry, managedProviderIds)) {
+        delete providers[providerId];
+      }
+    }
+    providers[UCLAW_MANAGED_PROVIDER_ID] = structuredClone(entry);
+    return { ...document, providers };
+  });
+}
+
+/** Remove every managed OpenAI provider entry, including historical inline credentials. */
+export async function removeManagedAgentOpenAiProviders(
+  snapshot: ManagedAgentModelsFilesSnapshot,
+  additionalProviderIds: Iterable<string> = [],
+): Promise<void> {
+  const managedProviderIds = managedOpenAiProviderIds(additionalProviderIds);
+  try {
+    await applyManagedAgentModelsFiles(snapshot, 'remove managed providers from', (document) => {
+      if (!isPlainRecord(document.providers)) return document;
+      const providers = { ...document.providers };
+      for (const [providerId, entry] of Object.entries(providers)) {
+        if (isManagedAgentModelProvider(providerId, entry, managedProviderIds)) {
+          delete providers[providerId];
+        }
+      }
+      return { ...document, providers };
+    }, true);
+  } catch (cause) {
+    const state = requireManagedAgentModelsFilesSnapshot(snapshot);
+    if (!state.files.some((file) => file.appliedGeneration !== undefined)) {
+      throw cause;
+    }
+    try {
+      await restoreManagedAgentModelsFiles(snapshot);
+    } catch (rollbackCause) {
+      throw new AggregateError(
+        [cause, rollbackCause],
+        'Failed to remove managed Agent model providers and restore the previous files',
+        { cause: rollbackCause },
+      );
+    }
+    throw cause;
+  }
+}
+
+/** Restore every frozen target, reporting all failures after attempting each one. */
+export async function restoreManagedAgentModelsFiles(
+  snapshot: ManagedAgentModelsFilesSnapshot,
+): Promise<void> {
+  const state = requireManagedAgentModelsFilesSnapshot(snapshot);
+  const failures: Error[] = [];
+
+  for (const file of state.files) {
+    try {
+      const current = await readManagedFileState(file.filePath);
+      if (sameManagedFileGeneration(current.generation, file.beforeGeneration)) continue;
+      if (
+        !file.appliedGeneration
+        || !sameManagedFileGeneration(current.generation, file.appliedGeneration)
+      ) {
+        throw new Error(`Refusing to overwrite concurrently changed models.json at ${file.filePath}`);
+      }
+
+      if (file.originalContent === null) {
+        try {
+          await assertManagedFileGeneration(file.filePath, file.appliedGeneration);
+          await unlink(file.filePath);
+        } catch (cause) {
+          if (!isManagedFileMissingError(cause)) throw cause;
+        }
+        continue;
+      }
+
+      await replaceManagedFileAtomically(
+        file.filePath,
+        file.originalContent,
+        file.originalMode ?? 0o600,
+        file.appliedGeneration,
+      );
+    } catch (cause) {
+      failures.push(new Error(
+        `Failed to restore models.json for managed agent "${file.agentId}" at ${file.filePath}`,
+        { cause },
+      ));
+    }
+  }
+
+  if (failures.length > 0) {
+    throw new AggregateError(failures, 'Failed to restore one or more managed agent models.json files');
+  }
+}
 
 async function updateModelsJsonProviderEntriesForAgents(
   agentIds: string[],

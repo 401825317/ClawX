@@ -15,6 +15,14 @@
   "soldOut": "已售罄",
   "loading": "正在加载商店",
   "retry": "重试",
+  "methods": {
+    "alipay": "支付宝",
+    "wxpay": "微信支付"
+  },
+  "activeOrder": {
+    "title": "当前支付订单",
+    "view": "查看订单"
+  },
   "errors": {
     "auth_required": "请先登录 UClaw",
     "auth_expired": "登录状态已失效，请重新登录 UClaw",
@@ -34,23 +42,49 @@
     "check": "检查状态",
     "checking": "正在检查",
     "close": "关闭",
+    "cancelOrder": "放弃订单",
     "noQr": "未返回可用的付款码",
+    "returnToCheck": "完成付款后回到这里检查状态",
+    "orderNumber": "订单号",
+    "createdAt": "创建时间",
+    "waiting": "等待时长",
+    "lastChecked": "最近检查",
+    "durationSeconds": "{{seconds}} 秒",
+    "durationMinutes": "{{minutes}} 分 {{seconds}} 秒",
     "success": "支付成功，虾粮已更新",
     "pending": "等待支付",
     "failed": "支付失败",
     "cancelled": "订单已取消",
     "expired": "订单已关闭",
-    "statusUnavailable": "暂时无法确认支付状态，系统会继续重试"
+    "statusUnavailable": "暂时无法确认支付状态，系统会继续重试",
+    "guidance": {
+      "pendingTitle": "请使用付款码完成支付",
+      "pendingSubtitle": "付款后 UClaw 会自动更新订单状态。",
+      "delayedTitle": "支付确认时间较长",
+      "delayedSubtitle": "请保留当前订单，UClaw 仍在持续检查支付状态。",
+      "unavailableTitle": "暂时无法确认支付结果",
+      "unavailableSubtitle": "订单仍然有效，UClaw 会自动继续重试。",
+      "failedTitle": "支付未完成",
+      "failedSubtitle": "请放弃当前订单后重新发起充值。",
+      "cancelledTitle": "订单已取消",
+      "cancelledSubtitle": "这笔订单没有完成付款，你可以重新发起充值。",
+      "expiredTitle": "订单已关闭",
+      "expiredSubtitle": "这笔订单已过期，请重新发起充值。"
+    }
   },
   "orders": {
     "title": "历史订单",
     "description": "最近的虾粮充值记录",
     "empty": "暂无充值订单",
+    "refresh": "刷新历史订单",
+    "orderNumber": "订单号",
     "date": "时间",
     "amount": "金额",
     "quota": "虾粮",
     "method": "支付方式",
     "status": "状态",
+    "completed": "完成",
+    "total": "共 {{total}} 条",
     "previous": "上一页",
     "next": "下一页",
     "page": "第 {{page}} / {{total}} 页"

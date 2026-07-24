@@ -111,6 +111,99 @@ describe('gateway supervisor process cleanup', () => {
     expect(child.kill).toHaveBeenCalledTimes(1);
   });
 
+  it('rejects when child.kill reports that SIGTERM was not sent', async () => {
+    setPlatform('linux');
+    const child = new MockUtilityChild(9876);
+    child.kill.mockReturnValue(false);
+    const { terminateOwnedGatewayProcess } = await import('@electron/gateway/supervisor');
+
+    await expect(
+      terminateOwnedGatewayProcess(child as unknown as Electron.UtilityProcess),
+    ).rejects.toThrow(/SIGTERM.*child\.kill\(\) returned false/i);
+  });
+
+  it('waits for the child exit event after escalating to SIGKILL', async () => {
+    vi.useFakeTimers();
+    setPlatform('linux');
+    const child = new MockUtilityChild(9876);
+    const killSpy = vi.spyOn(process, 'kill').mockReturnValue(true);
+    const { terminateOwnedGatewayProcess } = await import('@electron/gateway/supervisor');
+
+    try {
+      let settled = false;
+      const stopPromise = terminateOwnedGatewayProcess(child as unknown as Electron.UtilityProcess)
+        .finally(() => {
+          settled = true;
+        });
+
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(killSpy).toHaveBeenCalledWith(9876, 'SIGKILL');
+      expect(settled).toBe(false);
+
+      child.emit('exit', null);
+      await stopPromise;
+      expect(settled).toBe(true);
+    } finally {
+      killSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects when SIGKILL is denied', async () => {
+    vi.useFakeTimers();
+    setPlatform('linux');
+    const child = new MockUtilityChild(9876);
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+    });
+    const { terminateOwnedGatewayProcess } = await import('@electron/gateway/supervisor');
+
+    try {
+      const stopPromise = terminateOwnedGatewayProcess(child as unknown as Electron.UtilityProcess);
+      const rejection = expect(stopPromise).rejects.toThrow(/SIGKILL.*operation not permitted/i);
+      await vi.advanceTimersByTimeAsync(5000);
+      await rejection;
+    } finally {
+      killSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects when the child remains alive after SIGKILL', async () => {
+    vi.useFakeTimers();
+    setPlatform('linux');
+    const child = new MockUtilityChild(9876);
+    const killSpy = vi.spyOn(process, 'kill').mockReturnValue(true);
+    const { terminateOwnedGatewayProcess } = await import('@electron/gateway/supervisor');
+
+    try {
+      const stopPromise = terminateOwnedGatewayProcess(child as unknown as Electron.UtilityProcess);
+      const rejection = expect(stopPromise).rejects.toThrow(/did not exit after SIGKILL/i);
+      await vi.advanceTimersByTimeAsync(5000);
+      await vi.advanceTimersByTimeAsync(5000);
+      await rejection;
+    } finally {
+      killSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects when taskkill cannot terminate an owned Windows process', async () => {
+    setPlatform('win32');
+    const child = new MockUtilityChild(4321);
+    mockExec.mockImplementationOnce(
+      (_cmd: string, _opts: object, cb: (err: Error | null, stdout: string) => void) => {
+        cb(new Error('access denied'), '');
+        return {} as never;
+      },
+    );
+    const { terminateOwnedGatewayProcess } = await import('@electron/gateway/supervisor');
+
+    await expect(
+      terminateOwnedGatewayProcess(child as unknown as Electron.UtilityProcess),
+    ).rejects.toThrow(/taskkill.*access denied/i);
+  });
+
   it('waits for port release after orphan cleanup on Windows', async () => {
     setPlatform('win32');
     const { findExistingGatewayProcess } = await import('@electron/gateway/supervisor');

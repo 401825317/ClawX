@@ -51,10 +51,13 @@ export function createAgentsApi(ctx: AgentsApiContext): CompleteHostServiceRegis
       const name = requireString(payload, 'name');
       const inheritWorkspace = isRecord(payload) ? payload.inheritWorkspace === true : undefined;
       const snapshot = await createAgent(name, { inheritWorkspace });
-      syncAllProviderAuthToRuntime().catch((err) => {
-        console.warn('[agents] Failed to sync provider auth after agent creation:', err);
-      });
-      scheduleGatewayReload(ctx, 'create-agent');
+      // Do not reload a newly created Agent while managed credential cleanup is incomplete.
+      try {
+        await syncAllProviderAuthToRuntime();
+        scheduleGatewayReload(ctx, 'create-agent');
+      } catch (syncError) {
+        console.warn('[agents] Failed to sync provider auth after agent creation:', syncError);
+      }
       void ensureClawXContext({ waitForAllConfiguredWorkspaces: true }).catch((err) => {
         console.warn('[agents] Failed to ensure ClawX context after agent creation:', err);
       });
@@ -71,16 +74,22 @@ export function createAgentsApi(ctx: AgentsApiContext): CompleteHostServiceRegis
       const agentId = requireString(payload, 'id');
       const modelRef = isRecord(payload) && typeof payload.modelRef === 'string' ? payload.modelRef : null;
       const snapshot = await updateAgentModel(agentId, modelRef);
+      // Runtime synchronization is a prerequisite for reload; a sync error
+      // keeps a stale managed credential from becoming active again.
+      let runtimeSynchronized = false;
       try {
         await syncAllProviderAuthToRuntime();
         await syncAgentModelOverrideToRuntime(agentId);
+        runtimeSynchronized = true;
       } catch (syncError) {
         console.warn('[agents] Failed to sync runtime after updating agent model:', syncError);
       }
       // Agent model changes must be picked up by the running Gateway before
       // the next send; otherwise the UI can show the new selection while the
       // active runtime still answers with the previous model.
-      scheduleGatewayReload(ctx, 'update-agent-model');
+      if (runtimeSynchronized) {
+        scheduleGatewayReload(ctx, 'update-agent-model');
+      }
       return { success: true, ...snapshot };
     },
     delete: async (payload) => {

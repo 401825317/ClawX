@@ -41,6 +41,12 @@ import {
 } from '../../utils/provider-keys';
 import type { ProviderWithKeyInfo } from '../../shared/providers/types';
 import { logger } from '../../utils/logger';
+import {
+  assertProviderMutationAllowed,
+  isOpenAiProviderIdentity,
+  isUclawManagedAccount,
+  withProviderMutationLock,
+} from './provider-mutation-lock';
 
 function maskApiKey(apiKey: string | null): string | null {
   if (!apiKey) return null;
@@ -111,6 +117,11 @@ export class ProviderService {
   }
 
   async listAccounts(): Promise<ProviderAccount[]> {
+    return withProviderMutationLock(() => this.listAccountsWithCleanup());
+  }
+
+  /** Build the UI snapshot and apply its store cleanup as one serialized mutation. */
+  private async listAccountsWithCleanup(): Promise<ProviderAccount[]> {
     await ensureProviderStoreMigrated();
 
     // ── openclaw.json is the ONLY source of truth ──
@@ -173,12 +184,15 @@ export class ProviderService {
         // Pick the best store account for this key:
         // 1. Prefer alias variants (e.g. minimax-portal-cn over minimax-portal)
         // 2. Among equal variants, prefer the most recently updated
+        const canonicalManagedOpenAi = key === 'openai'
+          ? storeGroup.find((account) => account.id === 'openai' && isUclawManagedAccount(account))
+          : undefined;
         const aliasAccounts = storeGroup.filter((a) => a.vendorId !== key);
         const candidates = aliasAccounts.length > 0 ? aliasAccounts : storeGroup;
         candidates.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 
         // Clean up orphaned duplicates from the store.
-        let kept = candidates[0];
+        let kept = canonicalManagedOpenAi ?? candidates[0];
         for (const account of storeGroup) {
           if (account.id !== kept.id) {
             logger.info(
@@ -189,7 +203,7 @@ export class ProviderService {
         }
 
         const entry = openClawProviders[key];
-        if (entry) {
+        if (entry && !canonicalManagedOpenAi) {
           const [syncedAccount] = ProviderService.buildAccountsFromOpenClawEntries(
             { [key]: entry },
             new Set(),
@@ -237,6 +251,9 @@ export class ProviderService {
     if (activeProviders.has(OPENAI_CODEX_RUNTIME_PROVIDER_KEY) || !hasConfiguredOpenAiApiKey) {
       const openaiStoreAccounts = storeByKey.get('openai') ?? [];
       for (const account of openaiStoreAccounts) {
+        if (account.id === 'openai' && isUclawManagedAccount(account)) {
+          continue;
+        }
         if (account.authMode !== 'api_key' && account.authMode !== undefined) {
           continue;
         }
@@ -353,14 +370,18 @@ export class ProviderService {
   }
 
   async createAccount(account: ProviderAccount, apiKey?: string): Promise<ProviderAccount> {
-    await ensureProviderStoreMigrated();
-    // Only save to providerAccounts store — do NOT call saveProvider() which
-    // writes to the legacy `providers` store and causes phantom/duplicate issues.
-    await saveProviderAccount(account);
-    if (apiKey !== undefined && apiKey.trim()) {
-      await storeApiKey(account.id, apiKey.trim());
-    }
-    return (await getProviderAccount(account.id)) ?? account;
+    return withProviderMutationLock(async () => {
+      await ensureProviderStoreMigrated();
+      const existing = await getProviderAccount(account.id);
+      await this.assertMutationAllowed(account, existing);
+      // Only save to providerAccounts store — do NOT call saveProvider() which
+      // writes to the legacy `providers` store and causes phantom/duplicate issues.
+      await saveProviderAccount(account);
+      if (apiKey !== undefined && apiKey.trim()) {
+        await storeApiKey(account.id, apiKey.trim());
+      }
+      return (await getProviderAccount(account.id)) ?? account;
+    });
   }
 
   async updateAccount(
@@ -368,36 +389,47 @@ export class ProviderService {
     patch: Partial<ProviderAccount>,
     apiKey?: string,
   ): Promise<ProviderAccount> {
-    await ensureProviderStoreMigrated();
-    const existing = await getProviderAccount(accountId);
-    if (!existing) {
-      throw new Error('Provider account not found');
-    }
-
-    const nextAccount: ProviderAccount = {
-      ...existing,
-      ...patch,
-      id: accountId,
-      updatedAt: patch.updatedAt ?? new Date().toISOString(),
-    };
-
-    // Only save to providerAccounts store — skip legacy saveProvider().
-    await saveProviderAccount(nextAccount);
-    if (apiKey !== undefined) {
-      const trimmedKey = apiKey.trim();
-      if (trimmedKey) {
-        await storeApiKey(accountId, trimmedKey);
-      } else {
-        await deleteApiKey(accountId);
+    return withProviderMutationLock(async () => {
+      await ensureProviderStoreMigrated();
+      const existing = await getProviderAccount(accountId);
+      if (!existing) {
+        throw new Error('Provider account not found');
       }
-    }
 
-    return (await getProviderAccount(accountId)) ?? nextAccount;
+      await this.assertMutationAllowed(accountId, existing, patch);
+      const nextAccount: ProviderAccount = {
+        ...existing,
+        ...patch,
+        id: accountId,
+        updatedAt: patch.updatedAt ?? new Date().toISOString(),
+      };
+
+      // Only save to providerAccounts store — skip legacy saveProvider().
+      await saveProviderAccount(nextAccount);
+      if (apiKey !== undefined) {
+        const trimmedKey = apiKey.trim();
+        if (trimmedKey) {
+          await storeApiKey(accountId, trimmedKey);
+        } else {
+          await deleteApiKey(accountId);
+        }
+      }
+
+      return (await getProviderAccount(accountId)) ?? nextAccount;
+    });
   }
 
   async deleteAccount(accountId: string): Promise<boolean> {
-    await ensureProviderStoreMigrated();
-    return deleteProvider(accountId);
+    return withProviderMutationLock(async () => {
+      await ensureProviderStoreMigrated();
+      await this.assertMutationAllowed(accountId, await getProviderAccount(accountId));
+      return deleteProvider(accountId);
+    });
+  }
+
+  /** Re-read canonical ownership only after the caller owns the mutation lock. */
+  private async assertMutationAllowed(...targets: unknown[]): Promise<void> {
+    assertProviderMutationAllowed(await getProviderAccount('openai'), ...targets);
   }
 
   // ── Internal silent variants ─────────────────────────────────────
@@ -415,17 +447,29 @@ export class ProviderService {
 
   /** Internal: list providers with hasKey/keyMasked metadata. */
   async _listProvidersWithKeyInfoInternal(): Promise<ProviderWithKeyInfo[]> {
-    const providers = await this._listProvidersFromAccountsInternal();
-    const results: ProviderWithKeyInfo[] = [];
-    for (const provider of providers) {
-      const apiKey = await getApiKey(provider.id);
-      results.push({
-        ...provider,
-        hasKey: !!apiKey,
-        keyMasked: maskApiKey(apiKey),
-      });
-    }
-    return results;
+    return withProviderMutationLock(async () => {
+      const accounts = await this.listAccounts();
+      const managedOpenAi = isUclawManagedAccount(await getProviderAccount('openai'));
+      const results: ProviderWithKeyInfo[] = [];
+      for (const account of accounts) {
+        const provider = providerAccountToConfig(account);
+        if (managedOpenAi && isOpenAiProviderIdentity(account)) {
+          results.push({
+            ...provider,
+            hasKey: await this.hasManagedOpenAiKeyWithoutAliasLeak(account),
+            keyMasked: null,
+          });
+          continue;
+        }
+        const apiKey = await getApiKey(provider.id);
+        results.push({
+          ...provider,
+          hasKey: !!apiKey,
+          keyMasked: maskApiKey(apiKey),
+        });
+      }
+      return results;
+    });
   }
 
   /** Internal: resolve a single provider in the legacy ProviderConfig shape. */
@@ -437,14 +481,17 @@ export class ProviderService {
 
   /** Internal: upsert a legacy provider config (creates or updates the account). */
   async _saveProviderInternal(config: ProviderConfig): Promise<void> {
-    await ensureProviderStoreMigrated();
-    const account = providerConfigToAccount(config);
-    const existing = await getProviderAccount(config.id);
-    if (existing) {
-      await this.updateAccount(config.id, account);
-      return;
-    }
-    await this.createAccount(account);
+    return withProviderMutationLock(async () => {
+      await ensureProviderStoreMigrated();
+      const account = providerConfigToAccount(config);
+      const existing = await getProviderAccount(config.id);
+      await this.assertMutationAllowed(config, account, existing);
+      if (existing) {
+        await this.updateAccount(config.id, account);
+        return;
+      }
+      await this.createAccount(account);
+    });
   }
 
   /** Internal: delete a provider account by id. */
@@ -466,17 +513,36 @@ export class ProviderService {
 
   /** Internal: store an account's api key without warning. */
   async _setProviderApiKeyInternal(providerId: string, apiKey: string): Promise<boolean> {
-    return storeApiKey(providerId, apiKey);
+    return withProviderMutationLock(async () => {
+      await ensureProviderStoreMigrated();
+      await this.assertMutationAllowed(providerId, await getProviderAccount(providerId));
+      return storeApiKey(providerId, apiKey);
+    });
   }
 
   /** Internal: read an account's api key without warning. */
   async _getProviderApiKeyInternal(providerId: string): Promise<string | null> {
-    return getApiKey(providerId);
+    return withProviderMutationLock(async () => {
+      await ensureProviderStoreMigrated();
+      const account = await getProviderAccount(providerId);
+      const canonicalOpenAi = await getProviderAccount('openai');
+      if (
+        isUclawManagedAccount(canonicalOpenAi)
+        && isOpenAiProviderIdentity(account ?? providerId)
+      ) {
+        return null;
+      }
+      return getApiKey(providerId);
+    });
   }
 
   /** Internal: delete an account's api key without warning. */
   async _deleteProviderApiKeyInternal(providerId: string): Promise<boolean> {
-    return deleteApiKey(providerId);
+    return withProviderMutationLock(async () => {
+      await ensureProviderStoreMigrated();
+      await this.assertMutationAllowed(providerId, await getProviderAccount(providerId));
+      return deleteApiKey(providerId);
+    });
   }
 
   /** Internal: check if an account has a stored api key. */
@@ -491,20 +557,31 @@ export class ProviderService {
 
   /** Return per-account API key status for the new account API surface. */
   async listAccountsKeyInfo(): Promise<Array<{ accountId: string; hasKey: boolean; keyMasked: string | null }>> {
-    const accounts = await this.listAccounts();
-    const results: Array<{ accountId: string; hasKey: boolean; keyMasked: string | null }> = [];
-    for (const account of accounts) {
-      const runtimeProviderKey = resolveOpenClawProviderKey(account);
-      const apiKey = (await getProviderApiKeyFromOpenClaw(runtimeProviderKey))
-        ?? (await getApiKey(account.id))
-        ?? (runtimeProviderKey !== account.id ? await getApiKey(runtimeProviderKey) : null);
-      results.push({
-        accountId: account.id,
-        hasKey: !!apiKey,
-        keyMasked: maskApiKey(apiKey),
-      });
-    }
-    return results;
+    return withProviderMutationLock(async () => {
+      const accounts = await this.listAccounts();
+      const managedOpenAi = isUclawManagedAccount(await getProviderAccount('openai'));
+      const results: Array<{ accountId: string; hasKey: boolean; keyMasked: string | null }> = [];
+      for (const account of accounts) {
+        if (managedOpenAi && isOpenAiProviderIdentity(account)) {
+          results.push({
+            accountId: account.id,
+            hasKey: await this.hasManagedOpenAiKeyWithoutAliasLeak(account),
+            keyMasked: null,
+          });
+          continue;
+        }
+        const runtimeProviderKey = resolveOpenClawProviderKey(account);
+        const apiKey = (await getProviderApiKeyFromOpenClaw(runtimeProviderKey))
+          ?? (await getApiKey(account.id))
+          ?? (runtimeProviderKey !== account.id ? await getApiKey(runtimeProviderKey) : null);
+        results.push({
+          accountId: account.id,
+          hasKey: !!apiKey,
+          keyMasked: maskApiKey(apiKey),
+        });
+      }
+      return results;
+    });
   }
 
   /** Read an account's API key (clean alternative to getLegacyProviderApiKey). */
@@ -514,17 +591,31 @@ export class ProviderService {
 
   /** Check whether an account has an API key stored. */
   async hasAccountApiKey(accountId: string): Promise<boolean> {
-    const account = await this.getAccount(accountId);
-    const runtimeProviderKey = account
-      ? resolveOpenClawProviderKey(account)
-      : accountId;
-    if (await getProviderApiKeyFromOpenClaw(runtimeProviderKey)) {
-      return true;
+    return withProviderMutationLock(async () => {
+      const account = await this.getAccount(accountId);
+      const managedOpenAi = isUclawManagedAccount(await getProviderAccount('openai'));
+      if (account && managedOpenAi && isOpenAiProviderIdentity(account)) {
+        return this.hasManagedOpenAiKeyWithoutAliasLeak(account);
+      }
+      const runtimeProviderKey = account
+        ? resolveOpenClawProviderKey(account)
+        : accountId;
+      if (await getProviderApiKeyFromOpenClaw(runtimeProviderKey)) {
+        return true;
+      }
+      if (runtimeProviderKey !== accountId && (await hasApiKey(runtimeProviderKey))) {
+        return true;
+      }
+      return this._hasProviderApiKeyInternal(accountId);
+    });
+  }
+
+  /** Report key presence without resolving a residual OpenAI account to the canonical relay slot. */
+  private async hasManagedOpenAiKeyWithoutAliasLeak(account: ProviderAccount): Promise<boolean> {
+    if (account.id !== 'openai') {
+      return hasApiKey(account.id);
     }
-    if (runtimeProviderKey !== accountId && (await hasApiKey(runtimeProviderKey))) {
-      return true;
-    }
-    return this._hasProviderApiKeyInternal(accountId);
+    return Boolean(await getProviderApiKeyFromOpenClaw('openai')) || hasApiKey('openai');
   }
 
   // ── Legacy public API (logs deprecation warning once per method) ─
@@ -621,9 +712,12 @@ export class ProviderService {
   }
 
   async setDefaultAccount(accountId: string): Promise<void> {
-    await ensureProviderStoreMigrated();
-    await setDefaultProviderAccount(accountId);
-    await setDefaultProvider(accountId);
+    return withProviderMutationLock(async () => {
+      await ensureProviderStoreMigrated();
+      await this.assertMutationAllowed(accountId, await getProviderAccount(accountId));
+      await setDefaultProviderAccount(accountId);
+      await setDefaultProvider(accountId);
+    });
   }
 
   getVendorDefinition(vendorId: string): ProviderDefinition | undefined {

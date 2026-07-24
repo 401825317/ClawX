@@ -15,6 +15,14 @@
   "soldOut": "売り切れ",
   "loading": "ストアを読み込み中",
   "retry": "再試行",
+  "methods": {
+    "alipay": "Alipay",
+    "wxpay": "WeChat Pay"
+  },
+  "activeOrder": {
+    "title": "支払い中の注文",
+    "view": "注文を表示"
+  },
   "errors": {
     "auth_required": "先に UClaw にログインしてください",
     "auth_expired": "ログインの有効期限が切れました。UClaw に再度ログインしてください",
@@ -34,23 +42,49 @@
     "check": "状態を確認",
     "checking": "確認中",
     "close": "閉じる",
+    "cancelOrder": "注文を破棄",
     "noQr": "利用可能な支払いコードが返されませんでした",
+    "returnToCheck": "支払い後にここへ戻って状態を確認してください",
+    "orderNumber": "注文番号",
+    "createdAt": "作成日時",
+    "waiting": "待ち時間",
+    "lastChecked": "最終確認",
+    "durationSeconds": "{{seconds}}秒",
+    "durationMinutes": "{{minutes}}分{{seconds}}秒",
     "success": "支払いが完了し、シュリンプ残高が更新されました",
     "pending": "支払い待ち",
     "failed": "支払い失敗",
     "cancelled": "注文はキャンセルされました",
     "expired": "注文は終了しました",
-    "statusUnavailable": "支払い状態を一時的に確認できません。自動確認を続けます"
+    "statusUnavailable": "支払い状態を一時的に確認できません。自動確認を続けます",
+    "guidance": {
+      "pendingTitle": "表示されたコードで支払いを完了してください",
+      "pendingSubtitle": "支払い後、UClaw が注文状態を自動更新します。",
+      "delayedTitle": "支払い確認に時間がかかっています",
+      "delayedSubtitle": "注文を保持してください。UClaw は支払い状態の確認を続けています。",
+      "unavailableTitle": "支払い結果を一時的に確認できません",
+      "unavailableSubtitle": "注文は有効なままで、UClaw が自動的に再試行します。",
+      "failedTitle": "支払いが完了しませんでした",
+      "failedSubtitle": "この注文を破棄してから、もう一度チャージしてください。",
+      "cancelledTitle": "注文はキャンセルされました",
+      "cancelledSubtitle": "この注文は支払われていません。新しい注文を作成できます。",
+      "expiredTitle": "注文は終了しました",
+      "expiredSubtitle": "この注文は期限切れです。新しい注文を作成してください。"
+    }
   },
   "orders": {
     "title": "注文履歴",
     "description": "最近のシュリンプチャージ注文",
     "empty": "チャージ注文はありません",
+    "refresh": "注文履歴を更新",
+    "orderNumber": "注文番号",
     "date": "日時",
     "amount": "金額",
     "quota": "シュリンプ",
     "method": "支払い方法",
     "status": "状態",
+    "completed": "完了",
+    "total": "合計 {{total}} 件",
     "previous": "前へ",
     "next": "次へ",
     "page": "{{page}} / {{total}} ページ"

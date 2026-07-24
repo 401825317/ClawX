@@ -145,8 +145,13 @@ describe('managed auth page integration', () => {
     });
   });
 
-  it('shows login and registration in managed setup', async () => {
-    useManagedAuthStore.setState({ status: status() });
+  it('opens managed setup in login mode and shows activation only after switching to registration', async () => {
+    useManagedAuthStore.setState({
+      status: status({
+        activationRequired: true,
+        bootstrap: { auth: { registrationEnabled: true, activationRequired: true } },
+      }),
+    });
     renderSetup();
 
     fireEvent.click(screen.getByTestId('setup-next-button'));
@@ -155,6 +160,10 @@ describe('managed auth page integration', () => {
       expect(screen.getByTestId('managed-auth-mode-login')).toBeInTheDocument();
       expect(screen.getByTestId('managed-auth-mode-register')).toBeInTheDocument();
     });
+    expect(screen.queryByTestId('managed-auth-activation-input')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('managed-auth-mode-register'));
+    expect(screen.getByTestId('managed-auth-activation-input')).toBeInTheDocument();
   });
 
   it('loads the remote activation policy when the registration panel opens', async () => {

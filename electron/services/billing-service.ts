@@ -217,8 +217,11 @@ export async function getBillingOrderHistory(
 /** Validate the selected backend product and create one balance-recharge order. */
 export async function createBillingOrder(payload: BillingCreateOrderPayload): Promise<BillingCheckout> {
   const overview = await getBillingOverview();
-  const product = overview.products.find((item) => item.id === payload.productId && item.enabled);
-  if (!overview.onlineTopupEnabled || !product || product.stock === 0) {
+  const availableProducts = overview.products.filter(
+    (item) => item.enabled && (item.stock === null || item.stock > 0),
+  );
+  const product = availableProducts.length === 1 ? availableProducts[0] : undefined;
+  if (!overview.onlineTopupEnabled || !product || product.id !== payload.productId) {
     throw new BillingServiceError('payment_unavailable', 'Recharge is currently unavailable');
   }
   if (!overview.paymentMethods.some((method) => method.type === payload.paymentMethod)) {
@@ -242,12 +245,14 @@ export async function createBillingOrder(payload: BillingCreateOrderPayload): Pr
   if (nextStatus !== 'success' && !nextTradeNo) {
     throw new BillingServiceError('request_failed', 'UClaw did not return a recharge order number');
   }
-  const estimatedQuota = amountYuan * overview.creditUsdPerCny * overview.quotaPerUnit;
+  const estimatedQuota = Math.round(
+    amountYuan * overview.creditUsdPerCny * overview.quotaPerUnit,
+  );
   return {
     tradeNo: nextTradeNo,
     status: nextStatus,
     amountYuan,
-    creditQuota: numberValue(order.credit_quota, estimatedQuota),
+    creditQuota: estimatedQuota > 0 ? estimatedQuota : numberValue(order.credit_quota),
     paymentMethod: stringValue(order.payment_type ?? order.epay_method) || payload.paymentMethod,
     checkoutUrl: checkoutUrl(order),
     qrCode: stringValue(order.qr_code ?? order.qrcode ?? order.qr_code_data) || undefined,
@@ -264,8 +269,12 @@ export async function getBillingOrderStatus(
     timeoutMs: UCLAW_BILLING_REQUEST_TIMEOUT_MS,
     body: { out_trade_no: payload.tradeNo },
   }));
+  const responseTradeNo = tradeNo(order);
+  if (responseTradeNo && responseTradeNo !== payload.tradeNo) {
+    throw new BillingServiceError('request_failed', 'UClaw returned a different recharge order number');
+  }
   return {
-    tradeNo: tradeNo(order) || payload.tradeNo,
+    tradeNo: payload.tradeNo,
     status: normalizePaymentStatus(order.status),
     creditQuota: numberValue(order.credit_quota ?? order.quota ?? order.amount),
   };

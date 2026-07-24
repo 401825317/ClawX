@@ -65,9 +65,11 @@ import { createFilesApi } from '../services/files-api';
 import { createMediaApi } from '../services/media-api';
 import {
   createProvidersApi,
+  isManagedOpenAiMutationLocked,
   isUclawManagedAccount,
   managedProviderRejected,
 } from '../services/providers-api';
+import { withProviderMutationLock } from '../services/providers/provider-mutation-lock';
 import { createManagedAuthApi } from '../services/managed-auth-api';
 import { createBillingApi } from '../services/billing-api';
 import { createSupportApi } from '../services/support-api';
@@ -86,6 +88,40 @@ import {
 import { createMenu } from './menu';
 
 const gatewayRpcBackpressure = new GatewayRpcBackpressure();
+const PROVIDER_MUTATION_ACTIONS = new Set([
+  'save',
+  'delete',
+  'setApiKey',
+  'updateWithKey',
+  'deleteApiKey',
+  'setDefault',
+]);
+
+/** Schedule Gateway lifecycle after leaving the shared Provider mutation context. */
+function scheduleProviderGatewayRefresh(
+  gatewayManager: GatewayManager,
+  mode: 'reload' | 'restart',
+  onlyIfRunning = false,
+): void {
+  if (onlyIfRunning && gatewayManager.getStatus?.().state === 'stopped') return;
+  if (mode === 'restart') {
+    gatewayManager.debouncedRestart?.();
+    return;
+  }
+  gatewayManager.debouncedReload?.();
+}
+
+/** Apply the managed OpenAI ownership rule to every legacy Provider entry point. */
+async function isManagedProviderOperationLocked(
+  providerService: ReturnType<typeof getProviderService>,
+  providerId: string,
+  ...targets: unknown[]
+): Promise<boolean> {
+  if (targets.some(isUclawManagedAccount)) return true;
+  const existingAccount = await providerService.getAccount(providerId);
+  return isUclawManagedAccount(existingAccount)
+    || isManagedOpenAiMutationLocked(providerService, providerId, existingAccount, ...targets);
+}
 
 /**
  * Register all IPC handlers
@@ -180,7 +216,7 @@ function registerTypedHostHandlers(
     agents: createAgentsApi({ gatewayManager }),
     providers: createProvidersApi({ gatewayManager, mainWindow }),
     managedAuth: createManagedAuthApi({ gatewayManager }),
-    billing: createBillingApi(),
+    billing: createBillingApi({ gatewayManager }),
     support: createSupportApi(),
     files: createFilesApi({
       attachmentAccess,
@@ -197,7 +233,8 @@ function registerTypedHostHandlers(
   registerHostInvokeHandler(hostApiRegistry);
 }
 
-function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
+/** @internal Registers the compatibility request envelope retained for stale renderers. */
+export function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
   const providerService = getProviderService();
   const handleProxySettingsChange = async () => {
     const settings = await getAllSettings();
@@ -217,7 +254,10 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
       };
     }
 
-    try {
+    let providerGatewayRefresh: 'reload' | 'restart' | null = null;
+    let providerRefreshOnlyIfRunning = false;
+    const executeRequest = async (): Promise<AppResponse> => {
+      try {
       let data: unknown;
       switch (request.module) {
         case 'app': {
@@ -263,7 +303,9 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
             const payload = request.payload as { providerId?: string } | string | undefined;
             const providerId = typeof payload === 'string' ? payload : payload?.providerId;
             if (!providerId) throw new Error('Invalid provider.getApiKey payload');
-            data = await providerService.getLegacyProviderApiKey(providerId);
+            data = await isManagedProviderOperationLocked(providerService, providerId)
+              ? null
+              : await providerService.getLegacyProviderApiKey(providerId);
             break;
           }
           if (request.action === 'validateKey') {
@@ -299,6 +341,10 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
             if (!config) throw new Error('Invalid provider.save payload');
 
             try {
+              if (await isManagedProviderOperationLocked(providerService, config.id, config)) {
+                data = managedProviderRejected();
+                break;
+              }
               await providerService.saveLegacyProvider(config);
 
               if (apiKey !== undefined) {
@@ -309,7 +355,8 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
               }
 
               try {
-                await syncSavedProviderToRuntime(config, apiKey, gatewayManager);
+                await syncSavedProviderToRuntime(config, apiKey);
+                providerGatewayRefresh = 'reload';
               } catch (err) {
                 console.warn('Failed to sync openclaw provider config:', err);
               }
@@ -326,11 +373,16 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
             if (!providerId) throw new Error('Invalid provider.delete payload');
 
             try {
+              if (await isManagedProviderOperationLocked(providerService, providerId)) {
+                data = managedProviderRejected();
+                break;
+              }
               const existing = await providerService.getLegacyProvider(providerId);
               await providerService.deleteLegacyProvider(providerId);
               if (existing?.type) {
                 try {
-                  await syncDeletedProviderToRuntime(existing, providerId, gatewayManager);
+                  await syncDeletedProviderToRuntime(existing, providerId);
+                  providerGatewayRefresh = 'restart';
                 } catch (err) {
                   console.warn('Failed to completely remove provider from OpenClaw:', err);
                 }
@@ -351,6 +403,10 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
             if (!providerId || typeof apiKey !== 'string') throw new Error('Invalid provider.setApiKey payload');
 
             try {
+              if (await isManagedProviderOperationLocked(providerService, providerId)) {
+                data = managedProviderRejected();
+                break;
+              }
               await providerService.setLegacyProviderApiKey(providerId, apiKey);
               const provider = await providerService.getLegacyProvider(providerId);
               const providerType = provider?.type || providerId;
@@ -375,6 +431,11 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
             const updates = Array.isArray(payload) ? payload[1] : payload?.updates;
             const apiKey = Array.isArray(payload) ? payload[2] : payload?.apiKey;
             if (!providerId || !updates) throw new Error('Invalid provider.updateWithKey payload');
+
+            if (await isManagedProviderOperationLocked(providerService, providerId, updates)) {
+              data = managedProviderRejected();
+              break;
+            }
 
             const existing = await providerService.getLegacyProvider(providerId);
             if (!existing) {
@@ -406,7 +467,8 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
               }
 
               try {
-                await syncUpdatedProviderToRuntime(nextConfig, apiKey, gatewayManager);
+                await syncUpdatedProviderToRuntime(nextConfig, apiKey);
+                providerGatewayRefresh = 'reload';
               } catch (err) {
                 console.warn('Failed to sync openclaw config after provider update:', err);
               }
@@ -435,6 +497,10 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
             const providerId = typeof payload === 'string' ? payload : payload?.providerId;
             if (!providerId) throw new Error('Invalid provider.deleteApiKey payload');
             try {
+              if (await isManagedProviderOperationLocked(providerService, providerId)) {
+                data = managedProviderRejected();
+                break;
+              }
               await providerService.deleteLegacyProviderApiKey(providerId);
               const provider = await providerService.getLegacyProvider(providerId);
               const providerType = provider?.type || providerId;
@@ -458,11 +524,17 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
             if (!providerId) throw new Error('Invalid provider.setDefault payload');
 
             try {
+              if (await isManagedProviderOperationLocked(providerService, providerId)) {
+                data = managedProviderRejected();
+                break;
+              }
               await providerService.setDefaultLegacyProvider(providerId);
               const provider = await providerService.getLegacyProvider(providerId);
               if (provider) {
                 try {
-                  await syncDefaultProviderToRuntime(providerId, gatewayManager);
+                  await syncDefaultProviderToRuntime(providerId);
+                  providerGatewayRefresh = 'reload';
+                  providerRefreshOnlyIfRunning = true;
                 } catch (err) {
                   console.warn('Failed to set OpenClaw default model:', err);
                 }
@@ -645,16 +717,29 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
       }
 
       return { id: request.id, ok: true, data };
-    } catch (error) {
-      return {
-        id: request.id,
-        ok: false,
-        error: {
-          code: mapAppErrorCode(error),
-          message: error instanceof Error ? error.message : String(error),
-        },
-      };
+      } catch (error) {
+        return {
+          id: request.id,
+          ok: false,
+          error: {
+            code: mapAppErrorCode(error),
+            message: error instanceof Error ? error.message : String(error),
+          },
+        };
+      }
+    };
+
+    const response = request.module === 'provider' && PROVIDER_MUTATION_ACTIONS.has(request.action)
+      ? await withProviderMutationLock(executeRequest)
+      : await executeRequest();
+    if (providerGatewayRefresh) {
+      scheduleProviderGatewayRefresh(
+        gatewayManager,
+        providerGatewayRefresh,
+        providerRefreshOnlyIfRunning,
+      );
     }
+    return response;
   });
 }
 
@@ -819,9 +904,6 @@ function registerWhatsAppHandlers(mainWindow: BrowserWindow): void {
  */
 export function registerProviderHandlers(gatewayManager: GatewayManager): void {
   const providerService = getProviderService();
-  const isManagedProvider = async (providerId: string): Promise<boolean> => (
-    isUclawManagedAccount(await providerService.getAccount(providerId))
-  );
   const legacyProviderChannelsWarned = new Set<string>();
   const logLegacyProviderChannel = (channel: string): void => {
     if (legacyProviderChannelsWarned.has(channel)) return;
@@ -858,88 +940,104 @@ export function registerProviderHandlers(gatewayManager: GatewayManager): void {
   // Save a provider configuration
   ipcMain.handle('provider:save', async (_, config: ProviderConfig, apiKey?: string) => {
     logLegacyProviderChannel('provider:save');
-    try {
-      if (isUclawManagedAccount(config) || await isManagedProvider(config.id)) {
-        return managedProviderRejected();
-      }
-      // Save the provider config
-      await providerService.saveLegacyProvider(config);
+    const result = await withProviderMutationLock(async () => {
+      try {
+        if (await isManagedProviderOperationLocked(providerService, config.id, config)) {
+          return managedProviderRejected();
+        }
+        // Save the provider config
+        await providerService.saveLegacyProvider(config);
 
-      // Store the API key if provided
-      if (apiKey !== undefined) {
-        const trimmedKey = apiKey.trim();
-        if (trimmedKey) {
-          await providerService.setLegacyProviderApiKey(config.id, trimmedKey);
+        // Store the API key if provided
+        if (apiKey !== undefined) {
+          const trimmedKey = apiKey.trim();
+          if (trimmedKey) {
+            await providerService.setLegacyProviderApiKey(config.id, trimmedKey);
 
-          // Also write to OpenClaw auth-profiles.json so the gateway can use it
-          try {
-            await syncProviderApiKeyToRuntime(config.type, config.id, trimmedKey);
-          } catch (err) {
-            console.warn('Failed to save key to OpenClaw auth-profiles:', err);
+            // Also write to OpenClaw auth-profiles.json so the gateway can use it
+            try {
+              await syncProviderApiKeyToRuntime(config.type, config.id, trimmedKey);
+            } catch (err) {
+              console.warn('Failed to save key to OpenClaw auth-profiles:', err);
+            }
           }
         }
-      }
 
-      // Sync the provider configuration to openclaw.json so Gateway knows about it
-      try {
-        await syncSavedProviderToRuntime(config, apiKey, gatewayManager);
-      } catch (err) {
-        console.warn('Failed to sync openclaw provider config:', err);
-      }
+        // Sync runtime files while managed takeover is excluded by the same lock.
+        try {
+          await syncSavedProviderToRuntime(config, apiKey);
+        } catch (err) {
+          console.warn('Failed to sync openclaw provider config:', err);
+        }
 
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: String(error) };
+        return { success: true };
+      } catch (error) {
+        return { success: false, error: String(error) };
+      }
+    });
+    if (result.success) {
+      scheduleProviderGatewayRefresh(gatewayManager, 'reload');
     }
+    return result;
   });
 
   // Delete a provider
   ipcMain.handle('provider:delete', async (_, providerId: string) => {
     logLegacyProviderChannel('provider:delete');
-    try {
-      if (await isManagedProvider(providerId)) {
-        return managedProviderRejected();
-      }
-      const existing = await providerService.getLegacyProvider(providerId);
-      await providerService.deleteLegacyProvider(providerId);
-
-      // Best-effort cleanup in OpenClaw auth profiles & openclaw.json config
-      if (existing?.type) {
-        try {
-          await syncDeletedProviderToRuntime(existing, providerId, gatewayManager);
-        } catch (err) {
-          console.warn('Failed to completely remove provider from OpenClaw:', err);
+    let shouldRestartGateway = false;
+    const result = await withProviderMutationLock(async () => {
+      try {
+        if (await isManagedProviderOperationLocked(providerService, providerId)) {
+          return managedProviderRejected();
         }
-      }
+        const existing = await providerService.getLegacyProvider(providerId);
+        await providerService.deleteLegacyProvider(providerId);
 
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: String(error) };
+        // Best-effort cleanup in OpenClaw auth profiles & openclaw.json config
+        if (existing?.type) {
+          try {
+            await syncDeletedProviderToRuntime(existing, providerId);
+            shouldRestartGateway = true;
+          } catch (err) {
+            console.warn('Failed to completely remove provider from OpenClaw:', err);
+          }
+        }
+
+        return { success: true };
+      } catch (error) {
+        return { success: false, error: String(error) };
+      }
+    });
+    if (result.success && shouldRestartGateway) {
+      scheduleProviderGatewayRefresh(gatewayManager, 'restart');
     }
+    return result;
   });
 
   // Update API key for a provider
   ipcMain.handle('provider:setApiKey', async (_, providerId: string, apiKey: string) => {
     logLegacyProviderChannel('provider:setApiKey');
-    try {
-      if (await isManagedProvider(providerId)) {
-        return managedProviderRejected();
-      }
-      await providerService.setLegacyProviderApiKey(providerId, apiKey);
-
-      // Also write to OpenClaw auth-profiles.json
-      const provider = await providerService.getLegacyProvider(providerId);
-      const providerType = provider?.type || providerId;
+    return withProviderMutationLock(async () => {
       try {
-        await syncProviderApiKeyToRuntime(providerType, providerId, apiKey);
-      } catch (err) {
-        console.warn('Failed to save key to OpenClaw auth-profiles:', err);
-      }
+        if (await isManagedProviderOperationLocked(providerService, providerId)) {
+          return managedProviderRejected();
+        }
+        await providerService.setLegacyProviderApiKey(providerId, apiKey);
 
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: String(error) };
-    }
+        // Also write to OpenClaw auth-profiles.json
+        const provider = await providerService.getLegacyProvider(providerId);
+        const providerType = provider?.type || providerId;
+        try {
+          await syncProviderApiKeyToRuntime(providerType, providerId, apiKey);
+        } catch (err) {
+          console.warn('Failed to save key to OpenClaw auth-profiles:', err);
+        }
+
+        return { success: true };
+      } catch (error) {
+        return { success: false, error: String(error) };
+      }
+    });
   });
 
   // Atomically update provider config and API key
@@ -952,88 +1050,96 @@ export function registerProviderHandlers(gatewayManager: GatewayManager): void {
       apiKey?: string
     ) => {
       logLegacyProviderChannel('provider:updateWithKey');
-      if (isUclawManagedAccount(updates) || await isManagedProvider(providerId)) {
-        return managedProviderRejected();
-      }
-      const existing = await providerService.getLegacyProvider(providerId);
-      if (!existing) {
-        return { success: false, error: 'Provider not found' };
-      }
-
-      const previousKey = await providerService.getLegacyProviderApiKey(providerId);
-      const previousOck = getOpenClawProviderKey(existing.type, providerId);
-
-      try {
-        const nextConfig: ProviderConfig = {
-          ...existing,
-          ...updates,
-          updatedAt: new Date().toISOString(),
-        };
-
-        const ock = getOpenClawProviderKey(nextConfig.type, providerId);
-
-        await providerService.saveLegacyProvider(nextConfig);
-
-        if (apiKey !== undefined) {
-          const trimmedKey = apiKey.trim();
-          if (trimmedKey) {
-            await providerService.setLegacyProviderApiKey(providerId, trimmedKey);
-            await syncProviderApiKeyToRuntime(nextConfig.type, providerId, trimmedKey);
-          } else {
-            await providerService.deleteLegacyProviderApiKey(providerId);
-            await removeProviderFromOpenClaw(ock);
-          }
+      const result = await withProviderMutationLock(async () => {
+        if (await isManagedProviderOperationLocked(providerService, providerId, updates)) {
+          return managedProviderRejected();
+        }
+        const existing = await providerService.getLegacyProvider(providerId);
+        if (!existing) {
+          return { success: false, error: 'Provider not found' };
         }
 
-        // Sync the provider configuration to openclaw.json so Gateway knows about it
+        const previousKey = await providerService.getLegacyProviderApiKey(providerId);
+        const previousOck = getOpenClawProviderKey(existing.type, providerId);
+
         try {
-          await syncUpdatedProviderToRuntime(nextConfig, apiKey, gatewayManager);
-        } catch (err) {
-          console.warn('Failed to sync openclaw config after provider update:', err);
-        }
+          const nextConfig: ProviderConfig = {
+            ...existing,
+            ...updates,
+            updatedAt: new Date().toISOString(),
+          };
 
-        return { success: true };
-      } catch (error) {
-        // Best-effort rollback to keep config/key consistent.
-        try {
-          await providerService.saveLegacyProvider(existing);
-          if (previousKey) {
-            await providerService.setLegacyProviderApiKey(providerId, previousKey);
-            await saveProviderKeyToOpenClaw(previousOck, previousKey);
-          } else {
-            await providerService.deleteLegacyProviderApiKey(providerId);
-            await removeProviderFromOpenClaw(previousOck);
+          const ock = getOpenClawProviderKey(nextConfig.type, providerId);
+
+          await providerService.saveLegacyProvider(nextConfig);
+
+          if (apiKey !== undefined) {
+            const trimmedKey = apiKey.trim();
+            if (trimmedKey) {
+              await providerService.setLegacyProviderApiKey(providerId, trimmedKey);
+              await syncProviderApiKeyToRuntime(nextConfig.type, providerId, trimmedKey);
+            } else {
+              await providerService.deleteLegacyProviderApiKey(providerId);
+              await removeProviderFromOpenClaw(ock);
+            }
           }
-        } catch (rollbackError) {
-          console.warn('Failed to rollback provider updateWithKey:', rollbackError);
-        }
 
-        return { success: false, error: String(error) };
+          // Sync runtime files before managed takeover can snapshot a new generation.
+          try {
+            await syncUpdatedProviderToRuntime(nextConfig, apiKey);
+          } catch (err) {
+            console.warn('Failed to sync openclaw config after provider update:', err);
+          }
+
+          return { success: true };
+        } catch (error) {
+          // Best-effort rollback to keep config/key consistent.
+          try {
+            await providerService.saveLegacyProvider(existing);
+            if (previousKey) {
+              await providerService.setLegacyProviderApiKey(providerId, previousKey);
+              await saveProviderKeyToOpenClaw(previousOck, previousKey);
+            } else {
+              await providerService.deleteLegacyProviderApiKey(providerId);
+              await removeProviderFromOpenClaw(previousOck);
+            }
+          } catch (rollbackError) {
+            console.warn('Failed to rollback provider updateWithKey:', rollbackError);
+          }
+
+          return { success: false, error: String(error) };
+        }
+      });
+      if (result.success) {
+        scheduleProviderGatewayRefresh(gatewayManager, 'reload');
       }
+      return result;
     }
   );
 
   // Delete API key for a provider
   ipcMain.handle('provider:deleteApiKey', async (_, providerId: string) => {
     logLegacyProviderChannel('provider:deleteApiKey');
-    try {
-      if (await isManagedProvider(providerId)) {
-        return managedProviderRejected();
-      }
-      await providerService.deleteLegacyProviderApiKey(providerId);
-
-      // Keep OpenClaw auth-profiles.json in sync with local key storage
-      const provider = await providerService.getLegacyProvider(providerId);
+    return withProviderMutationLock(async () => {
       try {
-        await syncDeletedProviderApiKeyToRuntime(provider, providerId);
-      } catch (err) {
-        console.warn('Failed to completely remove provider from OpenClaw:', err);
-      }
+        if (await isManagedProviderOperationLocked(providerService, providerId)) {
+          return managedProviderRejected();
+        }
+        await providerService.deleteLegacyProviderApiKey(providerId);
 
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: String(error) };
-    }
+        // Keep OpenClaw auth-profiles.json in sync with local key storage.
+        const provider = await providerService.getLegacyProvider(providerId);
+        try {
+          await syncDeletedProviderApiKeyToRuntime(provider, providerId);
+        } catch (err) {
+          console.warn('Failed to completely remove provider from OpenClaw:', err);
+        }
+
+        return { success: true };
+      } catch (error) {
+        return { success: false, error: String(error) };
+      }
+    });
   });
 
   // Check if a provider has an API key
@@ -1045,27 +1151,36 @@ export function registerProviderHandlers(gatewayManager: GatewayManager): void {
   // Get the actual API key (for internal use only - be careful!)
   ipcMain.handle('provider:getApiKey', async (_, providerId: string) => {
     logLegacyProviderChannel('provider:getApiKey');
-    if (await isManagedProvider(providerId)) return null;
+    if (await isManagedProviderOperationLocked(providerService, providerId)) return null;
     return await providerService.getLegacyProviderApiKey(providerId);
   });
 
   // Set default provider and update OpenClaw default model
   ipcMain.handle('provider:setDefault', async (_, providerId: string) => {
     logLegacyProviderChannel('provider:setDefault');
-    try {
-      await providerService.setDefaultLegacyProvider(providerId);
-
-      // Update OpenClaw config to use this provider's default model
+    const result = await withProviderMutationLock(async () => {
       try {
-        await syncDefaultProviderToRuntime(providerId, gatewayManager);
-      } catch (err) {
-        console.warn('Failed to set OpenClaw default model:', err);
-      }
+        if (await isManagedProviderOperationLocked(providerService, providerId)) {
+          return managedProviderRejected();
+        }
+        await providerService.setDefaultLegacyProvider(providerId);
 
-      return { success: true };
-    } catch (error) {
-      return { success: false, error: String(error) };
+        // Update OpenClaw config before managed takeover may commit.
+        try {
+          await syncDefaultProviderToRuntime(providerId);
+        } catch (err) {
+          console.warn('Failed to set OpenClaw default model:', err);
+        }
+
+        return { success: true };
+      } catch (error) {
+        return { success: false, error: String(error) };
+      }
+    });
+    if (result.success) {
+      scheduleProviderGatewayRefresh(gatewayManager, 'reload', true);
     }
+    return result;
   });
 
 

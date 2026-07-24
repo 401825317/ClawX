@@ -10,6 +10,11 @@ import {
   saveOAuthTokenToOpenClaw,
   setOpenClawDefaultModelWithOverride,
 } from './openclaw-auth';
+import {
+  isManagedOpenAiMutationLocked,
+  ManagedProviderMutationError,
+  withProviderMutationLock,
+} from '../services/providers/provider-mutation-lock';
 
 // Google was removed: OpenClaw's `google-gemini-cli` OAuth integration is an
 // unofficial third-party flow that requires the `gemini` CLI binary to be on
@@ -28,6 +33,7 @@ class BrowserOAuthManager extends EventEmitter {
   private mainWindow: BrowserWindow | null = null;
   private pendingManualCodeResolve: ((value: string) => void) | null = null;
   private pendingManualCodeReject: ((reason?: unknown) => void) | null = null;
+  private activeGeneration = 0;
 
   setWindow(window: BrowserWindow) {
     this.mainWindow = window;
@@ -42,16 +48,17 @@ class BrowserOAuthManager extends EventEmitter {
     }
 
     this.active = true;
+    const generation = ++this.activeGeneration;
     this.activeAccountId = options?.accountId || provider;
     this.activeLabel = options?.label || null;
     this.emit('oauth:start', { provider, accountId: this.activeAccountId });
 
     // OpenAI flow may switch to manual callback mode; keep start API non-blocking.
-    void this.executeFlow(provider);
+    void this.executeFlow(provider, generation);
     return true;
   }
 
-  private async executeFlow(provider: BrowserOAuthProviderType): Promise<void> {
+  private async executeFlow(provider: BrowserOAuthProviderType, generation: number): Promise<void> {
     try {
       const token = await loginOpenAICodexOAuth({
         openUrl: async (url) => {
@@ -59,6 +66,7 @@ class BrowserOAuthManager extends EventEmitter {
         },
         onProgress: (message) => logger.info(`[BrowserOAuth] ${message}`),
         onManualCodeRequired: ({ authorizationUrl, reason }) => {
+          if (!this.active || this.activeGeneration !== generation) return;
           const message = reason === 'port_in_use'
             ? 'OpenAI OAuth callback port 1455 is in use. Complete sign-in, then paste the final callback URL or code.'
             : 'OpenAI OAuth callback timed out. Paste the final callback URL or code to continue.';
@@ -74,6 +82,9 @@ class BrowserOAuthManager extends EventEmitter {
           }
         },
         onManualCodeInput: async () => {
+          if (!this.active || this.activeGeneration !== generation) {
+            throw new Error('OAuth flow cancelled');
+          }
           return await new Promise<string>((resolve, reject) => {
             this.pendingManualCodeResolve = resolve;
             this.pendingManualCodeReject = reject;
@@ -81,9 +92,9 @@ class BrowserOAuthManager extends EventEmitter {
         },
       });
 
-      await this.onSuccess(provider, token);
+      await this.onSuccess(provider, token, generation);
     } catch (error) {
-      if (!this.active) {
+      if (!this.active || this.activeGeneration !== generation) {
         return;
       }
       logger.error(`[BrowserOAuth] Flow error for ${provider}:`, error);
@@ -97,6 +108,7 @@ class BrowserOAuthManager extends EventEmitter {
   }
 
   async stopFlow(): Promise<void> {
+    this.activeGeneration += 1;
     this.active = false;
     this.activeAccountId = null;
     this.activeLabel = null;
@@ -122,106 +134,118 @@ class BrowserOAuthManager extends EventEmitter {
   private async onSuccess(
     providerType: BrowserOAuthProviderType,
     token: OpenAICodexOAuthCredentials,
+    generation: number,
   ) {
     const accountId = this.activeAccountId || providerType;
     const accountLabel = this.activeLabel;
-    this.active = false;
-    this.activeAccountId = null;
-    this.activeLabel = null;
-    this.pendingManualCodeResolve = null;
-    this.pendingManualCodeReject = null;
-    logger.info(`[BrowserOAuth] Successfully completed OAuth for ${providerType}`);
+    let completedAccountId: string | null = null;
 
-    const providerService = getProviderService();
-    const existing = await providerService.getAccount(accountId);
-    const runtimeProviderId = OPENAI_RUNTIME_PROVIDER_ID;
-    const defaultModel = OPENAI_OAUTH_DEFAULT_MODEL;
-    const accountLabelDefault = 'OpenAI Codex';
-    const oauthTokenEmail = typeof token.email === 'string' ? token.email : undefined;
-    const oauthTokenSubject = typeof token.accountId === 'string' ? token.accountId : undefined;
+    await withProviderMutationLock(async () => {
+      if (!this.active || this.activeGeneration !== generation) return;
 
-    const normalizedExistingModel = (() => {
-      const value = existing?.model?.trim();
-      if (!value) return undefined;
-      if (value.startsWith('openai/') || value.startsWith('openai-codex/')) {
-        return value.split('/').pop();
+      const providerService = getProviderService();
+      const existing = await providerService.getAccount(accountId);
+      if (await isManagedOpenAiMutationLocked(providerService, accountId, existing, { vendorId: providerType })) {
+        throw new ManagedProviderMutationError();
       }
-      return value.includes('/') ? value.split('/').pop() : value;
-    })();
 
-    const nextAccount = await providerService.createAccount({
-      id: accountId,
-      vendorId: providerType,
-      label: accountLabel || existing?.label || accountLabelDefault,
-      authMode: 'oauth_browser',
-      baseUrl: existing?.baseUrl,
-      apiProtocol: existing?.apiProtocol,
-      model: normalizedExistingModel || defaultModel,
-      fallbackModels: existing?.fallbackModels,
-      fallbackAccountIds: existing?.fallbackAccountIds,
-      enabled: existing?.enabled ?? true,
-      isDefault: existing?.isDefault ?? false,
-      metadata: {
-        ...existing?.metadata,
-        email: oauthTokenEmail,
-        resourceUrl: runtimeProviderId,
-      },
-      createdAt: existing?.createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    });
+      const runtimeProviderId = OPENAI_RUNTIME_PROVIDER_ID;
+      const defaultModel = OPENAI_OAUTH_DEFAULT_MODEL;
+      const accountLabelDefault = 'OpenAI Codex';
+      const oauthTokenEmail = typeof token.email === 'string' ? token.email : undefined;
+      const oauthTokenSubject = typeof token.accountId === 'string' ? token.accountId : undefined;
+      const normalizedExistingModel = (() => {
+        const value = existing?.model?.trim();
+        if (!value) return undefined;
+        if (value.startsWith('openai/') || value.startsWith('openai-codex/')) {
+          return value.split('/').pop();
+        }
+        return value.includes('/') ? value.split('/').pop() : value;
+      })();
 
-    await getSecretStore().set({
-      type: 'oauth',
-      accountId,
-      accessToken: token.access,
-      refreshToken: token.refresh,
-      expiresAt: token.expires,
-      email: oauthTokenEmail,
-      subject: oauthTokenSubject,
-    });
-
-    await saveOAuthTokenToOpenClaw(runtimeProviderId, {
-      access: token.access,
-      refresh: token.refresh,
-      expires: token.expires,
-      email: oauthTokenEmail,
-      projectId: oauthTokenSubject,
-      accountId: oauthTokenSubject,
-    });
-
-    const modelId = normalizedExistingModel || defaultModel;
-    const modelRef = `${runtimeProviderId}/${modelId}`;
-    const fallbackModelRefs = (nextAccount.fallbackModels ?? [])
-      .map((fallback) => fallback.trim())
-      .filter(Boolean)
-      .map((fallback) => (
-        fallback.replace(/^openai-codex\//, `${runtimeProviderId}/`).startsWith(`${runtimeProviderId}/`)
-          ? fallback.replace(/^openai-codex\//, `${runtimeProviderId}/`)
-          : `${runtimeProviderId}/${fallback}`
-      ));
-
-    try {
-      await setOpenClawDefaultModelWithOverride(
-        runtimeProviderId,
-        modelRef,
-        {
-          baseUrl: OPENAI_CODEX_OAUTH_PROVIDER_CONFIG.baseUrl,
-          api: OPENAI_CODEX_OAUTH_PROVIDER_CONFIG.api,
+      const nextAccount = await providerService.createAccount({
+        id: accountId,
+        vendorId: providerType,
+        label: accountLabel || existing?.label || accountLabelDefault,
+        authMode: 'oauth_browser',
+        baseUrl: existing?.baseUrl,
+        apiProtocol: existing?.apiProtocol,
+        model: normalizedExistingModel || defaultModel,
+        fallbackModels: existing?.fallbackModels,
+        fallbackAccountIds: existing?.fallbackAccountIds,
+        enabled: existing?.enabled ?? true,
+        isDefault: existing?.isDefault ?? false,
+        metadata: {
+          ...existing?.metadata,
+          email: oauthTokenEmail,
+          resourceUrl: runtimeProviderId,
         },
-        fallbackModelRefs,
-      );
-      await ensureOpenClawProviderAgentRuntimePins();
-      logger.info(`[BrowserOAuth] Registered ${runtimeProviderId} in openclaw.json (default model: ${modelRef})`);
-    } catch (err) {
-      logger.warn('[BrowserOAuth] Failed to register OpenAI OAuth provider in openclaw.json:', err);
-      throw err;
-    }
+        createdAt: existing?.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
 
-    this.emit('oauth:success', { provider: providerType, accountId: nextAccount.id });
+      await getSecretStore().set({
+        type: 'oauth',
+        accountId,
+        accessToken: token.access,
+        refreshToken: token.refresh,
+        expiresAt: token.expires,
+        email: oauthTokenEmail,
+        subject: oauthTokenSubject,
+      });
+
+      await saveOAuthTokenToOpenClaw(runtimeProviderId, {
+        access: token.access,
+        refresh: token.refresh,
+        expires: token.expires,
+        email: oauthTokenEmail,
+        projectId: oauthTokenSubject,
+        accountId: oauthTokenSubject,
+      });
+
+      const modelId = normalizedExistingModel || defaultModel;
+      const modelRef = `${runtimeProviderId}/${modelId}`;
+      const fallbackModelRefs = (nextAccount.fallbackModels ?? [])
+        .map((fallback) => fallback.trim())
+        .filter(Boolean)
+        .map((fallback) => (
+          fallback.replace(/^openai-codex\//, `${runtimeProviderId}/`).startsWith(`${runtimeProviderId}/`)
+            ? fallback.replace(/^openai-codex\//, `${runtimeProviderId}/`)
+            : `${runtimeProviderId}/${fallback}`
+        ));
+
+      try {
+        await setOpenClawDefaultModelWithOverride(
+          runtimeProviderId,
+          modelRef,
+          {
+            baseUrl: OPENAI_CODEX_OAUTH_PROVIDER_CONFIG.baseUrl,
+            api: OPENAI_CODEX_OAUTH_PROVIDER_CONFIG.api,
+          },
+          fallbackModelRefs,
+        );
+        await ensureOpenClawProviderAgentRuntimePins();
+        logger.info(`[BrowserOAuth] Registered ${runtimeProviderId} in openclaw.json (default model: ${modelRef})`);
+      } catch (err) {
+        logger.warn('[BrowserOAuth] Failed to register OpenAI OAuth provider in openclaw.json:', err);
+        throw err;
+      }
+
+      completedAccountId = nextAccount.id;
+      this.active = false;
+      this.activeAccountId = null;
+      this.activeLabel = null;
+      this.pendingManualCodeResolve = null;
+      this.pendingManualCodeReject = null;
+    });
+
+    if (!completedAccountId) return;
+    logger.info(`[BrowserOAuth] Successfully completed OAuth for ${providerType}`);
+    this.emit('oauth:success', { provider: providerType, accountId: completedAccountId });
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
       this.mainWindow.webContents.send('oauth:success', {
         provider: providerType,
-        accountId: nextAccount.id,
+        accountId: completedAccountId,
         success: true,
       });
     }

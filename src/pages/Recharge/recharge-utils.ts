@@ -1,6 +1,10 @@
 import QRCode from 'qrcode-terminal/vendor/QRCode/index.js';
 import QRErrorCorrectLevel from 'qrcode-terminal/vendor/QRCode/QRErrorCorrectLevel.js';
-import type { BillingErrorCode, BillingPaymentStatus } from '@shared/billing';
+import type {
+  BillingErrorCode,
+  BillingPaymentMethod,
+  BillingPaymentStatus,
+} from '@shared/billing';
 
 export type RechargeErrorCode = BillingErrorCode | 'configuration' | 'invalid_amount';
 
@@ -53,6 +57,40 @@ export function formatDateTime(value: number | undefined, language: string): str
     hour: '2-digit',
     minute: '2-digit',
   }).format(new Date(value));
+}
+
+export function durationParts(startedAt: number, now = Date.now()): {
+  minutes: number;
+  seconds: number;
+} {
+  const totalSeconds = Math.max(0, Math.floor((now - startedAt) / 1000));
+  return {
+    minutes: Math.floor(totalSeconds / 60),
+    seconds: totalSeconds % 60,
+  };
+}
+
+export function resolvePaymentMethodLabel(
+  paymentMethod: string,
+  paymentProvider: string,
+  methods: BillingPaymentMethod[],
+  knownLabels: { alipay: string; wxpay: string },
+): string {
+  const candidates = [paymentMethod, paymentProvider]
+    .map((value) => value.trim())
+    .filter(Boolean);
+  for (const candidate of candidates) {
+    const normalized = candidate.toLowerCase();
+    const configured = methods.find((method) => (
+      method.type.toLowerCase() === normalized || method.name.toLowerCase() === normalized
+    ));
+    if (configured) return configured.name;
+    if (normalized.includes('ali')) return knownLabels.alipay;
+    if (normalized.includes('wx') || normalized.includes('wechat') || normalized.includes('weixin')) {
+      return knownLabels.wxpay;
+    }
+  }
+  return candidates[0] ?? '-';
 }
 
 export function paymentStatusTone(status: BillingPaymentStatus): string {

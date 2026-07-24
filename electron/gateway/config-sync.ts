@@ -35,7 +35,24 @@ import { logger } from '../utils/logger';
 import { prependPathEntry } from '../utils/env-path';
 import { copyPluginFromNodeModules, fixupPluginManifest, cpSyncSafe, buildCandidateSources, repairTrustedOfficialPluginInstallRecords, syncTrustedOfficialPluginInstallRecord, resolvePluginNpmPackagePath } from '../utils/plugin-install';
 import { CLAWX_OPENAI_IMAGE_PROVIDER_KEY } from '../utils/openclaw-image-relay-constants';
-import { stripSystemdSupervisorEnv } from './config-sync-env';
+import {
+  isUclawManagedDistribution,
+  UCLAW_AUTH_ACCOUNT_ID,
+  UCLAW_PROVIDER_ID,
+} from '../utils/junfeiai-distribution';
+import { getProviderAccount } from '../services/providers/provider-store';
+import {
+  isUclawManagedAccount,
+  resolveValidUclawManagedRelayToken,
+  withProviderMutationLock,
+} from '../services/providers/provider-mutation-lock';
+import { getProviderSecret } from '../services/secrets/secret-store';
+import {
+  buildManagedOpenAiProviderEnv,
+  shouldInjectProviderEnv,
+  stripManagedProviderEnv,
+  stripSystemdSupervisorEnv,
+} from './config-sync-env';
 import { cleanupAgentsSymlinkedSkills, cleanupStalePluginRuntimeDeps } from './skills-symlink-cleanup';
 import {
   buildPrelaunchMaintenanceCacheKey,
@@ -547,22 +564,60 @@ export async function syncGatewayConfigBeforeLaunch(
   };
 }
 
-async function loadProviderEnv(): Promise<{ providerEnv: Record<string, string>; loadedProviderKeyCount: number }> {
+/** Resolve the canonical managed OpenAI credential without racing login or logout. */
+export async function loadManagedOpenAiProviderEnv(): Promise<ReturnType<typeof buildManagedOpenAiProviderEnv>> {
+  return withProviderMutationLock(async () => {
+    const account = await getProviderAccount(UCLAW_PROVIDER_ID);
+    if (
+      account?.id !== UCLAW_PROVIDER_ID
+      || account.vendorId !== 'openai'
+      || !isUclawManagedAccount(account)
+    ) {
+      return buildManagedOpenAiProviderEnv(null);
+    }
+
+    const authSecret = await getProviderSecret(UCLAW_AUTH_ACCOUNT_ID, { migrate: false });
+    const relaySecret = await getProviderSecret(UCLAW_PROVIDER_ID, { migrate: false });
+    return buildManagedOpenAiProviderEnv(resolveValidUclawManagedRelayToken(
+      account,
+      authSecret,
+      relaySecret,
+    ));
+  });
+}
+
+async function loadProviderEnv(
+  managedDistribution: boolean,
+): Promise<{ providerEnv: Record<string, string>; loadedProviderKeyCount: number }> {
   const providerEnv: Record<string, string> = {};
   const providerTypes = getKeyableProviderTypes();
   let loadedProviderKeyCount = 0;
+
+  if (managedDistribution) {
+    try {
+      const managedOpenAi = await loadManagedOpenAiProviderEnv();
+      Object.assign(providerEnv, managedOpenAi.providerEnv);
+      loadedProviderKeyCount += managedOpenAi.loadedProviderKeyCount;
+    } catch {
+      const managedOpenAi = buildManagedOpenAiProviderEnv(null);
+      Object.assign(providerEnv, managedOpenAi.providerEnv);
+      logger.warn('Failed to load the managed OpenAI credential; Gateway login is required');
+    }
+  }
 
   try {
     const defaultProviderId = await getDefaultProvider();
     if (defaultProviderId) {
       const defaultProvider = await getProvider(defaultProviderId);
       const defaultProviderType = defaultProvider?.type;
-      const defaultProviderKey = await getApiKey(defaultProviderId);
-      if (defaultProviderType && defaultProviderKey) {
+      if (defaultProviderType) {
         const envVar = getProviderEnvVar(defaultProviderType);
-        if (envVar) {
-          providerEnv[envVar] = defaultProviderKey;
-          loadedProviderKeyCount++;
+        if (shouldInjectProviderEnv(envVar, managedDistribution)) {
+          const defaultProviderKey = await getApiKey(defaultProviderId);
+          if (envVar && defaultProviderKey) {
+            providerEnv[envVar] = defaultProviderKey;
+            loadedProviderKeyCount++;
+          }
         }
       }
     }
@@ -572,13 +627,12 @@ async function loadProviderEnv(): Promise<{ providerEnv: Record<string, string>;
 
   for (const providerType of providerTypes) {
     try {
+      const envVar = getProviderEnvVar(providerType);
+      if (!shouldInjectProviderEnv(envVar, managedDistribution)) continue;
       const key = await getApiKey(providerType);
-      if (key) {
-        const envVar = getProviderEnvVar(providerType);
-        if (envVar) {
-          providerEnv[envVar] = key;
-          loadedProviderKeyCount++;
-        }
+      if (envVar && key) {
+        providerEnv[envVar] = key;
+        loadedProviderKeyCount++;
       }
     } catch (err) {
       logger.warn(`Failed to load API key for ${providerType}:`, err);
@@ -620,6 +674,7 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
   const totalStartedAt = Date.now();
   const openclawDir = getOpenClawDir();
   const entryScript = getOpenClawEntryPath();
+  const managedDistribution = isUclawManagedDistribution();
 
   if (!isOpenClawPresent()) {
     throw new Error(`OpenClaw package not found at: ${openclawDir}`);
@@ -645,7 +700,11 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
     : path.join(process.cwd(), 'resources', 'bin', target);
   const binPathExists = existsSync(binPath);
 
-  const { providerEnv, loadedProviderKeyCount } = await measureAsync(timingsMs, 'providerEnvMs', loadProviderEnv);
+  const { providerEnv, loadedProviderKeyCount } = await measureAsync(
+    timingsMs,
+    'providerEnvMs',
+    () => loadProviderEnv(managedDistribution),
+  );
   const { skipChannels, channelStartupSummary } = await measureAsync(
     timingsMs,
     'channelStartupPolicyMs',
@@ -663,8 +722,12 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
   const baseEnvPatched = binPathExists
     ? prependPathEntry(baseEnvRecord, binPath).env
     : baseEnvRecord;
+  const inheritedEnv = stripManagedProviderEnv(
+    stripSystemdSupervisorEnv(baseEnvPatched),
+    managedDistribution,
+  );
   const forkEnv: Record<string, string | undefined> = {
-    ...stripSystemdSupervisorEnv(baseEnvPatched),
+    ...inheritedEnv,
     ...providerEnv,
     ...uvEnv,
     ...proxyEnv,

@@ -223,7 +223,7 @@ export function Setup() {
             <div className="rounded-xl bg-card text-card-foreground border shadow-sm p-8 mb-8">
               {step.id === 'welcome' && <WelcomeContent />}
               {step.id === 'auth' && (
-                <ManagedAccountAuthPanel onReadyChange={setManagedAuthReady} />
+                <ManagedAccountAuthPanel defaultMode="login" onReadyChange={setManagedAuthReady} />
               )}
               {step.id === 'runtime' && <RuntimeContent onStatusChange={setRuntimeChecksPassed} />}
               {step.id === 'installing' && (

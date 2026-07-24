@@ -22,6 +22,17 @@ import {
 import { validateApiKeyWithProvider } from './providers/provider-validation';
 import type { ProviderAccount } from '../shared/providers/types';
 import { isRecord } from './payload-utils';
+import {
+  isOpenAiProviderIdentity,
+  isManagedOpenAiMutationLocked,
+  isUclawManagedAccount,
+  withProviderMutationLock,
+} from './providers/provider-mutation-lock';
+
+export {
+  isManagedOpenAiMutationLocked,
+  isUclawManagedAccount,
+} from './providers/provider-mutation-lock';
 
 type ProvidersApiContext = {
   gatewayManager: GatewayManager;
@@ -39,10 +50,7 @@ type ValidationOptions = {
 export const UCLAW_MANAGED_PROVIDER_ERROR =
   'This UClaw-managed provider account can only be changed through UClaw account settings';
 
-export function isUclawManagedAccount(account: unknown): boolean {
-  if (!isRecord(account) || !isRecord(account.metadata)) return false;
-  return account.metadata.managedBy === 'uclaw';
-}
+const UCLAW_MANAGED_OPENAI_ACCOUNT_ID = 'openai';
 
 export function managedProviderRejected(): HostSuccess {
   return { success: false, error: UCLAW_MANAGED_PROVIDER_ERROR };
@@ -69,9 +77,15 @@ function hasObjectChanges<T extends Record<string, unknown>>(
 function selectReplacementDefaultAccount(
   accounts: ProviderAccount[],
   deletedAccountId: string,
+  managedOpenAiLocked = false,
 ): ProviderAccount | undefined {
   return accounts
     .filter((account) => account.id !== deletedAccountId)
+    .filter((account) => (
+      !managedOpenAiLocked
+      || !isOpenAiProviderIdentity(account)
+      || (account.id === UCLAW_MANAGED_OPENAI_ACCOUNT_ID && isUclawManagedAccount(account))
+    ))
     .sort((left, right) => {
       if (left.enabled !== right.enabled) {
         return left.enabled ? -1 : 1;
@@ -79,6 +93,21 @@ function selectReplacementDefaultAccount(
       const updatedAtOrder = right.updatedAt.localeCompare(left.updatedAt);
       return updatedAtOrder !== 0 ? updatedAtOrder : left.id.localeCompare(right.id);
     })[0];
+}
+
+/** Schedule Gateway lifecycle only after the Provider mutation lock has been released. */
+function scheduleGatewayAfterProviderMutation(
+  gatewayManager: GatewayManager | undefined,
+  mode: 'reload' | 'restart',
+  onlyIfRunning = false,
+): void {
+  if (!gatewayManager) return;
+  if (onlyIfRunning && gatewayManager.getStatus?.().state === 'stopped') return;
+  if (mode === 'restart') {
+    gatewayManager.debouncedRestart?.();
+    return;
+  }
+  gatewayManager.debouncedReload?.();
 }
 
 function payloadString(payload: unknown, key: string): string | undefined {
@@ -212,137 +241,186 @@ async function validateKey(payload: ProviderPayload<'validateKey'>): Promise<{ v
 async function saveProvider(payload: ProviderPayload<'save'>, gatewayManager?: GatewayManager) {
   const providerService = getProviderService();
   const { config, apiKey } = getSavePayload(payload);
-  try {
-    if (await getManagedAccount(providerService, config.id)) {
-      return managedProviderRejected();
-    }
-    await providerService._saveProviderInternal(config);
-    if (apiKey !== undefined) {
-      const trimmedKey = apiKey.trim();
-      if (trimmedKey) {
-        await providerService._setProviderApiKeyInternal(config.id, trimmedKey);
-        await syncProviderApiKeyToRuntime(config.type, config.id, trimmedKey);
+  const result = await withProviderMutationLock(async () => {
+    try {
+      const existing = await providerService._getProviderInternal(config.id);
+      if (
+        await getManagedAccount(providerService, config.id)
+        || await isManagedOpenAiMutationLocked(providerService, config, existing)
+      ) {
+        return managedProviderRejected();
       }
+      await providerService._saveProviderInternal(config);
+      if (apiKey !== undefined) {
+        const trimmedKey = apiKey.trim();
+        if (trimmedKey) {
+          await providerService._setProviderApiKeyInternal(config.id, trimmedKey);
+          await syncProviderApiKeyToRuntime(config.type, config.id, trimmedKey);
+        }
+      }
+      await syncSavedProviderToRuntime(config, apiKey);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: String(error) };
     }
-    await syncSavedProviderToRuntime(config, apiKey, gatewayManager);
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: String(error) };
-  }
+  });
+  if (result.success) scheduleGatewayAfterProviderMutation(gatewayManager, 'reload');
+  return result;
 }
 
 async function deleteProvider(payload: ProviderPayload<'delete'>, gatewayManager?: GatewayManager) {
   const providerService = getProviderService();
   const providerId = getProviderId(payload, 'delete');
-  try {
-    if (await getManagedAccount(providerService, providerId)) {
-      return managedProviderRejected();
+  let shouldRestartGateway = false;
+  const result = await withProviderMutationLock(async () => {
+    try {
+      const existing = await providerService._getProviderInternal(providerId);
+      if (
+        await getManagedAccount(providerService, providerId)
+        || await isManagedOpenAiMutationLocked(providerService, providerId, existing)
+      ) {
+        return managedProviderRejected();
+      }
+      await providerService._deleteProviderInternal(providerId);
+      await syncDeletedProviderToRuntime(existing, providerId);
+      shouldRestartGateway = Boolean(existing?.type);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: String(error) };
     }
-    const existing = await providerService._getProviderInternal(providerId);
-    await providerService._deleteProviderInternal(providerId);
-    await syncDeletedProviderToRuntime(existing, providerId, gatewayManager);
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: String(error) };
+  });
+  if (result.success && shouldRestartGateway) {
+    scheduleGatewayAfterProviderMutation(gatewayManager, 'restart');
   }
+  return result;
 }
 
 async function setProviderApiKey(payload: ProviderPayload<'setApiKey'>) {
   const providerService = getProviderService();
   const { providerId, apiKey } = getApiKeyPayload(payload, 'setApiKey');
-  try {
-    if (await getManagedAccount(providerService, providerId)) {
-      return managedProviderRejected();
+  return withProviderMutationLock(async () => {
+    try {
+      const provider = await providerService._getProviderInternal(providerId);
+      if (
+        await getManagedAccount(providerService, providerId)
+        || await isManagedOpenAiMutationLocked(providerService, providerId, provider)
+      ) {
+        return managedProviderRejected();
+      }
+      await providerService._setProviderApiKeyInternal(providerId, apiKey);
+      const providerType = provider?.type || providerId;
+      await syncProviderApiKeyToRuntime(providerType, providerId, apiKey);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: String(error) };
     }
-    await providerService._setProviderApiKeyInternal(providerId, apiKey);
-    const provider = await providerService._getProviderInternal(providerId);
-    const providerType = provider?.type || providerId;
-    await syncProviderApiKeyToRuntime(providerType, providerId, apiKey);
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: String(error) };
-  }
+  });
 }
 
 async function updateProviderWithKey(payload: ProviderPayload<'updateWithKey'>, gatewayManager?: GatewayManager) {
   const providerService = getProviderService();
   const { providerId, updates, apiKey } = getProviderUpdatePayload(payload);
-  if (await getManagedAccount(providerService, providerId)) {
-    return managedProviderRejected();
-  }
-  const existing = await providerService._getProviderInternal(providerId);
-  if (!existing) {
-    return { success: false, error: 'Provider not found' };
-  }
-
-  const previousKey = await providerService._getProviderApiKeyInternal(providerId);
-  const previousOck = getOpenClawProviderKey(existing.type, providerId);
-
-  try {
-    const nextConfig: ProviderConfig = {
-      ...existing,
-      ...updates,
-      updatedAt: new Date().toISOString(),
-    };
-    const ock = getOpenClawProviderKey(nextConfig.type, providerId);
-    await providerService._saveProviderInternal(nextConfig);
-
-    if (apiKey !== undefined) {
-      const trimmedKey = apiKey.trim();
-      if (trimmedKey) {
-        await providerService._setProviderApiKeyInternal(providerId, trimmedKey);
-        await syncProviderApiKeyToRuntime(nextConfig.type, providerId, trimmedKey);
-      } else {
-        await providerService._deleteProviderApiKeyInternal(providerId);
-        await removeProviderFromOpenClaw(ock);
-      }
+  const result = await withProviderMutationLock(async () => {
+    const existing = await providerService._getProviderInternal(providerId);
+    if (
+      await getManagedAccount(providerService, providerId)
+      || await isManagedOpenAiMutationLocked(providerService, providerId, existing, updates)
+    ) {
+      return managedProviderRejected();
+    }
+    if (!existing) {
+      return { success: false, error: 'Provider not found' };
     }
 
-    await syncUpdatedProviderToRuntime(nextConfig, apiKey, gatewayManager);
-    return { success: true };
-  } catch (error) {
+    const previousKey = await providerService._getProviderApiKeyInternal(providerId);
+    const previousOck = getOpenClawProviderKey(existing.type, providerId);
+
     try {
-      await providerService._saveProviderInternal(existing);
-      if (previousKey) {
-        await providerService._setProviderApiKeyInternal(providerId, previousKey);
-        await saveProviderKeyToOpenClaw(previousOck, previousKey);
-      } else {
-        await providerService._deleteProviderApiKeyInternal(providerId);
-        await removeProviderFromOpenClaw(previousOck);
+      const nextConfig: ProviderConfig = {
+        ...existing,
+        ...updates,
+        updatedAt: new Date().toISOString(),
+      };
+      const ock = getOpenClawProviderKey(nextConfig.type, providerId);
+      await providerService._saveProviderInternal(nextConfig);
+
+      if (apiKey !== undefined) {
+        const trimmedKey = apiKey.trim();
+        if (trimmedKey) {
+          await providerService._setProviderApiKeyInternal(providerId, trimmedKey);
+          await syncProviderApiKeyToRuntime(nextConfig.type, providerId, trimmedKey);
+        } else {
+          await providerService._deleteProviderApiKeyInternal(providerId);
+          await removeProviderFromOpenClaw(ock);
+        }
       }
-    } catch (rollbackError) {
-      logger.warn('Failed to rollback provider updateWithKey:', rollbackError);
+
+      await syncUpdatedProviderToRuntime(nextConfig, apiKey);
+      return { success: true };
+    } catch (error) {
+      try {
+        await providerService._saveProviderInternal(existing);
+        if (previousKey) {
+          await providerService._setProviderApiKeyInternal(providerId, previousKey);
+          await saveProviderKeyToOpenClaw(previousOck, previousKey);
+        } else {
+          await providerService._deleteProviderApiKeyInternal(providerId);
+          await removeProviderFromOpenClaw(previousOck);
+        }
+      } catch (rollbackError) {
+        logger.warn('Failed to rollback provider updateWithKey:', rollbackError);
+      }
+      return { success: false, error: String(error) };
     }
-    return { success: false, error: String(error) };
-  }
+  });
+  if (result.success) scheduleGatewayAfterProviderMutation(gatewayManager, 'reload');
+  return result;
 }
 
 async function deleteProviderApiKey(payload: ProviderPayload<'deleteApiKey'>) {
   const providerService = getProviderService();
   const providerId = getProviderId(payload, 'deleteApiKey');
-  try {
-    if (await getManagedAccount(providerService, providerId)) {
-      return managedProviderRejected();
+  return withProviderMutationLock(async () => {
+    try {
+      const provider = await providerService._getProviderInternal(providerId);
+      if (
+        await getManagedAccount(providerService, providerId)
+        || await isManagedOpenAiMutationLocked(providerService, providerId, provider)
+      ) {
+        return managedProviderRejected();
+      }
+      await providerService._deleteProviderApiKeyInternal(providerId);
+      await syncDeletedProviderApiKeyToRuntime(provider, providerId);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: String(error) };
     }
-    await providerService._deleteProviderApiKeyInternal(providerId);
-    const provider = await providerService._getProviderInternal(providerId);
-    await syncDeletedProviderApiKeyToRuntime(provider, providerId);
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: String(error) };
-  }
+  });
 }
 
 async function setDefaultProvider(payload: ProviderPayload<'setDefault'>, gatewayManager?: GatewayManager) {
   const providerService = getProviderService();
   const providerId = getProviderId(payload, 'setDefault');
-  try {
-    await providerService._setDefaultProviderInternal(providerId);
-    await syncDefaultProviderToRuntime(providerId, gatewayManager);
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: String(error) };
+  const result = await withProviderMutationLock(async () => {
+    try {
+      const provider = await providerService._getProviderInternal(providerId);
+      if (
+        await getManagedAccount(providerService, providerId)
+        || await isManagedOpenAiMutationLocked(providerService, providerId, provider)
+      ) {
+        return managedProviderRejected();
+      }
+      await providerService._setDefaultProviderInternal(providerId);
+      await syncDefaultProviderToRuntime(providerId);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  });
+  if (result.success) {
+    scheduleGatewayAfterProviderMutation(gatewayManager, 'reload', true);
   }
+  return result;
 }
 
 async function createAccount(payload: ProviderPayload<'createAccount'>, gatewayManager?: GatewayManager) {
@@ -353,19 +431,27 @@ async function createAccount(payload: ProviderPayload<'createAccount'>, gatewayM
   }
   const requestedAccount = body.account as unknown as ProviderAccount;
   const apiKey = typeof body.apiKey === 'string' ? body.apiKey : undefined;
-  try {
-    const existingManagedAccount = typeof requestedAccount.id === 'string'
-      ? await getManagedAccount(providerService, requestedAccount.id)
-      : null;
-    if (isUclawManagedAccount(requestedAccount) || existingManagedAccount) {
-      return managedProviderRejected();
+  const result = await withProviderMutationLock(async () => {
+    try {
+      const existingAccount = typeof requestedAccount.id === 'string'
+        ? await providerService.getAccount(requestedAccount.id)
+        : null;
+      if (
+        isUclawManagedAccount(requestedAccount)
+        || isUclawManagedAccount(existingAccount)
+        || await isManagedOpenAiMutationLocked(providerService, requestedAccount, existingAccount)
+      ) {
+        return managedProviderRejected();
+      }
+      const account = await providerService.createAccount(requestedAccount, apiKey);
+      await syncSavedProviderToRuntime(providerAccountToConfig(account), apiKey);
+      return { success: true, account };
+    } catch (error) {
+      return { success: false, error: String(error) };
     }
-    const account = await providerService.createAccount(requestedAccount, apiKey);
-    await syncSavedProviderToRuntime(providerAccountToConfig(account), apiKey, gatewayManager);
-    return { success: true, account };
-  } catch (error) {
-    return { success: false, error: String(error) };
-  }
+  });
+  if (result.success) scheduleGatewayAfterProviderMutation(gatewayManager, 'reload');
+  return result;
 }
 
 async function updateAccount(payload: ProviderPayload<'updateAccount'>, gatewayManager?: GatewayManager) {
@@ -377,24 +463,34 @@ async function updateAccount(payload: ProviderPayload<'updateAccount'>, gatewayM
   if (!accountId || !updates) {
     throw new Error('Invalid providers.updateAccount payload');
   }
-  try {
-    const existing = await providerService.getAccount(accountId);
-    if (!existing) {
-      return { success: false, error: 'Provider account not found' };
+  const result = await withProviderMutationLock(async () => {
+    try {
+      const existing = await providerService.getAccount(accountId);
+      if (!existing) {
+        return { success: false, error: 'Provider account not found' };
+      }
+      if (
+        isUclawManagedAccount(existing)
+        || isUclawManagedAccount(updates)
+        || await isManagedOpenAiMutationLocked(providerService, accountId, existing, updates)
+      ) {
+        return managedProviderRejected();
+      }
+      const hasPatchChanges = hasObjectChanges(existing as unknown as Record<string, unknown>, updates as Record<string, unknown>);
+      if (!hasPatchChanges && apiKey === undefined) {
+        return { success: true, noChange: true, account: existing };
+      }
+      const account = await providerService.updateAccount(accountId, updates, apiKey);
+      await syncUpdatedProviderToRuntime(providerAccountToConfig(account), apiKey);
+      return { success: true, account };
+    } catch (error) {
+      return { success: false, error: String(error) };
     }
-    if (isUclawManagedAccount(existing) || isUclawManagedAccount(updates)) {
-      return managedProviderRejected();
-    }
-    const hasPatchChanges = hasObjectChanges(existing as unknown as Record<string, unknown>, updates as Record<string, unknown>);
-    if (!hasPatchChanges && apiKey === undefined) {
-      return { success: true, noChange: true, account: existing };
-    }
-    const account = await providerService.updateAccount(accountId, updates, apiKey);
-    await syncUpdatedProviderToRuntime(providerAccountToConfig(account), apiKey, gatewayManager);
-    return { success: true, account };
-  } catch (error) {
-    return { success: false, error: String(error) };
+  });
+  if (result.success && !('noChange' in result)) {
+    scheduleGatewayAfterProviderMutation(gatewayManager, 'reload');
   }
+  return result;
 }
 
 async function deleteAccount(
@@ -408,9 +504,14 @@ async function deleteAccount(
   if (!accountId) {
     throw new Error('Invalid providers.deleteAccount payload');
   }
-  try {
+  let shouldRestartGateway = false;
+  const result = await withProviderMutationLock(async () => {
+    try {
     const existing = await providerService.getAccount(accountId);
-    if (isUclawManagedAccount(existing)) {
+    if (
+      isUclawManagedAccount(existing)
+      || await isManagedOpenAiMutationLocked(providerService, accountId, existing)
+    ) {
       return managedProviderRejected();
     }
     const runtimeProviderKey = existing?.authMode === 'oauth_browser' && existing.vendorId === 'openai'
@@ -426,9 +527,17 @@ async function deleteAccount(
       return { success: true };
     }
     const currentDefaultAccountId = await providerService.getDefaultAccountId();
-    const replacementDefault = currentDefaultAccountId === accountId
-      ? selectReplacementDefaultAccount(await providerService.listAccounts(), accountId)
-      : undefined;
+    let replacementDefault: ProviderAccount | undefined;
+    if (currentDefaultAccountId === accountId) {
+      const managedOpenAiLocked = Boolean(
+        await getManagedAccount(providerService, UCLAW_MANAGED_OPENAI_ACCOUNT_ID),
+      );
+      replacementDefault = selectReplacementDefaultAccount(
+        await providerService.listAccounts(),
+        accountId,
+        managedOpenAiLocked,
+      );
+    }
 
     await providerService.deleteAccount(accountId);
     if (replacementDefault) {
@@ -438,29 +547,48 @@ async function deleteAccount(
     await syncDeletedProviderToRuntime(
       existing ? providerAccountToConfig(existing) : null,
       accountId,
-      gatewayManager,
+      undefined,
       runtimeProviderKey,
     );
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: String(error) };
+    shouldRestartGateway = Boolean(existing?.vendorId);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: String(error) };
+    }
+  });
+  if (result.success && !apiKeyOnly && shouldRestartGateway) {
+    scheduleGatewayAfterProviderMutation(gatewayManager, 'restart');
   }
+  return result;
 }
 
 async function setDefaultAccount(payload: ProviderPayload<'setDefaultAccount'>, gatewayManager?: GatewayManager) {
   const providerService = getProviderService();
   const accountId = getAccountId(payload, 'setDefaultAccount');
-  try {
-    const currentDefault = await providerService.getDefaultAccountId();
-    if (currentDefault === accountId) {
-      return { success: true, noChange: true };
+  const result = await withProviderMutationLock(async () => {
+    try {
+      const account = await providerService.getAccount(accountId);
+      if (
+        isUclawManagedAccount(account)
+        || await isManagedOpenAiMutationLocked(providerService, accountId, account)
+      ) {
+        return managedProviderRejected();
+      }
+      const currentDefault = await providerService.getDefaultAccountId();
+      if (currentDefault === accountId) {
+        return { success: true, noChange: true };
+      }
+      await providerService.setDefaultAccount(accountId);
+      await syncDefaultProviderToRuntime(accountId);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: String(error) };
     }
-    await providerService.setDefaultAccount(accountId);
-    await syncDefaultProviderToRuntime(accountId, gatewayManager);
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: String(error) };
+  });
+  if (result.success && !('noChange' in result)) {
+    scheduleGatewayAfterProviderMutation(gatewayManager, 'reload', true);
   }
+  return result;
 }
 
 async function requestOAuth(payload: ProviderPayload<'requestOAuth'>) {
@@ -475,6 +603,14 @@ async function requestOAuth(payload: ProviderPayload<'requestOAuth'>) {
     label: typeof body.label === 'string' ? body.label : undefined,
   };
   try {
+    if (
+      await isManagedOpenAiMutationLocked(
+        getProviderService(),
+        { id: options.accountId, vendorId: provider },
+      )
+    ) {
+      return managedProviderRejected();
+    }
     if (provider === 'openai') {
       await browserOAuthManager.startFlow(provider as BrowserOAuthProviderType, options);
     } else {
@@ -521,10 +657,11 @@ export function createProvidersApi(ctx: ProvidersApiContext): CompleteHostServic
     list: async () => providerService._listProvidersWithKeyInfoInternal(),
     get: async (payload) => providerService._getProviderInternal(getProviderId(payload, 'get')),
     getDefault: async () => providerService._getDefaultProviderInternal(),
-    hasApiKey: async (payload) => providerService._hasProviderApiKeyInternal(getProviderId(payload, 'hasApiKey')),
+    hasApiKey: async (payload) => providerService.hasAccountApiKey(getProviderId(payload, 'hasApiKey')),
     getApiKey: async (payload) => {
       const providerId = getProviderId(payload, 'getApiKey');
-      if (await getManagedAccount(providerService, providerId)) return null;
+      const account = await providerService.getAccount(providerId);
+      if (await isManagedOpenAiMutationLocked(providerService, providerId, account)) return null;
       return providerService._getProviderApiKeyInternal(providerId);
     },
     validateKey,
@@ -541,7 +678,8 @@ export function createProvidersApi(ctx: ProvidersApiContext): CompleteHostServic
     getAccount: async (payload) => providerService.getAccount(getAccountId(payload, 'getAccount')),
     getAccountApiKey: async (payload) => {
       const accountId = getAccountId(payload, 'getAccountApiKey');
-      if (await getManagedAccount(providerService, accountId)) return null;
+      const account = await providerService.getAccount(accountId);
+      if (await isManagedOpenAiMutationLocked(providerService, accountId, account)) return null;
       return providerService.getAccountApiKey(accountId);
     },
     hasAccountApiKey: async (payload) => providerService.hasAccountApiKey(getAccountId(payload, 'hasAccountApiKey')),

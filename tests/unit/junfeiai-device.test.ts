@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -26,12 +26,16 @@ import {
   getUclawDeviceActivationPath,
   getUclawDeviceIdentityPath,
   loadOrCreateUclawDeviceIdentity,
+  markManagedDeviceActivated,
   markUclawDeviceActivated,
   readUclawDeviceActivationState,
+  restoreManagedDeviceActivationFiles,
+  snapshotManagedDeviceActivationFiles,
 } from '@electron/utils/junfeiai-device';
 
 const legacyIdentityPath = join(userData, 'clawx-device-identity.json');
 const legacyActivationPath = join(userData, 'clawx-device-activation.json');
+const stableActivationPath = join(appData, 'UClaw', 'uclaw-device-activation.json');
 
 async function mode(filePath: string): Promise<number> {
   return (await stat(filePath)).mode & 0o777;
@@ -50,6 +54,88 @@ describe('UClaw managed device identity', () => {
     await expect(readUclawDeviceActivationState()).resolves.toBeNull();
     await expect(readFile(getUclawDeviceIdentityPath(), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(readFile(getStableUclawDeviceIdentityPath(), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('snapshots both activation files byte-for-byte without creating or hardening files', async () => {
+    const currentBytes = Buffer.from([0x00, 0xff, 0x7b, 0x0a]);
+    const stableBytes = Buffer.from([0xfe, 0x01, 0x7d, 0x0a]);
+    await mkdir(userData, { recursive: true });
+    await mkdir(join(appData, 'UClaw'), { recursive: true });
+    await writeFile(getUclawDeviceActivationPath(), currentBytes);
+    await writeFile(stableActivationPath, stableBytes);
+    await chmod(getUclawDeviceActivationPath(), 0o644);
+    await chmod(stableActivationPath, 0o640);
+
+    const snapshot = await snapshotManagedDeviceActivationFiles();
+
+    expect(snapshot.current.path).toBe(getUclawDeviceActivationPath());
+    expect(snapshot.current.bytes).toEqual(currentBytes);
+    expect(snapshot.stable.path).toBe(stableActivationPath);
+    expect(snapshot.stable.bytes).toEqual(stableBytes);
+    expect(await mode(getUclawDeviceActivationPath())).toBe(0o644);
+    expect(await mode(stableActivationPath)).toBe(0o640);
+    await expect(readFile(getUclawDeviceIdentityPath())).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readFile(getStableUclawDeviceIdentityPath())).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('records missing activation files without creating their parent directories', async () => {
+    const snapshot = await snapshotManagedDeviceActivationFiles();
+
+    expect(snapshot.current.bytes).toBeNull();
+    expect(snapshot.stable.bytes).toBeNull();
+    await expect(stat(userData)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(join(appData, 'UClaw'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('restores existing activation files byte-for-byte with private permissions', async () => {
+    const currentBytes = Buffer.from([0x00, 0xff, 0x01]);
+    const stableBytes = Buffer.from([0xfe, 0x02, 0x00]);
+    await mkdir(userData, { recursive: true });
+    await mkdir(join(appData, 'UClaw'), { recursive: true });
+    await writeFile(getUclawDeviceActivationPath(), currentBytes);
+    await writeFile(stableActivationPath, stableBytes);
+    const snapshot = await snapshotManagedDeviceActivationFiles();
+    await writeFile(getUclawDeviceActivationPath(), 'changed');
+    await rm(stableActivationPath);
+    await chmod(getUclawDeviceActivationPath(), 0o666);
+
+    await restoreManagedDeviceActivationFiles(snapshot);
+
+    expect(await readFile(getUclawDeviceActivationPath())).toEqual(currentBytes);
+    expect(await readFile(stableActivationPath)).toEqual(stableBytes);
+    expect(await mode(getUclawDeviceActivationPath())).toBe(0o600);
+    expect(await mode(stableActivationPath)).toBe(0o600);
+  });
+
+  it('removes activation files created after a missing snapshot and ignores ENOENT', async () => {
+    const snapshot = await snapshotManagedDeviceActivationFiles();
+    await mkdir(userData, { recursive: true });
+    await mkdir(join(appData, 'UClaw'), { recursive: true });
+    await writeFile(getUclawDeviceActivationPath(), 'new-current');
+    await writeFile(stableActivationPath, 'new-stable');
+
+    await restoreManagedDeviceActivationFiles(snapshot);
+    await expect(readFile(getUclawDeviceActivationPath())).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readFile(stableActivationPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(restoreManagedDeviceActivationFiles(snapshot)).resolves.toBeUndefined();
+  });
+
+  it('restores the stable file when current restoration fails and aggregates the error', async () => {
+    const stableBytes = Buffer.from([0xfe, 0x03, 0x00]);
+    await mkdir(join(appData, 'UClaw'), { recursive: true });
+    await writeFile(stableActivationPath, stableBytes);
+    const snapshot = await snapshotManagedDeviceActivationFiles();
+    await mkdir(snapshot.current.path, { recursive: true });
+    await writeFile(stableActivationPath, 'changed-stable');
+
+    const failure = await restoreManagedDeviceActivationFiles(snapshot).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors).toEqual([
+      expect.objectContaining({ code: expect.stringMatching(/^(EISDIR|EPERM)$/) }),
+    ]);
+    expect(await readFile(stableActivationPath)).toEqual(stableBytes);
+    expect(await mode(stableActivationPath)).toBe(0o600);
   });
 
   it('keeps one identity across loads and protects every persisted copy', async () => {
@@ -114,6 +200,23 @@ describe('UClaw managed device identity', () => {
       'version',
     ]);
     expect(JSON.stringify(persisted)).not.toContain('must-not-be-stored');
+  });
+
+  it('makes the managed stable mirror strict and records each write intent before I/O', async () => {
+    await loadOrCreateUclawDeviceIdentity();
+    await mkdir(stableActivationPath);
+    const applied: Parameters<typeof markManagedDeviceActivated>[2] = {};
+
+    await expect(markManagedDeviceActivated('login', { id: 'user-1' }, applied))
+      .rejects.toMatchObject({ code: expect.stringMatching(/^(EISDIR|EPERM)$/) });
+
+    expect(applied.current?.path).toBe(getUclawDeviceActivationPath());
+    expect(applied.stable?.path).toBe(stableActivationPath);
+    expect(applied.current?.bytes).toEqual(await readFile(getUclawDeviceActivationPath()));
+    expect(applied.stable?.bytes).not.toBeNull();
+
+    // The legacy public flow keeps the stable backup best-effort.
+    await expect(markUclawDeviceActivated('login', { id: 'user-1' })).resolves.toBeDefined();
   });
 
   it('rejects an activation record that belongs to another device', async () => {

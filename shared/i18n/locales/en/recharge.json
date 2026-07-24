@@ -15,6 +15,14 @@
   "soldOut": "Sold out",
   "loading": "Loading store",
   "retry": "Retry",
+  "methods": {
+    "alipay": "Alipay",
+    "wxpay": "WeChat Pay"
+  },
+  "activeOrder": {
+    "title": "Active payment order",
+    "view": "View order"
+  },
   "errors": {
     "auth_required": "Sign in to UClaw first",
     "auth_expired": "Your session has expired. Sign in to UClaw again",
@@ -34,23 +42,49 @@
     "check": "Check status",
     "checking": "Checking",
     "close": "Close",
+    "cancelOrder": "Discard order",
     "noQr": "No usable payment code was returned",
+    "returnToCheck": "Return here after payment to check the status",
+    "orderNumber": "Order number",
+    "createdAt": "Created",
+    "waiting": "Waiting time",
+    "lastChecked": "Last checked",
+    "durationSeconds": "{{seconds}}s",
+    "durationMinutes": "{{minutes}}m {{seconds}}s",
     "success": "Payment complete. Your shrimp balance is updated",
     "pending": "Awaiting payment",
     "failed": "Payment failed",
     "cancelled": "Order cancelled",
     "expired": "Order closed",
-    "statusUnavailable": "Payment status is temporarily unavailable. UClaw will keep checking"
+    "statusUnavailable": "Payment status is temporarily unavailable. UClaw will keep checking",
+    "guidance": {
+      "pendingTitle": "Complete payment with the displayed code",
+      "pendingSubtitle": "UClaw will update the order automatically after payment.",
+      "delayedTitle": "Payment confirmation is taking longer than usual",
+      "delayedSubtitle": "Keep this order open. UClaw is still checking the payment status.",
+      "unavailableTitle": "Payment confirmation is temporarily unavailable",
+      "unavailableSubtitle": "The order remains active and UClaw will retry automatically.",
+      "failedTitle": "Payment was not completed",
+      "failedSubtitle": "Discard this order and create a new one to try again.",
+      "cancelledTitle": "Order cancelled",
+      "cancelledSubtitle": "This order was not paid. You can create a new recharge order.",
+      "expiredTitle": "Order closed",
+      "expiredSubtitle": "This order has expired. Create a new recharge order to continue."
+    }
   },
   "orders": {
     "title": "Order history",
     "description": "Recent shrimp recharge orders",
     "empty": "No recharge orders yet",
+    "refresh": "Refresh order history",
+    "orderNumber": "Order number",
     "date": "Date",
     "amount": "Amount",
     "quota": "Shrimp",
     "method": "Payment method",
     "status": "Status",
+    "completed": "Completed",
+    "total": "Total: {{total}}",
     "previous": "Previous",
     "next": "Next",
     "page": "Page {{page}} of {{total}}"

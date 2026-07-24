@@ -8,6 +8,12 @@ import { logger } from '../utils/logger';
 import { prependPathEntry } from '../utils/env-path';
 import { probeGatewayReady } from './ws-client';
 
+const OWNED_GATEWAY_EXIT_TIMEOUT_MS = 5000;
+
+function describeTerminationError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function warmupManagedPythonReadiness(): void {
   void isPythonReady().then((pythonReady) => {
     if (!pythonReady) {
@@ -21,60 +27,101 @@ export function warmupManagedPythonReadiness(): void {
   });
 }
 
+/** Terminate an owned Gateway child and return only after its exit is confirmed. */
 export async function terminateOwnedGatewayProcess(child: Electron.UtilityProcess): Promise<void> {
   const terminateWindowsProcessTree = async (pid: number): Promise<void> => {
     const cp = await import('child_process');
-    await new Promise<void>((resolve) => {
-      cp.exec(`taskkill /F /PID ${pid} /T`, { timeout: 5000, windowsHide: true }, () => resolve());
+    await new Promise<void>((resolve, reject) => {
+      cp.exec(`taskkill /F /PID ${pid} /T`, { timeout: 5000, windowsHide: true }, (error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
     });
   };
 
-  await new Promise<void>((resolve) => {
-    let exited = false;
+  let exited = false;
+  let resolveExit!: () => void;
+  const exitPromise = new Promise<void>((resolve) => {
+    resolveExit = resolve;
+  });
+  const onExit = () => {
+    exited = true;
+    resolveExit();
+  };
 
-    // Register a single exit listener before any kill attempt to avoid
-    // the race where exit fires between two separate `once('exit')` calls.
-    child.once('exit', () => {
-      exited = true;
-      clearTimeout(timeout);
-      resolve();
+  // Register once before the first signal so a fast exit cannot be missed.
+  child.once('exit', onExit);
+
+  const waitForExit = async (): Promise<boolean> => {
+    if (exited) return true;
+
+    let timeout: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<false>((resolve) => {
+      timeout = setTimeout(() => resolve(false), OWNED_GATEWAY_EXIT_TIMEOUT_MS);
     });
+    const didExit = await Promise.race([
+      exitPromise.then(() => true as const),
+      timedOut,
+    ]);
+    if (timeout) clearTimeout(timeout);
+    return didExit;
+  };
 
-    const pid = child.pid;
-    logger.info(`Sending kill to Gateway process (pid=${pid ?? 'unknown'})`);
+  const pid = child.pid;
+  logger.info(`Sending kill to Gateway process (pid=${pid ?? 'unknown'})`);
 
-    if (process.platform === 'win32' && pid) {
-      void terminateWindowsProcessTree(pid).catch((err) => {
-        logger.warn(`Windows process-tree kill failed for Gateway pid=${pid}:`, err);
-      });
-    } else {
-      try {
-        child.kill();
-      } catch {
-        // ignore if already exited
-      }
-    }
-
-    const timeout = setTimeout(() => {
-      if (!exited) {
-        logger.warn(`Gateway did not exit in time, force-killing (pid=${pid ?? 'unknown'})`);
-        if (pid) {
-          if (process.platform === 'win32') {
-            void terminateWindowsProcessTree(pid).catch((err) => {
-              logger.warn(`Forced Windows process-tree kill failed for Gateway pid=${pid}:`, err);
-            });
-          } else {
-            try {
-              process.kill(pid, 'SIGKILL');
-            } catch {
-              // ignore
-            }
-          }
+  try {
+    try {
+      if (process.platform === 'win32' && pid) {
+        await terminateWindowsProcessTree(pid);
+      } else {
+        const sent = child.kill();
+        if (sent === false && !exited) {
+          throw new Error('child.kill() returned false');
         }
       }
-      resolve();
-    }, 5000);
-  });
+    } catch (error) {
+      if (exited) return;
+      const signal = process.platform === 'win32' && pid ? 'taskkill' : 'SIGTERM';
+      throw new Error(
+        `Failed to terminate Gateway process with ${signal} (pid=${pid ?? 'unknown'}): ${describeTerminationError(error)}`,
+        { cause: error },
+      );
+    }
+
+    if (await waitForExit()) return;
+
+    logger.warn(`Gateway did not exit in time, force-killing (pid=${pid ?? 'unknown'})`);
+    try {
+      if (!pid) {
+        throw new Error('Gateway process PID is unavailable');
+      }
+      if (process.platform === 'win32') {
+        await terminateWindowsProcessTree(pid);
+      } else {
+        process.kill(pid, 'SIGKILL');
+      }
+    } catch (error) {
+      if (exited) return;
+      const signal = process.platform === 'win32' ? 'taskkill' : 'SIGKILL';
+      throw new Error(
+        `Failed to force-kill Gateway process with ${signal} (pid=${pid ?? 'unknown'}): ${describeTerminationError(error)}`,
+        { cause: error },
+      );
+    }
+
+    if (await waitForExit()) return;
+
+    const signal = process.platform === 'win32' ? 'taskkill' : 'SIGKILL';
+    throw new Error(
+      `Gateway process did not exit after ${signal} (pid=${pid ?? 'unknown'})`,
+    );
+  } finally {
+    child.removeListener('exit', onExit);
+  }
 }
 
 export async function unloadLaunchctlGatewayService(): Promise<void> {

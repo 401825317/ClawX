@@ -6,6 +6,7 @@ import type {
   BillingResult,
 } from '../../shared/billing';
 import type { CompleteHostServiceRegistry } from '../main/ipc/host-contract';
+import type { GatewayManager } from '../gateway/manager';
 import {
   createBillingOrder,
   getBillingOrderHistory,
@@ -13,10 +14,18 @@ import {
   getBillingOverview,
   toBillingError,
 } from './billing-service';
+import {
+  getFreshManagedAuthStatus,
+  toManagedAuthError,
+} from './managed-auth-service';
 import { isRecord } from './payload-utils';
 
 type BillingPayload<Action extends keyof HostApiContract['billing']> =
   Parameters<HostApiContract['billing'][Action]>[0];
+
+type BillingApiContext = {
+  gatewayManager: GatewayManager;
+};
 
 function optionalHistoryPayload(payload: unknown): BillingOrderHistoryPayload {
   if (payload === undefined) return {};
@@ -57,30 +66,62 @@ function orderStatusPayload(payload: unknown): BillingOrderStatusPayload {
   return { tradeNo: payload.tradeNo.trim() };
 }
 
-async function callSafely<T>(task: () => Promise<T>): Promise<BillingResult<T>> {
+function billingRequestFailed<T>(): BillingResult<T> {
+  return {
+    success: false,
+    errorCode: 'request_failed',
+    message: 'UClaw billing request failed',
+  };
+}
+
+async function callSafely<T>(
+  task: () => Promise<T>,
+  gatewayManager: GatewayManager,
+): Promise<BillingResult<T>> {
   try {
     return { success: true, data: await task() };
   } catch (error) {
+    const managedError = toManagedAuthError(error);
+    if (managedError.httpStatus === 401) {
+      try {
+        // A Billing edge response is not authoritative for the runtime session.
+        // Verify once without replaying the Billing request (createOrder included).
+        const status = await getFreshManagedAuthStatus(gatewayManager);
+        if (status.authRejected === true) {
+          return {
+            success: false,
+            errorCode: 'auth_expired',
+            message: 'UClaw authentication was rejected',
+          };
+        }
+      } catch {
+        return billingRequestFailed();
+      }
+      return billingRequestFailed();
+    }
+    if (managedError.httpStatus === 403) return billingRequestFailed();
     const failure = toBillingError(error);
     return { success: false, ...failure };
   }
 }
 
-/** Create the credential-free typed billing Host API exposed to Renderer. */
-export function createBillingApi(): CompleteHostServiceRegistry['billing'] {
+/** Create the typed Billing Host API while managed auth retains credential ownership. */
+export function createBillingApi(
+  { gatewayManager }: BillingApiContext,
+): CompleteHostServiceRegistry['billing'] {
   return {
-    overview: () => callSafely(() => getBillingOverview()),
+    overview: () => callSafely(() => getBillingOverview(), gatewayManager),
     history: (payload: BillingPayload<'history'>) => {
       const body = optionalHistoryPayload(payload);
-      return callSafely(() => getBillingOrderHistory(body));
+      return callSafely(() => getBillingOrderHistory(body), gatewayManager);
     },
     createOrder: (payload: BillingPayload<'createOrder'>) => {
       const body = createOrderPayload(payload);
-      return callSafely(() => createBillingOrder(body));
+      return callSafely(() => createBillingOrder(body), gatewayManager);
     },
     orderStatus: (payload: BillingPayload<'orderStatus'>) => {
       const body = orderStatusPayload(payload);
-      return callSafely(() => getBillingOrderStatus(body));
+      return callSafely(() => getBillingOrderStatus(body), gatewayManager);
     },
   };
 }

@@ -62,6 +62,15 @@ import {
 } from './startup-stderr';
 import { runGatewayStartupSequence } from './startup-orchestrator';
 import {
+  acquireManagedRuntimeMutationLease as acquireRuntimeMutationLease,
+  assertManagedRuntimeLaunchAllowed,
+  assertManagedRuntimeStartAllowed,
+  isManagedRuntimeMutationActive,
+  isManagedRuntimeStartBlockedError,
+  releaseManagedRuntimeMutationLease as releaseRuntimeMutationLease,
+  type ManagedRuntimeMutationLease,
+} from './managed-runtime-mutation-barrier';
+import {
   GatewayCapabilityMonitor,
   type GatewayCapabilityName,
   type GatewayCapabilitySnapshot,
@@ -146,6 +155,20 @@ function classifyCapabilityMethod(method: string): GatewayCapabilityName | null 
   return null;
 }
 
+class GatewayLateChildTerminationError extends AggregateError {
+  constructor(lifecycleError: unknown, terminationError: unknown, pid?: number) {
+    const lifecycleMessage = lifecycleError instanceof Error ? lifecycleError.message : String(lifecycleError);
+    const terminationMessage = terminationError instanceof Error ? terminationError.message : String(terminationError);
+    super(
+      [lifecycleError, terminationError],
+      `Gateway child spawned after lifecycle invalidation could not be terminated `
+        + `(pid=${pid ?? 'unknown'}): lifecycle=${lifecycleMessage}; termination=${terminationMessage}`,
+      { cause: terminationError },
+    );
+    this.name = 'GatewayLateChildTerminationError';
+  }
+}
+
 /**
  * Gateway Manager Events
  */
@@ -178,6 +201,7 @@ export class GatewayManager extends EventEmitter {
   private reconnectConfig: ReconnectConfig;
   private shouldReconnect = true;
   private startLock = false;
+  private startInFlight: Promise<void> | null = null;
   private lastSpawnSummary: string | null = null;
   private recentStartupStderrLines: string[] = [];
   private readonly startupTraceCollector = new GatewayStartupTraceCollector();
@@ -224,6 +248,10 @@ export class GatewayManager extends EventEmitter {
       onTransition: (previousState, nextState) => {
         if (nextState === 'running') {
           this.restartGovernor.onRunning();
+        }
+        if (isManagedRuntimeMutationActive()) {
+          this.restartController.resetDeferredRestart();
+          return;
         }
         this.restartController.flushDeferredRestart(
           `status:${previousState}->${nextState}`,
@@ -291,6 +319,21 @@ export class GatewayManager extends EventEmitter {
     return this.stateController.getStatus();
   }
 
+  /** Acquire exclusive runtime authority before a managed credential transaction. */
+  acquireManagedRuntimeMutationLease(): ManagedRuntimeMutationLease {
+    const lease = acquireRuntimeMutationLease();
+    this.lifecycleController.bump('managed-runtime-mutation-acquire');
+    this.shouldReconnect = false;
+    this.clearAllTimers();
+    this.restartController.resetDeferredRestart();
+    return lease;
+  }
+
+  /** Release runtime authority after success, safe rollback, or persisted quarantine. */
+  releaseManagedRuntimeMutationLease(lease: ManagedRuntimeMutationLease): void {
+    releaseRuntimeMutationLease(lease);
+  }
+
   getDiagnostics(): GatewayDiagnosticsSnapshot {
     return { ...this.diagnostics };
   }
@@ -318,7 +361,23 @@ export class GatewayManager extends EventEmitter {
   /**
    * Start Gateway process
    */
-  async start(): Promise<void> {
+  async start(lease?: ManagedRuntimeMutationLease): Promise<void> {
+    await assertManagedRuntimeStartAllowed(lease);
+    if (this.startInFlight) {
+      await this.startInFlight;
+      return;
+    }
+
+    const current = this.startInternal(lease);
+    this.startInFlight = current;
+    try {
+      await current;
+    } finally {
+      if (this.startInFlight === current) this.startInFlight = null;
+    }
+  }
+
+  private async startInternal(lease?: ManagedRuntimeMutationLease): Promise<void> {
     if (this.startLock) {
       logger.debug('Gateway start ignored because a start flow is already in progress');
       return;
@@ -376,6 +435,7 @@ export class GatewayManager extends EventEmitter {
         getStartupStderrLines: () => this.recentStartupStderrLines,
         assertLifecycle: (phase) => {
           this.lifecycleController.assert(startEpoch, phase);
+          assertManagedRuntimeLaunchAllowed(lease);
         },
         findExistingGateway: async (port) => {
           // Always read the current process pid dynamically so that retries
@@ -413,7 +473,10 @@ export class GatewayManager extends EventEmitter {
           await waitForPortFree(port);
         },
         startProcess: async () => {
-          await this.startProcess();
+          await this.startProcess((phase) => {
+            this.lifecycleController.assert(startEpoch, phase);
+            assertManagedRuntimeLaunchAllowed(lease);
+          });
           tSpawned = Date.now();
         },
         waitForReady: async (port) => {
@@ -457,6 +520,15 @@ export class GatewayManager extends EventEmitter {
         logger.debug(error.message);
         return;
       }
+      if (error instanceof GatewayLateChildTerminationError) {
+        logger.error(error.message, error);
+        this.setStatus({ state: 'error', error: error.message });
+        throw error;
+      }
+      if (isManagedRuntimeStartBlockedError(error)) {
+        logger.debug(error.message);
+        throw error;
+      }
       logger.error(
         `Gateway start failed (port=${this.status.port}, reconnectAttempts=${this.reconnectAttempts}, spawn=${this.lastSpawnSummary ?? 'n/a'})`,
         error
@@ -469,19 +541,23 @@ export class GatewayManager extends EventEmitter {
       throw error;
     } finally {
       this.startLock = false;
-      this.restartController.flushDeferredRestart(
-        'start:finally',
-        {
-          state: this.status.state,
-          startLock: this.startLock,
-          shouldReconnect: this.shouldReconnect,
-        },
-        () => {
-          void this.restart().catch((error) => {
-            logger.warn('Deferred Gateway restart failed:', error);
-          });
-        },
-      );
+      if (isManagedRuntimeMutationActive()) {
+        this.restartController.resetDeferredRestart();
+      } else {
+        this.restartController.flushDeferredRestart(
+          'start:finally',
+          {
+            state: this.status.state,
+            startLock: this.startLock,
+            shouldReconnect: this.shouldReconnect,
+          },
+          () => {
+            void this.restart().catch((error) => {
+              logger.warn('Deferred Gateway restart failed:', error);
+            });
+          },
+        );
+      }
     }
   }
 
@@ -497,6 +573,13 @@ export class GatewayManager extends EventEmitter {
 
     // Clear all timers
     this.clearAllTimers();
+
+    // A superseded start may still be preparing or launching a child. Wait for
+    // its post-launch guard to terminate any late child before stop returns.
+    const startToDrain = this.startInFlight;
+    if (startToDrain) {
+      await startToDrain.catch(() => undefined);
+    }
 
     // If this manager is attached to an external gateway process, ask it to shut down
     // over protocol before closing the socket.
@@ -566,7 +649,8 @@ export class GatewayManager extends EventEmitter {
   /**
    * Restart Gateway process
    */
-  async restart(): Promise<void> {
+  async restart(lease?: ManagedRuntimeMutationLease): Promise<void> {
+    await assertManagedRuntimeStartAllowed(lease);
     if (this.restartController.isRestartDeferred({
       state: this.status.state,
       startLock: this.startLock,
@@ -604,12 +688,20 @@ export class GatewayManager extends EventEmitter {
     }
 
     const pidBefore = this.status.pid;
+    let managedRuntimeBlocked = false;
     logger.info(`[gateway-refresh] mode=restart requested pidBefore=${pidBefore ?? 'n/a'}`);
     this.restartInFlight = (async () => {
       await this.stop();
       try {
-        await this.start();
+        await this.start(lease);
       } catch (err) {
+        if (isManagedRuntimeStartBlockedError(err)) {
+          managedRuntimeBlocked = true;
+          this.shouldReconnect = false;
+          this.restartController.resetDeferredRestart();
+          logger.debug('Gateway restart stopped by managed credential mutation');
+          throw err;
+        }
         // stop() set shouldReconnect=false. Restore it so the gateway
         // can self-heal via scheduleReconnect() instead of dying permanently.
         logger.warn('Gateway restart: start() failed after stop(), enabling auto-reconnect recovery', err);
@@ -637,19 +729,23 @@ export class GatewayManager extends EventEmitter {
       );
     } finally {
       this.restartInFlight = null;
-      this.restartController.flushDeferredRestart(
-        'restart:finally',
-        {
-          state: this.status.state,
-          startLock: this.startLock,
-          shouldReconnect: this.shouldReconnect,
-        },
-        () => {
-          void this.restart().catch((error) => {
-            logger.warn('Deferred Gateway restart failed:', error);
-          });
-        },
-      );
+      if (managedRuntimeBlocked || isManagedRuntimeMutationActive()) {
+        this.restartController.resetDeferredRestart();
+      } else {
+        this.restartController.flushDeferredRestart(
+          'restart:finally',
+          {
+            state: this.status.state,
+            startLock: this.startLock,
+            shouldReconnect: this.shouldReconnect,
+          },
+          () => {
+            void this.restart().catch((error) => {
+              logger.warn('Deferred Gateway restart failed:', error);
+            });
+          },
+        );
+      }
     }
   }
 
@@ -661,6 +757,11 @@ export class GatewayManager extends EventEmitter {
    * of each other during setup.
    */
   debouncedRestart(delayMs = 2000): void {
+    if (isManagedRuntimeMutationActive()) {
+      this.restartController.resetDeferredRestart();
+      logger.debug('Gateway debounced restart dropped during managed credential mutation');
+      return;
+    }
     this.restartController.debouncedRestart(delayMs, () => {
       void this.restart().catch((err) => {
         logger.warn('Debounced Gateway restart failed:', err);
@@ -672,14 +773,15 @@ export class GatewayManager extends EventEmitter {
    * Ask the Gateway process to reload config in-place when possible.
    * Falls back to restart on unsupported platforms or signaling failures.
    */
-  async reload(): Promise<void> {
+  async reload(lease?: ManagedRuntimeMutationLease): Promise<void> {
+    await assertManagedRuntimeStartAllowed(lease);
     await this.refreshReloadPolicy();
 
     if (this.reloadPolicy.mode === 'off' || this.reloadPolicy.mode === 'restart') {
       logger.info(
         `[gateway-refresh] mode=reload result=policy_forced_restart policy=${this.reloadPolicy.mode}`,
       );
-      await this.restart();
+      await this.restart(lease);
       return;
     }
 
@@ -700,7 +802,7 @@ export class GatewayManager extends EventEmitter {
     if (!this.process?.pid || this.status.state !== 'running') {
       logger.warn('[gateway-refresh] mode=reload result=fallback_restart cause=not_running');
       logger.warn('Gateway reload requested while not running; falling back to restart');
-      await this.restart();
+      await this.restart(lease);
       return;
     }
 
@@ -722,11 +824,12 @@ export class GatewayManager extends EventEmitter {
       // Fall back to a full restart.  The connectedForMs < 8000 guard above
       // already skips unnecessary restarts for recently-started processes.
       logger.warn('[gateway-refresh] mode=reload result=fallback_restart cause=windows');
-      await this.restart();
+      await this.restart(lease);
       return;
     }
 
     try {
+      assertManagedRuntimeLaunchAllowed(lease);
       process.kill(this.process.pid, 'SIGUSR1');
       logger.info(`Sent SIGUSR1 to Gateway for config reload (pid=${this.process.pid})`);
       // Some gateway builds do not handle SIGUSR1 as an in-process reload.
@@ -735,7 +838,7 @@ export class GatewayManager extends EventEmitter {
       if (this.status.state !== 'running' || !this.process?.pid) {
         logger.warn('[gateway-refresh] mode=reload result=fallback_restart cause=post_signal_unhealthy');
         logger.warn('Gateway did not stay running after reload signal, falling back to restart');
-        await this.restart();
+        await this.restart(lease);
       } else {
         const pidAfter = this.process.pid;
         logger.info(
@@ -743,9 +846,12 @@ export class GatewayManager extends EventEmitter {
         );
       }
     } catch (error) {
+      if (isManagedRuntimeStartBlockedError(error)) {
+        throw error;
+      }
       logger.warn('[gateway-refresh] mode=reload result=fallback_restart cause=signal_error');
       logger.warn('Gateway reload signal failed, falling back to restart:', error);
-      await this.restart();
+      await this.restart(lease);
     }
   }
 
@@ -754,6 +860,14 @@ export class GatewayManager extends EventEmitter {
    * in-process reload when possible.
    */
   debouncedReload(delayMs?: number): void {
+    if (isManagedRuntimeMutationActive()) {
+      if (this.reloadDebounceTimer) {
+        clearTimeout(this.reloadDebounceTimer);
+        this.reloadDebounceTimer = null;
+      }
+      logger.debug('Gateway debounced reload dropped during managed credential mutation');
+      return;
+    }
     void this.refreshReloadPolicy();
     const effectiveDelay = delayMs ?? this.reloadPolicy.debounceMs;
     if (this.reloadPolicy.mode === 'off' || this.reloadPolicy.mode === 'restart') {
@@ -1052,7 +1166,7 @@ export class GatewayManager extends EventEmitter {
    * Start Gateway process
    * Uses OpenClaw npm package from node_modules (dev) or resources (production)
    */
-  private async startProcess(): Promise<void> {
+  private async startProcess(assertCanLaunch: (phase: string) => void): Promise<void> {
     const launchContext = await prepareGatewayLaunchContext(this.status.port);
     await unloadLaunchctlGatewayService();
     this.processExitCode = null;
@@ -1062,6 +1176,9 @@ export class GatewayManager extends EventEmitter {
     const stderrDedup = new Map<string, number>();
     this.startupTraceCollector.reset();
 
+    // This is the final asynchronous boundary before utilityProcess.fork().
+    // A managed transaction that superseded startup must win before the child exists.
+    assertCanLaunch('start/process-before-fork');
     const { child, lastSpawnSummary } = await launchGatewayProcess({
       port: this.status.port,
       launchContext,
@@ -1145,6 +1262,26 @@ export class GatewayManager extends EventEmitter {
     this.ownsProcess = true;
     logger.debug(`Gateway manager now owns process pid=${child.pid ?? 'unknown'}`);
     this.lastSpawnSummary = lastSpawnSummary;
+
+    try {
+      // fork() may finish after a transaction acquired the barrier. Register
+      // first so stop/quit paths can see the child, then validate ownership.
+      assertCanLaunch('start/process-after-register');
+    } catch (error) {
+      try {
+        await terminateOwnedGatewayProcess(child);
+      } catch (terminationError) {
+        throw new GatewayLateChildTerminationError(error, terminationError, child.pid);
+      }
+      if (this.process === child) {
+        this.process = null;
+        this.ownsProcess = false;
+      }
+      if (this.process === null && this.status.pid === child.pid) {
+        this.setStatus({ pid: undefined });
+      }
+      throw error;
+    }
   }
 
   /**
@@ -1337,6 +1474,15 @@ export class GatewayManager extends EventEmitter {
    * Schedule reconnection attempt with exponential backoff
    */
   private scheduleReconnect(): void {
+    if (isManagedRuntimeMutationActive()) {
+      this.shouldReconnect = false;
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
+      logger.debug('Gateway reconnect dropped during managed credential mutation');
+      return;
+    }
     const decision = getReconnectScheduleDecision({
       shouldReconnect: this.shouldReconnect,
       hasReconnectTimer: this.reconnectTimer !== null,
@@ -1403,6 +1549,12 @@ export class GatewayManager extends EventEmitter {
         });
         this.reconnectAttempts = 0;
       } catch (error) {
+        if (isManagedRuntimeStartBlockedError(error)) {
+          this.shouldReconnect = false;
+          this.isAutoReconnectStart = false;
+          logger.debug('Gateway reconnection stopped by managed credential quarantine');
+          return;
+        }
         logger.error('Gateway reconnection attempt failed:', error);
         this.emitReconnectMetric('failure', {
           attemptNo,

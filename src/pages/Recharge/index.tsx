@@ -1,9 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, CreditCard, History, Loader2, RefreshCw } from 'lucide-react';
+import {
+  AlertCircle,
+  CreditCard,
+  ExternalLink,
+  Eye,
+  History,
+  Loader2,
+  RefreshCw,
+  RotateCcw,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import type {
-  BillingCheckout,
   BillingErrorCode,
   BillingOrderHistory,
   BillingPaymentStatus,
@@ -17,12 +25,13 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { hostApi } from '@/lib/host-api';
 import { cn } from '@/lib/utils';
-import { CheckoutDialog } from './CheckoutDialog';
+import { CheckoutDialog, type RechargeCheckout } from './CheckoutDialog';
 import { OrderHistoryDialog } from './OrderHistoryDialog';
 import {
   formatNumber,
   normalizeAmountInput,
   parseAmountFen,
+  paymentStatusTone,
   type RechargeErrorCode,
 } from './recharge-utils';
 
@@ -33,18 +42,17 @@ const EMPTY_HISTORY: BillingOrderHistory = {
   items: [],
 };
 
-type StatusSyncResult = BillingPaymentStatus | 'stale';
+type StatusSyncResult = BillingPaymentStatus | 'paused' | 'stale';
 
 export function Recharge() {
   const { t, i18n } = useTranslation('recharge');
   const [overview, setOverview] = useState<BillingOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [errorCode, setErrorCode] = useState<RechargeErrorCode | null>(null);
-  const [selectedProductId, setSelectedProductId] = useState<number | null>(null);
   const [paymentMethod, setPaymentMethod] = useState('');
   const [amountYuan, setAmountYuan] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [checkout, setCheckout] = useState<BillingCheckout | null>(null);
+  const [checkout, setCheckout] = useState<RechargeCheckout | null>(null);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [payStatus, setPayStatus] = useState<BillingPaymentStatus>('pending');
   const [checkingPayment, setCheckingPayment] = useState(false);
@@ -53,6 +61,8 @@ export function Recharge() {
   const [history, setHistory] = useState<BillingOrderHistory>(EMPTY_HISTORY);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState('');
+  const mountedRef = useRef(true);
+  const historyRequestRef = useRef(0);
   const pollTimerRef = useRef<number | null>(null);
   const activeTradeNoRef = useRef('');
   const statusRequestRef = useRef<{
@@ -70,13 +80,13 @@ export function Recharge() {
     ),
     [overview?.products],
   );
-  const selectedProduct = availableProducts.find((product) => product.id === selectedProductId) ?? null;
+  const selectedProduct = availableProducts.length === 1 ? availableProducts[0] : null;
   const amountFen = parseAmountFen(amountYuan);
   const quotaPerYuan = (overview?.creditUsdPerCny ?? 0) * (overview?.quotaPerUnit ?? 0);
   const estimatedQuota = amountFen > 0 ? (amountFen / 100) * quotaPerYuan : 0;
   const paymentConfigured = Boolean(
     overview?.onlineTopupEnabled
-    && availableProducts.length > 0
+    && availableProducts.length === 1
     && overview.paymentMethods.length > 0,
   );
 
@@ -103,9 +113,6 @@ export function Recharge() {
         (product) => product.enabled && (product.stock === null || product.stock > 0),
       );
       setOverview(next);
-      setSelectedProductId((current) => (
-        nextProducts.some((product) => product.id === current) ? current : nextProducts[0]?.id ?? null
-      ));
       setPaymentMethod((current) => (
         next.paymentMethods.some((method) => method.type === current)
           ? current
@@ -113,7 +120,7 @@ export function Recharge() {
             ?? next.paymentMethods[0]?.type
             ?? ''
       ));
-      if (!next.onlineTopupEnabled || nextProducts.length === 0 || next.paymentMethods.length === 0) {
+      if (!next.onlineTopupEnabled || nextProducts.length !== 1 || next.paymentMethods.length === 0) {
         setErrorCode('configuration');
       }
       return true;
@@ -127,6 +134,7 @@ export function Recharge() {
 
   /** Load a bounded order-history page only while its dialog is requested. */
   const loadHistory = useCallback(async (page: number) => {
+    const requestId = ++historyRequestRef.current;
     setHistoryLoading(true);
     setHistoryError('');
     try {
@@ -134,15 +142,20 @@ export function Recharge() {
         page,
         pageSize: UCLAW_BILLING_HISTORY_PAGE_SIZE,
       });
+      if (historyRequestRef.current !== requestId) return;
       if (!result.success) {
         setHistoryError(errorText(result.errorCode));
         return;
       }
       setHistory(result.data);
     } catch {
-      setHistoryError(errorText('request_failed'));
+      if (historyRequestRef.current === requestId) {
+        setHistoryError(errorText('request_failed'));
+      }
     } finally {
-      setHistoryLoading(false);
+      if (historyRequestRef.current === requestId) {
+        setHistoryLoading(false);
+      }
     }
   }, [errorText]);
 
@@ -156,26 +169,62 @@ export function Recharge() {
         const result = await hostApi.billing.orderStatus({ tradeNo });
         if (activeTradeNoRef.current !== tradeNo) return 'stale';
         if (!result.success) {
+          const authenticationUnavailable = result.errorCode === 'auth_required'
+            || result.errorCode === 'auth_expired';
+          if (authenticationUnavailable) {
+            clearPolling();
+            setErrorCode(result.errorCode);
+          }
           setStatusUnavailable(true);
-          return 'pending';
+          setCheckout((current) => current?.tradeNo === tradeNo
+            ? {
+                ...current,
+                lastCheckedAt: Date.now(),
+                lastStatusError: errorText(result.errorCode),
+              }
+            : current);
+          return authenticationUnavailable ? 'paused' : 'pending';
         }
 
         const nextStatus = result.data.status;
+        setErrorCode((current) => (
+          current === 'auth_required' || current === 'auth_expired' ? null : current
+        ));
         setStatusUnavailable(false);
         setPayStatus(nextStatus);
         setCheckout((current) => current?.tradeNo === tradeNo
-          ? { ...current, status: nextStatus, creditQuota: result.data.creditQuota || current.creditQuota }
+          ? {
+              ...current,
+              status: nextStatus,
+              lastCheckedAt: Date.now(),
+              lastStatusError: '',
+            }
           : current);
         if (nextStatus !== 'pending') {
           clearPolling();
         }
         if (nextStatus === 'success') {
+          activeTradeNoRef.current = '';
+          setCheckout(null);
+          setCheckoutOpen(false);
+          setCheckingPayment(false);
           await loadOverview();
           toast.success(t('checkout.success'));
+        } else if (nextStatus !== 'pending') {
+          setCheckoutOpen(true);
         }
         return nextStatus;
       } catch {
-        if (activeTradeNoRef.current === tradeNo) setStatusUnavailable(true);
+        if (activeTradeNoRef.current === tradeNo) {
+          setStatusUnavailable(true);
+          setCheckout((current) => current?.tradeNo === tradeNo
+            ? {
+                ...current,
+                lastCheckedAt: Date.now(),
+                lastStatusError: errorText('request_failed'),
+              }
+            : current);
+        }
         return activeTradeNoRef.current === tradeNo ? 'pending' : 'stale';
       }
     })();
@@ -185,7 +234,7 @@ export function Recharge() {
       if (statusRequestRef.current?.promise === request) statusRequestRef.current = null;
     });
     return request;
-  }, [clearPolling, loadOverview, t]);
+  }, [clearPolling, errorText, loadOverview, t]);
 
   /** Poll serially so a slow status request can never overlap the next interval. */
   const startPolling = useCallback((tradeNo: string) => {
@@ -200,8 +249,11 @@ export function Recharge() {
   }, [clearPolling, syncOrderStatus]);
 
   useEffect(() => {
+    mountedRef.current = true;
     void loadOverview();
     return () => {
+      mountedRef.current = false;
+      historyRequestRef.current += 1;
       activeTradeNoRef.current = '';
       clearPolling();
     };
@@ -222,6 +274,7 @@ export function Recharge() {
         paymentMethod,
         productId: selectedProduct.id,
       });
+      if (!mountedRef.current) return;
       if (!result.success) {
         setErrorCode(result.errorCode);
         return;
@@ -233,23 +286,32 @@ export function Recharge() {
       }
 
       activeTradeNoRef.current = result.data.tradeNo;
-      setCheckout(result.data);
+      setCheckout({
+        ...result.data,
+        createdAt: Date.now(),
+        lastCheckedAt: 0,
+        lastStatusError: '',
+      });
       setPayStatus(result.data.status);
       setStatusUnavailable(false);
       setCheckoutOpen(true);
       if (result.data.status === 'pending') startPolling(result.data.tradeNo);
     } catch {
-      setErrorCode('request_failed');
+      if (mountedRef.current) setErrorCode('request_failed');
     } finally {
-      setSubmitting(false);
+      if (mountedRef.current) setSubmitting(false);
     }
   };
 
   const handleCheckStatus = async () => {
     if (!checkout?.tradeNo || checkingPayment) return;
+    const tradeNo = checkout.tradeNo;
     setCheckingPayment(true);
     try {
-      await syncOrderStatus(checkout.tradeNo);
+      const status = await syncOrderStatus(tradeNo);
+      if (status === 'pending' && activeTradeNoRef.current === tradeNo) {
+        startPolling(tradeNo);
+      }
     } finally {
       setCheckingPayment(false);
     }
@@ -257,12 +319,16 @@ export function Recharge() {
 
   const handleCheckoutOpenChange = (open: boolean) => {
     setCheckoutOpen(open);
-    if (open) return;
+  };
+
+  const resetCheckout = () => {
     activeTradeNoRef.current = '';
     clearPolling();
     setCheckout(null);
+    setCheckoutOpen(false);
     setPayStatus('pending');
     setStatusUnavailable(false);
+    setCheckingPayment(false);
   };
 
   const handleOpenExternal = async () => {
@@ -282,7 +348,14 @@ export function Recharge() {
     void loadHistory(1);
   };
 
-  const formDisabled = submitting || loading || !paymentConfigured || !selectedProduct || !paymentMethod || Boolean(checkout);
+  const authenticationUnavailable = errorCode === 'auth_required' || errorCode === 'auth_expired';
+  const formDisabled = submitting
+    || loading
+    || authenticationUnavailable
+    || !paymentConfigured
+    || !selectedProduct
+    || !paymentMethod
+    || Boolean(checkout);
 
   return (
     <div data-testid="recharge-page" className="h-full overflow-y-auto bg-background">
@@ -350,36 +423,63 @@ export function Recharge() {
               </div>
             )}
 
-            <section className="border-b border-black/10 py-7 dark:border-white/10">
-              <h2 className="text-sm font-medium text-foreground">{t('product')}</h2>
-              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                {overview.products.map((product) => {
-                  const unavailable = !product.enabled || product.stock === 0;
-                  const selected = product.id === selectedProductId;
-                  return (
-                    <button
-                      key={product.id}
-                      type="button"
-                      aria-pressed={selected}
-                      disabled={unavailable || submitting || Boolean(checkout)}
-                      onClick={() => setSelectedProductId(product.id)}
-                      className={cn(
-                        'min-h-20 rounded-lg border px-4 py-3 text-left transition-colors',
-                        selected
-                          ? 'border-foreground/40 bg-black/5 dark:bg-white/10'
-                          : 'border-black/10 hover:bg-black/5 dark:border-white/10 dark:hover:bg-white/5',
-                        unavailable && 'cursor-not-allowed opacity-50',
+            {checkout && (
+              <section
+                data-testid="recharge-active-order"
+                className="mt-5 flex flex-col gap-4 rounded-md border border-black/10 px-4 py-4 dark:border-white/10 md:flex-row md:items-center md:justify-between"
+              >
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-muted-foreground">{t('activeOrder.title')}</p>
+                  <p className={cn('mt-1 text-sm font-medium', paymentStatusTone(payStatus))}>
+                    {t(`status.${payStatus}`)}
+                  </p>
+                  <code className="mt-1 block truncate text-xs text-muted-foreground">{checkout.tradeNo}</code>
+                  {statusUnavailable && (
+                    <p className="mt-2 text-xs text-amber-700 dark:text-amber-400">
+                      {t('checkout.statusUnavailable')}
+                    </p>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {payStatus === 'pending' && (
+                    <Button type="button" variant="outline" size="sm" onClick={() => void handleCheckStatus()} disabled={checkingPayment}>
+                      {checkingPayment ? (
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
+                      ) : (
+                        <RefreshCw className="mr-2 h-4 w-4" aria-hidden="true" />
                       )}
-                    >
-                      <span className="block text-sm font-medium text-foreground">{product.name}</span>
-                      <span className="mt-1 block text-xs text-muted-foreground">
-                        {unavailable ? t('soldOut') : product.description}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </section>
+                      {checkingPayment ? t('checkout.checking') : t('checkout.check')}
+                    </Button>
+                  )}
+                  <Button type="button" variant="outline" size="sm" onClick={() => setCheckoutOpen(true)}>
+                    <Eye className="mr-2 h-4 w-4" aria-hidden="true" />
+                    {t('activeOrder.view')}
+                  </Button>
+                  {checkout.checkoutUrl && payStatus === 'pending' && (
+                    <Button type="button" variant="outline" size="sm" onClick={() => void handleOpenExternal()}>
+                      <ExternalLink className="mr-2 h-4 w-4" aria-hidden="true" />
+                      {t('checkout.openExternal')}
+                    </Button>
+                  )}
+                  <Button type="button" variant="outline" size="sm" onClick={resetCheckout}>
+                    <RotateCcw className="mr-2 h-4 w-4" aria-hidden="true" />
+                    {t('checkout.cancelOrder')}
+                  </Button>
+                </div>
+              </section>
+            )}
+
+            {selectedProduct && (
+              <section className="border-b border-black/10 py-7 dark:border-white/10">
+                <h2 className="text-sm font-medium text-foreground">{t('product')}</h2>
+                <div className="mt-3 rounded-md border border-black/10 px-4 py-3 dark:border-white/10">
+                  <span className="block text-sm font-medium text-foreground">{selectedProduct.name}</span>
+                  {selectedProduct.description && (
+                    <span className="mt-1 block text-xs text-muted-foreground">{selectedProduct.description}</span>
+                  )}
+                </div>
+              </section>
+            )}
 
             <section className="grid gap-7 border-b border-black/10 py-7 dark:border-white/10 md:grid-cols-2">
               <div>
@@ -459,17 +559,21 @@ export function Recharge() {
         status={payStatus}
         checking={checkingPayment}
         statusUnavailable={statusUnavailable}
+        paymentMethods={overview?.paymentMethods ?? []}
         onOpenChange={handleCheckoutOpenChange}
         onCheckStatus={() => void handleCheckStatus()}
         onOpenExternal={() => void handleOpenExternal()}
+        onReset={resetCheckout}
       />
       <OrderHistoryDialog
         open={historyOpen}
         history={history}
         loading={historyLoading}
         error={historyError}
+        paymentMethods={overview?.paymentMethods ?? []}
         onOpenChange={setHistoryOpen}
         onPageChange={(page) => void loadHistory(page)}
+        onRefresh={() => void loadHistory(history.page)}
       />
     </div>
   );

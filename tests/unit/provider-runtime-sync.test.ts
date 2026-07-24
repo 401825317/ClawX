@@ -12,10 +12,14 @@ const mocks = vi.hoisted(() => ({
   getProvider: vi.fn(),
   getProviderConfig: vi.fn(),
   getProviderDefaultModel: vi.fn(),
+  installManagedAgentOpenAiApiKey: vi.fn(),
   removeProviderFromOpenClaw: vi.fn(),
   removeProviderKeyFromOpenClaw: vi.fn(),
+  removeManagedAgentOpenAiCredentials: vi.fn(),
+  restoreManagedAgentAuthProfiles: vi.fn(),
   saveOAuthTokenToOpenClaw: vi.fn(),
   saveProviderKeyToOpenClaw: vi.fn(),
+  snapshotManagedAgentAuthProfiles: vi.fn(),
   setOpenClawDefaultModel: vi.fn(),
   setOpenClawDefaultModelWithOverride: vi.fn(),
   syncProviderConfigToOpenClaw: vi.fn(),
@@ -23,6 +27,13 @@ const mocks = vi.hoisted(() => ({
   updateSingleAgentModelProvider: vi.fn(),
   getProviderApiKeyFromOpenClaw: vi.fn(),
   listAgentsSnapshot: vi.fn(),
+  migrateAllAgentAuthProfilesToSqlite: vi.fn(),
+  assertManagedRuntimeStartAllowed: vi.fn(),
+  isUclawManagedDistribution: vi.fn(),
+}));
+
+vi.mock('@electron/gateway/managed-runtime-mutation-barrier', () => ({
+  assertManagedRuntimeStartAllowed: mocks.assertManagedRuntimeStartAllowed,
 }));
 
 vi.mock('@electron/services/providers/provider-store', () => ({
@@ -49,12 +60,16 @@ vi.mock('@electron/utils/provider-registry', () => ({
 vi.mock('@electron/utils/openclaw-auth', () => ({
   ensureAnthropicMessagesModelMaxTokens: vi.fn().mockResolvedValue([]),
   ensureOpenClawProviderAgentRuntimePins: vi.fn().mockResolvedValue([]),
-  migrateAllAgentAuthProfilesToSqlite: vi.fn().mockResolvedValue(undefined),
+  installManagedAgentOpenAiApiKey: mocks.installManagedAgentOpenAiApiKey,
+  migrateAllAgentAuthProfilesToSqlite: mocks.migrateAllAgentAuthProfilesToSqlite,
   pruneInvalidApiProviderEntries: vi.fn().mockResolvedValue([]),
+  removeManagedAgentOpenAiCredentials: mocks.removeManagedAgentOpenAiCredentials,
   removeProviderFromOpenClaw: mocks.removeProviderFromOpenClaw,
   removeProviderKeyFromOpenClaw: mocks.removeProviderKeyFromOpenClaw,
+  restoreManagedAgentAuthProfiles: mocks.restoreManagedAgentAuthProfiles,
   saveOAuthTokenToOpenClaw: mocks.saveOAuthTokenToOpenClaw,
   saveProviderKeyToOpenClaw: mocks.saveProviderKeyToOpenClaw,
+  snapshotManagedAgentAuthProfiles: mocks.snapshotManagedAgentAuthProfiles,
   OPENAI_CODEX_OAUTH_PROVIDER_CONFIG: {
     baseUrl: 'https://chatgpt.com/backend-api/codex',
     api: 'openai-chatgpt-responses',
@@ -71,6 +86,14 @@ vi.mock('@electron/utils/agent-config', () => ({
   listAgentsSnapshot: mocks.listAgentsSnapshot,
 }));
 
+vi.mock('@electron/utils/junfeiai-distribution', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@electron/utils/junfeiai-distribution')>();
+  return {
+    ...actual,
+    isUclawManagedDistribution: mocks.isUclawManagedDistribution,
+  };
+});
+
 vi.mock('@electron/utils/logger', () => ({
   logger: {
     debug: vi.fn(),
@@ -82,12 +105,14 @@ vi.mock('@electron/utils/logger', () => ({
 
 import {
   syncAgentModelOverrideToRuntime,
+  syncAllProviderAuthToRuntime,
   syncDefaultProviderToRuntime,
   syncDeletedProviderApiKeyToRuntime,
   syncDeletedProviderToRuntime,
   syncSavedProviderToRuntime,
   syncUpdatedProviderToRuntime,
 } from '@electron/services/providers/provider-runtime-sync';
+import { isProviderMutationLockHeld } from '@electron/services/providers/provider-mutation-lock';
 
 function createProvider(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
   return {
@@ -136,6 +161,205 @@ describe('provider-runtime-sync refresh strategy', () => {
     mocks.getProviderApiKeyFromOpenClaw.mockResolvedValue(null);
     mocks.listProviderAccounts.mockResolvedValue([]);
     mocks.listAgentsSnapshot.mockResolvedValue({ agents: [] });
+    mocks.migrateAllAgentAuthProfilesToSqlite.mockResolvedValue(undefined);
+    mocks.assertManagedRuntimeStartAllowed.mockResolvedValue(undefined);
+    mocks.isUclawManagedDistribution.mockReturnValue(true);
+    mocks.snapshotManagedAgentAuthProfiles.mockResolvedValue({});
+    mocks.installManagedAgentOpenAiApiKey.mockResolvedValue(undefined);
+    mocks.removeManagedAgentOpenAiCredentials.mockResolvedValue(undefined);
+    mocks.restoreManagedAgentAuthProfiles.mockResolvedValue(undefined);
+  });
+
+  it('blocks startup Provider synchronization while managed recovery is quarantined', async () => {
+    mocks.assertManagedRuntimeStartAllowed.mockRejectedValueOnce(
+      new Error('Gateway start is blocked until managed credentials are recovered'),
+    );
+
+    await expect(syncAllProviderAuthToRuntime()).rejects.toThrow(/blocked/);
+    expect(mocks.migrateAllAgentAuthProfilesToSqlite).not.toHaveBeenCalled();
+    expect(mocks.listProviderAccounts).not.toHaveBeenCalled();
+  });
+
+  it('installs only the strict canonical key for a valid managed Relay Token', async () => {
+    const snapshot = {};
+    mocks.snapshotManagedAgentAuthProfiles.mockResolvedValue(snapshot);
+    mocks.listProviderAccounts.mockResolvedValue([{
+      id: 'openai',
+      vendorId: 'openai',
+      authMode: 'api_key',
+      label: 'UClaw',
+      model: 'smart-latest',
+      enabled: true,
+      isDefault: true,
+      metadata: { managedBy: 'uclaw' },
+      createdAt: '2026-07-24T00:00:00.000Z',
+      updatedAt: '2026-07-24T00:00:00.000Z',
+    }]);
+    mocks.getProviderSecret.mockImplementation(async (accountId: string) => (
+      accountId === 'uclaw-auth'
+        ? {
+            type: 'oauth',
+            accountId: 'uclaw-auth',
+            accessToken: 'access-token',
+            refreshToken: 'refresh-token',
+            expiresAt: Date.now() + 60_000,
+            subject: 'user-1',
+          }
+        : {
+            type: 'api_key',
+            accountId: 'openai',
+            apiKey: 'current-relay-token',
+            ownerUserId: 'user-1',
+            expiresAt: Date.now() + 60_000,
+          }
+    ));
+
+    await syncAllProviderAuthToRuntime();
+
+    expect(mocks.installManagedAgentOpenAiApiKey).toHaveBeenCalledWith(
+      snapshot,
+      'current-relay-token',
+    );
+    expect(mocks.removeManagedAgentOpenAiCredentials).not.toHaveBeenCalled();
+    expect(mocks.saveProviderKeyToOpenClaw).not.toHaveBeenCalled();
+  });
+
+  it('removes a stale managed profile when the Relay owner does not match auth', async () => {
+    mocks.listProviderAccounts.mockResolvedValue([{
+      id: 'openai',
+      vendorId: 'openai',
+      authMode: 'api_key',
+      label: 'UClaw',
+      enabled: true,
+      isDefault: true,
+      metadata: { managedBy: 'uclaw' },
+      createdAt: '2026-07-24T00:00:00.000Z',
+      updatedAt: '2026-07-24T00:00:00.000Z',
+    }]);
+    mocks.getProviderSecret.mockImplementation(async (accountId: string) => (
+      accountId === 'uclaw-auth'
+        ? {
+            type: 'oauth',
+            accountId: 'uclaw-auth',
+            accessToken: 'access-token',
+            refreshToken: 'refresh-token',
+            expiresAt: Date.now() + 60_000,
+            subject: 'current-user',
+          }
+        : {
+            type: 'api_key',
+            accountId: 'openai',
+            apiKey: 'other-user-relay',
+            ownerUserId: 'other-user',
+            expiresAt: Date.now() + 60_000,
+          }
+    ));
+
+    await syncAllProviderAuthToRuntime();
+
+    expect(mocks.removeManagedAgentOpenAiCredentials).toHaveBeenCalledOnce();
+    expect(mocks.installManagedAgentOpenAiApiKey).not.toHaveBeenCalled();
+    expect(mocks.saveProviderKeyToOpenClaw).not.toHaveBeenCalled();
+  });
+
+  it('removes a stale managed profile when the Relay Token is expired', async () => {
+    mocks.listProviderAccounts.mockResolvedValue([{
+      id: 'openai',
+      vendorId: 'openai',
+      authMode: 'api_key',
+      label: 'UClaw',
+      enabled: true,
+      isDefault: true,
+      metadata: { managedBy: 'uclaw' },
+      createdAt: '2026-07-24T00:00:00.000Z',
+      updatedAt: '2026-07-24T00:00:00.000Z',
+    }]);
+    mocks.getProviderSecret.mockImplementation(async (accountId: string) => (
+      accountId === 'uclaw-auth'
+        ? {
+            type: 'oauth',
+            accountId: 'uclaw-auth',
+            accessToken: 'access-token',
+            refreshToken: 'refresh-token',
+            expiresAt: Date.now() + 60_000,
+            email: 'user@example.com',
+          }
+        : {
+            type: 'api_key',
+            accountId: 'openai',
+            apiKey: 'expired-relay',
+            ownerEmail: 'USER@example.com',
+            expiresAt: Date.now() - 1,
+          }
+    ));
+
+    await syncAllProviderAuthToRuntime();
+
+    expect(mocks.removeManagedAgentOpenAiCredentials).toHaveBeenCalledOnce();
+    expect(mocks.installManagedAgentOpenAiApiKey).not.toHaveBeenCalled();
+  });
+
+  it('removes a stale managed profile when the canonical auth Secret is missing', async () => {
+    mocks.listProviderAccounts.mockResolvedValue([{
+      id: 'openai',
+      vendorId: 'openai',
+      authMode: 'api_key',
+      label: 'UClaw',
+      enabled: true,
+      isDefault: true,
+      metadata: { managedBy: 'uclaw' },
+      createdAt: '2026-07-24T00:00:00.000Z',
+      updatedAt: '2026-07-24T00:00:00.000Z',
+    }]);
+    mocks.getProviderSecret.mockImplementation(async (accountId: string) => (
+      accountId === 'uclaw-auth'
+        ? null
+        : {
+            type: 'api_key',
+            accountId: 'openai',
+            apiKey: 'orphaned-relay',
+            ownerUserId: 'user-1',
+            expiresAt: Date.now() + 60_000,
+          }
+    ));
+
+    await syncAllProviderAuthToRuntime();
+
+    expect(mocks.removeManagedAgentOpenAiCredentials).toHaveBeenCalledOnce();
+    expect(mocks.installManagedAgentOpenAiApiKey).not.toHaveBeenCalled();
+  });
+
+  it('rejects startup sync when a stale managed profile cannot be removed', async () => {
+    mocks.listProviderAccounts.mockResolvedValue([]);
+    mocks.removeManagedAgentOpenAiCredentials.mockRejectedValueOnce(
+      new Error('managed auth cleanup failed'),
+    );
+
+    await expect(syncAllProviderAuthToRuntime()).rejects.toThrow('managed auth cleanup failed');
+    expect(mocks.saveProviderKeyToOpenClaw).not.toHaveBeenCalled();
+  });
+
+  it('continues to synchronize ordinary Providers after managed cleanup', async () => {
+    mocks.listProviderAccounts.mockResolvedValue([{
+      id: 'moonshot',
+      vendorId: 'moonshot',
+      authMode: 'api_key',
+      label: 'Moonshot',
+      enabled: true,
+      isDefault: true,
+      createdAt: '2026-07-24T00:00:00.000Z',
+      updatedAt: '2026-07-24T00:00:00.000Z',
+    }]);
+    mocks.getProviderSecret.mockImplementation(async (accountId: string) => (
+      accountId === 'moonshot'
+        ? { type: 'api_key', accountId: 'moonshot', apiKey: 'moonshot-key' }
+        : null
+    ));
+
+    await syncAllProviderAuthToRuntime();
+
+    expect(mocks.removeManagedAgentOpenAiCredentials).toHaveBeenCalledOnce();
+    expect(mocks.saveProviderKeyToOpenClaw).toHaveBeenCalledWith('moonshot', 'moonshot-key');
   });
 
   it('uses debouncedReload after saving provider config', async () => {
@@ -298,6 +522,7 @@ describe('provider-runtime-sync refresh strategy', () => {
   });
 
   it('syncs a targeted agent model override to runtime provider registry', async () => {
+    let lockHeldDuringAgentWrite = false;
     mocks.getAllProviders.mockResolvedValue([
       createProvider({
         id: 'ark',
@@ -327,9 +552,13 @@ describe('provider-runtime-sync refresh strategy', () => {
         },
       ],
     });
+    mocks.updateSingleAgentModelProvider.mockImplementationOnce(async () => {
+      lockHeldDuringAgentWrite = isProviderMutationLockHeld();
+    });
 
     await syncAgentModelOverrideToRuntime('coder');
 
+    expect(lockHeldDuringAgentWrite).toBe(true);
     expect(mocks.updateSingleAgentModelProvider).toHaveBeenCalledWith(
       'coder',
       'ark',

@@ -5,6 +5,8 @@
     "managedProviderId": "openai",
     "managedAccountId": "openai",
     "authAccountId": "uclaw-auth",
+    "legacyProviderIds": ["openai-codex", "lingzhiwuxian"],
+    "legacyAuthAccountIds": ["lingzhiwuxian-auth"],
     "defaultModel": "smart-latest",
     "defaultModelContextWindow": 258000,
     "defaultApiProtocol": "openai-responses",

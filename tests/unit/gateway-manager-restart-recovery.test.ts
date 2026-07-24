@@ -21,6 +21,13 @@ vi.mock('@electron/utils/logger', () => ({
   },
 }));
 
+vi.mock('@electron/services/providers/store-instance', () => ({
+  getClawXProviderStore: async () => ({
+    get: () => undefined,
+    has: () => false,
+  }),
+}));
+
 describe('GatewayManager restart recovery', () => {
   beforeEach(() => {
     vi.resetModules();

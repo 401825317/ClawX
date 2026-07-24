@@ -1,4 +1,13 @@
 import type { GatewayManager } from '../gateway/manager';
+import {
+  acquireManagedRuntimeMutationLease as acquireRuntimeMutationLease,
+  clearManagedRuntimeMutationMarker,
+  markManagedRuntimeMutationStarted,
+  quarantineManagedRuntimeMutation,
+  releaseManagedRuntimeMutationLease as releaseRuntimeMutationLease,
+  type ManagedRuntimeMutationLease,
+} from '../gateway/managed-runtime-mutation-barrier';
+import { waitForPortFree } from '../gateway/supervisor';
 import type { ProviderAccount, ProviderSecret } from '../shared/providers/types';
 import type {
   ManagedAuthActivationCheckResult,
@@ -24,6 +33,8 @@ import {
   UCLAW_DEFAULT_MODEL,
   UCLAW_DEFAULT_MODEL_CONTEXT_WINDOW,
   UCLAW_DEFAULT_THINKING_LEVEL,
+  UCLAW_LEGACY_AUTH_ACCOUNT_IDS,
+  UCLAW_LEGACY_PROVIDER_IDS,
   UCLAW_MANAGED_SERVICE_NAME,
   UCLAW_OFFLINE_GRACE_SECONDS,
   UCLAW_PROVIDER_ID,
@@ -39,38 +50,59 @@ import {
   getManagedDevicePayload,
   markManagedDeviceActivated,
   readManagedDeviceActivationState,
+  restoreManagedDeviceActivationFiles,
+  snapshotManagedDeviceActivationFiles,
+  type ManagedDeviceActivationFileSnapshot,
+  type ManagedDeviceActivationFilesApplied,
+  type ManagedDeviceActivationFilesSnapshot,
   type ManagedDevicePayload,
 } from '../utils/junfeiai-device';
 import { proxyAwareFetch } from '../utils/proxy-fetch';
 import {
   deleteProviderSecret,
   getProviderSecret,
+  installManagedProviderSecrets,
+  restoreProviderSecretSlots,
   setProviderSecret,
+  snapshotProviderSecretSlots,
+  type ProviderSecretSlotsSnapshot,
 } from './secrets/secret-store';
 import {
-  deleteProviderAccount,
-  getDefaultProviderAccountId,
+  getManagedOpenAiTargetAccountIds,
   getProviderAccount,
-  providerAccountToConfig,
-  saveProviderAccount,
-  setDefaultProviderAccount,
+  installManagedOpenAiProviderAccount,
+  restoreManagedProviderStore,
+  snapshotManagedProviderStore,
+  type ManagedProviderStoreSnapshot,
 } from './providers/provider-store';
-import { getProviderService } from './providers/provider-service';
 import { ensureProviderStoreMigrated } from './providers/provider-migration';
 import {
-  syncDefaultProviderToRuntime,
-  syncSavedProviderToRuntime,
-} from './providers/provider-runtime-sync';
+  getManagedRuntimeOpenAiProviderIds,
+  removeManagedRuntimeOpenAiState,
+  restoreManagedRuntimeConfig,
+  snapshotManagedRuntimeConfig,
+  updateManagedRuntimeConfig,
+  type ManagedRuntimeConfigSnapshot,
+} from './providers/managed-runtime-config';
 import {
-  removeProviderFromOpenClaw,
-  removeProviderKeyFromOpenClaw,
-  updateAgentModelProvider,
+  getManagedAgentOpenAiProviderIds,
+  installManagedAgentOpenAiApiKey,
+  removeManagedAgentOpenAiCredentialsFromSnapshot,
+  removeManagedAgentOpenAiProviders,
+  restoreManagedAgentAuthProfiles,
+  restoreManagedAgentModelsFiles,
+  snapshotManagedAgentAuthProfiles,
+  snapshotManagedAgentModelsFiles,
+  updateManagedAgentModelProviderStrict,
+  type ManagedAgentAuthProfilesSnapshot,
+  type ManagedAgentModelsFilesSnapshot,
 } from '../utils/openclaw-auth';
-import { readOpenClawConfig, writeOpenClawConfig } from '../utils/channel-config';
-import { withConfigLock } from '../utils/config-mutex';
-import { getDefaultProvider, setDefaultProvider } from '../utils/secure-storage';
 import { getClawXProviderStore } from './providers/store-instance';
 import { logger } from '../utils/logger';
+import {
+  isOpenAiProviderIdentity,
+  withProviderMutationLock,
+} from './providers/provider-mutation-lock';
 
 type JsonRecord = Record<string, unknown>;
 type AuthSecret = Extract<ProviderSecret, { type: 'oauth' }>;
@@ -138,8 +170,6 @@ class ManagedAuthHttpError extends ManagedAuthServiceError {
   }
 }
 
-const LEGACY_AUTH_ACCOUNT_IDS = ['lingzhiwuxian-auth'] as const;
-const LEGACY_PROVIDER_ACCOUNT_IDS = ['lingzhiwuxian'] as const;
 const AUTH_ROUTE = '/api/clawx';
 const FALLBACK_AUTH_ROUTE = '/api/v1/auth';
 
@@ -451,7 +481,7 @@ function isExpired(expiresAt: number | undefined, skewSeconds = 0): boolean {
 }
 
 async function readAuthSecret(migrate = true): Promise<AuthSecret | null> {
-  for (const accountId of [UCLAW_AUTH_ACCOUNT_ID, ...LEGACY_AUTH_ACCOUNT_IDS]) {
+  for (const accountId of [UCLAW_AUTH_ACCOUNT_ID, ...UCLAW_LEGACY_AUTH_ACCOUNT_IDS]) {
     const secret = await getProviderSecret(accountId, { migrate });
     if (secret?.type === 'oauth') return secret;
   }
@@ -459,7 +489,7 @@ async function readAuthSecret(migrate = true): Promise<AuthSecret | null> {
 }
 
 async function readRelaySecret(migrate = true): Promise<RelaySecret | null> {
-  for (const accountId of [UCLAW_ACCOUNT_ID, ...LEGACY_PROVIDER_ACCOUNT_IDS]) {
+  for (const accountId of [UCLAW_ACCOUNT_ID, ...UCLAW_LEGACY_PROVIDER_IDS]) {
     const secret = await getProviderSecret(accountId, { migrate });
     if (secret?.type === 'api_key') return secret;
   }
@@ -515,13 +545,6 @@ function relayBelongsToUser(secret: RelaySecret | null, user: ManagedAuthUser | 
   }, user);
 }
 
-async function prepareManagedProviderSlot(): Promise<ProviderAccount | null> {
-  await ensureProviderStoreMigrated();
-  // Import OpenClaw-only state before the transaction snapshot so rollback can restore it.
-  await getProviderService().listAccounts();
-  return getProviderAccount(UCLAW_ACCOUNT_ID);
-}
-
 async function readVerificationCache(): Promise<VerificationCache | null> {
   const store = await getClawXProviderStore();
   const value = store.get('uclawVerificationCache');
@@ -536,18 +559,38 @@ async function readVerificationCache(): Promise<VerificationCache | null> {
   };
 }
 
-async function writeVerificationCache(user: ManagedAuthUser | undefined, bootstrap: ManagedAuthBootstrap): Promise<void> {
-  const store = await getClawXProviderStore();
+function buildVerificationCache(
+  user: ManagedAuthUser | undefined,
+  bootstrap: ManagedAuthBootstrap,
+): VerificationCache {
   const verifiedAt = Date.now();
   const verifyAfter = verifiedAt
     + (bootstrap.offline?.verifyMemoryCacheSeconds ?? UCLAW_VERIFY_MEMORY_CACHE_SECONDS) * 1000;
   const expiresAt = verifiedAt + (bootstrap.offline?.graceSeconds ?? UCLAW_OFFLINE_GRACE_SECONDS) * 1000;
-  store.set('uclawVerificationCache', {
+  return {
     verifiedAt,
     verifyAfter,
     expiresAt,
     ...(user ? { user } : {}),
-  } satisfies VerificationCache);
+  };
+}
+
+async function persistVerificationCache(cache: VerificationCache): Promise<void> {
+  const store = await getClawXProviderStore();
+  store.set('uclawVerificationCache', cache);
+}
+
+async function writeVerificationCache(
+  user: ManagedAuthUser | undefined,
+  bootstrap: ManagedAuthBootstrap,
+): Promise<VerificationCache> {
+  const cache = buildVerificationCache(user, bootstrap);
+  await persistVerificationCache(cache);
+  return cache;
+}
+
+function verificationCacheEquals(left: VerificationCache | null, right: VerificationCache | null): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 async function clearVerificationCache(): Promise<void> {
@@ -555,30 +598,64 @@ async function clearVerificationCache(): Promise<void> {
   store.delete('uclawVerificationCache');
 }
 
-async function clearManagedCredentials(): Promise<void> {
+async function clearManagedCredentials(previous: ManagedAuthSnapshot): Promise<void> {
   activationTickets.clear();
   refreshInFlight = null;
+  const managedProviderIds = new Set(previous.managedOpenAiTargetAccountIds);
   const failures: string[] = [];
-  const attempt = async (name: string, task: () => Promise<void>): Promise<void> => {
+  const skipped: string[] = [];
+  const attempt = async (name: string, task: () => Promise<void>): Promise<boolean> => {
     try {
       await task();
+      return true;
     } catch {
       failures.push(name);
+      return false;
     }
   };
 
   await attempt('auth-secret', () => deleteProviderSecret(UCLAW_AUTH_ACCOUNT_ID));
-  await attempt('relay-secret', () => deleteProviderSecret(UCLAW_ACCOUNT_ID));
-  for (const id of [...LEGACY_AUTH_ACCOUNT_IDS, ...LEGACY_PROVIDER_ACCOUNT_IDS]) {
+  for (const id of UCLAW_LEGACY_AUTH_ACCOUNT_IDS) {
     await attempt(`legacy-secret:${id}`, () => deleteProviderSecret(id));
   }
-  for (const id of LEGACY_PROVIDER_ACCOUNT_IDS) {
-    await attempt(`legacy-runtime-key:${id}`, () => removeProviderKeyFromOpenClaw(id));
+  let relaySecretsCleared = true;
+  for (const id of managedProviderIds) {
+    const cleared = await attempt(`relay-secret:${id}`, () => deleteProviderSecret(id));
+    relaySecretsCleared = cleared && relaySecretsCleared;
   }
-  await attempt('runtime-key', () => removeProviderKeyFromOpenClaw(UCLAW_PROVIDER_ID));
+
+  // Runtime/model entries are the only reliable discovery anchors for some
+  // historical custom ids. Preserve them whenever an earlier cleanup stage
+  // fails so a later login/logout can deterministically retry the same ids.
+  let agentAuthCleared = false;
+  if (relaySecretsCleared) {
+    agentAuthCleared = await attempt('agent-auth-profiles', () => (
+      removeManagedAgentOpenAiCredentialsFromSnapshot(previous.agentAuthProfiles, managedProviderIds)
+    ));
+  } else {
+    skipped.push('agent-auth-profiles', 'agent-models', 'runtime-state');
+  }
+
+  if (relaySecretsCleared && agentAuthCleared) {
+    const agentModelsCleared = await attempt('agent-models', () => (
+      removeManagedAgentOpenAiProviders(previous.agentModelsFiles, managedProviderIds)
+    ));
+    if (agentModelsCleared) {
+      await attempt('runtime-state', () => (
+        removeManagedRuntimeOpenAiState(previous.managedRuntime, managedProviderIds)
+      ));
+    } else {
+      skipped.push('runtime-state');
+    }
+  } else if (relaySecretsCleared) {
+    skipped.push('agent-models', 'runtime-state');
+  }
   await attempt('verification-cache', clearVerificationCache);
   if (failures.length > 0) {
-    logger.warn('[uclaw-auth] Managed session cleanup was incomplete', { failedSteps: failures });
+    logger.warn('[uclaw-auth] Managed session cleanup was incomplete', {
+      failedSteps: failures,
+      skippedSteps: skipped,
+    });
     throw new ManagedAuthServiceError('session_cleanup_failed', 'UClaw could not clear the local session');
   }
 }
@@ -595,23 +672,174 @@ async function stopGatewayForAuthSafety(
   }
 }
 
+type GatewayQuiescence = {
+  gatewayManager?: GatewayManager;
+  lease: ManagedRuntimeMutationLease;
+  operation: string;
+  wasActive: boolean;
+  previousPid?: number;
+  markerStarted: boolean;
+};
+
+function releaseManagedMutationLease(quiescence: GatewayQuiescence): void {
+  if (quiescence.gatewayManager) {
+    quiescence.gatewayManager.releaseManagedRuntimeMutationLease(quiescence.lease);
+    return;
+  }
+  releaseRuntimeMutationLease(quiescence.lease);
+}
+
+async function markManagedMutationStarted(quiescence: GatewayQuiescence): Promise<void> {
+  await markManagedRuntimeMutationStarted(quiescence.lease, quiescence.operation);
+  quiescence.markerStarted = true;
+}
+
+async function quarantineManagedMutation(
+  quiescence: GatewayQuiescence,
+  reason: string,
+): Promise<void> {
+  try {
+    if (quiescence.markerStarted) {
+      await quarantineManagedRuntimeMutation(
+        quiescence.lease,
+        quiescence.operation,
+        reason,
+      );
+    }
+  } catch (error) {
+    // The existing in-progress marker still keeps startup fail-closed.
+    logger.error('[uclaw-auth] Failed to update managed runtime quarantine marker', error);
+  } finally {
+    releaseManagedMutationLease(quiescence);
+  }
+}
+
+/** Reserve runtime ownership, drain any start, and prove the port is free. */
+async function quiesceGatewayForManagedMutation(
+  operation: string,
+  gatewayManager?: GatewayManager,
+): Promise<GatewayQuiescence> {
+  let lease: ManagedRuntimeMutationLease;
+  try {
+    lease = gatewayManager
+      ? gatewayManager.acquireManagedRuntimeMutationLease()
+      : acquireRuntimeMutationLease();
+  } catch {
+    throw new ManagedAuthServiceError('auth_in_progress', 'Another UClaw runtime update is in progress');
+  }
+
+  if (!gatewayManager) {
+    return {
+      lease,
+      operation,
+      wasActive: false,
+      markerStarted: false,
+    };
+  }
+
+  const initial = gatewayManager.getStatus();
+  const quiescence: GatewayQuiescence = {
+    gatewayManager,
+    lease,
+    operation,
+    wasActive: initial.state !== 'stopped',
+    previousPid: initial.pid,
+    markerStarted: false,
+  };
+
+  try {
+    await gatewayManager.stop();
+    if (gatewayManager.getStatus().state !== 'stopped') {
+      throw new Error('Gateway did not enter the stopped state');
+    }
+    // An externally attached Gateway can report stopped after its shutdown RPC
+    // fails, so require the listening socket to disappear before credentials move.
+    await waitForPortFree(initial.port, 10_000);
+  } catch {
+    releaseManagedMutationLease(quiescence);
+    throw new ManagedAuthServiceError('gateway_stop_failed', 'UClaw could not stop Gateway before updating credentials');
+  }
+  return quiescence;
+}
+
+/** Restore the prior active state with a provably new credential environment. */
+async function resumeGatewayAfterManagedMutation(
+  quiescence: GatewayQuiescence,
+): Promise<Pick<ManagedAuthStatus, 'gatewayReloaded' | 'gatewayReloadError'>> {
+  const { gatewayManager } = quiescence;
+  try {
+    if (quiescence.markerStarted) {
+      await clearManagedRuntimeMutationMarker(quiescence.lease);
+      quiescence.markerStarted = false;
+    }
+  } catch (error) {
+    await quarantineManagedMutation(quiescence, 'managed runtime marker cleanup failed');
+    logger.error('[uclaw-auth] Failed to clear managed runtime mutation marker', error);
+    return {
+      gatewayReloaded: false,
+      gatewayReloadError: 'Gateway remains blocked until managed credentials are recovered',
+    };
+  }
+
+  if (!gatewayManager || !quiescence.wasActive) {
+    releaseManagedMutationLease(quiescence);
+    return { gatewayReloaded: false };
+  }
+
+  try {
+    await gatewayManager.start(quiescence.lease);
+    const started = gatewayManager.getStatus();
+    const hasNewProcess = started.pid !== undefined
+      && (quiescence.previousPid === undefined || started.pid !== quiescence.previousPid);
+    if (started.state !== 'running' || !hasNewProcess) {
+      await stopGatewayForAuthSafety(gatewayManager, 'managed credential start returned an unhealthy Gateway');
+      return { gatewayReloaded: false, gatewayReloadError: 'Gateway start did not remain healthy' };
+    }
+    return { gatewayReloaded: true };
+  } catch {
+    await stopGatewayForAuthSafety(gatewayManager, 'managed credential start failure');
+    return { gatewayReloaded: false, gatewayReloadError: 'Gateway start failed' };
+  } finally {
+    releaseManagedMutationLease(quiescence);
+  }
+}
+
 async function invalidateManagedSession(
   gatewayManager?: GatewayManager,
 ): Promise<Pick<ManagedAuthStatus, 'gatewayReloaded' | 'gatewayReloadError'>> {
+  const quiescence = await quiesceGatewayForManagedMutation('invalidate-session', gatewayManager);
   let cleanupError: unknown;
+  let snapshotCompleted = false;
   try {
-    await clearManagedCredentials();
+    await withProviderMutationLock(async () => {
+      // snapshot() may migrate the Provider Store, so persist recovery evidence
+      // before it can perform the first credential-related write.
+      await markManagedMutationStarted(quiescence);
+      const previous = await snapshot();
+      snapshotCompleted = true;
+      await clearManagedCredentials(previous);
+    });
   } catch (error) {
     cleanupError = error;
   }
   if (cleanupError) {
-    // A running Gateway may still hold the credential that failed to clear.
-    await stopGatewayForAuthSafety(gatewayManager, 'managed session cleanup failure');
+    // Once the marker exists, snapshot migration or cleanup may have written
+    // partially. Without a complete rollback, the runtime must stay isolated.
+    if (quiescence.markerStarted) {
+      await quarantineManagedMutation(
+        quiescence,
+        snapshotCompleted
+          ? 'managed session cleanup failed'
+          : 'managed session snapshot failed',
+      );
+    } else {
+      await resumeGatewayAfterManagedMutation(quiescence);
+    }
     throw cleanupError;
   }
-  const gateway = await applyGatewayReload(gatewayManager);
+  const gateway = await resumeGatewayAfterManagedMutation(quiescence);
   if (gateway.gatewayReloadError) {
-    throw new ManagedAuthServiceError('gateway_reload_failed', gateway.gatewayReloadError);
+    throw new ManagedAuthServiceError('gateway_start_failed', gateway.gatewayReloadError);
   }
   return gateway;
 }
@@ -720,9 +948,22 @@ async function refreshAuthSecret(secret: AuthSecret): Promise<AuthSecret | null>
     subject: secret.subject,
     scopes: secret.scopes,
   };
-  await setProviderSecret(next);
-  if (secret.accountId !== UCLAW_AUTH_ACCOUNT_ID) await deleteProviderSecret(secret.accountId);
-  return next;
+  return withProviderMutationLock(async () => {
+    // The refresh HTTP request may outlive logout or a new login generation.
+    const current = await readAuthSecret(false);
+    if (
+      !current
+      || current.accountId !== secret.accountId
+      || current.accessToken !== secret.accessToken
+      || current.refreshToken !== secret.refreshToken
+      || current.expiresAt !== secret.expiresAt
+    ) {
+      return null;
+    }
+    await setProviderSecret(next);
+    if (secret.accountId !== UCLAW_AUTH_ACCOUNT_ID) await deleteProviderSecret(secret.accountId);
+    return next;
+  });
 }
 
 async function getAccessToken(refresh = true): Promise<{ secret: AuthSecret; token: string } | null> {
@@ -761,11 +1002,8 @@ export async function requestManagedAuthenticatedJson<T>(
   } catch (error) {
     if (
       error instanceof ManagedAuthHttpError
-      && (error.status === 401 || error.status === 403)
+      && error.status === 401
     ) {
-      throw new ManagedAuthServiceError('auth_expired', 'Your UClaw session has expired', error.status);
-    }
-    if (error instanceof ManagedAuthServiceError && error.code === 'invalid_credentials') {
       throw new ManagedAuthServiceError('auth_expired', 'Your UClaw session has expired', error.status);
     }
     throw error;
@@ -873,163 +1111,165 @@ async function requestAuth(
   }));
 }
 
-type ManagedRuntimeSnapshot = {
-  hasThinkingDefault: boolean;
-  thinkingDefault?: unknown;
-  hasReasoningDefault: boolean;
-  reasoningDefault?: unknown;
-  hasModelEntry: boolean;
-  modelEntry?: JsonRecord;
-};
-
-function cloneRecord(value: JsonRecord): JsonRecord {
-  return structuredClone(value);
-}
-
 function copiedRecord(value: unknown): JsonRecord {
   return isRecord(value) ? { ...value } : {};
 }
 
-async function readManagedRuntimeSnapshot(): Promise<ManagedRuntimeSnapshot> {
-  return withConfigLock(async () => {
-    const config = await readOpenClawConfig();
-    const agents = copiedRecord(config.agents);
-    const defaults = copiedRecord(agents.defaults);
-    const models = copiedRecord(config.models);
-    const providers = copiedRecord(models.providers);
-    const provider = copiedRecord(providers[UCLAW_PROVIDER_ID]);
-    const modelEntry = Array.isArray(provider.models)
-      ? provider.models.find((entry) => isRecord(entry) && entry.id === UCLAW_DEFAULT_MODEL)
-      : undefined;
-    return {
-      hasThinkingDefault: Object.hasOwn(defaults, 'thinkingDefault'),
-      thinkingDefault: defaults.thinkingDefault,
-      hasReasoningDefault: Object.hasOwn(defaults, 'reasoningDefault'),
-      reasoningDefault: defaults.reasoningDefault,
-      hasModelEntry: isRecord(modelEntry),
-      ...(isRecord(modelEntry) ? { modelEntry: cloneRecord(modelEntry) } : {}),
-    };
-  });
+function isManagedOpenAiProviderKey(value: unknown, managedProviderIds: ReadonlySet<string>): boolean {
+  return typeof value === 'string'
+    && (managedProviderIds.has(value) || isOpenAiProviderIdentity(value));
 }
 
-function managedRuntimeModelEntry(existing?: JsonRecord): JsonRecord {
-  const compat = isRecord(existing?.compat) ? { ...existing.compat } : {};
-  delete compat.thinkingFormat;
+/** Remove stale OpenAI auth metadata while preserving every unrelated Provider route. */
+function removeManagedOpenAiAuthMetadata(
+  config: JsonRecord,
+  managedProviderIds: ReadonlySet<string>,
+): void {
+  const auth = copiedRecord(config.auth);
+  const profiles = copiedRecord(auth.profiles);
+  const removedProfileIds = new Set<string>();
+  for (const [profileId, profile] of Object.entries(profiles)) {
+    const provider = isRecord(profile) ? profile.provider : undefined;
+    if (!isManagedOpenAiProviderKey(provider, managedProviderIds)) continue;
+    delete profiles[profileId];
+    removedProfileIds.add(profileId);
+  }
+
+  const order = copiedRecord(auth.order);
+  for (const [provider, rawProfileIds] of Object.entries(order)) {
+    if (isManagedOpenAiProviderKey(provider, managedProviderIds)) {
+      delete order[provider];
+      continue;
+    }
+    if (!Array.isArray(rawProfileIds)) continue;
+    const retained = rawProfileIds.filter(
+      (profileId): profileId is string => typeof profileId === 'string' && !removedProfileIds.has(profileId),
+    );
+    if (retained.length > 0) order[provider] = retained;
+    else delete order[provider];
+  }
+
+  if (Object.keys(profiles).length > 0) auth.profiles = profiles;
+  else delete auth.profiles;
+  if (Object.keys(order).length > 0) auth.order = order;
+  else delete auth.order;
+  if (Object.keys(auth).length > 0) config.auth = auth;
+  else delete config.auth;
+}
+
+function managedRuntimeModelEntry(): JsonRecord {
   return {
-    ...(existing ?? {}),
     id: UCLAW_DEFAULT_MODEL,
     name: UCLAW_DEFAULT_MODEL,
     contextWindow: UCLAW_DEFAULT_MODEL_CONTEXT_WINDOW,
     reasoning: true,
-    compat: {
-      ...compat,
-      ...UCLAW_RESPONSES_REASONING_COMPAT,
-    },
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    compat: { ...UCLAW_RESPONSES_REASONING_COMPAT },
   };
 }
 
-async function syncManagedRuntimeDefaults(): Promise<void> {
-  const modelEntry = await withConfigLock(async () => {
-    const config = await readOpenClawConfig();
+async function syncManagedRuntimeDefaults(
+  agentModelsFiles: ManagedAgentModelsFilesSnapshot,
+  runtimeSnapshot: ManagedRuntimeConfigSnapshot,
+  managedProviderIds: ReadonlySet<string>,
+): Promise<void> {
+  const modelEntry = managedRuntimeModelEntry();
+  const providerEntry = {
+    baseUrl: UCLAW_DEFAULT_BASE_URL,
+    api: UCLAW_DEFAULT_API_PROTOCOL,
+    // Canonical OpenAI entries must stay on ClawX's bundled agent runtime.
+    agentRuntime: { id: 'pi' },
+    models: [modelEntry as { id: string; name: string; [key: string]: unknown }],
+  };
+
+  await updateManagedRuntimeConfig(runtimeSnapshot, (config) => {
     const agents = copiedRecord(config.agents);
     const defaults = copiedRecord(agents.defaults);
+    defaults.model = {
+      primary: `${UCLAW_PROVIDER_ID}/${UCLAW_DEFAULT_MODEL}`,
+      fallbacks: [],
+    };
     defaults.thinkingDefault = UCLAW_DEFAULT_THINKING_LEVEL;
     defaults.reasoningDefault = 'on';
     agents.defaults = defaults;
     config.agents = agents;
 
+    removeManagedOpenAiAuthMetadata(config, managedProviderIds);
+
     const models = copiedRecord(config.models);
     const providers = copiedRecord(models.providers);
-    const provider = isRecord(providers[UCLAW_PROVIDER_ID])
-      ? copiedRecord(providers[UCLAW_PROVIDER_ID])
-      : { baseUrl: UCLAW_DEFAULT_BASE_URL, api: UCLAW_DEFAULT_API_PROTOCOL };
-    const currentModels = Array.isArray(provider.models)
-      ? provider.models.filter(isRecord).map(cloneRecord)
-      : [];
-    const existingIndex = currentModels.findIndex((entry) => entry.id === UCLAW_DEFAULT_MODEL);
-    const nextEntry = managedRuntimeModelEntry(existingIndex >= 0 ? currentModels[existingIndex] : undefined);
-    if (existingIndex >= 0) currentModels[existingIndex] = nextEntry;
-    else currentModels.push(nextEntry);
-    provider.baseUrl = UCLAW_DEFAULT_BASE_URL;
-    provider.api = UCLAW_DEFAULT_API_PROTOCOL;
-    provider.models = currentModels;
-    providers[UCLAW_PROVIDER_ID] = provider;
+    for (const [providerId, existingEntry] of Object.entries(providers)) {
+      if (
+        managedProviderIds.has(providerId)
+        || isOpenAiProviderIdentity({ ...copiedRecord(existingEntry), id: providerId })
+      ) {
+        delete providers[providerId];
+      }
+    }
+    providers[UCLAW_PROVIDER_ID] = structuredClone(providerEntry);
     models.providers = providers;
     config.models = models;
-    await writeOpenClawConfig(config);
-    return nextEntry;
   });
 
-  await updateAgentModelProvider(UCLAW_PROVIDER_ID, {
-    baseUrl: UCLAW_DEFAULT_BASE_URL,
-    api: UCLAW_DEFAULT_API_PROTOCOL,
-    models: [modelEntry as { id: string; name: string; [key: string]: unknown }],
-  });
+  await updateManagedAgentModelProviderStrict(agentModelsFiles, providerEntry, managedProviderIds);
 }
 
-async function restoreManagedRuntimeSnapshot(snapshot: ManagedRuntimeSnapshot): Promise<void> {
-  await withConfigLock(async () => {
-    const config = await readOpenClawConfig();
-    const agents = copiedRecord(config.agents);
-    const defaults = copiedRecord(agents.defaults);
-    if (snapshot.hasThinkingDefault) defaults.thinkingDefault = snapshot.thinkingDefault;
-    else delete defaults.thinkingDefault;
-    if (snapshot.hasReasoningDefault) defaults.reasoningDefault = snapshot.reasoningDefault;
-    else delete defaults.reasoningDefault;
-    agents.defaults = defaults;
-    config.agents = agents;
-
-    const models = copiedRecord(config.models);
-    const providers = copiedRecord(models.providers);
-    const provider = isRecord(providers[UCLAW_PROVIDER_ID])
-      ? copiedRecord(providers[UCLAW_PROVIDER_ID])
-      : null;
-    if (provider) {
-      const providerModels = Array.isArray(provider.models)
-        ? provider.models.filter(isRecord).map(cloneRecord)
-        : [];
-      const index = providerModels.findIndex((entry) => entry.id === UCLAW_DEFAULT_MODEL);
-      if (snapshot.hasModelEntry && snapshot.modelEntry) {
-        if (index >= 0) providerModels[index] = cloneRecord(snapshot.modelEntry);
-        else providerModels.push(cloneRecord(snapshot.modelEntry));
-      } else if (index >= 0) {
-        providerModels.splice(index, 1);
-      }
-      provider.models = providerModels;
-      providers[UCLAW_PROVIDER_ID] = provider;
-      models.providers = providers;
-      config.models = models;
-    }
-    await writeOpenClawConfig(config);
-  });
-
-  if (snapshot.hasModelEntry && snapshot.modelEntry) {
-    await updateAgentModelProvider(UCLAW_PROVIDER_ID, {
-      baseUrl: UCLAW_DEFAULT_BASE_URL,
-      api: UCLAW_DEFAULT_API_PROTOCOL,
-      models: [snapshot.modelEntry as { id: string; name: string; [key: string]: unknown }],
-    });
-  }
-}
-
-async function snapshot(): Promise<{
+type ManagedAuthSnapshot = {
   account: ProviderAccount | null;
-  auth: ProviderSecret | null;
-  relay: ProviderSecret | null;
-  defaultAccountId?: string;
-  defaultProviderId?: string;
+  auth: AuthSecret | null;
+  providerStore: ManagedProviderStoreSnapshot;
+  providerSecretSlots: ProviderSecretSlotsSnapshot;
   verificationCache: VerificationCache | null;
-  managedRuntime: ManagedRuntimeSnapshot;
-}> {
+  managedRuntime: ManagedRuntimeConfigSnapshot;
+  deviceActivationFiles: ManagedDeviceActivationFilesSnapshot;
+  agentModelsFiles: ManagedAgentModelsFilesSnapshot;
+  agentAuthProfiles: ManagedAgentAuthProfilesSnapshot;
+  managedOpenAiTargetAccountIds: string[];
+  appliedVerificationCache?: VerificationCache | null;
+  appliedDeviceActivationFiles?: ManagedDeviceActivationFilesApplied;
+};
+
+function activationFileSnapshotEquals(
+  left: ManagedDeviceActivationFileSnapshot,
+  right: ManagedDeviceActivationFileSnapshot,
+): boolean {
+  return left.path === right.path
+    && (left.bytes === null
+      ? right.bytes === null
+      : right.bytes !== null && left.bytes.equals(right.bytes));
+}
+
+async function snapshot(): Promise<ManagedAuthSnapshot> {
   await ensureProviderStoreMigrated();
+  // Freeze runtime files first so historical managed ids are discovered from
+  // the same generations later used for commit, cleanup, or rollback.
+  const managedRuntime = await snapshotManagedRuntimeConfig();
+  const agentModelsFiles = await snapshotManagedAgentModelsFiles();
+  const providerStore = await snapshotManagedProviderStore();
+  const managedOpenAiTargetAccountIds = [...new Set([
+    UCLAW_ACCOUNT_ID,
+    UCLAW_PROVIDER_ID,
+    ...UCLAW_LEGACY_PROVIDER_IDS,
+    ...getManagedOpenAiTargetAccountIds(providerStore),
+    ...getManagedRuntimeOpenAiProviderIds(managedRuntime),
+    ...getManagedAgentOpenAiProviderIds(agentModelsFiles),
+  ])];
+  const providerSecretSlots = await snapshotProviderSecretSlots([
+    ...managedOpenAiTargetAccountIds,
+    UCLAW_AUTH_ACCOUNT_ID,
+    ...UCLAW_LEGACY_AUTH_ACCOUNT_IDS,
+  ]);
   return {
     account: await getProviderAccount(UCLAW_ACCOUNT_ID),
-    auth: await getProviderSecret(UCLAW_AUTH_ACCOUNT_ID),
-    relay: await getProviderSecret(UCLAW_ACCOUNT_ID),
-    defaultAccountId: await getDefaultProviderAccountId(),
-    defaultProviderId: await getDefaultProvider(),
+    auth: await readAuthSecret(false),
+    providerStore,
+    providerSecretSlots,
     verificationCache: await readVerificationCache(),
-    managedRuntime: await readManagedRuntimeSnapshot(),
+    managedRuntime,
+    deviceActivationFiles: await snapshotManagedDeviceActivationFiles(),
+    agentModelsFiles,
+    agentAuthProfiles: await snapshotManagedAgentAuthProfiles(),
+    managedOpenAiTargetAccountIds,
   };
 }
 
@@ -1044,6 +1284,7 @@ function buildManagedAccount(existing: ProviderAccount | null, user: ManagedAuth
     apiProtocol: UCLAW_DEFAULT_API_PROTOCOL,
     model: UCLAW_DEFAULT_MODEL,
     fallbackModels: [],
+    fallbackAccountIds: [],
     enabled: true,
     isDefault: true,
     metadata: {
@@ -1058,7 +1299,7 @@ function buildManagedAccount(existing: ProviderAccount | null, user: ManagedAuth
   };
 }
 
-async function restoreSnapshot(previous: Awaited<ReturnType<typeof snapshot>>): Promise<void> {
+async function restoreSnapshot(previous: ManagedAuthSnapshot): Promise<void> {
   const failures: string[] = [];
   const attempt = async (name: string, task: () => Promise<void>): Promise<void> => {
     try {
@@ -1068,93 +1309,55 @@ async function restoreSnapshot(previous: Awaited<ReturnType<typeof snapshot>>): 
     }
   };
 
-  await attempt('provider-account', async () => {
-    if (previous.account) await saveProviderAccount(previous.account);
-    else await deleteProviderAccount(UCLAW_ACCOUNT_ID);
-  });
-  await attempt('auth-secret', async () => {
-    if (previous.auth) await setProviderSecret(previous.auth);
-    else await deleteProviderSecret(UCLAW_AUTH_ACCOUNT_ID);
-  });
-  await attempt('relay-secret', async () => {
-    if (previous.relay) await setProviderSecret(previous.relay);
-    else await deleteProviderSecret(UCLAW_ACCOUNT_ID);
-  });
+  await attempt('provider-store', () => restoreManagedProviderStore(previous.providerStore));
+  await attempt('provider-secrets', () => restoreProviderSecretSlots(previous.providerSecretSlots));
 
-  let store: Awaited<ReturnType<typeof getClawXProviderStore>> | null = null;
-  await attempt('provider-store', async () => {
-    store = await getClawXProviderStore();
-  });
-  await attempt('default-provider', async () => {
-    if (previous.defaultProviderId) await setDefaultProvider(previous.defaultProviderId);
-    else if (store) store.delete('defaultProvider');
-    else throw new Error('Provider store unavailable');
-  });
-  await attempt('default-account', async () => {
-    if (previous.defaultAccountId) await setDefaultProviderAccount(previous.defaultAccountId);
-    else if (store) store.delete('defaultProviderAccountId');
-    else throw new Error('Provider store unavailable');
-  });
-  await attempt('verification-cache', async () => {
-    if (!store) throw new Error('Provider store unavailable');
-    if (previous.verificationCache) store.set('uclawVerificationCache', previous.verificationCache);
-    else store.delete('uclawVerificationCache');
-  });
-  await attempt('runtime-provider', async () => {
-    if (previous.account) {
-      const relayKey = previous.relay?.type === 'api_key' ? previous.relay.apiKey : '';
-      await syncSavedProviderToRuntime(providerAccountToConfig(previous.account), relayKey, undefined);
-    } else {
-      await removeProviderFromOpenClaw(UCLAW_PROVIDER_ID);
-    }
-  });
-  const previousDefault = previous.defaultProviderId ?? previous.defaultAccountId;
-  if (previousDefault) {
-    await attempt('runtime-default', () => syncDefaultProviderToRuntime(previousDefault, undefined));
+  if (Object.hasOwn(previous, 'appliedVerificationCache')) {
+    await attempt('verification-cache', async () => {
+      const current = await readVerificationCache();
+      if (verificationCacheEquals(current, previous.verificationCache)) {
+        return;
+      }
+      if (!verificationCacheEquals(current, previous.appliedVerificationCache ?? null)) {
+        throw new ManagedAuthServiceError(
+          'rollback_conflict',
+          'UClaw verification cache changed after the managed authentication write',
+        );
+      }
+      const store = await getClawXProviderStore();
+      if (previous.verificationCache) store.set('uclawVerificationCache', previous.verificationCache);
+      else store.delete('uclawVerificationCache');
+    });
   }
-  await attempt('runtime-managed-defaults', () => restoreManagedRuntimeSnapshot(previous.managedRuntime));
+  await attempt('runtime-managed-defaults', () => restoreManagedRuntimeConfig(previous.managedRuntime));
+  let currentDeviceActivation: ManagedDeviceActivationFilesSnapshot | null = null;
+  await attempt('device-activation-snapshot', async () => {
+    currentDeviceActivation = await snapshotManagedDeviceActivationFiles();
+  });
+  if (currentDeviceActivation) {
+    for (const target of ['current', 'stable'] as const) {
+      await attempt(`device-activation:${target}`, async () => {
+        const current = currentDeviceActivation![target];
+        const before = previous.deviceActivationFiles[target];
+        if (activationFileSnapshotEquals(current, before)) return;
+        const applied = previous.appliedDeviceActivationFiles?.[target];
+        if (!applied || !activationFileSnapshotEquals(current, applied)) {
+          throw new ManagedAuthServiceError(
+            'rollback_conflict',
+            'UClaw device activation changed after the managed authentication write',
+          );
+        }
+        await restoreManagedDeviceActivationFiles({ [target]: before });
+      });
+    }
+  }
+  // Raw Agent snapshots win after every Provider/config restoration step.
+  await attempt('agent-models', () => restoreManagedAgentModelsFiles(previous.agentModelsFiles));
+  await attempt('agent-auth-profiles', () => restoreManagedAgentAuthProfiles(previous.agentAuthProfiles));
 
   if (failures.length > 0) {
     logger.warn('[uclaw-auth] Provider snapshot rollback was incomplete', { failedSteps: failures });
     throw new ManagedAuthServiceError('rollback_failed', 'UClaw could not restore the previous runtime state');
-  }
-}
-
-async function applyGatewayReload(gatewayManager: GatewayManager | undefined): Promise<Pick<ManagedAuthStatus, 'gatewayReloaded' | 'gatewayReloadError'>> {
-  if (!gatewayManager) {
-    return { gatewayReloaded: false };
-  }
-  const initialState = gatewayManager.getStatus().state;
-  if (initialState === 'stopped') return { gatewayReloaded: false };
-  if (initialState !== 'running') {
-    await stopGatewayForAuthSafety(gatewayManager, 'managed auth reload requested while Gateway was not running');
-    return { gatewayReloaded: false, gatewayReloadError: 'Gateway was not ready to reload' };
-  }
-  try {
-    const deadline = Date.now() + 10_000;
-    while (true) {
-      const status = gatewayManager.getStatus();
-      if (status.state !== 'running') return { gatewayReloaded: false };
-      const connectedForMs = status.connectedAt
-        ? Date.now() - status.connectedAt
-        : Number.POSITIVE_INFINITY;
-      if (connectedForMs >= 8_000) break;
-      const waitMs = Math.min(8_050 - connectedForMs, deadline - Date.now());
-      if (waitMs <= 0) {
-        await stopGatewayForAuthSafety(gatewayManager, 'unstable managed auth reload window');
-        return { gatewayReloaded: false, gatewayReloadError: 'Gateway reload window was not stable' };
-      }
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
-    }
-    await gatewayManager.reload();
-    if (gatewayManager.getStatus().state !== 'running') {
-      await stopGatewayForAuthSafety(gatewayManager, 'managed auth reload returned an unhealthy Gateway');
-      return { gatewayReloaded: false, gatewayReloadError: 'Gateway reload did not remain healthy' };
-    }
-    return { gatewayReloaded: true };
-  } catch {
-    await stopGatewayForAuthSafety(gatewayManager, 'managed auth reload failure');
-    return { gatewayReloaded: false, gatewayReloadError: 'Gateway reload failed' };
   }
 }
 
@@ -1168,67 +1371,101 @@ async function commitAuthenticatedSession(
   const accessToken = auth.accessToken?.trim();
   if (!accessToken) throw new ManagedAuthServiceError('auth_invalid', 'UClaw did not return a usable session');
   if (!relay.token.trim()) throw new ManagedAuthServiceError('relay_missing', 'UClaw did not return a usable runtime credential');
-  const existing = await prepareManagedProviderSlot();
-  const previous = await snapshot();
-  const user = authUserFromPayload(auth) ?? userFromSecret(previous.auth?.type === 'oauth' ? previous.auth : null);
-  if (!hasUserIdentity(user)) {
-    throw new ManagedAuthServiceError('auth_identity_missing', 'UClaw did not return a usable account identity');
-  }
-
+  const responseUser = authUserFromPayload(auth);
+  let rollbackFailed = false;
+  let snapshotCompleted = false;
+  let committedStatus: ManagedAuthStatus;
+  const quiescence = await quiesceGatewayForManagedMutation(`commit-${source}`, gatewayManager);
   try {
-    // Remove the previous user's runtime credential before committing the new generation.
-    await deleteProviderSecret(UCLAW_ACCOUNT_ID);
-    await removeProviderKeyFromOpenClaw(UCLAW_PROVIDER_ID);
+    committedStatus = await withProviderMutationLock(async () => {
+      // snapshot() may migrate the Provider Store, so persist recovery evidence
+      // before it can perform the first credential-related write.
+      await markManagedMutationStarted(quiescence);
+      // Freeze every local generation only after all earlier Provider writers finish.
+      const previous = await snapshot();
+      snapshotCompleted = true;
+      const previousAuth = previous.auth;
+      const user = responseUser ?? (source === 'auth-token' ? userFromSecret(previousAuth) : undefined);
+      if (!hasUserIdentity(user)) {
+        throw new ManagedAuthServiceError('auth_identity_missing', 'UClaw did not return a usable account identity');
+      }
 
-    const authSecret: AuthSecret = {
-      type: 'oauth',
-      accountId: UCLAW_AUTH_ACCOUNT_ID,
-      accessToken,
-      refreshToken: auth.refreshToken?.trim() || (previous.auth?.type === 'oauth' ? previous.auth.refreshToken : ''),
-      expiresAt: authExpiry(auth),
-      email: user?.email,
-      subject: user?.id,
-    };
-    await setProviderSecret(authSecret);
+      try {
+        const previousSessionMatches = previousAuth
+          ? ownerMatchesUser({ userId: previousAuth.subject, email: previousAuth.email }, user)
+          : false;
+        const authSecret: AuthSecret = {
+          type: 'oauth',
+          accountId: UCLAW_AUTH_ACCOUNT_ID,
+          accessToken,
+          refreshToken: auth.refreshToken?.trim()
+            || (previousSessionMatches && previousAuth ? previousAuth.refreshToken.trim() : ''),
+          expiresAt: authExpiry(auth),
+          email: user?.email,
+          subject: user?.id,
+        };
+        const account = buildManagedAccount(previous.account, user);
+        const relaySecret: RelaySecret = {
+          type: 'api_key',
+          accountId: UCLAW_ACCOUNT_ID,
+          apiKey: relay.token,
+          ownerUserId: user?.id,
+          ownerUsername: user?.username,
+          ownerEmail: user?.email,
+          expiresAt: relay.expiresAt,
+        };
+        await installManagedOpenAiProviderAccount(previous.providerStore, account);
+        await installManagedProviderSecrets(previous.providerSecretSlots, authSecret, relaySecret);
 
-    const account = buildManagedAccount(existing, user);
-    const providerService = getProviderService();
-    if (existing) {
-      await providerService.updateAccount(UCLAW_ACCOUNT_ID, account, relay.token);
-    } else {
-      await providerService.createAccount(account, relay.token);
-    }
-    await setDefaultProvider(UCLAW_ACCOUNT_ID);
-    await setProviderSecret({
-      type: 'api_key',
-      accountId: UCLAW_ACCOUNT_ID,
-      apiKey: relay.token,
-      ownerUserId: user?.id,
-      ownerUsername: user?.username,
-      ownerEmail: user?.email,
-      expiresAt: relay.expiresAt,
+        // Install only the managed OpenAI credential and runtime entries; generic
+        // Provider synchronization can self-heal unrelated Provider ids.
+        const managedProviderIds = new Set(previous.managedOpenAiTargetAccountIds);
+        await installManagedAgentOpenAiApiKey(previous.agentAuthProfiles, relay.token, managedProviderIds);
+        await syncManagedRuntimeDefaults(previous.agentModelsFiles, previous.managedRuntime, managedProviderIds);
+        const appliedVerificationCache = buildVerificationCache(user, bootstrap);
+        previous.appliedVerificationCache = appliedVerificationCache;
+        await persistVerificationCache(appliedVerificationCache);
+        const appliedDeviceActivationFiles: ManagedDeviceActivationFilesApplied = {};
+        previous.appliedDeviceActivationFiles = appliedDeviceActivationFiles;
+        await markManagedDeviceActivated(source, user, appliedDeviceActivationFiles);
+
+        const status = await localStatus(bootstrap);
+        return {
+          ...status,
+          localOnly: false,
+          authValid: true,
+          ...(user ? { user, auth: { user } } : {}),
+        };
+      } catch (error) {
+        try {
+          await restoreSnapshot(previous);
+        } catch (rollbackError) {
+          rollbackFailed = true;
+          throw rollbackError;
+        }
+        throw error;
+      }
     });
-
-    // Finish all OpenClaw file writes before the single Gateway lifecycle action.
-    await syncSavedProviderToRuntime(providerAccountToConfig(account), relay.token, undefined);
-    await syncDefaultProviderToRuntime(UCLAW_ACCOUNT_ID, undefined);
-    await syncManagedRuntimeDefaults();
-    await writeVerificationCache(user, bootstrap);
-    await markManagedDeviceActivated(source, user);
-
-    const gateway = await applyGatewayReload(gatewayManager);
-    const status = await localStatus(bootstrap);
-    return {
-      ...status,
-      localOnly: false,
-      authValid: true,
-      ...(user ? { user, auth: { user } } : {}),
-      ...gateway,
-    };
   } catch (error) {
-    await restoreSnapshot(previous);
+    // Gateway lifecycle must never inherit or run inside the Provider lock context.
+    if (rollbackFailed || (quiescence.markerStarted && !snapshotCompleted)) {
+      await quarantineManagedMutation(
+        quiescence,
+        rollbackFailed
+          ? 'managed authentication rollback failed'
+          : 'managed authentication snapshot failed',
+      );
+    } else {
+      const gateway = await resumeGatewayAfterManagedMutation(quiescence);
+      if (gateway.gatewayReloadError) {
+        logger.error(`[uclaw-auth] ${gateway.gatewayReloadError} after managed auth rollback`);
+      }
+    }
     throw error;
   }
+
+  const gateway = await resumeGatewayAfterManagedMutation(quiescence);
+  return { ...committedStatus, ...gateway };
 }
 
 async function withMutation<T>(task: () => Promise<T>): Promise<T> {
@@ -1330,13 +1567,11 @@ async function verifyManagedAuthStatusInternal(
     if (isRecord(raw) && raw.valid === false) {
       throw new ManagedAuthServiceError(payloadErrorCode(raw) || 'auth_invalid', payloadErrorMessage(raw) || 'UClaw session is invalid', 401);
     }
-    await writeVerificationCache(user, bootstrap);
     const device = isRecord(raw) && isRecord(raw.device) ? raw.device : null;
-    if (device && ['active', 'activated', 'enabled'].includes(pickString(device, 'status', 'state').toLowerCase())) {
-      await markManagedDeviceActivated('auth-token', user);
-    }
     let status = await localStatus(bootstrap);
     if (!status.hasRelayToken) {
+      // The commit owns cache/device writes when relay recovery also requires
+      // runtime mutation, so its snapshot still represents the old generation.
       const relay = await requestRelayToken(access.token, await getManagedDevicePayload());
       status = await commitAuthenticatedSession({
         accessToken: access.token,
@@ -1344,14 +1579,22 @@ async function verifyManagedAuthStatusInternal(
         expiresAt: access.secret.expiresAt,
         user,
       }, relay, 'auth-token', bootstrap, gatewayManager);
+    } else {
+      status = await withProviderMutationLock(async () => {
+        await writeVerificationCache(user, bootstrap);
+        if (device && ['active', 'activated', 'enabled'].includes(pickString(device, 'status', 'state').toLowerCase())) {
+          await markManagedDeviceActivated('auth-token', user);
+        }
+        return localStatus(bootstrap);
+      });
     }
     return { ...status, localOnly: false, authValid: true };
   } catch (error) {
     if (canUseOfflineGrace(error, currentLocal)) return currentLocal;
     const shape = errorShape(error);
-    const authRejected = shape.httpStatus === 401
-      || shape.httpStatus === 403
-      || shape.code === 'auth_invalid';
+    // Only an authoritative 401 revokes the local session. A successful
+    // verification payload with valid:false is normalized to 401 above.
+    const authRejected = shape.httpStatus === 401;
     if (authRejected) {
       let cleanupFailure: AuthErrorShape | null = null;
       try {
@@ -1409,6 +1652,19 @@ export async function getManagedAuthStatus(
   }
 }
 
+/** Force one verification that starts after every status request already in flight. */
+export async function getFreshManagedAuthStatus(
+  gatewayManager?: GatewayManager,
+): Promise<ManagedAuthStatus> {
+  const existing = statusInFlight?.promise;
+  if (existing) {
+    const previous = await existing.catch(() => null);
+    // An earlier authoritative rejection remains conclusive after Billing 401.
+    if (previous?.authRejected === true) return previous;
+  }
+  return getManagedAuthStatus({ force: true }, gatewayManager);
+}
+
 export async function checkManagedAuthActivation(
   code: string,
 ): Promise<ManagedAuthActivationCheckResult> {
@@ -1457,27 +1713,21 @@ export async function loginManagedAuth(
   gatewayManager?: GatewayManager,
 ): Promise<ManagedAuthResult> {
   return withMutation(async () => {
-    try {
-      const device = await getManagedDevicePayload();
-      if (payload.activationCode?.trim() && !activationTicketFor(payload.activationCode.trim(), device.id)) {
-        const activation = await checkActivationInternal(payload.activationCode.trim(), device);
-        if (!activation.valid) {
-          await invalidateManagedSession(gatewayManager);
-          return { success: false, errorCode: activation.errorCode || 'activation_invalid' };
-        }
+    const device = await getManagedDevicePayload();
+    if (payload.activationCode?.trim() && !activationTicketFor(payload.activationCode.trim(), device.id)) {
+      const activation = await checkActivationInternal(payload.activationCode.trim(), device);
+      if (!activation.valid) {
+        return { success: false, errorCode: activation.errorCode || 'activation_invalid' };
       }
-      const auth = await requestAuth('login', payload, device);
-      if (!auth.accessToken) {
-        throw new ManagedAuthServiceError('auth_invalid', 'UClaw did not return a usable session');
-      }
-      const relay = await requestRelayToken(auth.accessToken, device);
-      const status = await commitAuthenticatedSession(auth, relay, 'login', normalizeBootstrap(auth), gatewayManager);
-      if (payload.activationCode?.trim()) activationTickets.delete(payload.activationCode.trim());
-      return { success: true, status, ...(status.user ? { user: status.user } : {}) };
-    } catch (error) {
-      await invalidateManagedSession(gatewayManager);
-      throw error;
     }
+    const auth = await requestAuth('login', payload, device);
+    if (!auth.accessToken) {
+      throw new ManagedAuthServiceError('auth_invalid', 'UClaw did not return a usable session');
+    }
+    const relay = await requestRelayToken(auth.accessToken, device);
+    const status = await commitAuthenticatedSession(auth, relay, 'login', normalizeBootstrap(auth), gatewayManager);
+    if (payload.activationCode?.trim()) activationTickets.delete(payload.activationCode.trim());
+    return { success: true, status, ...(status.user ? { user: status.user } : {}) };
   }).catch(failureResult);
 }
 
@@ -1486,27 +1736,21 @@ export async function registerManagedAuth(
   gatewayManager?: GatewayManager,
 ): Promise<ManagedAuthResult> {
   return withMutation(async () => {
-    try {
-      const device = await getManagedDevicePayload();
-      if (payload.activationCode?.trim() && !activationTicketFor(payload.activationCode.trim(), device.id)) {
-        const activation = await checkActivationInternal(payload.activationCode.trim(), device);
-        if (!activation.valid) {
-          await invalidateManagedSession(gatewayManager);
-          return { success: false, errorCode: activation.errorCode || 'activation_invalid' };
-        }
+    const device = await getManagedDevicePayload();
+    if (payload.activationCode?.trim() && !activationTicketFor(payload.activationCode.trim(), device.id)) {
+      const activation = await checkActivationInternal(payload.activationCode.trim(), device);
+      if (!activation.valid) {
+        return { success: false, errorCode: activation.errorCode || 'activation_invalid' };
       }
-      const auth = await requestAuth('register', payload, device);
-      if (!auth.accessToken) {
-        throw new ManagedAuthServiceError('auth_invalid', 'UClaw did not return a usable session');
-      }
-      const relay = await requestRelayToken(auth.accessToken, device);
-      const status = await commitAuthenticatedSession(auth, relay, 'register', normalizeBootstrap(auth), gatewayManager);
-      if (payload.activationCode?.trim()) activationTickets.delete(payload.activationCode.trim());
-      return { success: true, status, ...(status.user ? { user: status.user } : {}) };
-    } catch (error) {
-      await invalidateManagedSession(gatewayManager);
-      throw error;
     }
+    const auth = await requestAuth('register', payload, device);
+    if (!auth.accessToken) {
+      throw new ManagedAuthServiceError('auth_invalid', 'UClaw did not return a usable session');
+    }
+    const relay = await requestRelayToken(auth.accessToken, device);
+    const status = await commitAuthenticatedSession(auth, relay, 'register', normalizeBootstrap(auth), gatewayManager);
+    if (payload.activationCode?.trim()) activationTickets.delete(payload.activationCode.trim());
+    return { success: true, status, ...(status.user ? { user: status.user } : {}) };
   }).catch(failureResult);
 }
 
@@ -1540,7 +1784,17 @@ export async function verifyManagedAuth(
 
 export async function logoutManagedAuth(gatewayManager?: GatewayManager): Promise<ManagedAuthResult> {
   return withMutation(async () => {
-    const secret = await readAuthSecret();
+    // Read without legacy migration so no credential write can precede quiescence.
+    const secret = await readAuthSecret(false);
+    const quiescence = await quiesceGatewayForManagedMutation('logout', gatewayManager);
+    try {
+      // Persist crash recovery before the remote logout can invalidate the
+      // server session while local relay credentials still exist.
+      await markManagedMutationStarted(quiescence);
+    } catch (error) {
+      await resumeGatewayAfterManagedMutation(quiescence);
+      throw error;
+    }
     if (secret?.refreshToken?.trim()) {
       await requestJson<unknown>(`${AUTH_ROUTE}/auth/logout`, {
         method: 'POST',
@@ -1551,17 +1805,20 @@ export async function logoutManagedAuth(gatewayManager?: GatewayManager): Promis
     }
     let cleanupError: unknown;
     try {
-      await clearManagedCredentials();
+      await withProviderMutationLock(async () => {
+        const previous = await snapshot();
+        await clearManagedCredentials(previous);
+      });
     } catch (error) {
       cleanupError = error;
     }
     if (cleanupError) {
-      await stopGatewayForAuthSafety(gatewayManager, 'managed session cleanup failure');
+      await quarantineManagedMutation(quiescence, 'managed logout cleanup failed');
       throw cleanupError;
     }
-    // Local logout is authoritative; Gateway reload failures are reported as
+    // Local logout is authoritative; Gateway start failures are reported as
     // degraded status after the local credentials have already been removed.
-    const gateway = await applyGatewayReload(gatewayManager);
+    const gateway = await resumeGatewayAfterManagedMutation(quiescence);
     const status = await localStatus(defaultBootstrap());
     return {
       success: true,

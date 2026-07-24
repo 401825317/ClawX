@@ -1,6 +1,6 @@
 import { app } from 'electron';
 import crypto from 'node:crypto';
-import { access, chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, normalize, resolve } from 'node:path';
@@ -29,6 +29,20 @@ export type UclawDeviceActivationState = {
   username?: string;
   email?: string;
 };
+
+export type ManagedDeviceActivationFileSnapshot = {
+  path: string;
+  bytes: Buffer | null;
+};
+
+export type ManagedDeviceActivationFilesSnapshot = {
+  current: ManagedDeviceActivationFileSnapshot;
+  stable: ManagedDeviceActivationFileSnapshot;
+};
+
+export type ManagedDeviceActivationFilesApplied = Partial<ManagedDeviceActivationFilesSnapshot>;
+
+type ActivationWriteObserver = (snapshot: ManagedDeviceActivationFileSnapshot) => void;
 
 export const UCLAW_DEVICE_IDENTITY_FILE = 'uclaw-device-identity.json';
 export const UCLAW_DEVICE_ACTIVATION_FILE = 'uclaw-device-activation.json';
@@ -81,6 +95,10 @@ function getStableIdentityDir(): string {
   return join(getAppDataPath(), STABLE_IDENTITY_DIR);
 }
 
+function getStableUclawDeviceActivationPath(): string {
+  return join(getStableIdentityDir(), UCLAW_DEVICE_ACTIVATION_FILE);
+}
+
 export function getUclawDeviceIdentityPath(): string {
   return join(app.getPath('userData'), UCLAW_DEVICE_IDENTITY_FILE);
 }
@@ -91,6 +109,62 @@ export function getUclawDeviceActivationPath(): string {
 
 export function getStableUclawDeviceIdentityPath(): string {
   return join(getStableIdentityDir(), UCLAW_DEVICE_IDENTITY_FILE);
+}
+
+async function snapshotActivationFile(filePath: string): Promise<ManagedDeviceActivationFileSnapshot> {
+  try {
+    return { path: filePath, bytes: await readFile(filePath) };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { path: filePath, bytes: null };
+    }
+    throw error;
+  }
+}
+
+/** Capture managed-auth activation files without triggering migration or permission changes. */
+export async function snapshotManagedDeviceActivationFiles(): Promise<ManagedDeviceActivationFilesSnapshot> {
+  const currentPath = getUclawDeviceActivationPath();
+  const stablePath = getStableUclawDeviceActivationPath();
+  const [current, stable] = await Promise.all([
+    snapshotActivationFile(currentPath),
+    snapshotActivationFile(stablePath),
+  ]);
+  return { current, stable };
+}
+
+async function restoreActivationFile(snapshot: ManagedDeviceActivationFileSnapshot): Promise<void> {
+  if (snapshot.bytes !== null) {
+    await mkdir(dirname(snapshot.path), { recursive: true });
+    await writeFile(snapshot.path, snapshot.bytes, { mode: 0o600 });
+    await chmod(snapshot.path, 0o600);
+    return;
+  }
+
+  // The file did not exist before the managed-auth transaction.
+  try {
+    await unlink(snapshot.path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
+/** Restore the exact managed-auth activation files captured before a transaction. */
+export async function restoreManagedDeviceActivationFiles(
+  snapshot: ManagedDeviceActivationFilesApplied,
+): Promise<void> {
+  const errors: unknown[] = [];
+  for (const fileSnapshot of [snapshot.current, snapshot.stable]) {
+    if (!fileSnapshot) continue;
+    try {
+      await restoreActivationFile(fileSnapshot);
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length > 0) {
+    throw new AggregateError(errors, 'Failed to restore managed device activation files');
+  }
 }
 
 /** Candidate paths are read-only migration sources; callers must never edit them in place. */
@@ -250,10 +324,13 @@ async function readActivationAt(
 async function writeActivationAt(
   identityPath: string,
   state: UclawDeviceActivationState,
+  beforeWrite?: ActivationWriteObserver,
 ): Promise<void> {
   const activationPath = join(dirname(identityPath), UCLAW_DEVICE_ACTIVATION_FILE);
   await mkdir(dirname(activationPath), { recursive: true });
-  await writeFile(activationPath, `${JSON.stringify(state, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  const bytes = Buffer.from(`${JSON.stringify(state, null, 2)}\n`, 'utf8');
+  beforeWrite?.({ path: activationPath, bytes });
+  await writeFile(activationPath, bytes, { mode: 0o600 });
   try {
     await chmod(activationPath, 0o600);
   } catch {
@@ -265,6 +342,7 @@ async function mirrorToStablePath(
   identity: DeviceIdentity,
   sourceIdentityPath: string,
   activation: UclawDeviceActivationState | null,
+  beforeActivationWrite?: ActivationWriteObserver,
 ): Promise<void> {
   const stablePath = getStableUclawDeviceIdentityPath();
   if (normalizePath(stablePath) === normalizePath(sourceIdentityPath)) return;
@@ -278,7 +356,7 @@ async function mirrorToStablePath(
   if (activation) {
     const stableActivation = await readActivationAt(stablePath, identity.deviceId);
     if (!stableActivation) {
-      await writeActivationAt(stablePath, activation);
+      await writeActivationAt(stablePath, activation, beforeActivationWrite);
     } else {
       await hardenFilePermissions(join(dirname(stablePath), UCLAW_DEVICE_ACTIVATION_FILE));
     }
@@ -394,9 +472,13 @@ export async function readUclawDeviceActivationState(): Promise<UclawDeviceActiv
   return readActivationAt(getUclawDeviceIdentityPath(), identity.deviceId);
 }
 
-export async function markUclawDeviceActivated(
+async function markDeviceActivated(
   source: UclawDeviceActivationState['source'],
   user?: { id?: unknown; username?: unknown; email?: unknown } | null,
+  options: {
+    strictStableMirror: boolean;
+    beforeActivationWrite?: ActivationWriteObserver;
+  } = { strictStableMirror: false },
 ): Promise<UclawDeviceActivationState> {
   const identity = await loadOrCreateUclawDeviceIdentity();
   const currentPath = getUclawDeviceIdentityPath();
@@ -417,13 +499,46 @@ export async function markUclawDeviceActivated(
     ...(username ? { username } : {}),
     ...(email ? { email } : {}),
   };
-  await writeActivationAt(currentPath, state);
-  try {
-    await mirrorToStablePath(identity, currentPath, state);
-  } catch {
-    // A backup location must never make a successful activation fail.
+  await writeActivationAt(currentPath, state, options.beforeActivationWrite);
+  if (options.strictStableMirror) {
+    await mirrorToStablePath(identity, currentPath, state, options.beforeActivationWrite);
+  } else {
+    try {
+      await mirrorToStablePath(identity, currentPath, state);
+    } catch {
+      // A backup location must never make the primary identity unavailable.
+    }
   }
   return state;
+}
+
+/** Preserve the historical best-effort stable mirror for ordinary device flows. */
+export async function markUclawDeviceActivated(
+  source: UclawDeviceActivationState['source'],
+  user?: { id?: unknown; username?: unknown; email?: unknown } | null,
+): Promise<UclawDeviceActivationState> {
+  return markDeviceActivated(source, user);
+}
+
+/**
+ * Managed authentication treats both activation files as one transaction.
+ * Each intended file generation is recorded before its write starts.
+ */
+export async function markManagedDeviceActivated(
+  source: UclawDeviceActivationState['source'],
+  user: { id?: unknown; username?: unknown; email?: unknown } | null | undefined,
+  applied: ManagedDeviceActivationFilesApplied = {},
+): Promise<UclawDeviceActivationState> {
+  const currentPath = normalizePath(getUclawDeviceActivationPath());
+  const stablePath = normalizePath(getStableUclawDeviceActivationPath());
+  return markDeviceActivated(source, user, {
+    strictStableMirror: true,
+    beforeActivationWrite: (fileSnapshot) => {
+      const targetPath = normalizePath(fileSnapshot.path);
+      if (targetPath === currentPath) applied.current = fileSnapshot;
+      else if (targetPath === stablePath) applied.stable = fileSnapshot;
+    },
+  });
 }
 
 /** Managed-auth names used by the Main-process service boundary. */
@@ -436,4 +551,3 @@ export const getManagedDeviceIdentityCandidatePaths = getUclawDeviceIdentityCand
 export const loadOrCreateManagedDeviceIdentity = loadOrCreateUclawDeviceIdentity;
 export const getManagedDevicePayload = getUclawDevicePayload;
 export const readManagedDeviceActivationState = readUclawDeviceActivationState;
-export const markManagedDeviceActivated = markUclawDeviceActivated;

@@ -5,6 +5,7 @@
 import { app, BrowserWindow, nativeImage, session, shell, type Session } from 'electron';
 import { join } from 'path';
 import { GatewayManager } from '../gateway/manager';
+import { hasManagedRuntimeMutationMarker } from '../gateway/managed-runtime-mutation-barrier';
 import { registerIpcHandlers } from './ipc-handlers';
 import { HostApiRegistry } from './ipc/host-invoke';
 import { createTray } from './tray';
@@ -546,10 +547,14 @@ async function initialize(): Promise<void> {
   const gatewayAutoStart = await getSetting('gatewayAutoStart');
   if (!isE2EMode && gatewayAutoStart) {
     try {
-      await syncAllProviderAuthToRuntime();
-      logger.debug('Auto-starting Gateway...');
-      await gatewayManager.start();
-      logger.info('Gateway auto-start succeeded');
+      if (await hasManagedRuntimeMutationMarker()) {
+        logger.warn('Gateway auto-start and Provider sync skipped until managed credentials are recovered');
+      } else {
+        await syncAllProviderAuthToRuntime();
+        logger.debug('Auto-starting Gateway...');
+        await gatewayManager.start();
+        logger.info('Gateway auto-start succeeded');
+      }
     } catch (error) {
       logger.error('Gateway auto-start failed:', error);
       mainWindow?.webContents.send('gateway:error', String(error));

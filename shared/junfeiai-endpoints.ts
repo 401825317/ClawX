@@ -14,6 +14,8 @@ export type UclawEndpointsConfig = {
     managedProviderId: string;
     managedAccountId: string;
     authAccountId: string;
+    legacyProviderIds: string[];
+    legacyAuthAccountIds: string[];
     defaultModel: string;
     defaultModelContextWindow: number;
     defaultApiProtocol: UclawApiProtocol;
@@ -107,6 +109,13 @@ function readNonEmptyString(value: unknown, key: string): string {
     throw new Error(`${key} in shared/junfeiai-endpoints.json must be a non-empty string`);
   }
   return value.trim();
+}
+
+function readNonEmptyStringArray(value: unknown, key: string): string[] {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string' || !entry.trim())) {
+    throw new Error(`${key} in shared/junfeiai-endpoints.json must be an array of non-empty strings`);
+  }
+  return [...new Set(value.map((entry) => entry.trim()))];
 }
 
 function readPositiveInteger(value: unknown, key: string): number {
@@ -226,6 +235,8 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
       managedProviderId: readNonEmptyString(provider.managedProviderId, 'provider.managedProviderId'),
       managedAccountId: readNonEmptyString(provider.managedAccountId, 'provider.managedAccountId'),
       authAccountId: readNonEmptyString(provider.authAccountId, 'provider.authAccountId'),
+      legacyProviderIds: readNonEmptyStringArray(provider.legacyProviderIds, 'provider.legacyProviderIds'),
+      legacyAuthAccountIds: readNonEmptyStringArray(provider.legacyAuthAccountIds, 'provider.legacyAuthAccountIds'),
       defaultModel: readNonEmptyString(provider.defaultModel, 'provider.defaultModel'),
       defaultModelContextWindow: readPositiveInteger(
         provider.defaultModelContextWindow,
@@ -403,6 +414,8 @@ export const UCLAW_MANAGED_PROVIDER_BASE_URL = `${UCLAW_PRODUCTION_ORIGIN}/v1`;
 export const UCLAW_MANAGED_PROVIDER_ID = UCLAW_ENDPOINTS_CONFIG.provider.managedProviderId;
 export const UCLAW_MANAGED_ACCOUNT_ID = UCLAW_ENDPOINTS_CONFIG.provider.managedAccountId;
 export const UCLAW_MANAGED_AUTH_ACCOUNT_ID = UCLAW_ENDPOINTS_CONFIG.provider.authAccountId;
+export const UCLAW_LEGACY_PROVIDER_IDS = UCLAW_ENDPOINTS_CONFIG.provider.legacyProviderIds;
+export const UCLAW_LEGACY_AUTH_ACCOUNT_IDS = UCLAW_ENDPOINTS_CONFIG.provider.legacyAuthAccountIds;
 export const UCLAW_DEFAULT_MODEL = UCLAW_ENDPOINTS_CONFIG.provider.defaultModel;
 export const UCLAW_DEFAULT_API_PROTOCOL = UCLAW_ENDPOINTS_CONFIG.provider.defaultApiProtocol;
 export const UCLAW_DEFAULT_MODEL_CONTEXT_WINDOW = UCLAW_ENDPOINTS_CONFIG.provider.defaultModelContextWindow;

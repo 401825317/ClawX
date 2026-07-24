@@ -86,7 +86,7 @@ describe('billing service', () => {
     expect(JSON.stringify(result)).not.toContain('access-secret');
   });
 
-  it('creates a normalized order after validating server-owned payment configuration', async () => {
+  it('uses the overview rate for estimated quota instead of backend billing units', async () => {
     mocks.request
       .mockResolvedValueOnce(overviewPayload)
       .mockResolvedValueOnce({
@@ -94,7 +94,7 @@ describe('billing service', () => {
         status: 'PENDING',
         pay_url: 'https://pay.example.com/checkout',
         qr_code: 'https://pay.example.com/qr',
-        credit_quota: 600,
+        credit_quota: 3,
         payment_type: 'alipay',
       });
 
@@ -126,6 +126,32 @@ describe('billing service', () => {
     }));
   });
 
+  it('estimates 500000 shrimp for the current one-yuan UClaw order contract', async () => {
+    mocks.request
+      .mockResolvedValueOnce({
+        ...overviewPayload,
+        quotaPerUnit: 500000,
+        topupInfo: {
+          ...overviewPayload.topupInfo,
+          payg_credit_usd_per_cny: 1,
+        },
+      })
+      .mockResolvedValueOnce({
+        out_trade_no: 'trade-one-yuan',
+        status: 'PENDING',
+        credit_quota: 1,
+        payment_type: 'alipay',
+      });
+
+    const result = await createBillingOrder({
+      amountFen: 100,
+      paymentMethod: 'alipay',
+      productId: 7,
+    });
+
+    expect(result.creditQuota).toBe(500000);
+  });
+
   it('drops unsafe payment URLs returned by the backend', async () => {
     mocks.request
       .mockResolvedValueOnce(overviewPayload)
@@ -146,6 +172,31 @@ describe('billing service', () => {
     mocks.request.mockResolvedValueOnce(overviewPayload);
 
     await expect(createBillingOrder({ amountFen: 100, paymentMethod: 'alipay', productId: 999 }))
+      .rejects.toEqual(expect.objectContaining({ code: 'payment_unavailable' }));
+    expect(mocks.request).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects ambiguous multiple-product configuration before creating an order', async () => {
+    mocks.request.mockResolvedValueOnce({
+      ...overviewPayload,
+      topupInfo: {
+        ...overviewPayload.topupInfo,
+        payg_products: [
+          ...overviewPayload.topupInfo.payg_products,
+          {
+            id: 8,
+            name: 'Second product',
+            description: 'Ambiguous balance recharge',
+            enabled: true,
+            sort_order: 2,
+            stock: 10,
+            allowed_group_ids: [1, 2],
+          },
+        ],
+      },
+    });
+
+    await expect(createBillingOrder({ amountFen: 100, paymentMethod: 'alipay', productId: 7 }))
       .rejects.toEqual(expect.objectContaining({ code: 'payment_unavailable' }));
     expect(mocks.request).toHaveBeenCalledTimes(1);
   });
@@ -194,6 +245,17 @@ describe('billing service', () => {
       method: 'POST',
       body: { out_trade_no: 'trade-status' },
     }));
+  });
+
+  it('rejects an order-status response for a different order', async () => {
+    mocks.request.mockResolvedValueOnce({
+      out_trade_no: 'trade-other',
+      status: 'SUCCESS',
+      credit_quota: 200,
+    });
+
+    await expect(getBillingOrderStatus({ tradeNo: 'trade-status' }))
+      .rejects.toEqual(expect.objectContaining({ code: 'request_failed' }));
   });
 
   it('maps managed authentication and transport failures to stable billing codes', () => {

@@ -96,6 +96,7 @@ const {
     listVendors: vi.fn(),
     saveLegacyProvider: vi.fn(),
     setLegacyProviderApiKey: vi.fn(),
+    setDefaultLegacyProvider: vi.fn(),
     setDefaultAccount: vi.fn(),
     updateAccount: vi.fn(),
   },
@@ -196,7 +197,7 @@ vi.mock('@electron/utils/plugin-install', () => ({
 }));
 
 vi.mock('@electron/utils/openclaw-workspace', () => ({
-  ensureClawXContext: vi.fn(),
+  ensureClawXContext: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('@electron/services/providers/provider-runtime-sync', () => ({
@@ -486,7 +487,12 @@ describe('host services', () => {
       updatedAt: '2026-05-31T00:00:00.000Z',
     };
     providerServiceMock.createAccount.mockResolvedValue(account);
-    const gatewayManager = { debouncedReload: vi.fn() };
+    const { isProviderMutationLockHeld } = await import('@electron/services/providers/provider-mutation-lock');
+    const gatewayManager = {
+      debouncedReload: vi.fn(() => {
+        expect(isProviderMutationLockHeld()).toBe(false);
+      }),
+    };
     const { createProvidersApi } = await import('@electron/services/providers-api');
 
     await expect(createProvidersApi({
@@ -502,8 +508,8 @@ describe('host services', () => {
     expect(syncSavedProviderToRuntimeMock).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'custom-local', type: 'custom' }),
       'sk-test',
-      gatewayManager,
     );
+    expect(gatewayManager.debouncedReload).toHaveBeenCalledTimes(1);
   });
 
   it('rejects ordinary Provider mutations for a UClaw-managed account', async () => {
@@ -564,6 +570,269 @@ describe('host services', () => {
     expect(providerServiceMock.deleteAccount).not.toHaveBeenCalled();
     expect(syncSavedProviderToRuntimeMock).not.toHaveBeenCalled();
     expect(syncDeletedProviderToRuntimeMock).not.toHaveBeenCalled();
+  });
+
+  it('locks every OpenAI identity while the canonical OpenAI account is UClaw-managed', async () => {
+    const managedAccount = {
+      id: 'openai',
+      vendorId: 'openai',
+      label: 'UClaw',
+      authMode: 'api_key',
+      enabled: true,
+      isDefault: true,
+      metadata: { managedBy: 'uclaw' },
+      createdAt: '2026-07-23T00:00:00.000Z',
+      updatedAt: '2026-07-23T00:00:00.000Z',
+    };
+    const personalOpenAi = {
+      ...managedAccount,
+      id: 'personal-openai',
+      label: 'Personal OpenAI',
+      isDefault: false,
+      metadata: undefined,
+    };
+    const customAccount = {
+      ...personalOpenAi,
+      id: 'custom-local',
+      vendorId: 'custom',
+      label: 'Custom',
+    };
+    providerServiceMock.getAccount.mockImplementation(async (accountId: string) => ({
+      openai: managedAccount,
+      'personal-openai': personalOpenAi,
+      'custom-local': customAccount,
+    })[accountId] ?? null);
+    providerServiceMock._getProviderInternal.mockImplementation(async (providerId: string) => ({
+      'personal-openai': {
+        id: 'personal-openai',
+        name: 'Personal OpenAI',
+        type: 'openai',
+        enabled: true,
+        createdAt: personalOpenAi.createdAt,
+        updatedAt: personalOpenAi.updatedAt,
+      },
+      'custom-local': {
+        id: 'custom-local',
+        name: 'Custom',
+        type: 'custom',
+        enabled: true,
+        createdAt: customAccount.createdAt,
+        updatedAt: customAccount.updatedAt,
+      },
+    })[providerId] ?? null);
+    const { browserOAuthManager } = await import('@electron/utils/browser-oauth');
+    const { createProvidersApi } = await import('@electron/services/providers-api');
+    const providersApi = createProvidersApi({
+      gatewayManager: {} as never,
+      mainWindow: {} as never,
+    });
+    const expected = {
+      success: false,
+      error: 'This UClaw-managed provider account can only be changed through UClaw account settings',
+    };
+    const aliasAccount = {
+      ...customAccount,
+      id: 'openai-codex',
+      label: 'Legacy OpenAI Alias',
+    };
+
+    const results = await Promise.all([
+      providersApi.createAccount({ account: personalOpenAi }),
+      providersApi.createAccount({ account: aliasAccount }),
+      providersApi.createAccount({ account: { ...customAccount, id: 'personal-openai' } }),
+      providersApi.updateAccount({ accountId: 'personal-openai', updates: { label: 'Changed' } }),
+      providersApi.updateAccount({ accountId: 'custom-local', updates: { vendorId: 'openai' } }),
+      providersApi.deleteAccount({ accountId: 'personal-openai' }),
+      providersApi.deleteAccountApiKey({ accountId: 'personal-openai' }),
+      providersApi.setDefaultAccount({ accountId: 'personal-openai' }),
+      providersApi.setDefaultAccount({ accountId: 'openai-codex' }),
+      providersApi.save({
+        config: {
+          id: 'legacy-openai',
+          name: 'Legacy OpenAI',
+          type: 'openai',
+          enabled: true,
+          createdAt: personalOpenAi.createdAt,
+          updatedAt: personalOpenAi.updatedAt,
+        },
+      }),
+      providersApi.save({
+        config: {
+          id: 'personal-openai',
+          name: 'Overwrite As Custom',
+          type: 'custom',
+          enabled: true,
+          createdAt: personalOpenAi.createdAt,
+          updatedAt: personalOpenAi.updatedAt,
+        },
+      }),
+      providersApi.save({
+        config: {
+          id: 'openai-codex',
+          name: 'Legacy Alias',
+          type: 'custom',
+          enabled: true,
+          createdAt: personalOpenAi.createdAt,
+          updatedAt: personalOpenAi.updatedAt,
+        },
+      }),
+      providersApi.delete({ providerId: 'personal-openai' }),
+      providersApi.setApiKey({ providerId: 'personal-openai', apiKey: 'replacement-key' }),
+      providersApi.updateWithKey({ providerId: 'personal-openai', updates: { name: 'Changed' } }),
+      providersApi.updateWithKey({ providerId: 'custom-local', updates: { type: 'openai' } }),
+      providersApi.deleteApiKey({ providerId: 'personal-openai' }),
+      providersApi.setDefault({ providerId: 'personal-openai' }),
+      providersApi.requestOAuth({ provider: 'openai', accountId: 'personal-openai' }),
+    ]);
+
+    expect(results).toEqual(Array.from({ length: results.length }, () => expected));
+    expect(providerServiceMock.createAccount).not.toHaveBeenCalled();
+    expect(providerServiceMock.updateAccount).not.toHaveBeenCalled();
+    expect(providerServiceMock.deleteAccount).not.toHaveBeenCalled();
+    expect(providerServiceMock.setDefaultAccount).not.toHaveBeenCalled();
+    expect(providerServiceMock._saveProviderInternal).not.toHaveBeenCalled();
+    expect(providerServiceMock._deleteProviderInternal).not.toHaveBeenCalled();
+    expect(providerServiceMock._setProviderApiKeyInternal).not.toHaveBeenCalled();
+    expect(providerServiceMock._deleteProviderApiKeyInternal).not.toHaveBeenCalled();
+    expect(providerServiceMock._setDefaultProviderInternal).not.toHaveBeenCalled();
+    expect(browserOAuthManager.startFlow).not.toHaveBeenCalled();
+  });
+
+  it('keeps DeepSeek and custom OpenAI-compatible providers mutable during managed login', async () => {
+    const managedAccount = {
+      id: 'openai',
+      vendorId: 'openai',
+      metadata: { managedBy: 'uclaw' },
+    };
+    const deepSeekAccount = {
+      id: 'deepseek',
+      vendorId: 'deepseek',
+      label: 'DeepSeek',
+      authMode: 'api_key',
+      baseUrl: 'https://api.deepseek.com/v1',
+      apiProtocol: 'openai-completions',
+      enabled: true,
+      isDefault: false,
+      createdAt: '2026-07-23T00:00:00.000Z',
+      updatedAt: '2026-07-23T00:00:00.000Z',
+    };
+    const customAccount = {
+      ...deepSeekAccount,
+      id: 'custom-compatible',
+      vendorId: 'custom',
+      label: 'Custom Compatible',
+      baseUrl: 'http://127.0.0.1:8080/v1',
+      apiProtocol: 'openai-responses',
+    };
+    providerServiceMock.getAccount.mockImplementation(async (accountId: string) => ({
+      openai: managedAccount,
+      deepseek: deepSeekAccount,
+    })[accountId] ?? null);
+    providerServiceMock._getProviderInternal.mockImplementation(async (providerId: string) => ({
+      deepseek: {
+        id: 'deepseek',
+        name: 'DeepSeek',
+        type: 'deepseek',
+        enabled: true,
+        createdAt: deepSeekAccount.createdAt,
+        updatedAt: deepSeekAccount.updatedAt,
+      },
+    })[providerId] ?? null);
+    providerServiceMock.createAccount.mockImplementation(async (account: unknown) => account);
+    providerServiceMock.updateAccount.mockResolvedValue({ ...deepSeekAccount, label: 'DeepSeek Updated' });
+    const gatewayManager = { debouncedReload: vi.fn() };
+    const { createProvidersApi } = await import('@electron/services/providers-api');
+    const providersApi = createProvidersApi({
+      gatewayManager: gatewayManager as never,
+      mainWindow: {} as never,
+    });
+
+    await expect(providersApi.createAccount({ account: customAccount, apiKey: 'custom-key' }))
+      .resolves.toMatchObject({ success: true, account: customAccount });
+    await expect(providersApi.updateAccount({ accountId: 'deepseek', updates: { label: 'DeepSeek Updated' } }))
+      .resolves.toMatchObject({ success: true, account: { vendorId: 'deepseek' } });
+    await expect(providersApi.setDefaultAccount({ accountId: 'deepseek' }))
+      .resolves.toEqual({ success: true });
+    await expect(providersApi.save({
+      config: {
+        id: 'custom-compatible',
+        name: 'Custom Compatible',
+        type: 'custom',
+        baseUrl: 'http://127.0.0.1:8080/v1',
+        apiProtocol: 'openai-responses',
+        enabled: true,
+        createdAt: customAccount.createdAt,
+        updatedAt: customAccount.updatedAt,
+      },
+      apiKey: 'custom-key',
+    })).resolves.toEqual({ success: true });
+    await expect(providersApi.setDefault({ providerId: 'deepseek' }))
+      .resolves.toEqual({ success: true });
+
+    expect(providerServiceMock.createAccount).toHaveBeenCalledWith(customAccount, 'custom-key');
+    expect(providerServiceMock.updateAccount).toHaveBeenCalledWith(
+      'deepseek',
+      { label: 'DeepSeek Updated' },
+      undefined,
+    );
+    expect(providerServiceMock.setDefaultAccount).toHaveBeenCalledWith('deepseek');
+    expect(providerServiceMock._saveProviderInternal).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'custom-compatible', type: 'custom' }),
+    );
+    expect(providerServiceMock._setDefaultProviderInternal).toHaveBeenCalledWith('deepseek');
+  });
+
+  it('never promotes a secondary OpenAI account while deleting another default account', async () => {
+    const managedAccount = {
+      id: 'openai',
+      vendorId: 'openai',
+      label: 'UClaw',
+      authMode: 'api_key',
+      enabled: true,
+      isDefault: false,
+      metadata: { managedBy: 'uclaw' },
+      createdAt: '2026-07-23T00:00:00.000Z',
+      updatedAt: '2026-07-23T00:00:00.000Z',
+    };
+    const deletedDefault = {
+      ...managedAccount,
+      id: 'deepseek',
+      vendorId: 'deepseek',
+      label: 'DeepSeek',
+      isDefault: true,
+      metadata: undefined,
+      updatedAt: '2026-07-24T00:00:00.000Z',
+    };
+    const secondaryOpenAi = {
+      ...managedAccount,
+      id: 'personal-openai',
+      label: 'Personal OpenAI',
+      updatedAt: '2026-07-25T00:00:00.000Z',
+      metadata: undefined,
+    };
+    providerServiceMock.getAccount.mockImplementation(async (accountId: string) => ({
+      openai: managedAccount,
+      deepseek: deletedDefault,
+      'personal-openai': secondaryOpenAi,
+    })[accountId] ?? null);
+    providerServiceMock.getDefaultAccountId.mockResolvedValue('deepseek');
+    providerServiceMock.listAccounts.mockResolvedValue([
+      deletedDefault,
+      secondaryOpenAi,
+      managedAccount,
+    ]);
+    const { createProvidersApi } = await import('@electron/services/providers-api');
+    const providersApi = createProvidersApi({
+      gatewayManager: {} as never,
+      mainWindow: {} as never,
+    });
+
+    await expect(providersApi.deleteAccount({ accountId: 'deepseek' }))
+      .resolves.toEqual({ success: true });
+
+    expect(providerServiceMock.setDefaultAccount).toHaveBeenCalledWith('openai');
+    expect(providerServiceMock.setDefaultAccount).not.toHaveBeenCalledWith('personal-openai');
+    expect(syncDefaultProviderToRuntimeMock).toHaveBeenCalledWith('openai');
   });
 
   it('does not expose a UClaw-managed runtime credential through ordinary Provider reads', async () => {
@@ -640,10 +909,20 @@ describe('host services', () => {
   });
 
   it('protects UClaw-managed accounts from deprecated Provider IPC mutations and key reads', async () => {
-    providerServiceMock.getAccount.mockResolvedValue({
+    const managedAccount = {
       id: 'openai',
       vendorId: 'openai',
       metadata: { managedBy: 'uclaw' },
+    };
+    const personalOpenAiAccount = {
+      id: 'personal-openai',
+      vendorId: 'openai',
+      metadata: {},
+    };
+    providerServiceMock.getAccount.mockImplementation(async (accountId: string) => {
+      if (accountId === 'openai') return managedAccount;
+      if (accountId === 'personal-openai') return personalOpenAiAccount;
+      return null;
     });
     providerServiceMock.getLegacyProviderApiKey.mockResolvedValue('relay-secret');
     const { ipcMain } = await import('electron');
@@ -677,12 +956,150 @@ describe('host services', () => {
       .resolves.toEqual(expected);
     await expect(invoke('provider:deleteApiKey', 'openai')).resolves.toEqual(expected);
     await expect(invoke('provider:getApiKey', 'openai')).resolves.toBeNull();
+    await expect(invoke('provider:save', {
+      ...config,
+      id: 'personal-openai',
+    }, 'replacement-key')).resolves.toEqual(expected);
+    await expect(invoke('provider:save', {
+      ...config,
+      id: 'openai-codex',
+      type: 'custom',
+    }, 'replacement-key')).resolves.toEqual(expected);
+    await expect(invoke('provider:delete', 'personal-openai')).resolves.toEqual(expected);
+    await expect(invoke('provider:setApiKey', 'personal-openai', 'replacement-key')).resolves.toEqual(expected);
+    await expect(invoke(
+      'provider:updateWithKey',
+      'personal-openai',
+      { name: 'Changed' },
+      'replacement-key',
+    )).resolves.toEqual(expected);
+    await expect(invoke('provider:deleteApiKey', 'personal-openai')).resolves.toEqual(expected);
+    await expect(invoke('provider:getApiKey', 'personal-openai')).resolves.toBeNull();
+    await expect(invoke('provider:setDefault', 'personal-openai')).resolves.toEqual(expected);
 
     expect(providerServiceMock.saveLegacyProvider).not.toHaveBeenCalled();
     expect(providerServiceMock.deleteLegacyProvider).not.toHaveBeenCalled();
     expect(providerServiceMock.setLegacyProviderApiKey).not.toHaveBeenCalled();
     expect(providerServiceMock.deleteLegacyProviderApiKey).not.toHaveBeenCalled();
     expect(providerServiceMock.getLegacyProviderApiKey).not.toHaveBeenCalled();
+    expect(providerServiceMock.setDefaultLegacyProvider).not.toHaveBeenCalled();
+  });
+
+  it('keeps custom OpenAI-compatible providers writable through deprecated Provider IPC', async () => {
+    const customAccount = {
+      id: 'custom-local',
+      vendorId: 'custom',
+      metadata: {},
+    };
+    providerServiceMock.getAccount.mockImplementation(async (accountId: string) => (
+      accountId === 'custom-local' ? customAccount : null
+    ));
+    const { ipcMain } = await import('electron');
+    const { registerProviderHandlers } = await import('@electron/main/ipc-handlers');
+    registerProviderHandlers({ debouncedRestart: vi.fn() } as never);
+    const handlers = new Map(
+      vi.mocked(ipcMain.handle).mock.calls.map(([channel, handler]) => [channel, handler] as const),
+    );
+    const invoke = (channel: string, ...args: unknown[]) => {
+      const handler = handlers.get(channel);
+      if (!handler) throw new Error(`Missing IPC handler: ${channel}`);
+      return handler({} as never, ...args);
+    };
+    const config = {
+      id: 'custom-local',
+      name: 'Custom OpenAI-compatible',
+      type: 'custom',
+      apiProtocol: 'openai-responses',
+      enabled: true,
+      createdAt: '2026-07-23T00:00:00.000Z',
+      updatedAt: '2026-07-23T00:00:00.000Z',
+    };
+
+    await expect(invoke('provider:save', config, 'custom-key')).resolves.toEqual({ success: true });
+    await expect(invoke('provider:setDefault', 'custom-local')).resolves.toEqual({ success: true });
+
+    expect(providerServiceMock.saveLegacyProvider).toHaveBeenCalledWith(config);
+    expect(providerServiceMock.setLegacyProviderApiKey).toHaveBeenCalledWith('custom-local', 'custom-key');
+    expect(providerServiceMock.setDefaultLegacyProvider).toHaveBeenCalledWith('custom-local');
+  });
+
+  it('protects every real OpenAI identity through the app request compatibility route', async () => {
+    const managedAccount = {
+      id: 'openai',
+      vendorId: 'openai',
+      metadata: { managedBy: 'uclaw' },
+    };
+    const personalOpenAiAccount = {
+      id: 'personal-openai',
+      vendorId: 'openai',
+      metadata: {},
+    };
+    providerServiceMock.getAccount.mockImplementation(async (accountId: string) => {
+      if (accountId === 'openai') return managedAccount;
+      if (accountId === 'personal-openai') return personalOpenAiAccount;
+      return null;
+    });
+    providerServiceMock.getLegacyProviderApiKey.mockResolvedValue('relay-secret');
+    const { ipcMain } = await import('electron');
+    const { registerUnifiedRequestHandlers } = await import('@electron/main/ipc-handlers');
+    registerUnifiedRequestHandlers({
+      getStatus: vi.fn(() => ({ state: 'stopped' })),
+      restart: vi.fn(),
+    } as never);
+    const handler = vi.mocked(ipcMain.handle).mock.calls.find(([channel]) => channel === 'app:request')?.[1];
+    if (!handler) throw new Error('Missing app:request compatibility handler');
+    const invoke = (action: string, payload: unknown) => handler({} as never, {
+      id: `provider-${action}`,
+      module: 'provider',
+      action,
+      payload,
+    });
+    const rejected = {
+      success: false,
+      error: 'This UClaw-managed provider account can only be changed through UClaw account settings',
+    };
+    const response = (action: string, data: unknown) => ({
+      id: `provider-${action}`,
+      ok: true,
+      data,
+    });
+    const config = {
+      id: 'personal-openai',
+      name: 'Personal OpenAI',
+      type: 'openai',
+      enabled: true,
+      createdAt: '2026-07-23T00:00:00.000Z',
+      updatedAt: '2026-07-23T00:00:00.000Z',
+    };
+
+    await expect(invoke('save', { config, apiKey: 'replacement-key' }))
+      .resolves.toEqual(response('save', rejected));
+    await expect(invoke('save', {
+      config: { ...config, id: 'openai-codex', type: 'custom' },
+      apiKey: 'replacement-key',
+    })).resolves.toEqual(response('save', rejected));
+    await expect(invoke('delete', { providerId: 'personal-openai' }))
+      .resolves.toEqual(response('delete', rejected));
+    await expect(invoke('setApiKey', { providerId: 'personal-openai', apiKey: 'replacement-key' }))
+      .resolves.toEqual(response('setApiKey', rejected));
+    await expect(invoke('updateWithKey', {
+      providerId: 'personal-openai',
+      updates: { name: 'Changed' },
+      apiKey: 'replacement-key',
+    })).resolves.toEqual(response('updateWithKey', rejected));
+    await expect(invoke('deleteApiKey', { providerId: 'personal-openai' }))
+      .resolves.toEqual(response('deleteApiKey', rejected));
+    await expect(invoke('getApiKey', { providerId: 'personal-openai' }))
+      .resolves.toEqual(response('getApiKey', null));
+    await expect(invoke('setDefault', { providerId: 'personal-openai' }))
+      .resolves.toEqual(response('setDefault', rejected));
+
+    expect(providerServiceMock.saveLegacyProvider).not.toHaveBeenCalled();
+    expect(providerServiceMock.deleteLegacyProvider).not.toHaveBeenCalled();
+    expect(providerServiceMock.setLegacyProviderApiKey).not.toHaveBeenCalled();
+    expect(providerServiceMock.deleteLegacyProviderApiKey).not.toHaveBeenCalled();
+    expect(providerServiceMock.getLegacyProviderApiKey).not.toHaveBeenCalled();
+    expect(providerServiceMock.setDefaultLegacyProvider).not.toHaveBeenCalled();
   });
 
   it('rejects forged UClaw ownership metadata on deprecated Provider IPC writes', async () => {
@@ -721,7 +1138,13 @@ describe('host services', () => {
 
   it('sets the default provider account and syncs runtime defaults', async () => {
     providerServiceMock.getDefaultAccountId.mockResolvedValue('old-default');
-    const gatewayManager = { debouncedReload: vi.fn() };
+    const { isProviderMutationLockHeld } = await import('@electron/services/providers/provider-mutation-lock');
+    const gatewayManager = {
+      getStatus: vi.fn(() => ({ state: 'running' })),
+      debouncedReload: vi.fn(() => {
+        expect(isProviderMutationLockHeld()).toBe(false);
+      }),
+    };
     const { createProvidersApi } = await import('@electron/services/providers-api');
 
     await expect(createProvidersApi({
@@ -730,7 +1153,8 @@ describe('host services', () => {
     }).setDefaultAccount({ accountId: 'custom-local' })).resolves.toEqual({ success: true });
 
     expect(providerServiceMock.setDefaultAccount).toHaveBeenCalledWith('custom-local');
-    expect(syncDefaultProviderToRuntimeMock).toHaveBeenCalledWith('custom-local', gatewayManager);
+    expect(syncDefaultProviderToRuntimeMock).toHaveBeenCalledWith('custom-local');
+    expect(gatewayManager.debouncedReload).toHaveBeenCalledTimes(1);
   });
 
   it('promotes the newest enabled account before removing the deleted default from runtime', async () => {
@@ -771,7 +1195,13 @@ describe('host services', () => {
       olderEnabledAccount,
       newestEnabledAccount,
     ]);
-    const gatewayManager = { debouncedReload: vi.fn(), debouncedRestart: vi.fn() };
+    const { isProviderMutationLockHeld } = await import('@electron/services/providers/provider-mutation-lock');
+    const gatewayManager = {
+      debouncedReload: vi.fn(),
+      debouncedRestart: vi.fn(() => {
+        expect(isProviderMutationLockHeld()).toBe(false);
+      }),
+    };
     const { createProvidersApi } = await import('@electron/services/providers-api');
 
     await expect(createProvidersApi({
@@ -784,9 +1214,10 @@ describe('host services', () => {
     expect(syncDeletedProviderToRuntimeMock).toHaveBeenCalledWith(
       expect.objectContaining({ id: deletedAccount.id, type: deletedAccount.vendorId }),
       deletedAccount.id,
-      gatewayManager,
+      undefined,
       undefined,
     );
+    expect(gatewayManager.debouncedRestart).toHaveBeenCalledTimes(1);
     expect(syncDefaultProviderToRuntimeMock.mock.invocationCallOrder[0])
       .toBeLessThan(syncDeletedProviderToRuntimeMock.mock.invocationCallOrder[0]);
   });
@@ -1057,6 +1488,76 @@ describe('host services', () => {
     expect(providerRuntimeSync.syncAllProviderAuthToRuntime).toHaveBeenCalledTimes(1);
     expect(providerRuntimeSync.syncAgentModelOverrideToRuntime).toHaveBeenCalledWith('main');
     expect(gatewayManager.debouncedReload).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not reload after agent creation when managed auth synchronization fails', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const snapshot = {
+      agents: [{ id: 'code', name: 'Code' }],
+      defaultAgentId: 'main',
+      defaultModelRef: null,
+      configuredChannelTypes: [],
+      channelOwners: {},
+      channelAccountOwners: {},
+    };
+    createAgentMock.mockResolvedValue(snapshot);
+    const gatewayManager = {
+      getStatus: vi.fn(() => ({ state: 'running' })),
+      debouncedReload: vi.fn(),
+    };
+    const { createAgentsApi } = await import('@electron/services/agents-api');
+    const providerRuntimeSync = await import('@electron/services/providers/provider-runtime-sync');
+    vi.mocked(providerRuntimeSync.syncAllProviderAuthToRuntime).mockRejectedValueOnce(
+      new Error('managed auth cleanup failed'),
+    );
+
+    await expect(createAgentsApi({ gatewayManager: gatewayManager as never }).create({
+      name: 'Code',
+    })).resolves.toEqual({ success: true, ...snapshot });
+
+    expect(createAgentMock).toHaveBeenCalledWith('Code', { inheritWorkspace: false });
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[agents] Failed to sync provider auth after agent creation:',
+      expect.any(Error),
+    );
+    expect(gatewayManager.debouncedReload).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it('does not reload after an agent model update when managed auth synchronization fails', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const snapshot = {
+      agents: [{ id: 'main', modelRef: 'openai/smart-latest' }],
+      defaultAgentId: 'main',
+      defaultModelRef: 'openai/smart-latest',
+      configuredChannelTypes: [],
+      channelOwners: {},
+      channelAccountOwners: {},
+    };
+    const gatewayManager = {
+      getStatus: vi.fn(() => ({ state: 'running' })),
+      debouncedReload: vi.fn(),
+    };
+    const { createAgentsApi } = await import('@electron/services/agents-api');
+    const agentConfig = await import('@electron/utils/agent-config');
+    const providerRuntimeSync = await import('@electron/services/providers/provider-runtime-sync');
+    vi.mocked(agentConfig.updateAgentModel).mockResolvedValue(snapshot as never);
+    vi.mocked(providerRuntimeSync.syncAllProviderAuthToRuntime).mockRejectedValueOnce(
+      new Error('managed auth cleanup failed'),
+    );
+
+    await expect(createAgentsApi({ gatewayManager: gatewayManager as never }).updateModel({
+      id: 'main',
+      modelRef: 'openai/smart-latest',
+    })).resolves.toEqual({ success: true, ...snapshot });
+
+    expect(providerRuntimeSync.syncAgentModelOverrideToRuntime).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[agents] Failed to sync runtime after updating agent model:',
+      expect.any(Error),
+    );
+    expect(gatewayManager.debouncedReload).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 
   it('assigns agent channels and schedules gateway reload', async () => {
@@ -1352,8 +1853,19 @@ describe('host services', () => {
     const source = readFileSync(join(process.cwd(), 'electron/main/ipc-handlers.ts'), 'utf8');
 
     expect(source).toContain('managedAuth: createManagedAuthApi({ gatewayManager })');
-    expect(source).toContain('billing: createBillingApi()');
+    expect(source).toContain('billing: createBillingApi({ gatewayManager })');
     expect(source).toContain('support: createSupportApi()');
+  });
+
+  it('checks managed recovery quarantine before startup Provider sync', () => {
+    const source = readFileSync(join(process.cwd(), 'electron/main/index.ts'), 'utf8');
+    const markerCheck = source.indexOf('await hasManagedRuntimeMutationMarker()');
+    const providerSync = source.indexOf('await syncAllProviderAuthToRuntime()', markerCheck);
+    const gatewayStart = source.indexOf('await gatewayManager.start()', providerSync);
+
+    expect(markerCheck).toBeGreaterThan(-1);
+    expect(providerSync).toBeGreaterThan(markerCheck);
+    expect(gatewayStart).toBeGreaterThan(providerSync);
   });
 
   it('configures browser policy and typed handlers before the initial renderer load', () => {

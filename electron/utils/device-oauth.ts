@@ -23,6 +23,11 @@ import { getProviderDefaultModel } from './provider-registry';
 import { proxyAwareFetch } from './proxy-fetch';
 import { saveOAuthTokenToOpenClaw, setOpenClawDefaultModelWithOverride } from './openclaw-auth';
 import { loginMiniMaxPortalOAuth, type MiniMaxOAuthToken, type MiniMaxRegion } from './minimax-oauth';
+import {
+    assertProviderMutationAllowed,
+    withProviderMutationLock,
+} from '../services/providers/provider-mutation-lock';
+import { getProviderService } from '../services/providers/provider-service';
 
 export type OAuthProviderType = 'minimax-portal' | 'minimax-portal-cn';
 
@@ -38,6 +43,7 @@ class DeviceOAuthManager extends EventEmitter {
     private activeAccountId: string | null = null;
     private activeLabel: string | null = null;
     private active: boolean = false;
+    private activeGeneration = 0;
     private mainWindow: BrowserWindow | null = null;
 
     private async runWithProxyAwareFetch<T>(task: () => Promise<T>): Promise<T> {
@@ -65,6 +71,7 @@ class DeviceOAuthManager extends EventEmitter {
         }
 
         this.active = true;
+        const generation = ++this.activeGeneration;
         this.emit('oauth:start', { provider, accountId: options?.accountId || provider });
         this.activeProvider = provider;
         this.activeAccountId = options?.accountId || provider;
@@ -73,13 +80,13 @@ class DeviceOAuthManager extends EventEmitter {
         try {
             if (provider === 'minimax-portal' || provider === 'minimax-portal-cn') {
                 const actualRegion = provider === 'minimax-portal-cn' ? 'cn' : (region || 'global');
-                await this.runMiniMaxFlow(actualRegion, provider);
+                await this.runMiniMaxFlow(actualRegion, provider, generation);
             } else {
                 throw new Error(`Unsupported OAuth provider type: ${provider}`);
             }
             return true;
         } catch (error) {
-            if (!this.active) {
+            if (!this.active || this.activeGeneration !== generation) {
                 // Flow was cancelled — not an error
                 return false;
             }
@@ -94,6 +101,7 @@ class DeviceOAuthManager extends EventEmitter {
     }
 
     async stopFlow(): Promise<void> {
+        this.activeGeneration += 1;
         this.active = false;
         this.activeProvider = null;
         this.activeAccountId = null;
@@ -105,7 +113,11 @@ class DeviceOAuthManager extends EventEmitter {
     // MiniMax flow
     // ─────────────────────────────────────────────────────────
 
-    private async runMiniMaxFlow(region?: MiniMaxRegion, providerType: OAuthProviderType = 'minimax-portal'): Promise<void> {
+    private async runMiniMaxFlow(
+        region: MiniMaxRegion | undefined,
+        providerType: OAuthProviderType,
+        generation: number,
+    ): Promise<void> {
         const provider = this.activeProvider!;
 
         const token: MiniMaxOAuthToken = await this.runWithProxyAwareFetch(() => loginMiniMaxPortalOAuth({
@@ -118,7 +130,7 @@ class DeviceOAuthManager extends EventEmitter {
                 );
             },
             note: async (message: string, _title?: string) => {
-                if (!this.active) return;
+                if (!this.active || this.activeGeneration !== generation) return;
                 // The extension calls note() with a message containing
                 // the user_code and verification_uri — parse them for the UI
                 const { verificationUri, userCode } = this.parseNote(message);
@@ -134,7 +146,7 @@ class DeviceOAuthManager extends EventEmitter {
             },
         }));
 
-        if (!this.active) return;
+        if (!this.active || this.activeGeneration !== generation) return;
 
         await this.onSuccess(providerType, {
             access: token.access,
@@ -145,7 +157,7 @@ class DeviceOAuthManager extends EventEmitter {
             // Revert back to anthropic-messages
             api: 'anthropic-messages',
             region,
-        });
+        }, generation);
     }
 
 
@@ -161,83 +173,81 @@ class DeviceOAuthManager extends EventEmitter {
         resourceUrl?: string;
         api: 'anthropic-messages' | 'openai-completions';
         region?: MiniMaxRegion;
-    }) {
+    }, generation: number) {
         const accountId = this.activeAccountId || providerType;
         const accountLabel = this.activeLabel;
-        this.active = false;
-        this.activeProvider = null;
-        this.activeAccountId = null;
-        this.activeLabel = null;
-        logger.info(`[DeviceOAuth] Successfully completed OAuth for ${providerType}`);
+        const completed = await withProviderMutationLock(async () => {
+            if (!this.active || this.activeGeneration !== generation) return false;
+            const providerService = getProviderService();
+            const existingAccount = await providerService.getAccount(accountId);
+            assertProviderMutationAllowed(
+                await providerService.getAccount('openai'),
+                accountId,
+                existingAccount,
+                { id: accountId, vendorId: providerType },
+            );
 
-        // 1. Write OAuth token to OpenClaw's auth-profiles.json in native OAuth format.
-        //    (matches what `openclaw models auth login` → upsertAuthProfile writes).
-        //    We save both MiniMax providers to the generic "minimax-portal" profile
-        //    so OpenClaw's gateway auto-refresher knows how to find it.
-        try {
-            const tokenProviderId = providerType.startsWith('minimax-portal') ? 'minimax-portal' : providerType;
-            await saveOAuthTokenToOpenClaw(tokenProviderId, {
-                access: token.access,
-                refresh: token.refresh,
-                expires: token.expires,
-            });
-        } catch (err) {
-            logger.warn(`[DeviceOAuth] Failed to save OAuth token to OpenClaw:`, err);
-        }
+            // Persist OAuth token, runtime config, and Provider record as one local generation.
+            try {
+                const tokenProviderId = providerType.startsWith('minimax-portal') ? 'minimax-portal' : providerType;
+                await saveOAuthTokenToOpenClaw(tokenProviderId, {
+                    access: token.access,
+                    refresh: token.refresh,
+                    expires: token.expires,
+                });
+            } catch (err) {
+                logger.warn(`[DeviceOAuth] Failed to save OAuth token to OpenClaw:`, err);
+            }
 
-        // 2. Write openclaw.json: set default model + provider config (baseUrl/api/models)
-        //    This mirrors what the OpenClaw plugin's configPatch does after CLI login.
-        //    The baseUrl comes from token.resourceUrl (per-account URL from the OAuth server)
-        //    or falls back to the provider's default public endpoint.
-        const defaultBaseUrl = providerType === 'minimax-portal'
-            ? 'https://api.minimax.io/anthropic'
-            : 'https://api.minimaxi.com/anthropic';
+            const defaultBaseUrl = providerType === 'minimax-portal'
+                ? 'https://api.minimax.io/anthropic'
+                : 'https://api.minimaxi.com/anthropic';
+            let baseUrl = token.resourceUrl || defaultBaseUrl;
+            if (baseUrl && !baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
+                baseUrl = 'https://' + baseUrl;
+            }
+            if (providerType.startsWith('minimax-portal') && baseUrl) {
+                baseUrl = baseUrl.replace(/\/v1$/, '').replace(/\/anthropic$/, '').replace(/\/$/, '') + '/anthropic';
+            }
 
-        let baseUrl = token.resourceUrl || defaultBaseUrl;
+            try {
+                const tokenProviderId = providerType.startsWith('minimax-portal') ? 'minimax-portal' : providerType;
+                await setOpenClawDefaultModelWithOverride(tokenProviderId, undefined, {
+                    baseUrl,
+                    api: token.api,
+                    authHeader: providerType.startsWith('minimax-portal') ? true : undefined,
+                    apiKeyEnv: 'minimax-oauth',
+                });
+            } catch (err) {
+                logger.warn(`[DeviceOAuth] Failed to configure openclaw models:`, err);
+            }
 
-        // Ensure baseUrl has a protocol prefix
-        if (baseUrl && !baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
-            baseUrl = 'https://' + baseUrl;
-        }
-
-        // Ensure the base URL ends with /anthropic
-        if (providerType.startsWith('minimax-portal') && baseUrl) {
-            baseUrl = baseUrl.replace(/\/v1$/, '').replace(/\/anthropic$/, '').replace(/\/$/, '') + '/anthropic';
-        }
-
-        try {
-            const tokenProviderId = providerType.startsWith('minimax-portal') ? 'minimax-portal' : providerType;
-            await setOpenClawDefaultModelWithOverride(tokenProviderId, undefined, {
+            const existing = await getProvider(accountId);
+            const nameMap: Record<OAuthProviderType, string> = {
+                'minimax-portal': 'MiniMax (Global)',
+                'minimax-portal-cn': 'MiniMax (CN)',
+            };
+            const providerConfig: ProviderConfig = {
+                id: accountId,
+                name: accountLabel || nameMap[providerType as OAuthProviderType] || providerType,
+                type: providerType,
+                enabled: existing?.enabled ?? true,
                 baseUrl,
-                api: token.api,
-                // Tells OpenClaw's anthropic adapter to use `Authorization: Bearer` instead of `x-api-key`
-                authHeader: providerType.startsWith('minimax-portal') ? true : undefined,
-                // OAuth placeholder — tells Gateway to resolve credentials
-                // from auth-profiles.json (type: 'oauth') instead of a static API key.
-                apiKeyEnv: 'minimax-oauth',
-            });
-        } catch (err) {
-            logger.warn(`[DeviceOAuth] Failed to configure openclaw models:`, err);
-        }
+                model: getProviderDefaultModel(providerType) || existing?.model,
+                createdAt: existing?.createdAt || new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+            };
+            await saveProvider(providerConfig);
 
-        // 3. Save provider record in ClawX's own store so UI shows it as configured
-        const existing = await getProvider(accountId);
-        const nameMap: Record<OAuthProviderType, string> = {
-            'minimax-portal': 'MiniMax (Global)',
-            'minimax-portal-cn': 'MiniMax (CN)',
-        };
-        const providerConfig: ProviderConfig = {
-            id: accountId,
-            name: accountLabel || nameMap[providerType as OAuthProviderType] || providerType,
-            type: providerType,
-            enabled: existing?.enabled ?? true,
-            baseUrl, // Save the dynamically resolved URL (Global vs CN)
+            this.active = false;
+            this.activeProvider = null;
+            this.activeAccountId = null;
+            this.activeLabel = null;
+            return true;
+        });
 
-            model: getProviderDefaultModel(providerType) || existing?.model,
-            createdAt: existing?.createdAt || new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-        };
-        await saveProvider(providerConfig);
+        if (!completed) return;
+        logger.info(`[DeviceOAuth] Successfully completed OAuth for ${providerType}`);
 
         // 4. Emit success internally so the main process can restart the Gateway
         this.emit('oauth:success', { provider: providerType, accountId });

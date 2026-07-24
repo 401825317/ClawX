@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { mkdir, readFile, rm, writeFile } from 'fs/promises';
+import { chmod, mkdir, readFile, rm, stat, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -59,14 +59,32 @@ async function readOpenClawJson(): Promise<Record<string, unknown>> {
 }
 
 async function readAuthProfiles(agentId: string): Promise<Record<string, unknown>> {
-  const content = await readFile(join(testHome, '.openclaw', 'agents', agentId, 'agent', 'auth-profiles.json'), 'utf8');
+  const content = await readFile(getAgentAuthProfilesPath(agentId), 'utf8');
   return JSON.parse(content) as Record<string, unknown>;
+}
+
+function getAgentAuthProfilesPath(agentId: string): string {
+  return join(testHome, '.openclaw', 'agents', agentId, 'agent', 'auth-profiles.json');
 }
 
 async function writeAgentAuthProfiles(agentId: string, store: Record<string, unknown>): Promise<void> {
   const agentDir = join(testHome, '.openclaw', 'agents', agentId, 'agent');
   await mkdir(agentDir, { recursive: true });
-  await writeFile(join(agentDir, 'auth-profiles.json'), JSON.stringify(store, null, 2), 'utf8');
+  await writeFile(getAgentAuthProfilesPath(agentId), JSON.stringify(store, null, 2), 'utf8');
+}
+
+async function fileMode(filePath: string): Promise<number> {
+  return (await stat(filePath)).mode & 0o777;
+}
+
+function getAgentModelsPath(agentId: string): string {
+  return join(testHome, '.openclaw', 'agents', agentId, 'agent', 'models.json');
+}
+
+async function writeAgentModelsJson(agentId: string, content: string): Promise<void> {
+  const modelsPath = getAgentModelsPath(agentId);
+  await mkdir(join(modelsPath, '..'), { recursive: true });
+  await writeFile(modelsPath, content, 'utf8');
 }
 
 describe('saveProviderKeyToOpenClaw', () => {
@@ -137,6 +155,560 @@ describe('saveProviderKeyToOpenClaw', () => {
     );
 
     logSpy.mockRestore();
+  });
+});
+
+describe('managed auth profiles transaction', () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.restoreAllMocks();
+    await rm(testHome, { recursive: true, force: true });
+    await rm(testUserData, { recursive: true, force: true });
+  });
+
+  it('strictly replaces every OpenAI profile and restores the original OAuth stores', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    const originalStore = {
+      version: 1,
+      profiles: {
+        'openai:default': {
+          type: 'oauth',
+          provider: 'openai',
+          access: 'original-access',
+          refresh: 'original-refresh',
+          expires: 123,
+        },
+        'personal-openai-oauth': {
+          type: 'oauth',
+          provider: 'openai',
+          access: 'backup-access',
+          refresh: 'backup-refresh',
+          expires: 456,
+        },
+        'openai-codex:default': {
+          type: 'oauth',
+          provider: 'openai-codex',
+          access: 'legacy-codex-access',
+          refresh: 'legacy-codex-refresh',
+          expires: 789,
+        },
+        'deepseek:default': {
+          type: 'api_key',
+          provider: 'deepseek',
+          key: 'deepseek-key',
+          metadata: { region: 'cn' },
+        },
+      },
+      order: {
+        openai: ['openai:default', 'personal-openai-oauth'],
+        'openai-codex': ['openai-codex:default'],
+        deepseek: ['deepseek:default'],
+        routed: ['personal-openai-oauth', 'deepseek:default'],
+      },
+      lastGood: {
+        openai: 'personal-openai-oauth',
+        'openai-codex': 'openai-codex:default',
+        deepseek: 'deepseek:default',
+        routed: 'personal-openai-oauth',
+      },
+      usageStats: {
+        'openai:default': { cooldownUntil: 99_999, errorCount: 1 },
+        'personal-openai-oauth': { disabledUntil: 88_888, errorCount: 2 },
+        'openai-codex:default': { cooldownUntil: 77_777, errorCount: 3 },
+        'deepseek:default': { lastUsed: 7 },
+      },
+    };
+    const originalJson = `${JSON.stringify(originalStore, null, 4)}\n`;
+    const jsonPath = getAgentAuthProfilesPath('main');
+    await mkdir(join(jsonPath, '..'), { recursive: true });
+    await writeFile(jsonPath, originalJson);
+    await chmod(jsonPath, 0o640);
+
+    const {
+      readAuthProfilesFromSqlite,
+      snapshotAuthProfilesSqlitePrimaryRows,
+      writeAuthProfilesToSqlite,
+    } = await import('@electron/utils/openclaw-auth-sqlite');
+    writeAuthProfilesToSqlite(originalStore, 'main');
+    const originalSqliteRows = snapshotAuthProfilesSqlitePrimaryRows('main');
+    const {
+      installManagedAgentOpenAiApiKey,
+      restoreManagedAgentAuthProfiles,
+      snapshotManagedAgentAuthProfiles,
+    } = await import('@electron/utils/openclaw-auth');
+    const snapshot = await snapshotManagedAgentAuthProfiles();
+
+    await installManagedAgentOpenAiApiKey(snapshot, '  managed-openai-key  ');
+
+    const installedJson = await readAuthProfiles('main');
+    const installedProfiles = installedJson.profiles as Record<string, unknown>;
+    expect(Object.keys(installedProfiles).sort()).toEqual(['deepseek:default', 'openai:default']);
+    expect(installedProfiles['openai:default']).toEqual({
+      type: 'api_key',
+      provider: 'openai',
+      key: 'managed-openai-key',
+    });
+    expect(installedProfiles['deepseek:default']).toEqual(originalStore.profiles['deepseek:default']);
+    expect(installedJson.order).toEqual({
+      openai: ['openai:default'],
+      deepseek: ['deepseek:default'],
+      routed: ['deepseek:default'],
+    });
+    expect(installedJson.lastGood).toEqual({
+      openai: 'openai:default',
+      deepseek: 'deepseek:default',
+    });
+    expect(installedJson.usageStats).toEqual({
+      'deepseek:default': { lastUsed: 7 },
+    });
+    expect(readAuthProfilesFromSqlite('main')).toEqual(installedJson);
+
+    await restoreManagedAgentAuthProfiles(snapshot);
+
+    expect(await readFile(jsonPath, 'utf8')).toBe(originalJson);
+    expect(await fileMode(jsonPath)).toBe(0o640);
+    expect(snapshotAuthProfilesSqlitePrimaryRows('main')).toEqual(originalSqliteRows);
+    expect(readAuthProfilesFromSqlite('main')?.profiles['openai:default']).toEqual(
+      originalStore.profiles['openai:default'],
+    );
+    expect(readAuthProfilesFromSqlite('main')?.profiles['personal-openai-oauth']).toEqual(
+      originalStore.profiles['personal-openai-oauth'],
+    );
+  });
+
+  it('removes every dynamic managed relay profile from JSON and SQLite while preserving ordinary custom providers', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    const jsonStore = {
+      version: 1,
+      profiles: {
+        'relay-primary-with-arbitrary-id': {
+          type: 'api_key',
+          provider: 'legacy-uclaw-relay',
+          key: 'legacy-json-key',
+        },
+        'ordinary-custom:default': {
+          type: 'api_key',
+          provider: 'ordinary-custom',
+          key: 'ordinary-json-key',
+        },
+      },
+      order: {
+        'legacy-uclaw-relay': ['relay-primary-with-arbitrary-id'],
+        routed: ['relay-primary-with-arbitrary-id', 'ordinary-custom:default'],
+        'ordinary-custom': ['ordinary-custom:default'],
+      },
+      lastGood: {
+        'legacy-uclaw-relay': 'relay-primary-with-arbitrary-id',
+        routed: 'relay-primary-with-arbitrary-id',
+        'ordinary-custom': 'ordinary-custom:default',
+      },
+      usageStats: {
+        'relay-primary-with-arbitrary-id': { errorCount: 2 },
+        'ordinary-custom:default': { lastUsed: 7 },
+      },
+    };
+    const sqliteStore = {
+      version: 1,
+      profiles: {
+        'sqlite-relay-profile': {
+          type: 'api_key',
+          provider: 'legacy-uclaw-relay',
+          key: 'legacy-sqlite-key',
+        },
+        'sqlite-custom-profile': {
+          type: 'api_key',
+          provider: 'sqlite-custom',
+          key: 'ordinary-sqlite-key',
+        },
+      },
+      order: {
+        'legacy-uclaw-relay': ['sqlite-relay-profile'],
+        'sqlite-custom': ['sqlite-custom-profile'],
+      },
+      lastGood: {
+        'legacy-uclaw-relay': 'sqlite-relay-profile',
+        'sqlite-custom': 'sqlite-custom-profile',
+      },
+      usageStats: {
+        'sqlite-relay-profile': { cooldownUntil: 88_888 },
+        'sqlite-custom-profile': { lastUsed: 9 },
+      },
+    };
+    await writeAgentAuthProfiles('main', jsonStore);
+    const {
+      readAuthProfilesFromSqlite,
+      writeAuthProfilesToSqlite,
+    } = await import('@electron/utils/openclaw-auth-sqlite');
+    writeAuthProfilesToSqlite(sqliteStore, 'main');
+    const { removeManagedAgentOpenAiCredentials } = await import('@electron/utils/openclaw-auth');
+
+    await removeManagedAgentOpenAiCredentials(['legacy-uclaw-relay']);
+
+    const cleanedJson = await readAuthProfiles('main');
+    expect(cleanedJson.profiles).toEqual({
+      'ordinary-custom:default': jsonStore.profiles['ordinary-custom:default'],
+    });
+    expect(cleanedJson.order).toEqual({
+      routed: ['ordinary-custom:default'],
+      'ordinary-custom': ['ordinary-custom:default'],
+    });
+    expect(cleanedJson.lastGood).toEqual({
+      'ordinary-custom': 'ordinary-custom:default',
+    });
+    expect(cleanedJson.usageStats).toEqual({
+      'ordinary-custom:default': { lastUsed: 7 },
+    });
+
+    const cleanedSqlite = readAuthProfilesFromSqlite('main');
+    expect(cleanedSqlite?.profiles).toEqual({
+      'sqlite-custom-profile': sqliteStore.profiles['sqlite-custom-profile'],
+    });
+    expect(cleanedSqlite?.order).toEqual({ 'sqlite-custom': ['sqlite-custom-profile'] });
+    expect(cleanedSqlite?.lastGood).toEqual({ 'sqlite-custom': 'sqlite-custom-profile' });
+    expect(cleanedSqlite?.usageStats).toEqual({
+      'sqlite-custom-profile': { lastUsed: 9 },
+    });
+  });
+
+  it('preserves each store own non-OpenAI profiles when JSON and SQLite differ', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    await writeAgentAuthProfiles('main', {
+      version: 1,
+      profiles: {
+        'deepseek:default': { type: 'api_key', provider: 'deepseek', key: 'json-deepseek-key' },
+      },
+      order: { deepseek: ['deepseek:default'] },
+    });
+    const {
+      readAuthProfilesFromSqlite,
+      writeAuthProfilesToSqlite,
+    } = await import('@electron/utils/openclaw-auth-sqlite');
+    writeAuthProfilesToSqlite({
+      version: 1,
+      profiles: {
+        'moonshot:default': { type: 'api_key', provider: 'moonshot', key: 'sqlite-moonshot-key' },
+      },
+      order: { moonshot: ['moonshot:default'] },
+    }, 'main');
+    const {
+      installManagedAgentOpenAiApiKey,
+      snapshotManagedAgentAuthProfiles,
+    } = await import('@electron/utils/openclaw-auth');
+
+    const snapshot = await snapshotManagedAgentAuthProfiles();
+    await installManagedAgentOpenAiApiKey(snapshot, 'managed-key');
+
+    const jsonProfiles = (await readAuthProfiles('main')).profiles as Record<string, unknown>;
+    const sqliteProfiles = readAuthProfilesFromSqlite('main')?.profiles ?? {};
+    expect(Object.keys(jsonProfiles).sort()).toEqual(['deepseek:default', 'openai:default']);
+    expect(jsonProfiles['moonshot:default']).toBeUndefined();
+    expect(Object.keys(sqliteProfiles).sort()).toEqual(['moonshot:default', 'openai:default']);
+    expect(sqliteProfiles['deepseek:default']).toBeUndefined();
+  });
+
+  it('seeds a missing SQLite store from JSON before replacing OpenAI', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    await writeAgentAuthProfiles('main', {
+      version: 1,
+      profiles: {
+        'deepseek:default': { type: 'api_key', provider: 'deepseek', key: 'json-deepseek-key' },
+      },
+    });
+    const {
+      getAuthProfilesSqlitePath,
+      readAuthProfilesFromSqlite,
+    } = await import('@electron/utils/openclaw-auth-sqlite');
+    const {
+      installManagedAgentOpenAiApiKey,
+      snapshotManagedAgentAuthProfiles,
+    } = await import('@electron/utils/openclaw-auth');
+
+    await expect(readFile(getAuthProfilesSqlitePath('main'))).rejects.toMatchObject({ code: 'ENOENT' });
+    const snapshot = await snapshotManagedAgentAuthProfiles();
+    await installManagedAgentOpenAiApiKey(snapshot, 'managed-key');
+
+    expect(Object.keys((await readAuthProfiles('main')).profiles as Record<string, unknown>).sort())
+      .toEqual(['deepseek:default', 'openai:default']);
+    expect(Object.keys(readAuthProfilesFromSqlite('main')?.profiles ?? {}).sort())
+      .toEqual(['deepseek:default', 'openai:default']);
+  });
+
+  it('seeds a missing JSON store from SQLite before replacing OpenAI', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    const {
+      readAuthProfilesFromSqlite,
+      writeAuthProfilesToSqlite,
+    } = await import('@electron/utils/openclaw-auth-sqlite');
+    writeAuthProfilesToSqlite({
+      version: 1,
+      profiles: {
+        'moonshot:default': { type: 'api_key', provider: 'moonshot', key: 'sqlite-moonshot-key' },
+      },
+    }, 'main');
+    const {
+      installManagedAgentOpenAiApiKey,
+      snapshotManagedAgentAuthProfiles,
+    } = await import('@electron/utils/openclaw-auth');
+
+    await expect(readFile(getAgentAuthProfilesPath('main'))).rejects.toMatchObject({ code: 'ENOENT' });
+    const snapshot = await snapshotManagedAgentAuthProfiles();
+    await installManagedAgentOpenAiApiKey(snapshot, 'managed-key');
+
+    expect(Object.keys((await readAuthProfiles('main')).profiles as Record<string, unknown>).sort())
+      .toEqual(['moonshot:default', 'openai:default']);
+    expect(Object.keys(readAuthProfilesFromSqlite('main')?.profiles ?? {}).sort())
+      .toEqual(['moonshot:default', 'openai:default']);
+  });
+
+  it('falls back to main when the frozen discovery result is empty', async () => {
+    await mkdir(join(testHome, '.openclaw', 'agents'), { recursive: true });
+    const agentConfig = await import('@electron/utils/agent-config');
+    vi.spyOn(agentConfig, 'listConfiguredAgentIds').mockResolvedValue([]);
+    const {
+      installManagedAgentOpenAiApiKey,
+      restoreManagedAgentAuthProfiles,
+      snapshotManagedAgentAuthProfiles,
+    } = await import('@electron/utils/openclaw-auth');
+
+    const snapshot = await snapshotManagedAgentAuthProfiles();
+    await installManagedAgentOpenAiApiKey(snapshot, 'managed-main-key');
+
+    expect(snapshot).toEqual({});
+    expect((await readAuthProfiles('main')).profiles).toEqual({
+      'openai:default': {
+        type: 'api_key',
+        provider: 'openai',
+        key: 'managed-main-key',
+      },
+    });
+
+    await restoreManagedAgentAuthProfiles(snapshot);
+    await expect(readFile(getAgentAuthProfilesPath('main'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rejects a concurrent auth JSON change before writing any frozen agent', async () => {
+    await writeOpenClawJson({
+      agents: { list: [{ id: 'main', name: 'Main' }, { id: 'worker', name: 'Worker' }] },
+    });
+    await writeAgentAuthProfiles('main', {
+      version: 1,
+      profiles: { 'deepseek:default': { type: 'api_key', provider: 'deepseek', key: 'main-key' } },
+    });
+    await writeAgentAuthProfiles('worker', {
+      version: 1,
+      profiles: { 'deepseek:default': { type: 'api_key', provider: 'deepseek', key: 'worker-key' } },
+    });
+    const mainOriginal = await readFile(getAgentAuthProfilesPath('main'), 'utf8');
+    const {
+      getAuthProfilesSqlitePath,
+    } = await import('@electron/utils/openclaw-auth-sqlite');
+    const {
+      installManagedAgentOpenAiApiKey,
+      snapshotManagedAgentAuthProfiles,
+    } = await import('@electron/utils/openclaw-auth');
+    const snapshot = await snapshotManagedAgentAuthProfiles();
+    const concurrentWorker = JSON.stringify({
+      version: 1,
+      profiles: { 'moonshot:default': { type: 'api_key', provider: 'moonshot', key: 'concurrent-key' } },
+    });
+    await writeFile(getAgentAuthProfilesPath('worker'), concurrentWorker, 'utf8');
+
+    await expect(installManagedAgentOpenAiApiKey(snapshot, 'managed-key')).rejects.toThrow('worker');
+
+    expect(await readFile(getAgentAuthProfilesPath('main'), 'utf8')).toBe(mainOriginal);
+    expect(await readFile(getAgentAuthProfilesPath('worker'), 'utf8')).toBe(concurrentWorker);
+    await expect(readFile(getAuthProfilesSqlitePath('main'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readFile(getAuthProfilesSqlitePath('worker'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rejects a concurrently created auth JSON file when the snapshot target was missing', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    const { getAuthProfilesSqlitePath } = await import('@electron/utils/openclaw-auth-sqlite');
+    const {
+      installManagedAgentOpenAiApiKey,
+      snapshotManagedAgentAuthProfiles,
+    } = await import('@electron/utils/openclaw-auth');
+    const snapshot = await snapshotManagedAgentAuthProfiles();
+    const concurrentJson = JSON.stringify({
+      version: 1,
+      profiles: { 'deepseek:default': { type: 'api_key', provider: 'deepseek', key: 'concurrent-key' } },
+    });
+    const authPath = getAgentAuthProfilesPath('main');
+    await mkdir(join(authPath, '..'), { recursive: true });
+    await writeFile(authPath, concurrentJson, 'utf8');
+
+    await expect(installManagedAgentOpenAiApiKey(snapshot, 'managed-key')).rejects.toThrow('main');
+
+    expect(await readFile(authPath, 'utf8')).toBe(concurrentJson);
+    await expect(readFile(getAuthProfilesSqlitePath('main'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('refuses to overwrite a concurrent auth JSON change during rollback', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    await writeAgentAuthProfiles('main', {
+      version: 1,
+      profiles: { 'deepseek:default': { type: 'api_key', provider: 'deepseek', key: 'original-key' } },
+    });
+    const { getAuthProfilesSqlitePath } = await import('@electron/utils/openclaw-auth-sqlite');
+    const {
+      installManagedAgentOpenAiApiKey,
+      restoreManagedAgentAuthProfiles,
+      snapshotManagedAgentAuthProfiles,
+    } = await import('@electron/utils/openclaw-auth');
+    const snapshot = await snapshotManagedAgentAuthProfiles();
+    await installManagedAgentOpenAiApiKey(snapshot, 'managed-key');
+    const concurrentJson = JSON.stringify({
+      version: 1,
+      profiles: { 'moonshot:default': { type: 'api_key', provider: 'moonshot', key: 'concurrent-key' } },
+    });
+    await writeFile(getAgentAuthProfilesPath('main'), concurrentJson, 'utf8');
+
+    const error = await restoreManagedAgentAuthProfiles(snapshot).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(AggregateError);
+    expect(await readFile(getAgentAuthProfilesPath('main'), 'utf8')).toBe(concurrentJson);
+    await expect(readFile(getAuthProfilesSqlitePath('main'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('preserves a concurrent auth JSON created after installing a missing target', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    const { getAuthProfilesSqlitePath } = await import('@electron/utils/openclaw-auth-sqlite');
+    const {
+      installManagedAgentOpenAiApiKey,
+      restoreManagedAgentAuthProfiles,
+      snapshotManagedAgentAuthProfiles,
+    } = await import('@electron/utils/openclaw-auth');
+    const snapshot = await snapshotManagedAgentAuthProfiles();
+    await installManagedAgentOpenAiApiKey(snapshot, 'managed-key');
+    const concurrentJson = JSON.stringify({
+      version: 1,
+      profiles: { 'deepseek:default': { type: 'api_key', provider: 'deepseek', key: 'concurrent-key' } },
+    });
+    await writeFile(getAgentAuthProfilesPath('main'), concurrentJson, 'utf8');
+
+    const error = await restoreManagedAgentAuthProfiles(snapshot).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(AggregateError);
+    expect(await readFile(getAgentAuthProfilesPath('main'), 'utf8')).toBe(concurrentJson);
+    await expect(readFile(getAuthProfilesSqlitePath('main'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it.each([
+    ['malformed JSON', '{not-json'],
+    ['a missing profiles object', JSON.stringify({ version: 1, order: { openai: [] } })],
+  ])('rejects %s before writing when SQLite has no usable store', async (_label, content) => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    const jsonPath = getAgentAuthProfilesPath('main');
+    await mkdir(join(jsonPath, '..'), { recursive: true });
+    await writeFile(jsonPath, content);
+    const { getAuthProfilesSqlitePath } = await import('@electron/utils/openclaw-auth-sqlite');
+    const { snapshotManagedAgentAuthProfiles } = await import('@electron/utils/openclaw-auth');
+
+    await expect(snapshotManagedAgentAuthProfiles()).rejects.toThrow('Invalid auth-profiles.json');
+
+    expect(await readFile(jsonPath, 'utf8')).toBe(content);
+    await expect(readFile(getAuthProfilesSqlitePath('main'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rejects invalid JSON instead of replacing it from a valid SQLite store', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    const jsonPath = getAgentAuthProfilesPath('main');
+    await mkdir(join(jsonPath, '..'), { recursive: true });
+    await writeFile(jsonPath, '{invalid-json', 'utf8');
+    const { writeAuthProfilesToSqlite } = await import('@electron/utils/openclaw-auth-sqlite');
+    writeAuthProfilesToSqlite({
+      version: 1,
+      profiles: {
+        'deepseek:default': { type: 'api_key', provider: 'deepseek', key: 'sqlite-key' },
+      },
+    }, 'main');
+    const { snapshotManagedAgentAuthProfiles } = await import('@electron/utils/openclaw-auth');
+
+    await expect(snapshotManagedAgentAuthProfiles()).rejects.toThrow('Invalid auth-profiles.json');
+
+    expect(await readFile(jsonPath, 'utf8')).toBe('{invalid-json');
+  });
+
+  it('rejects an invalid SQLite primary store row even when JSON is valid', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    await writeAgentAuthProfiles('main', {
+      version: 1,
+      profiles: {
+        'deepseek:default': { type: 'api_key', provider: 'deepseek', key: 'deepseek-key' },
+      },
+    });
+    const {
+      getAuthProfilesSqlitePath,
+      writeAuthProfilesToSqlite,
+    } = await import('@electron/utils/openclaw-auth-sqlite');
+    writeAuthProfilesToSqlite({
+      version: 1,
+      profiles: {
+        'deepseek:default': { type: 'api_key', provider: 'deepseek', key: 'deepseek-key' },
+      },
+    }, 'main');
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(getAuthProfilesSqlitePath('main'));
+    try {
+      db.prepare('UPDATE auth_profile_store SET store_json = ? WHERE store_key = ?')
+        .run('{invalid-sqlite-json', 'primary');
+    } finally {
+      db.close();
+    }
+    const { snapshotManagedAgentAuthProfiles } = await import('@electron/utils/openclaw-auth');
+
+    await expect(snapshotManagedAgentAuthProfiles()).rejects.toThrow('Invalid SQLite auth profile store');
+  });
+
+  it('continues JSON and later-agent restoration after a SQLite failure', async () => {
+    await writeOpenClawJson({
+      agents: { list: [{ id: 'main', name: 'Main' }, { id: 'worker', name: 'Worker' }] },
+    });
+    const originalJson = new Map<string, string>();
+    const sqliteSnapshots = new Map<string, unknown>();
+    const {
+      getAuthProfilesSqlitePath,
+      snapshotAuthProfilesSqlitePrimaryRows,
+      writeAuthProfilesToSqlite,
+    } = await import('@electron/utils/openclaw-auth-sqlite');
+    for (const agentId of ['main', 'worker']) {
+      const store = {
+        version: 1,
+        profiles: {
+          'openai:default': {
+            type: 'oauth',
+            provider: 'openai',
+            access: `${agentId}-access`,
+            refresh: `${agentId}-refresh`,
+            expires: 123,
+          },
+        },
+        order: { openai: ['openai:default'] },
+        lastGood: { openai: 'openai:default' },
+      };
+      await writeAgentAuthProfiles(agentId, store);
+      originalJson.set(agentId, await readFile(getAgentAuthProfilesPath(agentId), 'utf8'));
+      writeAuthProfilesToSqlite(store, agentId);
+      sqliteSnapshots.set(agentId, snapshotAuthProfilesSqlitePrimaryRows(agentId));
+    }
+    const {
+      installManagedAgentOpenAiApiKey,
+      restoreManagedAgentAuthProfiles,
+      snapshotManagedAgentAuthProfiles,
+    } = await import('@electron/utils/openclaw-auth');
+    const snapshot = await snapshotManagedAgentAuthProfiles();
+    await installManagedAgentOpenAiApiKey(snapshot, 'managed-key');
+    const mainSqlitePath = getAuthProfilesSqlitePath('main');
+    await rm(mainSqlitePath);
+    await mkdir(mainSqlitePath);
+
+    const failure = await restoreManagedAgentAuthProfiles(snapshot).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors).toHaveLength(1);
+    expect(await readFile(getAgentAuthProfilesPath('main'), 'utf8')).toBe(originalJson.get('main'));
+    expect(await readFile(getAgentAuthProfilesPath('worker'), 'utf8')).toBe(originalJson.get('worker'));
+    expect(snapshotAuthProfilesSqlitePrimaryRows('worker')).toEqual(sqliteSnapshots.get('worker'));
   });
 });
 
@@ -1842,6 +2414,457 @@ describe('anthropic-messages maxTokens', () => {
 
     expect(entry.maxTokens).toBe(MINIMAX_M27_MAX_TOKENS);
     expect(models[0]?.maxTokens).toBe(MINIMAX_M27_MAX_TOKENS);
+  });
+});
+
+describe('managed agent models transaction', () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.restoreAllMocks();
+    await rm(testHome, { recursive: true, force: true });
+    await rm(testUserData, { recursive: true, force: true });
+  });
+
+  it('falls back to main when model target discovery is empty', async () => {
+    await mkdir(join(testHome, '.openclaw', 'agents'), { recursive: true });
+    const agentConfig = await import('@electron/utils/agent-config');
+    vi.spyOn(agentConfig, 'listConfiguredAgentIds').mockResolvedValue([]);
+    const {
+      restoreManagedAgentModelsFiles,
+      snapshotManagedAgentModelsFiles,
+      updateManagedAgentModelProviderStrict,
+    } = await import('@electron/utils/openclaw-auth');
+
+    const snapshot = await snapshotManagedAgentModelsFiles();
+    await updateManagedAgentModelProviderStrict(snapshot, {
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      api: 'openai-responses',
+      models: [{ id: 'smart-latest', name: 'smart-latest' }],
+    });
+
+    expect(snapshot).toEqual({});
+    const installed = JSON.parse(await readFile(getAgentModelsPath('main'), 'utf8')) as {
+      providers: Record<string, unknown>;
+    };
+    expect(installed.providers.openai).toBeDefined();
+
+    await restoreManagedAgentModelsFiles(snapshot);
+    await expect(readFile(getAgentModelsPath('main'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('replaces the complete openai provider entry while preserving unrelated data', async () => {
+    await writeOpenClawJson({
+      agents: { list: [{ id: 'main', name: 'Main' }] },
+    });
+    await writeAgentModelsJson('main', JSON.stringify({
+      schemaVersion: 7,
+      customMetadata: { owner: 'user' },
+      providers: {
+        openai: {
+          baseUrl: 'https://personal.example/v1',
+          api: 'openai-responses',
+          apiKey: 'personal-secret',
+          authHeader: false,
+          headers: { 'X-Personal': 'secret' },
+          fallback: 'personal-fallback',
+          models: [{ id: 'personal-model', name: 'Personal Model' }],
+        },
+        'openai-codex': {
+          baseUrl: 'https://chatgpt.com/backend-api/codex',
+          api: 'openai-chatgpt-responses',
+          models: [{ id: 'gpt-5.4', name: 'Legacy Codex' }],
+        },
+        'legacy-uclaw-relay': {
+          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1/',
+          api: 'openai-responses',
+          modelId: 'legacy-uclaw-relay/smart-latest',
+        },
+        'ordinary-custom': {
+          baseUrl: 'https://llm.example.com/v1',
+          api: 'openai-responses',
+          models: [{ id: 'smart-latest', name: 'Unrelated Smart Model' }],
+        },
+        'same-host-other-model': {
+          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+          api: 'openai-responses',
+          models: [{ id: 'other-model', name: 'Other Model' }],
+        },
+        deepseek: {
+          baseUrl: 'https://api.deepseek.com/v1',
+          api: 'openai-completions',
+          models: [{ id: 'deepseek-chat', name: 'DeepSeek Chat' }],
+        },
+      },
+    }, null, 2));
+
+    const {
+      snapshotManagedAgentModelsFiles,
+      updateManagedAgentModelProviderStrict,
+    } = await import('@electron/utils/openclaw-auth');
+    const snapshot = await snapshotManagedAgentModelsFiles();
+    const managedEntry = {
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      api: 'openai-completions',
+      authHeader: true,
+      models: [{
+        id: 'smart-latest',
+        name: 'smart-latest',
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      }],
+    };
+
+    await updateManagedAgentModelProviderStrict(snapshot, managedEntry);
+
+    const result = JSON.parse(await readFile(getAgentModelsPath('main'), 'utf8')) as Record<string, unknown>;
+    const providers = result.providers as Record<string, unknown>;
+    expect(result.schemaVersion).toBe(7);
+    expect(result.customMetadata).toEqual({ owner: 'user' });
+    expect(providers.deepseek).toEqual({
+      baseUrl: 'https://api.deepseek.com/v1',
+      api: 'openai-completions',
+      models: [{ id: 'deepseek-chat', name: 'DeepSeek Chat' }],
+    });
+    expect(providers.openai).toEqual(managedEntry);
+    expect(providers['openai-codex']).toBeUndefined();
+    expect(providers['legacy-uclaw-relay']).toBeUndefined();
+    expect(providers['ordinary-custom']).toEqual({
+      baseUrl: 'https://llm.example.com/v1',
+      api: 'openai-responses',
+      models: [{ id: 'smart-latest', name: 'Unrelated Smart Model' }],
+    });
+    expect(providers['same-host-other-model']).toEqual({
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      api: 'openai-responses',
+      models: [{ id: 'other-model', name: 'Other Model' }],
+    });
+  });
+
+  it('discovers managed relay ids from every frozen models.json without matching unrelated custom providers', async () => {
+    await writeOpenClawJson({
+      agents: { list: [{ id: 'main', name: 'Main' }, { id: 'worker', name: 'Worker' }] },
+    });
+    await writeAgentModelsJson('main', JSON.stringify({
+      providers: {
+        openai: { baseUrl: 'https://personal.example/v1', models: [{ id: 'personal-model' }] },
+        'custom-a1b2c3d4': {
+          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1/',
+          models: [{ id: 'smart-latest' }],
+          apiKey: 'legacy-inline-key',
+        },
+        'same-host-other-model': {
+          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+          models: [{ id: 'other-model' }],
+        },
+        'other-host-same-model': {
+          baseUrl: 'https://llm.example.com/v1',
+          models: [{ id: 'smart-latest' }],
+        },
+      },
+    }));
+    await writeAgentModelsJson('worker', JSON.stringify({
+      providers: {
+        'custom-e5f6a7b8': {
+          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+          modelId: 'custom-e5f6a7b8/smart-latest',
+        },
+      },
+    }));
+
+    const {
+      getManagedAgentOpenAiProviderIds,
+      snapshotManagedAgentModelsFiles,
+    } = await import('@electron/utils/openclaw-auth');
+    const snapshot = await snapshotManagedAgentModelsFiles();
+
+    expect(getManagedAgentOpenAiProviderIds(snapshot)).toEqual([
+      'custom-a1b2c3d4',
+      'custom-e5f6a7b8',
+      'openai',
+    ]);
+  });
+
+  it('removes managed relay entries and inline keys while preserving unrelated custom providers', async () => {
+    await writeOpenClawJson({
+      agents: { list: [{ id: 'main', name: 'Main' }, { id: 'worker', name: 'Worker' }] },
+    });
+    await writeAgentModelsJson('main', JSON.stringify({
+      owner: 'main',
+      providers: {
+        openai: { apiKey: 'personal-openai-key', models: [{ id: 'personal-model' }] },
+        'custom-a1b2c3d4': {
+          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+          models: [{ id: 'smart-latest' }],
+          apiKey: 'legacy-inline-key',
+        },
+        'known-managed-id': { apiKey: 'known-managed-key' },
+        'same-host-other-model': {
+          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+          models: [{ id: 'other-model' }],
+          apiKey: 'keep-other-model-key',
+        },
+        'other-host-same-model': {
+          baseUrl: 'https://llm.example.com/v1',
+          models: [{ id: 'smart-latest' }],
+          apiKey: 'keep-other-host-key',
+        },
+      },
+    }));
+    await writeAgentModelsJson('worker', JSON.stringify({
+      providers: {
+        deepseek: { apiKey: 'deepseek-key', models: [{ id: 'deepseek-chat' }] },
+      },
+    }));
+
+    const {
+      getManagedAgentOpenAiProviderIds,
+      removeManagedAgentOpenAiProviders,
+      snapshotManagedAgentModelsFiles,
+    } = await import('@electron/utils/openclaw-auth');
+    const snapshot = await snapshotManagedAgentModelsFiles();
+    const discoveredIds = getManagedAgentOpenAiProviderIds(snapshot);
+    await removeManagedAgentOpenAiProviders(snapshot, [...discoveredIds, 'known-managed-id']);
+
+    const main = JSON.parse(await readFile(getAgentModelsPath('main'), 'utf8')) as {
+      owner: string;
+      providers: Record<string, unknown>;
+    };
+    const worker = JSON.parse(await readFile(getAgentModelsPath('worker'), 'utf8')) as {
+      providers: Record<string, unknown>;
+    };
+    expect(main.owner).toBe('main');
+    expect(Object.keys(main.providers).sort()).toEqual([
+      'other-host-same-model',
+      'same-host-other-model',
+    ]);
+    expect(worker.providers).toEqual({
+      deepseek: { apiKey: 'deepseek-key', models: [{ id: 'deepseek-chat' }] },
+    });
+  });
+
+  it('does not create a missing models.json when there is no managed provider to remove', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    const {
+      removeManagedAgentOpenAiProviders,
+      snapshotManagedAgentModelsFiles,
+    } = await import('@electron/utils/openclaw-auth');
+    const snapshot = await snapshotManagedAgentModelsFiles();
+
+    await removeManagedAgentOpenAiProviders(snapshot);
+
+    await expect(readFile(getAgentModelsPath('main'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('preflights every frozen agent before removing any managed models.json entry', async () => {
+    await writeOpenClawJson({
+      agents: { list: [{ id: 'main', name: 'Main' }, { id: 'worker', name: 'Worker' }] },
+    });
+    const mainOriginal = JSON.stringify({
+      providers: {
+        'custom-a1b2c3d4': {
+          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+          models: [{ id: 'smart-latest' }],
+          apiKey: 'legacy-inline-key',
+        },
+      },
+    });
+    await writeAgentModelsJson('main', mainOriginal);
+    await writeAgentModelsJson('worker', JSON.stringify({
+      providers: {
+        'custom-e5f6a7b8': {
+          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+          models: [{ id: 'smart-latest' }],
+        },
+      },
+    }));
+    const {
+      removeManagedAgentOpenAiProviders,
+      snapshotManagedAgentModelsFiles,
+    } = await import('@electron/utils/openclaw-auth');
+    const snapshot = await snapshotManagedAgentModelsFiles();
+    const workerConcurrent = JSON.stringify({ providers: { deepseek: { apiKey: 'new-key' } } });
+    await writeAgentModelsJson('worker', workerConcurrent);
+
+    await expect(removeManagedAgentOpenAiProviders(snapshot)).rejects.toThrow('worker');
+
+    expect(await readFile(getAgentModelsPath('main'), 'utf8')).toBe(mainOriginal);
+    expect(await readFile(getAgentModelsPath('worker'), 'utf8')).toBe(workerConcurrent);
+  });
+
+  it('preflights every frozen agent before writing any models.json', async () => {
+    await writeOpenClawJson({
+      agents: { list: [{ id: 'main', name: 'Main' }, { id: 'worker', name: 'Worker' }] },
+    });
+    const mainOriginal = '{"owner":"main","providers":{"deepseek":{"api":"openai-completions"}}}\n';
+    const workerOriginal = '{\n  "owner": "worker",\n  "providers": {}\n}\n';
+    await writeAgentModelsJson('main', mainOriginal);
+    await writeAgentModelsJson('worker', workerOriginal);
+
+    const {
+      snapshotManagedAgentModelsFiles,
+      updateManagedAgentModelProviderStrict,
+    } = await import('@electron/utils/openclaw-auth');
+    const snapshot = await snapshotManagedAgentModelsFiles();
+    const workerPath = getAgentModelsPath('worker');
+    await rm(workerPath);
+    await mkdir(workerPath);
+
+    await expect(updateManagedAgentModelProviderStrict(snapshot, {
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      api: 'openai-completions',
+      models: [{ id: 'smart-latest', name: 'smart-latest' }],
+    })).rejects.toThrow('worker');
+
+    expect(await readFile(getAgentModelsPath('main'), 'utf8')).toBe(mainOriginal);
+    expect((await stat(workerPath)).isDirectory()).toBe(true);
+  });
+
+  it('rejects a concurrently created models.json when the snapshot target was missing', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    const {
+      snapshotManagedAgentModelsFiles,
+      updateManagedAgentModelProviderStrict,
+    } = await import('@electron/utils/openclaw-auth');
+    const snapshot = await snapshotManagedAgentModelsFiles();
+    const concurrentModels = '{"providers":{"deepseek":{"api":"openai-completions"}}}\n';
+    await writeAgentModelsJson('main', concurrentModels);
+
+    await expect(updateManagedAgentModelProviderStrict(snapshot, {
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      api: 'openai-responses',
+      models: [{ id: 'smart-latest', name: 'smart-latest' }],
+    })).rejects.toThrow('main');
+
+    expect(await readFile(getAgentModelsPath('main'), 'utf8')).toBe(concurrentModels);
+  });
+
+  it('deletes models.json files that did not exist before the transaction', async () => {
+    await writeOpenClawJson({
+      agents: { list: [{ id: 'main', name: 'Main' }, { id: 'worker', name: 'Worker' }] },
+    });
+
+    const {
+      restoreManagedAgentModelsFiles,
+      snapshotManagedAgentModelsFiles,
+      updateManagedAgentModelProviderStrict,
+    } = await import('@electron/utils/openclaw-auth');
+    const snapshot = await snapshotManagedAgentModelsFiles();
+
+    await updateManagedAgentModelProviderStrict(snapshot, {
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      api: 'openai-completions',
+      models: [{ id: 'smart-latest', name: 'smart-latest' }],
+    });
+    await restoreManagedAgentModelsFiles(snapshot);
+
+    await expect(readFile(getAgentModelsPath('main'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readFile(getAgentModelsPath('worker'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('refuses to overwrite a concurrent models.json change during rollback', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    await writeAgentModelsJson('main', '{"providers":{"deepseek":{"api":"openai-completions"}}}\n');
+    const {
+      restoreManagedAgentModelsFiles,
+      snapshotManagedAgentModelsFiles,
+      updateManagedAgentModelProviderStrict,
+    } = await import('@electron/utils/openclaw-auth');
+    const snapshot = await snapshotManagedAgentModelsFiles();
+    await updateManagedAgentModelProviderStrict(snapshot, {
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      api: 'openai-responses',
+      models: [{ id: 'smart-latest', name: 'smart-latest' }],
+    });
+    const concurrentModels = '{"providers":{"moonshot":{"api":"openai-completions"}}}\n';
+    await writeFile(getAgentModelsPath('main'), concurrentModels, 'utf8');
+
+    const error = await restoreManagedAgentModelsFiles(snapshot).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(AggregateError);
+    expect(await readFile(getAgentModelsPath('main'), 'utf8')).toBe(concurrentModels);
+  });
+
+  it('preserves a concurrent models.json created after installing a missing target', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    const {
+      restoreManagedAgentModelsFiles,
+      snapshotManagedAgentModelsFiles,
+      updateManagedAgentModelProviderStrict,
+    } = await import('@electron/utils/openclaw-auth');
+    const snapshot = await snapshotManagedAgentModelsFiles();
+    await updateManagedAgentModelProviderStrict(snapshot, {
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      api: 'openai-responses',
+      models: [{ id: 'smart-latest', name: 'smart-latest' }],
+    });
+    const concurrentModels = '{"providers":{"deepseek":{"api":"openai-completions"}}}\n';
+    await writeFile(getAgentModelsPath('main'), concurrentModels, 'utf8');
+
+    const error = await restoreManagedAgentModelsFiles(snapshot).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(AggregateError);
+    expect(await readFile(getAgentModelsPath('main'), 'utf8')).toBe(concurrentModels);
+  });
+
+  it('attempts every restore target before reporting aggregated failures', async () => {
+    await writeOpenClawJson({
+      agents: { list: [{ id: 'main', name: 'Main' }, { id: 'worker', name: 'Worker' }] },
+    });
+    await writeAgentModelsJson('main', '{"providers":{}}');
+    await writeAgentModelsJson('worker', '{"providers":{}}');
+
+    const {
+      restoreManagedAgentModelsFiles,
+      snapshotManagedAgentModelsFiles,
+    } = await import('@electron/utils/openclaw-auth');
+    const snapshot = await snapshotManagedAgentModelsFiles();
+    for (const agentId of ['main', 'worker']) {
+      const modelsPath = getAgentModelsPath(agentId);
+      await rm(modelsPath);
+      await mkdir(modelsPath);
+    }
+
+    const error = await restoreManagedAgentModelsFiles(snapshot).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).errors).toHaveLength(2);
+  });
+
+  it('rejects corrupt JSON during snapshot before any models.json write', async () => {
+    await writeOpenClawJson({
+      agents: { list: [{ id: 'main', name: 'Main' }, { id: 'worker', name: 'Worker' }] },
+    });
+    const mainOriginal = '{"providers":{"deepseek":{"api":"openai-completions"}}}\n';
+    const workerOriginal = '{not-json';
+    await writeAgentModelsJson('main', mainOriginal);
+    await writeAgentModelsJson('worker', workerOriginal);
+
+    const { snapshotManagedAgentModelsFiles } = await import('@electron/utils/openclaw-auth');
+
+    await expect(snapshotManagedAgentModelsFiles()).rejects.toThrow('worker');
+    expect(await readFile(getAgentModelsPath('main'), 'utf8')).toBe(mainOriginal);
+    expect(await readFile(getAgentModelsPath('worker'), 'utf8')).toBe(workerOriginal);
+  });
+
+  it('keeps the generic updater best-effort when one agent write fails', async () => {
+    await writeOpenClawJson({
+      agents: { list: [{ id: 'main', name: 'Main' }, { id: 'worker', name: 'Worker' }] },
+    });
+    await writeAgentModelsJson('main', '{"providers":{}}');
+    await writeAgentModelsJson('worker', '{"providers":{}}');
+    const workerPath = getAgentModelsPath('worker');
+    await rm(workerPath);
+    await mkdir(workerPath);
+
+    const { updateAgentModelProvider } = await import('@electron/utils/openclaw-auth');
+
+    await expect(updateAgentModelProvider('openai', {
+      baseUrl: 'https://example.com/v1',
+      api: 'openai-completions',
+      models: [{ id: 'example', name: 'example' }],
+    })).resolves.toBeUndefined();
+
+    const main = JSON.parse(await readFile(getAgentModelsPath('main'), 'utf8')) as Record<string, unknown>;
+    expect((main.providers as Record<string, unknown>).openai).toBeDefined();
   });
 });
 
