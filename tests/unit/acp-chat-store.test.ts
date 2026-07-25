@@ -3050,7 +3050,15 @@ describe('ACP Chat store', () => {
       const parts = Object.values(useAcpChatSessionStore.getState().timeline.itemsById)
         .flatMap((item) => item.kind === 'message-segment' ? item.parts : []);
       expect(parts).toEqual(expect.arrayContaining([
-        expect.objectContaining({ kind: 'image', mediaIdentity: 'generated-image-identity' }),
+        expect.objectContaining({
+          kind: 'image',
+          mediaIdentity: 'generated-image-identity',
+          attachmentFileRef: expect.objectContaining({
+            sessionKey: 'agent:pi:s1',
+            generation: 1,
+            uri: '/repo/generated.png',
+          }),
+        }),
         expect.objectContaining({
           kind: 'attachment',
           source: 'openclaw-media',
@@ -3058,6 +3066,9 @@ describe('ACP Chat store', () => {
           access: expect.objectContaining({ status: 'available', identity: 'report-identity' }),
         }),
       ]));
+      const imagePart = parts.find((part) => part.kind === 'image');
+      expect(imagePart).not.toHaveProperty('filePath');
+      expect(imagePart).not.toHaveProperty('data');
     });
     expect(hostApiMock.sessionsHistory).toHaveBeenCalledTimes(1);
     expect(hostApiMock.resolveAttachment).toHaveBeenCalledWith(expect.objectContaining({

@@ -12,6 +12,7 @@ test.describe('ClawX chat model picker', () => {
         const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
 
         let currentSessionModelRef = refs.alphaModelRef;
+        let currentSessionThinkingLevel = 'medium';
         const hostRequests: Array<{ path: string; method: string; body: unknown }> = [];
         const now = new Date().toISOString();
         let releaseClientModels: (() => void) | undefined;
@@ -57,15 +58,32 @@ test.describe('ClawX chat model picker', () => {
         ipcMain.handle('gateway:rpc', async (_event: unknown, method: string, params: unknown) => {
           hostRequests.push({ path: `gateway:${method}`, method: 'RPC', body: params ?? null });
           if (method === 'sessions.list') {
-            return { success: true, result: { sessions: [{ key: 'agent:main:main', displayName: 'main', model: currentSessionModelRef }] } };
-          }
-          if (method === 'sessions.patch') {
-            const request = params as { key?: string; model?: string | null };
-            currentSessionModelRef = request.model ?? refs.alphaModelRef;
             return {
               success: true,
               result: {
-                entry: { model: currentSessionModelRef },
+                sessions: [{
+                  key: 'agent:main:main',
+                  displayName: 'main',
+                  model: currentSessionModelRef,
+                  thinkingLevel: currentSessionThinkingLevel,
+                  thinkingDefault: 'medium',
+                  thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+                }],
+              },
+            };
+          }
+          if (method === 'sessions.patch') {
+            const request = params as { key?: string; model?: string | null; thinkingLevel?: string | null };
+            if (Object.prototype.hasOwnProperty.call(request, 'model')) {
+              currentSessionModelRef = request.model ?? refs.alphaModelRef;
+            }
+            if (Object.prototype.hasOwnProperty.call(request, 'thinkingLevel')) {
+              currentSessionThinkingLevel = request.thinkingLevel ?? 'medium';
+            }
+            return {
+              success: true,
+              result: {
+                entry: { model: currentSessionModelRef, thinkingLevel: currentSessionThinkingLevel },
                 resolved: {
                   modelProvider: currentSessionModelRef.split('/')[0],
                   model: currentSessionModelRef.split('/').slice(1).join('/'),
@@ -137,15 +155,32 @@ test.describe('ClawX chat model picker', () => {
             const params = body?.params ?? null;
             hostRequests.push({ path: `gateway:${method}`, method: 'RPC', body: params });
             if (method === 'sessions.list') {
-              return makeResponse(request.id, { success: true, result: { sessions: [{ key: 'agent:main:main', displayName: 'main', model: currentSessionModelRef }] } });
-            }
-            if (method === 'sessions.patch') {
-              const patch = params as { key?: string; model?: string | null };
-              currentSessionModelRef = patch.model ?? refs.alphaModelRef;
               return makeResponse(request.id, {
                 success: true,
                 result: {
-                  entry: { model: currentSessionModelRef },
+                  sessions: [{
+                    key: 'agent:main:main',
+                    displayName: 'main',
+                    model: currentSessionModelRef,
+                    thinkingLevel: currentSessionThinkingLevel,
+                    thinkingDefault: 'medium',
+                    thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+                  }],
+                },
+              });
+            }
+            if (method === 'sessions.patch') {
+              const patch = params as { key?: string; model?: string | null; thinkingLevel?: string | null };
+              if (Object.prototype.hasOwnProperty.call(patch, 'model')) {
+                currentSessionModelRef = patch.model ?? refs.alphaModelRef;
+              }
+              if (Object.prototype.hasOwnProperty.call(patch, 'thinkingLevel')) {
+                currentSessionThinkingLevel = patch.thinkingLevel ?? 'medium';
+              }
+              return makeResponse(request.id, {
+                success: true,
+                result: {
+                  entry: { model: currentSessionModelRef, thinkingLevel: currentSessionThinkingLevel },
                   resolved: {
                     modelProvider: currentSessionModelRef.split('/')[0],
                     model: currentSessionModelRef.split('/').slice(1).join('/'),
@@ -330,8 +365,26 @@ test.describe('ClawX chat model picker', () => {
         || request.path === 'gateway:config.patch'
       )).toBe(false);
 
+      await expect(page.getByTestId('chat-thinking-picker-button')).toContainText('Medium');
+      await page.getByTestId('chat-thinking-picker-button').click();
+      await expect(page.getByTestId('chat-thinking-picker-menu')).toBeVisible();
+      await expect(page.getByTestId('chat-thinking-picker-menu')).toContainText('Extra high');
+      await page.getByTestId('chat-thinking-option-high').click();
+      await expect(page.getByTestId('chat-thinking-picker-button')).toContainText('High');
+      await expect.poll(async () => app.evaluate(() => (
+        ((globalThis as typeof globalThis & {
+          __chatModelPickerRequests?: Array<{ path: string; body: unknown }>;
+        }).__chatModelPickerRequests ?? []).some((request) => (
+          request.path === 'gateway:sessions.patch'
+          && typeof request.body === 'object'
+          && request.body !== null
+          && (request.body as Record<string, unknown>).thinkingLevel === 'high'
+        ))
+      ))).toBe(true);
+
       await page.getByTestId('sidebar-new-chat').click();
       await expect(page.getByTestId('chat-model-picker-button')).toContainText('Smart routing');
+      await expect(page.getByTestId('chat-thinking-picker-button')).toContainText('Medium');
       await page.getByTestId('chat-model-picker-button').click();
       await page.getByTestId('chat-model-picker-menu').getByRole('button', { name: 'DeepSeek V4 Pro' }).click();
 

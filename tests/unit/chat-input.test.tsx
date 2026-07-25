@@ -14,9 +14,13 @@ const { agentsState, chatState, gatewayState, providersState, managedClientConfi
     currentAgentId: 'main',
     currentSessionKey: 'agent:main:main',
     sessions: [] as Array<Record<string, unknown>>,
+    thinkingLevel: null as string | null,
     pendingSessionModelUpdates: {} as Record<string, boolean>,
+    pendingSessionThinkingUpdates: {} as Record<string, boolean>,
     updateSessionModel: vi.fn(),
     waitForSessionModelUpdate: vi.fn(),
+    updateSessionThinking: vi.fn(),
+    waitForSessionThinkingUpdate: vi.fn(),
   },
   gatewayState: {
     status: { state: 'running', port: 18789 },
@@ -120,6 +124,24 @@ function translate(key: string, vars?: Record<string, unknown>): string {
       return 'No matching skills found';
     case 'composer.pickAgent':
       return 'Choose agent';
+    case 'composer.pickThinking':
+      return 'Choose reasoning level';
+    case 'composer.thinkingInherit':
+      return `Inherit (${String(vars?.level ?? '')})`;
+    case 'composer.thinkingSwitchFailed':
+      return `Failed to switch reasoning level: ${String(vars?.error ?? '')}`;
+    case 'composer.thinkingLevels.off':
+      return 'Off';
+    case 'composer.thinkingLevels.minimal':
+      return 'Minimal';
+    case 'composer.thinkingLevels.low':
+      return 'Low';
+    case 'composer.thinkingLevels.medium':
+      return 'Medium';
+    case 'composer.thinkingLevels.high':
+      return 'High';
+    case 'composer.thinkingLevels.xhigh':
+      return 'Extra high';
     case 'composer.imageMode':
       return 'Image mode';
     case 'composer.imageSizeLabel':
@@ -281,11 +303,17 @@ describe('ChatInput agent targeting', () => {
     chatState.currentAgentId = 'main';
     chatState.currentSessionKey = 'agent:main:main';
     chatState.sessions = [];
+    chatState.thinkingLevel = null;
     chatState.pendingSessionModelUpdates = {};
+    chatState.pendingSessionThinkingUpdates = {};
     chatState.updateSessionModel.mockReset();
     chatState.updateSessionModel.mockResolvedValue(undefined);
     chatState.waitForSessionModelUpdate.mockReset();
     chatState.waitForSessionModelUpdate.mockResolvedValue(undefined);
+    chatState.updateSessionThinking.mockReset();
+    chatState.updateSessionThinking.mockResolvedValue(undefined);
+    chatState.waitForSessionThinkingUpdate.mockReset();
+    chatState.waitForSessionThinkingUpdate.mockResolvedValue(undefined);
     gatewayState.status = { state: 'running', port: 18789 };
     providersState.accounts = [];
     providersState.statuses = [];
@@ -407,6 +435,67 @@ describe('ChatInput agent targeting', () => {
     expect(leadingActions).toContainElement(imageOptions);
     expect(modelPicker.compareDocumentPosition(imageMode) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(imageMode.compareDocumentPosition(imageOptions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('places the thinking selector between the model selector and image mode', () => {
+    configureAgentAndModelPickers();
+    renderChatInput();
+
+    const leadingActions = screen.getByTestId('chat-composer-leading-actions');
+    const modelPicker = screen.getByTestId('chat-model-picker-button');
+    const thinkingPicker = screen.getByTestId('chat-thinking-picker-button');
+    const imageMode = screen.getByTestId('chat-composer-mode-image');
+
+    expect(leadingActions).toContainElement(thinkingPicker);
+    expect(modelPicker.compareDocumentPosition(thinkingPicker) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(thinkingPicker.compareDocumentPosition(imageMode) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('persists a thinking-level selection only for the current session', async () => {
+    configureAgentAndModelPickers();
+    chatState.sessions = [{
+      key: chatState.currentSessionKey,
+      model: 'openai/smart-latest',
+      thinkingLevel: 'medium',
+      thinkingDefault: 'medium',
+      thinkingLevels: ['low', 'medium', 'high'].map((id) => ({ id })),
+    }];
+
+    renderChatInput();
+    fireEvent.click(screen.getByTestId('chat-thinking-picker-button'));
+    fireEvent.click(screen.getByTestId('chat-thinking-option-high'));
+
+    await waitFor(() => {
+      expect(chatState.updateSessionThinking).toHaveBeenCalledWith('agent:main:main', 'high');
+    });
+  });
+
+  it('waits for pending thinking persistence before sending', async () => {
+    const thinkingUpdate = createDeferred<void>();
+    const onSend = vi.fn();
+    configureAgentAndModelPickers();
+    chatState.pendingSessionThinkingUpdates['agent:main:main'] = true;
+    chatState.waitForSessionThinkingUpdate.mockImplementation(() => thinkingUpdate.promise);
+
+    renderChatInput(onSend);
+    const input = screen.getByTestId('chat-composer-input');
+    fireEvent.change(input, { target: { value: 'Use the selected reasoning level' } });
+    expect(screen.getByTestId('chat-composer-send')).toBeDisabled();
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(chatState.waitForSessionModelUpdate).toHaveBeenCalledWith('agent:main:main');
+    expect(chatState.waitForSessionThinkingUpdate).toHaveBeenCalledWith('agent:main:main');
+
+    await act(async () => {
+      delete chatState.pendingSessionThinkingUpdates['agent:main:main'];
+      thinkingUpdate.resolve();
+      await thinkingUpdate.promise;
+    });
+
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith('Use the selected reasoning level', undefined, null);
+    });
   });
 
   it('shows only text models supplied by managed client-config', () => {

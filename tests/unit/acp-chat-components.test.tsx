@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AcpToolCallCard } from '@/pages/Chat/AcpToolCallCard';
 import { AcpAttachmentPart } from '@/pages/Chat/AcpAttachmentPart';
+import { AcpImagePart } from '@/pages/Chat/AcpImagePart';
 import { AcpTimeline } from '@/pages/Chat/AcpTimeline';
 import { AcpTurnFileActivity } from '@/pages/Chat/AcpTurnFileActivity';
 import type { AcpTimelineSnapshot, AttachmentRenderPart, ToolCallItem } from '@/lib/acp/timeline-types';
@@ -12,6 +13,7 @@ const openAttachmentMock = vi.hoisted(() => vi.fn());
 const listAttachmentOpenHandlersMock = vi.hoisted(() => vi.fn());
 const openAttachmentWithMock = vi.hoisted(() => vi.fn());
 const revealAttachmentMock = vi.hoisted(() => vi.fn());
+const readAttachmentBinaryMock = vi.hoisted(() => vi.fn());
 const listWorkspaceOpenHandlersMock = vi.hoisted(() => vi.fn());
 const openWorkspaceWithMock = vi.hoisted(() => vi.fn());
 const revealWorkspaceFileMock = vi.hoisted(() => vi.fn());
@@ -26,6 +28,7 @@ vi.mock('@/lib/host-api', () => ({
       listAttachmentOpenHandlers: listAttachmentOpenHandlersMock,
       openAttachmentWith: openAttachmentWithMock,
       revealAttachment: revealAttachmentMock,
+      readAttachmentBinary: readAttachmentBinaryMock,
       listWorkspaceOpenHandlers: listWorkspaceOpenHandlersMock,
       openWorkspaceWith: openWorkspaceWithMock,
       revealWorkspaceFile: revealWorkspaceFileMock,
@@ -62,6 +65,10 @@ vi.mock('react-i18next', () => ({
         'acp.loadFailed': 'Load failed',
         'acp.promptFailed': 'Prompt failed',
         'acp.unsupportedContent': 'Unsupported content',
+        'acp.image': 'Image',
+        'acp.imageLoading': 'Loading image',
+        'acp.imagePreviewFailed': 'Unable to load the full-size image',
+        'acp.imagePreviewDescription': 'Full-size preview of the generated image',
         'acp.turnDuration': 'Took {{duration}}',
         'acp.turnElapsed': '{{duration}} elapsed',
         'acp.dismiss': 'Dismiss',
@@ -79,6 +86,7 @@ vi.mock('react-i18next', () => ({
         'fileCard.showInFileManager': 'Show in file manager',
         'fileCard.openWithFailed': 'Could not open file with the selected application',
         'fileCard.revealFailed': 'Could not show file in its folder',
+        'filePreview.actions.close': 'Close',
         'fileActivity.created': 'Created',
         'fileActivity.modified': 'Modified',
         'fileActivity.deleted': 'Deleted',
@@ -173,10 +181,23 @@ describe('ACP chat timeline components', () => {
     listAttachmentOpenHandlersMock.mockResolvedValue({ ok: true, platform: 'darwin', handlers: [] });
     openAttachmentWithMock.mockResolvedValue({ ok: true });
     revealAttachmentMock.mockResolvedValue({ ok: true });
+    readAttachmentBinaryMock.mockResolvedValue({
+      ok: true,
+      data: new Uint8Array([1, 2, 3]),
+      mimeType: 'image/png',
+    });
     listWorkspaceOpenHandlersMock.mockResolvedValue({ ok: true, platform: 'darwin', handlers: [] });
     openWorkspaceWithMock.mockResolvedValue({ ok: true });
     revealWorkspaceFileMock.mockResolvedValue({ ok: true });
     thumbnailsMock.mockResolvedValue({});
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:generated-image-full-size'),
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: vi.fn(),
+    });
     useArtifactPanel.setState({
       open: false,
       tab: 'changes',
@@ -765,6 +786,94 @@ describe('ACP chat timeline components', () => {
 
     expect(screen.getByTestId('acp-image-part')).toBeInTheDocument();
     expect(screen.getByAltText('Chart preview')).toHaveAttribute('src', 'data:image/png;base64,abc');
+  });
+
+  it('loads local image bytes only after double-click and reveals the scoped attachment', async () => {
+    const imageRef = { ...attachmentRef, uri: 'file:///workspace/generated.png' };
+    render(<AcpImagePart part={{
+      kind: 'image',
+      source: 'data:image/png;base64,dGh1bWI=',
+      mimeType: 'image/png',
+      alt: 'Generated preview',
+      attachmentFileRef: imageRef,
+    }} />);
+
+    expect(readAttachmentBinaryMock).not.toHaveBeenCalled();
+    fireEvent.doubleClick(screen.getByAltText('Generated preview'));
+
+    await waitFor(() => {
+      expect(readAttachmentBinaryMock).toHaveBeenCalledWith(expect.objectContaining({ ref: imageRef }));
+    });
+    expect(await screen.findByTestId('acp-image-preview-full')).toHaveAttribute(
+      'src',
+      'blob:generated-image-full-size',
+    );
+
+    fireEvent.click(screen.getByTestId('acp-image-reveal'));
+    await waitFor(() => {
+      expect(revealAttachmentMock).toHaveBeenCalledWith(imageRef);
+    });
+
+    fireEvent.click(screen.getByTestId('acp-image-preview-close'));
+    await waitFor(() => {
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:generated-image-full-size');
+    });
+  });
+
+  it('keeps safe non-local images previewable without exposing a reveal action', () => {
+    render(<AcpImagePart part={{
+      kind: 'image',
+      source: 'https://example.test/generated.png',
+      mimeType: 'image/png',
+      alt: 'Remote preview',
+    }} />);
+
+    fireEvent.doubleClick(screen.getByAltText('Remote preview'));
+
+    expect(screen.getByTestId('acp-image-preview-full')).toHaveAttribute(
+      'src',
+      'https://example.test/generated.png',
+    );
+    expect(screen.queryByTestId('acp-image-reveal')).not.toBeInTheDocument();
+    expect(readAttachmentBinaryMock).not.toHaveBeenCalled();
+  });
+
+  it('reports a reveal failure from the full-size image preview', async () => {
+    revealAttachmentMock.mockResolvedValueOnce({ ok: false, error: 'reveal failed' });
+    const imageRef = { ...attachmentRef, uri: 'file:///workspace/generated.png' };
+    render(<AcpImagePart part={{
+      kind: 'image',
+      source: 'data:image/png;base64,dGh1bWI=',
+      mimeType: 'image/png',
+      alt: 'Generated preview',
+      attachmentFileRef: imageRef,
+    }} />);
+
+    fireEvent.doubleClick(screen.getByAltText('Generated preview'));
+    fireEvent.click(await screen.findByTestId('acp-image-reveal'));
+
+    await waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalledWith('Could not show file in its folder');
+    });
+  });
+
+  it('reports a rejected reveal request from the full-size image preview', async () => {
+    revealAttachmentMock.mockRejectedValueOnce(new Error('reveal unavailable'));
+    const imageRef = { ...attachmentRef, uri: 'file:///workspace/generated.png' };
+    render(<AcpImagePart part={{
+      kind: 'image',
+      source: 'data:image/png;base64,dGh1bWI=',
+      mimeType: 'image/png',
+      alt: 'Generated preview',
+      attachmentFileRef: imageRef,
+    }} />);
+
+    fireEvent.doubleClick(screen.getByAltText('Generated preview'));
+    fireEvent.click(await screen.findByTestId('acp-image-reveal'));
+
+    await waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalledWith('Could not show file in its folder');
+    });
   });
 
   it('embeds the open-with control inside an eligible assistant preview card', () => {

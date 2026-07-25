@@ -1,4 +1,4 @@
-import type { ChatSession, GatewaySessionsChangedPayload } from './types';
+import type { ChatSession, GatewaySessionsChangedPayload, ThinkingLevelOption } from './types';
 import { parseCronSessionKey } from './cron-session-utils';
 import { shouldIncludeSessionInSidebarList } from './session-key-utils';
 
@@ -22,6 +22,26 @@ const STRING_FIELDS = [
   'thinkingLevel',
   'workspacePath',
 ] as const satisfies readonly SessionField[];
+
+function parseThinkingLevels(value: unknown): ThinkingLevelOption[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const levels: ThinkingLevelOption[] = [];
+  const seen = new Set<string>();
+  for (const candidate of value) {
+    const id = typeof candidate === 'string'
+      ? candidate.trim()
+      : isRecord(candidate) && typeof candidate.id === 'string'
+        ? candidate.id.trim()
+        : '';
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const label = isRecord(candidate) && typeof candidate.label === 'string'
+      ? candidate.label.trim()
+      : '';
+    levels.push(label ? { id, label } : { id });
+  }
+  return levels;
+}
 
 function hasOwn(raw: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(raw, key);
@@ -80,6 +100,25 @@ export function normalizeGatewaySessionPatch(raw: Record<string, unknown>): Norm
       cleared.add(field);
     } else if (typeof value === 'string' && value) {
       values[field] = value;
+    }
+  }
+
+  if (hasOwn(raw, 'thinkingDefault')) {
+    present.add('thinkingDefault');
+    if (raw.thinkingDefault === null) {
+      cleared.add('thinkingDefault');
+    } else if (typeof raw.thinkingDefault === 'string' && raw.thinkingDefault.trim()) {
+      values.thinkingDefault = raw.thinkingDefault.trim();
+    }
+  }
+
+  if (hasOwn(raw, 'thinkingLevels')) {
+    present.add('thinkingLevels');
+    if (raw.thinkingLevels === null) {
+      cleared.add('thinkingLevels');
+    } else {
+      const thinkingLevels = parseThinkingLevels(raw.thinkingLevels);
+      if (thinkingLevels !== undefined) values.thinkingLevels = thinkingLevels;
     }
   }
 

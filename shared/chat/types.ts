@@ -70,6 +70,11 @@ export interface ContentBlock {
   content?: unknown;
 }
 
+export interface ThinkingLevelOption {
+  id: string;
+  label?: string;
+}
+
 /** Session from sessions.list */
 export interface ChatSession {
   key: string;
@@ -80,6 +85,8 @@ export interface ChatSession {
   derivedTitle?: string;
   lastMessagePreview?: string;
   thinkingLevel?: string;
+  thinkingLevels?: ThinkingLevelOption[];
+  thinkingDefault?: string;
   model?: string;
   updatedAt?: number;
   status?: string;
@@ -170,6 +177,8 @@ export interface ChatState {
   sessionLastActivity: Record<string, number>;
   /** Renderer model overrides currently being persisted, keyed by session. */
   pendingSessionModelUpdates: Record<string, boolean>;
+  /** Renderer thinking overrides currently being persisted, keyed by session. */
+  pendingSessionThinkingUpdates: Record<string, boolean>;
 
   // Thinking
   thinkingLevel: string | null;
@@ -186,6 +195,8 @@ export interface ChatState {
   renameSession: (key: string, label: string) => Promise<void>;
   updateSessionModel: (key: string, modelRef: string | null) => Promise<void>;
   waitForSessionModelUpdate: (key: string) => Promise<void>;
+  updateSessionThinking: (key: string, thinkingLevel: string | null) => Promise<void>;
+  waitForSessionThinkingUpdate: (key: string) => Promise<void>;
   cleanupEmptySession: () => void;
   loadHistory: (quiet?: boolean) => Promise<void>;
   loadMoreHistory: () => Promise<void>;

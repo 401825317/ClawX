@@ -202,6 +202,64 @@ async function getRecordedMediaSaveImagePayloads(app: ElectronApplication) {
   });
 }
 
+async function installGeneratedImagePreviewRecorder(app: ElectronApplication) {
+  await app.evaluate(async ({ app: _app }, payload) => {
+    const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
+    type HostInvokeRequest = {
+      id?: string;
+      module?: string;
+      action?: string;
+      payload?: Record<string, unknown>;
+      args?: unknown[];
+    };
+    type IpcInvokeHandler = (event: unknown, request: HostInvokeRequest) => Promise<unknown>;
+    const handlers = (ipcMain as unknown as { _invokeHandlers?: Map<string, IpcInvokeHandler> })._invokeHandlers;
+    const originalHostInvoke = handlers?.get('host:invoke');
+    const globals = globalThis as unknown as {
+      __generatedImagePreviewCalls?: Array<{ action: string; payload: Record<string, unknown> }>;
+    };
+    globals.__generatedImagePreviewCalls = [];
+
+    ipcMain.removeHandler('host:invoke');
+    ipcMain.handle('host:invoke', async (event: unknown, request: HostInvokeRequest) => {
+      const requestPayload = request.payload ?? (Array.isArray(request.args) ? request.args[0] : undefined);
+      if (
+        request?.module === 'files'
+        && (request.action === 'readAttachmentBinary' || request.action === 'revealAttachment')
+        && requestPayload
+      ) {
+        globals.__generatedImagePreviewCalls?.push({ action: request.action, payload: requestPayload });
+        if (request.action === 'readAttachmentBinary') {
+          const bytes = Buffer.from(payload.imageBase64, 'base64');
+          return {
+            id: request.id,
+            ok: true,
+            data: {
+              ok: true,
+              data: new Uint8Array(bytes),
+              mimeType: 'image/png',
+              size: bytes.byteLength,
+              readOnly: true,
+            },
+          };
+        }
+        return { id: request.id, ok: true, data: { ok: true } };
+      }
+      return originalHostInvoke?.(event, request) ?? { id: request?.id, ok: true, data: {} };
+    });
+  }, {
+    imageBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  });
+}
+
+async function getGeneratedImagePreviewCalls(app: ElectronApplication) {
+  return await app.evaluate(async ({ app: _app }) => (
+    (globalThis as unknown as {
+      __generatedImagePreviewCalls?: Array<{ action: string; payload: Record<string, unknown> }>;
+    }).__generatedImagePreviewCalls ?? []
+  ));
+}
+
 async function installAcpPromptSuccessMock(app: ElectronApplication) {
   await app.evaluate(async ({ app: _app }) => {
     const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
@@ -499,7 +557,6 @@ test.describe('ClawX ACP inline timeline', () => {
           locations: [],
         },
       ]);
-
       await expect(page.getByTestId('acp-chat-timeline')).toBeVisible({ timeout: 30_000 });
       await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
       await expect(page.getByTestId('acp-tool-call-card')).toBeVisible();
@@ -559,8 +616,9 @@ test.describe('ClawX ACP inline timeline', () => {
       await page.getByTestId('chat-composer-mode-image').click();
       await expect(page.getByTestId('chat-image-aspect-trigger')).toHaveText('1:1');
       await expect(page.getByTestId('chat-image-quality')).toHaveValue('medium');
-      const [modelPickerBox, imageModeButtonBox, aspectTriggerBox, qualityBox, sendBoxAfterImageMode] = await Promise.all([
+      const [modelPickerBox, thinkingPickerBox, imageModeButtonBox, aspectTriggerBox, qualityBox, sendBoxAfterImageMode] = await Promise.all([
         page.getByTestId('chat-model-picker-button').boundingBox(),
+        page.getByTestId('chat-thinking-picker-button').boundingBox(),
         page.getByTestId('chat-composer-mode-image').boundingBox(),
         page.getByTestId('chat-image-aspect-trigger').boundingBox(),
         page.getByTestId('chat-image-quality').boundingBox(),
@@ -568,11 +626,24 @@ test.describe('ClawX ACP inline timeline', () => {
       ]);
       expect(sendBoxBeforeImageMode).not.toBeNull();
       expect(modelPickerBox).not.toBeNull();
+      expect(thinkingPickerBox).not.toBeNull();
       expect(imageModeButtonBox).not.toBeNull();
       expect(aspectTriggerBox).not.toBeNull();
       expect(qualityBox).not.toBeNull();
       expect(sendBoxAfterImageMode).not.toBeNull();
-      expect(modelPickerBox!.x + modelPickerBox!.width).toBeLessThanOrEqual(imageModeButtonBox!.x);
+      const appearsBefore = (
+        first: { x: number; y: number; width: number; height: number },
+        second: { x: number; y: number; width: number; height: number },
+      ) => {
+        const firstCenterY = first.y + first.height / 2;
+        const secondCenterY = second.y + second.height / 2;
+        return firstCenterY < secondCenterY - 1
+          || (Math.abs(firstCenterY - secondCenterY) <= 1 && first.x + first.width <= second.x);
+      };
+      expect(appearsBefore(modelPickerBox!, thinkingPickerBox!)).toBe(true);
+      expect(appearsBefore(thinkingPickerBox!, imageModeButtonBox!)).toBe(true);
+      expect(appearsBefore(imageModeButtonBox!, aspectTriggerBox!)).toBe(true);
+      expect(appearsBefore(aspectTriggerBox!, qualityBox!)).toBe(true);
       expect(Math.abs(sendBoxAfterImageMode!.x - sendBoxBeforeImageMode!.x)).toBeLessThanOrEqual(1);
       const controlCenterY = aspectTriggerBox!.y + aspectTriggerBox!.height / 2;
       expect(Math.abs(qualityBox!.y + qualityBox!.height / 2 - controlCenterY)).toBeLessThanOrEqual(1);
@@ -975,6 +1046,7 @@ test.describe('ClawX ACP inline timeline', () => {
           locations: [],
         },
       ]);
+      await installGeneratedImagePreviewRecorder(app);
 
       const page = await openChat(app);
       await page.evaluate(() => {
@@ -1003,6 +1075,41 @@ test.describe('ClawX ACP inline timeline', () => {
       const image = imagePart.locator('img');
       await expect(image).toBeVisible();
       await expect(image).toHaveAttribute('src', GENERATED_IMAGE_PREVIEW);
+      expect(await getGeneratedImagePreviewCalls(app)).toEqual([]);
+
+      // The mock thumbnail has no intrinsic dimensions; size it like a generated preview for pointer testing.
+      await image.evaluate((element) => {
+        element.style.width = '128px';
+        element.style.height = '128px';
+      });
+      await image.dblclick({ position: { x: 12, y: 12 } });
+      await expect(page.getByTestId('acp-image-preview-dialog')).toBeVisible();
+      await expect(page.getByTestId('acp-image-preview-full')).toBeVisible();
+      await expect.poll(async () => await getGeneratedImagePreviewCalls(app)).toContainEqual({
+        action: 'readAttachmentBinary',
+        payload: {
+          ref: {
+            sessionKey: MAIN_SESSION_KEY,
+            generation: 1,
+            uri: GENERATED_IMAGE_PATH,
+            transcriptMessageId: 'transcript-image-complete',
+          },
+          maxBytes: 50 * 1024 * 1024,
+        },
+      });
+      await page.getByTestId('acp-image-reveal').click();
+      await expect.poll(async () => await getGeneratedImagePreviewCalls(app)).toContainEqual({
+        action: 'revealAttachment',
+        payload: {
+          sessionKey: MAIN_SESSION_KEY,
+          generation: 1,
+          uri: GENERATED_IMAGE_PATH,
+          transcriptMessageId: 'transcript-image-complete',
+        },
+      });
+      await page.getByTestId('acp-image-preview-close').click();
+      await expect(page.getByTestId('acp-image-preview-dialog')).toHaveCount(0);
+
       await imagePart.hover();
       await expect(page.getByTestId('acp-image-copy')).toBeVisible();
       await expect(page.getByTestId('acp-image-save')).toBeVisible();

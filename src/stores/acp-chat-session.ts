@@ -1590,7 +1590,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
     }
 
     const imageParts: RenderPart[] = [];
-    for (const { candidate, identity, mimeType } of resolvedCandidates) {
+    for (const { candidate, identity, mimeType, target } of resolvedCandidates) {
       const resolved = thumbnails[identity];
       if (!resolved?.preview) continue;
       imageParts.push({
@@ -1599,6 +1599,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         mimeType: candidate.mimeType ?? mimeType,
         alt: i18n.t('chat:acp.image'),
         mediaIdentity: identity,
+        ...(target.kind === 'local' ? { attachmentFileRef: target.ref } : {}),
       });
     }
 

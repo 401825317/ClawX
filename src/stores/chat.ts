@@ -2096,6 +2096,27 @@ type SessionModelMutation = {
 
 const _sessionModelMutations = new Map<string, SessionModelMutation>();
 
+type SessionRegistrationMutation = {
+  modelRef: string | null;
+  promise: Promise<GatewaySessionMutationResult>;
+};
+
+const _sessionRegistrationMutations = new Map<string, SessionRegistrationMutation>();
+
+type SessionThinkingField = Readonly<{
+  hasThinkingLevel: boolean;
+  thinkingLevel?: string;
+}>;
+
+type SessionThinkingMutation = {
+  latestVersion: number;
+  confirmed: SessionThinkingField;
+  desired: SessionThinkingField;
+  tail: Promise<void> | null;
+};
+
+const _sessionThinkingMutations = new Map<string, SessionThinkingMutation>();
+
 function toSessionModelField(modelRef: string | null | undefined): SessionModelField {
   const model = modelRef?.trim();
   return model ? { hasModel: true, model } : { hasModel: false };
@@ -2158,6 +2179,72 @@ function rollbackSessionModelField(
   return applySessionModelField(sessions, sessionKey, confirmed, { insertIfMissing: false });
 }
 
+function toSessionThinkingField(thinkingLevel: string | null | undefined): SessionThinkingField {
+  const normalized = thinkingLevel?.trim();
+  return normalized ? { hasThinkingLevel: true, thinkingLevel: normalized } : { hasThinkingLevel: false };
+}
+
+function readSessionThinkingField(sessions: ChatSession[], sessionKey: string): SessionThinkingField {
+  const session = sessions.find((entry) => entry.key === sessionKey);
+  return toSessionThinkingField(session?.thinkingLevel);
+}
+
+function sameSessionThinkingField(left: SessionThinkingField, right: SessionThinkingField): boolean {
+  return left.hasThinkingLevel === right.hasThinkingLevel && left.thinkingLevel === right.thinkingLevel;
+}
+
+function sessionThinkingValue(field: SessionThinkingField): string | null {
+  return field.hasThinkingLevel && field.thinkingLevel ? field.thinkingLevel : null;
+}
+
+function applySessionThinkingField(
+  sessions: ChatSession[],
+  sessionKey: string,
+  field: SessionThinkingField,
+  options: {
+    insertIfMissing?: boolean;
+    createdLocallyIfMissing?: boolean;
+    updatedAt?: number;
+  } = {},
+): ChatSession[] {
+  let found = false;
+  const update = (session: ChatSession): ChatSession => {
+    const next = { ...session };
+    if (field.hasThinkingLevel && field.thinkingLevel) next.thinkingLevel = field.thinkingLevel;
+    else delete next.thinkingLevel;
+    if (options.updatedAt !== undefined) next.updatedAt = options.updatedAt;
+    return next;
+  };
+  const nextSessions = sessions.map((session) => {
+    if (session.key !== sessionKey) return session;
+    found = true;
+    return update(session);
+  });
+  return found
+    ? nextSessions
+    : options.insertIfMissing === false
+      ? nextSessions
+      : [
+        ...nextSessions,
+        update({
+          key: sessionKey,
+          displayName: sessionKey,
+          ...(options.createdLocallyIfMissing ? { createdLocally: true } : {}),
+        }),
+      ];
+}
+
+function rollbackSessionThinkingField(
+  sessions: ChatSession[],
+  sessionKey: string,
+  expected: SessionThinkingField,
+  confirmed: SessionThinkingField,
+): ChatSession[] {
+  const current = readSessionThinkingField(sessions, sessionKey);
+  if (!sameSessionThinkingField(current, expected)) return sessions;
+  return applySessionThinkingField(sessions, sessionKey, confirmed, { insertIfMissing: false });
+}
+
 function markSessionCreatedOnGateway(sessions: ChatSession[], sessionKey: string): ChatSession[] {
   return sessions.map((session) => (
     session.key === sessionKey && session.createdLocally
@@ -2172,6 +2259,18 @@ function overlayPendingSessionModels(sessions: ChatSession[]): ChatSession[] {
     next = applySessionModelField(next, sessionKey, mutation.desired, { insertIfMissing: false });
   }
   return next;
+}
+
+function overlayPendingSessionThinking(sessions: ChatSession[]): ChatSession[] {
+  let next = sessions;
+  for (const [sessionKey, mutation] of _sessionThinkingMutations) {
+    next = applySessionThinkingField(next, sessionKey, mutation.desired, { insertIfMissing: false });
+  }
+  return next;
+}
+
+function overlayPendingSessionMutations(sessions: ChatSession[]): ChatSession[] {
+  return overlayPendingSessionThinking(overlayPendingSessionModels(sessions));
 }
 
 /** Preserve the latest explicit Gateway model as the rollback baseline for an in-flight local change. */
@@ -2198,14 +2297,47 @@ function updatePendingSessionModelBaseline(
   }
 }
 
-function updatePendingSessionModelBaselineFromEvent(payload: GatewaySessionsChangedPayload): void {
+/** Preserve the latest explicit Gateway thinking selection as a rollback baseline while a local change is pending. */
+function updatePendingSessionThinkingBaseline(
+  rawSession: Record<string, unknown>,
+  fallbackKey?: string,
+  snapshotTs?: number,
+): void {
+  if (!Object.prototype.hasOwnProperty.call(rawSession, 'thinkingLevel')) return;
+
+  const rawKey = typeof rawSession.key === 'string' ? rawSession.key.trim() : '';
+  const key = rawKey || fallbackKey?.trim() || '';
+  if (!key) return;
+  const latestEventTs = _latestSessionEventTsByKey.get(key);
+  if (snapshotTs !== undefined && latestEventTs !== undefined && snapshotTs < latestEventTs) return;
+
+  const mutation = _sessionThinkingMutations.get(key);
+  if (!mutation) return;
+  const patch = normalizeGatewaySessionPatch({ ...rawSession, key });
+  if (patch.cleared.has('thinkingLevel')) {
+    mutation.confirmed = { hasThinkingLevel: false };
+  } else if (typeof patch.values.thinkingLevel === 'string') {
+    mutation.confirmed = toSessionThinkingField(patch.values.thinkingLevel);
+  }
+}
+
+function updatePendingSessionMutationBaselines(
+  rawSession: Record<string, unknown>,
+  fallbackKey?: string,
+  snapshotTs?: number,
+): void {
+  updatePendingSessionModelBaseline(rawSession, fallbackKey, snapshotTs);
+  updatePendingSessionThinkingBaseline(rawSession, fallbackKey, snapshotTs);
+}
+
+function updatePendingSessionMutationBaselinesFromEvent(payload: GatewaySessionsChangedPayload): void {
   const nested = payload.session && typeof payload.session === 'object' && !Array.isArray(payload.session)
     ? payload.session
     : null;
   const fallbackKey = typeof payload.sessionKey === 'string'
     ? payload.sessionKey
     : typeof payload.key === 'string' ? payload.key : undefined;
-  updatePendingSessionModelBaseline(nested ?? payload, fallbackKey, payload.ts);
+  updatePendingSessionMutationBaselines(nested ?? payload, fallbackKey, payload.ts);
 }
 
 function mergeGatewaySessionWithLocalState(
@@ -2222,6 +2354,7 @@ function mergeGatewaySessionWithLocalState(
     ...(localSession.createdLocally && localSession.createdOnGateway ? { createdOnGateway: true } : {}),
   };
   const pending = _sessionModelMutations.get(session.key);
+  const pendingThinking = _sessionThinkingMutations.get(session.key);
   const localUpdatedAt = typeof localSession.updatedAt === 'number' ? localSession.updatedAt : undefined;
   const gatewayUpdatedAt = typeof session.updatedAt === 'number' ? session.updatedAt : undefined;
   const preserveLocalModel = Boolean(
@@ -2237,6 +2370,19 @@ function mergeGatewaySessionWithLocalState(
       { insertIfMissing: false },
     )[0] ?? merged;
   }
+  const preserveLocalThinking = Boolean(
+    pendingThinking
+    || localSession.createdLocally
+    || (localUpdatedAt !== undefined && (gatewayUpdatedAt === undefined || localUpdatedAt > gatewayUpdatedAt)),
+  );
+  if (preserveLocalThinking) {
+    merged = applySessionThinkingField(
+      [merged],
+      session.key,
+      pendingThinking?.desired ?? toSessionThinkingField(localSession.thinkingLevel),
+      { insertIfMissing: false },
+    )[0] ?? merged;
+  }
   return merged;
 }
 
@@ -2246,11 +2392,18 @@ async function persistSessionModelSelection(
   createIfMissing: boolean,
 ): Promise<{ modelRef: string | null; createdOnGateway: boolean }> {
   if (createIfMissing) {
-    const created = await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.create', {
-      key: sessionKey,
-      agentId: getAgentIdFromSessionKey(sessionKey),
-      ...(modelRef ? { model: modelRef } : {}),
-    });
+    const registration = registerLocalSession(sessionKey, modelRef);
+    const created = await registration.promise;
+    if (registration.modelRef !== modelRef) {
+      const patched = await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.patch', {
+        key: sessionKey,
+        model: modelRef,
+      });
+      return {
+        modelRef: resolveSessionMutationModel(patched, modelRef),
+        createdOnGateway: true,
+      };
+    }
     return {
       modelRef: resolveSessionMutationModel(created, modelRef),
       createdOnGateway: true,
@@ -2263,6 +2416,66 @@ async function persistSessionModelSelection(
   });
   return {
     modelRef: resolveSessionMutationModel(patched, modelRef),
+    createdOnGateway: false,
+  };
+}
+
+function registerLocalSession(
+  sessionKey: string,
+  modelRef: string | null = null,
+): SessionRegistrationMutation {
+  const pending = _sessionRegistrationMutations.get(sessionKey);
+  if (pending) return pending;
+
+  let registration: SessionRegistrationMutation;
+  const promise = useGatewayStore.getState()
+    .rpc<GatewaySessionMutationResult>('sessions.create', {
+      key: sessionKey,
+      agentId: getAgentIdFromSessionKey(sessionKey),
+      ...(modelRef ? { model: modelRef } : {}),
+    })
+    .then((result) => {
+      // Mark registration before releasing the shared mutation so a later field update patches it.
+      useChatStore.setState((state) => ({
+        sessions: markSessionCreatedOnGateway(state.sessions, sessionKey),
+      }));
+      return result;
+    })
+    .finally(() => {
+      if (_sessionRegistrationMutations.get(sessionKey) === registration) {
+        _sessionRegistrationMutations.delete(sessionKey);
+      }
+    });
+  registration = { modelRef, promise };
+  _sessionRegistrationMutations.set(sessionKey, registration);
+  return registration;
+}
+
+async function persistSessionThinkingSelection(
+  sessionKey: string,
+  thinkingLevel: string | null,
+  createIfMissing: boolean,
+): Promise<{ thinkingLevel: string | null; createdOnGateway: boolean }> {
+  if (createIfMissing) {
+    await registerLocalSession(sessionKey).promise;
+    const patched = await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.patch', {
+      key: sessionKey,
+      thinkingLevel,
+    });
+    const resolved = patched.entry?.thinkingLevel;
+    return {
+      thinkingLevel: typeof resolved === 'string' && resolved.trim() ? resolved.trim() : thinkingLevel,
+      createdOnGateway: true,
+    };
+  }
+
+  const patched = await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.patch', {
+    key: sessionKey,
+    thinkingLevel,
+  });
+  const resolved = patched.entry?.thinkingLevel;
+  return {
+    thinkingLevel: typeof resolved === 'string' && resolved.trim() ? resolved.trim() : thinkingLevel,
     createdOnGateway: false,
   };
 }
@@ -2377,6 +2590,9 @@ function buildSessionSwitchPatch(
     : state.sessions;
   const cachedNextSession = getCachedSessionHistory(nextSessionKey);
   const cachedRunState = getCachedSessionRunState(nextSessionKey);
+  const nextSessionThinkingLevel = cachedNextSession
+    ? cachedNextSession.thinkingLevel
+    : nextSessions.find((session) => session.key === nextSessionKey)?.thinkingLevel ?? null;
 
   return {
     currentSessionKey: nextSessionKey,
@@ -2391,7 +2607,8 @@ function buildSessionSwitchPatch(
     messages: cachedNextSession?.messages ?? [],
     hasMoreHistory: cachedNextSession ? cachedNextSession.messages.length >= HISTORY_PAGE_SIZE : false,
     loadingMoreHistory: false,
-    thinkingLevel: cachedNextSession?.thinkingLevel ?? state.thinkingLevel ?? null,
+    // Project only the target session; carrying the source override makes a new chat look configured.
+    thinkingLevel: nextSessionThinkingLevel,
     ...cachedRunState,
     error: null,
     runError: null,
@@ -3082,6 +3299,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sessionLabels: {},
   sessionLastActivity: {},
   pendingSessionModelUpdates: {},
+  pendingSessionThinkingUpdates: {},
 
   thinkingLevel: null,
 
@@ -3194,7 +3412,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             : undefined;
           if (listTs !== undefined) {
             for (const rawSession of rawSessions) {
-              updatePendingSessionModelBaseline(rawSession, undefined, listTs);
+              updatePendingSessionMutationBaselines(rawSession, undefined, listTs);
             }
           }
           const uncertainty = getSessionEventUncertainty(context.events);
@@ -3240,8 +3458,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
               _latestSessionEventTsByKey,
             );
             if (result.applied) {
-              updatePendingSessionModelBaselineFromEvent(event);
-              visibleMergedSessions = overlayPendingSessionModels(result.sessions);
+              updatePendingSessionMutationBaselinesFromEvent(event);
+              visibleMergedSessions = overlayPendingSessionMutations(result.sessions);
               if (result.deletedKey) {
                 clearSessionLabelHydrationTracking(result.deletedKey);
                 if (!uncertainty.keys.has(result.deletedKey)) {
@@ -3442,8 +3660,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
               );
               if (result.applied) {
                 appliedAny = true;
-                updatePendingSessionModelBaselineFromEvent(event);
-                reducedSessions = overlayPendingSessionModels(result.sessions);
+                updatePendingSessionMutationBaselinesFromEvent(event);
+                reducedSessions = overlayPendingSessionMutations(result.sessions);
                 if (result.deletedKey) {
                   clearSessionLabelHydrationTracking(result.deletedKey);
                   if (!uncertainty.keys.has(result.deletedKey)) {
@@ -3557,8 +3775,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       _latestSessionEventTsByKey,
     );
     if (result.applied) {
-      updatePendingSessionModelBaselineFromEvent(payload);
-      const projectedSessions = overlayPendingSessionModels(result.sessions);
+      updatePendingSessionMutationBaselinesFromEvent(payload);
+      const projectedSessions = overlayPendingSessionMutations(result.sessions);
       const eventKey = typeof payload.session?.key === 'string'
         ? payload.session.key.trim()
         : typeof payload.sessionKey === 'string'
@@ -3917,6 +4135,112 @@ export const useChatStore = create<ChatState>((set, get) => ({
         throw error;
       }
       const latest = _sessionModelMutations.get(key)?.tail;
+      if (!latest || latest === pending) return;
+    }
+  },
+
+  updateSessionThinking: async (key: string, thinkingLevel: string | null) => {
+    const normalizedThinkingLevel = thinkingLevel?.trim() || null;
+    let mutation = _sessionThinkingMutations.get(key);
+    if (!mutation) {
+      const confirmed = readSessionThinkingField(get().sessions, key);
+      mutation = {
+        latestVersion: 0,
+        confirmed,
+        desired: confirmed,
+        tail: null,
+      };
+      _sessionThinkingMutations.set(key, mutation);
+    }
+    const version = mutation.latestVersion + 1;
+    const desired = toSessionThinkingField(normalizedThinkingLevel);
+    mutation.latestVersion = version;
+    mutation.desired = desired;
+
+    set((state) => ({
+      sessions: applySessionThinkingField(state.sessions, key, desired, {
+        createdLocallyIfMissing: true,
+        updatedAt: Date.now(),
+      }),
+      ...(state.currentSessionKey === key ? { thinkingLevel: sessionThinkingValue(desired) } : {}),
+      pendingSessionThinkingUpdates: {
+        ...state.pendingSessionThinkingUpdates,
+        [key]: true,
+      },
+    }));
+
+    const persist = async (): Promise<void> => {
+      const session = get().sessions.find((entry) => entry.key === key);
+      const createIfMissing = session?.createdLocally === true && session.createdOnGateway !== true;
+      const persisted = await persistSessionThinkingSelection(key, normalizedThinkingLevel, createIfMissing);
+      const confirmed = toSessionThinkingField(persisted.thinkingLevel);
+      mutation.confirmed = confirmed;
+      set((state) => {
+        const appliesLatestValue = mutation.latestVersion === version;
+        return {
+          sessions: appliesLatestValue
+          ? applySessionThinkingField(
+            persisted.createdOnGateway
+              ? markSessionCreatedOnGateway(state.sessions, key)
+              : state.sessions,
+            key,
+            confirmed,
+            { insertIfMissing: false, updatedAt: Date.now() },
+          )
+          : persisted.createdOnGateway
+            ? markSessionCreatedOnGateway(state.sessions, key)
+            : state.sessions,
+          ...(appliesLatestValue && state.currentSessionKey === key
+            ? { thinkingLevel: sessionThinkingValue(confirmed) }
+            : {}),
+        };
+      });
+    };
+
+    const run = mutation.tail
+      ? mutation.tail.catch(() => undefined).then(persist)
+      : persist();
+    const tracked = run.catch((error) => {
+      if (mutation.latestVersion === version) {
+        set((state) => {
+          const shouldRollbackCurrentThinking = state.currentSessionKey === key
+            && sameSessionThinkingField(toSessionThinkingField(state.thinkingLevel), desired);
+          return {
+            sessions: rollbackSessionThinkingField(state.sessions, key, desired, mutation.confirmed),
+            ...(shouldRollbackCurrentThinking
+              ? { thinkingLevel: sessionThinkingValue(mutation.confirmed) }
+              : {}),
+          };
+        });
+      }
+      throw error;
+    }).finally(() => {
+      if (mutation.tail === tracked) {
+        _sessionThinkingMutations.delete(key);
+        set((state) => ({
+          pendingSessionThinkingUpdates: clearSessionEntryFromMap(
+            state.pendingSessionThinkingUpdates,
+            key,
+          ),
+        }));
+      }
+    });
+    mutation.tail = tracked;
+    return tracked;
+  },
+
+  waitForSessionThinkingUpdate: async (key: string) => {
+    while (true) {
+      const pending = _sessionThinkingMutations.get(key)?.tail;
+      if (!pending) return;
+      try {
+        await pending;
+      } catch (error) {
+        const latest = _sessionThinkingMutations.get(key)?.tail;
+        if (latest && latest !== pending) continue;
+        throw error;
+      }
+      const latest = _sessionThinkingMutations.get(key)?.tail;
       if (!latest || latest === pending) return;
     }
   },

@@ -43,7 +43,15 @@ export type AttachmentRenderPart = {
 
 export type RenderPart =
   | { kind: 'markdown'; text: string }
-  | { kind: 'image'; source: string; mimeType?: string; alt?: string; mediaIdentity?: string }
+  | {
+      kind: 'image';
+      source: string;
+      mimeType?: string;
+      alt?: string;
+      mediaIdentity?: string;
+      /** Scoped Main-owned reference retained for an on-demand full-size preview. */
+      attachmentFileRef?: AttachmentFileRef;
+    }
   | AttachmentRenderPart
   | { kind: 'error'; message: string };
 

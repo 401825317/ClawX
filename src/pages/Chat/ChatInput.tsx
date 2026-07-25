@@ -7,7 +7,7 @@
  * are sent with the message (no base64 over WebSocket).
  */
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { SendHorizontal, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, FolderOpen, Loader2, AtSign, Search, ChevronDown, Check, Image as ImageIcon } from 'lucide-react';
+import { SendHorizontal, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, FolderOpen, Loader2, AtSign, Search, ChevronDown, Check, Image as ImageIcon, Brain } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
@@ -31,6 +31,7 @@ import { collectDroppedFiles } from '@/lib/collect-dropped-files';
 import { fetchQuickAccessSkills } from '@/lib/quick-access-skills';
 import { DEFAULT_WORKSPACE_CWD, isDefaultWorkspacePath, normalizeWorkspacePath } from '@/lib/workspace-context';
 import type { AcpImageGenerationOptions } from '@shared/acp-chat/types';
+import { UCLAW_DEFAULT_THINKING_LEVEL } from '@shared/junfeiai-endpoints';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -89,6 +90,7 @@ const IMAGE_ASPECT_OPTIONS: ReadonlyArray<{
   { ratio: '16:9', size: '3840x2160', labelKey: 'composer.imageAspectWidescreen', previewClassName: 'h-3.5 w-6', testId: 'chat-image-aspect-16-9' },
 ];
 const IMAGE_QUALITY_OPTIONS: AcpImageGenerationOptions['quality'][] = ['low', 'medium', 'high'];
+const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -254,6 +256,7 @@ export function ChatInput({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [skillPickerOpen, setSkillPickerOpen] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [thinkingPickerOpen, setThinkingPickerOpen] = useState(false);
   const [imageAspectPickerOpen, setImageAspectPickerOpen] = useState(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [skillQuery, setSkillQuery] = useState('');
@@ -268,6 +271,7 @@ export function ChatInput({
   const pickerRef = useRef<HTMLDivElement>(null);
   const skillPickerRef = useRef<HTMLDivElement>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
+  const thinkingPickerRef = useRef<HTMLDivElement>(null);
   const imageAspectPickerRef = useRef<HTMLDivElement>(null);
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
   const modelChangeVersionRef = useRef(0);
@@ -294,10 +298,16 @@ export function ChatInput({
   }
   currentSessionKeyRef.current = currentSessionKey;
   const sessions = useChatStore((s) => s.sessions);
+  const thinkingLevel = useChatStore((s) => s.thinkingLevel);
   const updateSessionModel = useChatStore((s) => s.updateSessionModel);
   const waitForSessionModelUpdate = useChatStore((s) => s.waitForSessionModelUpdate);
+  const updateSessionThinking = useChatStore((s) => s.updateSessionThinking);
+  const waitForSessionThinkingUpdate = useChatStore((s) => s.waitForSessionThinkingUpdate);
   const modelPersisting = useChatStore(
     (s) => Boolean(s.pendingSessionModelUpdates[currentSessionKey]),
+  );
+  const thinkingPersisting = useChatStore(
+    (s) => Boolean(s.pendingSessionThinkingUpdates[currentSessionKey]),
   );
   const currentAgent = useMemo(
     () => (agents ?? []).find((agent) => agent.id === currentAgentId) ?? null,
@@ -307,6 +317,34 @@ export function ChatInput({
     () => (sessions ?? []).find((session) => session.key === currentSessionKey) ?? null,
     [currentSessionKey, sessions],
   );
+  const selectedThinkingLevel = (currentSession?.thinkingLevel ?? thinkingLevel ?? '').trim();
+  const thinkingOptions = useMemo(() => {
+    const configured = currentSession?.thinkingLevels ?? [];
+    const options: Array<{ id: string; label?: string }> = configured.length > 0
+      ? configured
+      : THINKING_LEVELS.map((id) => ({ id }));
+    if (selectedThinkingLevel && !options.some((option) => option.id === selectedThinkingLevel)) {
+      return [...options, { id: selectedThinkingLevel }];
+    }
+    return options;
+  }, [currentSession?.thinkingLevels, selectedThinkingLevel]);
+  const thinkingLevelLabel = useCallback((id: string, fallback?: string) => (
+    t(`composer.thinkingLevels.${id}`, { defaultValue: fallback || id })
+  ), [t]);
+  const inheritedThinkingLabel = useMemo(() => {
+    const defaultLevel = currentSession?.thinkingDefault || UCLAW_DEFAULT_THINKING_LEVEL;
+    return thinkingLevelLabel(
+      defaultLevel,
+      thinkingOptions.find((option) => option.id === defaultLevel)?.label,
+    );
+  }, [currentSession?.thinkingDefault, thinkingLevelLabel, thinkingOptions]);
+  const thinkingButtonLabel = useMemo(() => {
+    if (!selectedThinkingLevel) return inheritedThinkingLabel;
+    return thinkingLevelLabel(
+      selectedThinkingLevel,
+      thinkingOptions.find((option) => option.id === selectedThinkingLevel)?.label,
+    );
+  }, [inheritedThinkingLabel, selectedThinkingLevel, thinkingLevelLabel, thinkingOptions]);
   const imageModeActive = sessionImageModes[currentSessionKey] === true;
   const imageOptions = useMemo<AcpImageGenerationOptions>(
     () => ({
@@ -421,18 +459,20 @@ export function ChatInput({
   }, [agents, currentAgentId, targetAgentId]);
 
   useEffect(() => {
-    if (!pickerOpen && !skillPickerOpen && !modelPickerOpen && !imageAspectPickerOpen && !workspaceMenuOpen) return;
+    if (!pickerOpen && !skillPickerOpen && !modelPickerOpen && !thinkingPickerOpen && !imageAspectPickerOpen && !workspaceMenuOpen) return;
     const handlePointerDown = (event: MouseEvent) => {
       const target = event.target as Node;
       const insideAgentPicker = pickerRef.current?.contains(target);
       const insideSkillPicker = skillPickerRef.current?.contains(target);
       const insideModelPicker = modelPickerRef.current?.contains(target);
+      const insideThinkingPicker = thinkingPickerRef.current?.contains(target);
       const insideImageAspectPicker = imageAspectPickerRef.current?.contains(target);
       const insideWorkspaceMenu = workspaceMenuRef.current?.contains(target);
-      if (!insideAgentPicker && !insideSkillPicker && !insideModelPicker && !insideImageAspectPicker && !insideWorkspaceMenu) {
+      if (!insideAgentPicker && !insideSkillPicker && !insideModelPicker && !insideThinkingPicker && !insideImageAspectPicker && !insideWorkspaceMenu) {
         setPickerOpen(false);
         setSkillPickerOpen(false);
         setModelPickerOpen(false);
+        setThinkingPickerOpen(false);
         setImageAspectPickerOpen(false);
         setWorkspaceMenuOpen(false);
       }
@@ -441,15 +481,16 @@ export function ChatInput({
     return () => {
       document.removeEventListener('mousedown', handlePointerDown);
     };
-  }, [imageAspectPickerOpen, modelPickerOpen, pickerOpen, skillPickerOpen, workspaceMenuOpen]);
+  }, [imageAspectPickerOpen, modelPickerOpen, pickerOpen, skillPickerOpen, thinkingPickerOpen, workspaceMenuOpen]);
 
   useEffect(() => {
-    if (!pickerOpen && !skillPickerOpen && !modelPickerOpen && !imageAspectPickerOpen && !workspaceMenuOpen) return;
+    if (!pickerOpen && !skillPickerOpen && !modelPickerOpen && !thinkingPickerOpen && !imageAspectPickerOpen && !workspaceMenuOpen) return;
     const handleDocumentKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       setPickerOpen(false);
       setSkillPickerOpen(false);
       setModelPickerOpen(false);
+      setThinkingPickerOpen(false);
       setImageAspectPickerOpen(false);
       setWorkspaceMenuOpen(false);
     };
@@ -457,7 +498,7 @@ export function ChatInput({
     return () => {
       document.removeEventListener('keydown', handleDocumentKeyDown, true);
     };
-  }, [imageAspectPickerOpen, modelPickerOpen, pickerOpen, skillPickerOpen, workspaceMenuOpen]);
+  }, [imageAspectPickerOpen, modelPickerOpen, pickerOpen, skillPickerOpen, thinkingPickerOpen, workspaceMenuOpen]);
 
   useEffect(() => {
     setSelectedSkill((prev) => {
@@ -467,6 +508,7 @@ export function ChatInput({
       return null;
     });
     setSkillPickerOpen(false);
+    setThinkingPickerOpen(false);
     setWorkspaceMenuOpen(false);
     setSkillQuery('');
     setQuickSkills([]);
@@ -586,10 +628,34 @@ export function ChatInput({
     });
   }, [currentSessionKey, effectiveModelRef, managedDefaultModelRef, requestedModelRef, t, updateSessionModel]);
 
+  const handleSelectThinking = useCallback((nextThinkingLevel: string) => {
+    const normalizedThinkingLevel = nextThinkingLevel.trim() || null;
+    if (normalizedThinkingLevel === (selectedThinkingLevel || null)) {
+      setThinkingPickerOpen(false);
+      textareaRef.current?.focus();
+      return;
+    }
+
+    setThinkingPickerOpen(false);
+    textareaRef.current?.focus();
+    const sessionKey = currentSessionKey;
+    const sessionGeneration = currentSessionGenerationRef.current;
+    const update = updateSessionThinking(sessionKey, normalizedThinkingLevel);
+    void update.catch((error) => {
+      if (!mountedRef.current) return;
+      const selectionIsCurrent = currentSessionKeyRef.current === sessionKey
+        && currentSessionGenerationRef.current === sessionGeneration;
+      if (selectionIsCurrent) {
+        toast.error(t('composer.thinkingSwitchFailed', { error: String(error) }));
+      }
+    });
+  }, [currentSessionKey, selectedThinkingLevel, t, updateSessionThinking]);
+
   const toggleImageMode = useCallback(() => {
     setPickerOpen(false);
     setSkillPickerOpen(false);
     setModelPickerOpen(false);
+    setThinkingPickerOpen(false);
     setImageAspectPickerOpen(false);
     setWorkspaceMenuOpen(false);
     setSessionImageModes((current) => ({
@@ -615,6 +681,7 @@ export function ChatInput({
     setPickerOpen(false);
     setSkillPickerOpen(false);
     setModelPickerOpen(false);
+    setThinkingPickerOpen(false);
     setImageAspectPickerOpen(false);
     setWorkspaceMenuOpen((open) => !open);
   }, [workspaceSelectorDisabled]);
@@ -777,7 +844,7 @@ export function ChatInput({
     && !inputDisabled
     && !sending
     && !imageGenerating;
-  const canSend = canSendWithoutModelPersistence && !modelPersisting;
+  const canSend = canSendWithoutModelPersistence && !modelPersisting && !thinkingPersisting;
   const canStop = sending && !inputDisabled && !!onStop;
 
   const handleSend = useCallback(async () => {
@@ -800,7 +867,10 @@ export function ChatInput({
 
     try {
       try {
-        await waitForSessionModelUpdate(sessionKey);
+        await Promise.all([
+          waitForSessionModelUpdate(sessionKey),
+          waitForSessionThinkingUpdate(sessionKey),
+        ]);
       } catch {
         return;
       }
@@ -863,6 +933,7 @@ export function ChatInput({
       setTargetAgentId(null);
       setPickerOpen(false);
       setSkillPickerOpen(false);
+      setThinkingPickerOpen(false);
       setImageAspectPickerOpen(false);
       setWorkspaceMenuOpen(false);
     } finally {
@@ -884,6 +955,7 @@ export function ChatInput({
     targetAgentId,
     updateSessionModel,
     waitForSessionModelUpdate,
+    waitForSessionThinkingUpdate,
   ]);
 
   const handleStop = useCallback(() => {
@@ -1168,6 +1240,7 @@ export function ChatInput({
                   onClick={() => {
                     setSkillPickerOpen(false);
                     setModelPickerOpen(false);
+                    setThinkingPickerOpen(false);
                     setImageAspectPickerOpen(false);
                     setWorkspaceMenuOpen(false);
                     setPickerOpen((open) => !open);
@@ -1212,6 +1285,7 @@ export function ChatInput({
                 onClick={() => {
                   setPickerOpen(false);
                   setModelPickerOpen(false);
+                  setThinkingPickerOpen(false);
                   setImageAspectPickerOpen(false);
                   setWorkspaceMenuOpen(false);
                   setSkillPickerOpen((open) => !open);
@@ -1297,6 +1371,7 @@ export function ChatInput({
                   onClick={() => {
                     setPickerOpen(false);
                     setSkillPickerOpen(false);
+                    setThinkingPickerOpen(false);
                     setImageAspectPickerOpen(false);
                     setWorkspaceMenuOpen(false);
                     setModelPickerOpen((open) => !open);
@@ -1338,6 +1413,82 @@ export function ChatInput({
                 )}
               </div>
             )}
+
+            <div ref={thinkingPickerRef} className="relative shrink-0">
+              <button
+                type="button"
+                data-testid="chat-thinking-picker-button"
+                className={cn(
+                  'inline-flex h-8 max-w-[112px] items-center gap-1 rounded-lg px-1.5 text-meta font-medium text-muted-foreground transition-colors hover:bg-transparent hover:text-foreground focus-visible:outline-none focus-visible:ring-0 disabled:pointer-events-none disabled:opacity-50',
+                  thinkingPickerOpen && 'text-foreground',
+                )}
+                onClick={() => {
+                  setPickerOpen(false);
+                  setSkillPickerOpen(false);
+                  setModelPickerOpen(false);
+                  setImageAspectPickerOpen(false);
+                  setWorkspaceMenuOpen(false);
+                  setThinkingPickerOpen((open) => !open);
+                }}
+                disabled={inputDisabled || sending || !currentAgent}
+                title={t('composer.pickThinking')}
+                aria-label={t('composer.pickThinking')}
+                aria-haspopup="menu"
+                aria-expanded={thinkingPickerOpen}
+              >
+                <Brain className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span className="truncate">{thinkingButtonLabel}</span>
+                <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform', thinkingPickerOpen && 'rotate-180')} />
+              </button>
+              {thinkingPickerOpen && (
+                <div
+                  className="absolute bottom-full left-0 z-20 mb-2 w-48 overflow-hidden rounded-lg border border-black/10 bg-surface-modal p-1 shadow-xl dark:border-white/10"
+                  data-testid="chat-thinking-picker-menu"
+                  role="menu"
+                >
+                  <button
+                    type="button"
+                    data-testid="chat-thinking-option-inherit"
+                    role="menuitemradio"
+                    aria-checked={!selectedThinkingLevel}
+                    onClick={() => handleSelectThinking('')}
+                    className={cn(
+                      'flex w-full items-center justify-between gap-3 rounded-md px-2 py-2 text-left text-xs font-medium transition-colors',
+                      !selectedThinkingLevel
+                        ? 'bg-black/5 text-foreground dark:bg-white/10'
+                        : 'hover:bg-black/5 dark:hover:bg-white/5',
+                    )}
+                  >
+                    <span className="truncate">{t('composer.thinkingInherit', { level: inheritedThinkingLabel })}</span>
+                    {!selectedThinkingLevel && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />}
+                  </button>
+                  {thinkingOptions.map((option) => {
+                    const label = thinkingLevelLabel(option.id, option.label);
+                    const selected = option.id === selectedThinkingLevel;
+                    return (
+                      <button
+                        key={option.id}
+                        type="button"
+                        data-testid={`chat-thinking-option-${option.id}`}
+                        role="menuitemradio"
+                        aria-checked={selected}
+                        onClick={() => handleSelectThinking(option.id)}
+                        className={cn(
+                          'flex w-full items-center justify-between gap-3 rounded-md px-2 py-2 text-left text-xs font-medium transition-colors',
+                          selected
+                            ? 'bg-black/5 text-foreground dark:bg-white/10'
+                            : 'hover:bg-black/5 dark:hover:bg-white/5',
+                        )}
+                      >
+                        <span className="truncate">{label}</span>
+                        {selected && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -1374,6 +1525,7 @@ export function ChatInput({
                       setPickerOpen(false);
                       setSkillPickerOpen(false);
                       setModelPickerOpen(false);
+                      setThinkingPickerOpen(false);
                       setWorkspaceMenuOpen(false);
                       setImageAspectPickerOpen((open) => !open);
                     }}

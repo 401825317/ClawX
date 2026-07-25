@@ -386,4 +386,227 @@ describe('chat session model selection', () => {
     await expect(update).rejects.toThrow('patch failed');
     expect(store.getState().sessions[0]?.model).toBe('openai/glm-5');
   });
+
+  it('projects thinking from the target session and clears it for a new session', async () => {
+    const store = await loadStore();
+    store.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      thinkingLevel: 'high',
+      sessions: [
+        { key: 'agent:main:main', thinkingLevel: 'high' },
+        { key: 'agent:main:other', thinkingLevel: 'low' },
+      ],
+    });
+
+    store.getState().selectAcpSession('agent:main:other');
+    expect(store.getState().thinkingLevel).toBe('low');
+
+    store.getState().newSession();
+    const newSessionKey = store.getState().currentSessionKey;
+    expect(newSessionKey).toMatch(/^agent:main:session-/);
+    expect(store.getState().thinkingLevel).toBeNull();
+    expect(store.getState().sessions.find((session) => session.key === newSessionKey))
+      .not.toHaveProperty('thinkingLevel');
+  });
+
+  it('patches only the selected thinking level for an existing session', async () => {
+    gatewayRpcMock.mockResolvedValue({ entry: { thinkingLevel: 'high' } });
+    const store = await loadStore();
+    store.setState({
+      currentSessionKey: 'agent:main:main',
+      thinkingLevel: 'medium',
+      sessions: [
+        { key: 'agent:main:main', model: 'openai/smart-latest', thinkingLevel: 'medium' },
+        { key: 'agent:main:other', model: 'openai/glm-5', thinkingLevel: 'low' },
+      ],
+    });
+
+    await store.getState().updateSessionThinking('agent:main:main', 'high');
+
+    expect(gatewayRpcMock).toHaveBeenCalledWith('sessions.patch', {
+      key: 'agent:main:main',
+      thinkingLevel: 'high',
+    });
+    expect(store.getState().sessions).toMatchObject([
+      { key: 'agent:main:main', model: 'openai/smart-latest', thinkingLevel: 'high' },
+      { key: 'agent:main:other', model: 'openai/glm-5', thinkingLevel: 'low' },
+    ]);
+    expect(store.getState().thinkingLevel).toBe('high');
+  });
+
+  it('registers a local session before patching its thinking level', async () => {
+    gatewayRpcMock.mockImplementation((method: string, params: Record<string, unknown>) => {
+      if (method === 'sessions.create') return Promise.resolve({ entry: {} });
+      return Promise.resolve({ entry: { thinkingLevel: params.thinkingLevel } });
+    });
+    const store = await loadStore();
+    const sessionKey = 'agent:main:thinking-new';
+    store.setState({
+      currentSessionKey: sessionKey,
+      sessions: [{ key: sessionKey, displayName: sessionKey, createdLocally: true }],
+    });
+
+    await store.getState().updateSessionThinking(sessionKey, 'high');
+
+    expect(gatewayRpcMock).toHaveBeenNthCalledWith(1, 'sessions.create', {
+      key: sessionKey,
+      agentId: 'main',
+    });
+    expect(gatewayRpcMock).toHaveBeenNthCalledWith(2, 'sessions.patch', {
+      key: sessionKey,
+      thinkingLevel: 'high',
+    });
+    expect(store.getState().sessions[0]).toMatchObject({
+      key: sessionKey,
+      thinkingLevel: 'high',
+      createdLocally: true,
+      createdOnGateway: true,
+    });
+  });
+
+  it('shares one local registration when model selection starts before thinking selection', async () => {
+    const createRpc = createDeferred<{ entry: { model: string } }>();
+    gatewayRpcMock.mockImplementation((method: string, params: Record<string, unknown>) => {
+      if (method === 'sessions.create') return createRpc.promise;
+      return Promise.resolve({ entry: { thinkingLevel: params.thinkingLevel, model: params.model } });
+    });
+    const store = await loadStore();
+    const sessionKey = 'agent:main:model-first';
+    store.setState({
+      currentSessionKey: sessionKey,
+      sessions: [{ key: sessionKey, displayName: sessionKey, createdLocally: true }],
+    });
+
+    const modelUpdate = store.getState().updateSessionModel(sessionKey, 'openai/glm-5');
+    const thinkingUpdate = store.getState().updateSessionThinking(sessionKey, 'high');
+
+    expect(gatewayRpcMock).toHaveBeenCalledTimes(1);
+    expect(gatewayRpcMock).toHaveBeenCalledWith('sessions.create', {
+      key: sessionKey,
+      agentId: 'main',
+      model: 'openai/glm-5',
+    });
+
+    createRpc.resolve({ entry: { model: 'openai/glm-5' } });
+    await Promise.all([modelUpdate, thinkingUpdate]);
+
+    expect(gatewayRpcMock.mock.calls.filter(([method]) => method === 'sessions.create')).toHaveLength(1);
+    expect(gatewayRpcMock).toHaveBeenCalledWith('sessions.patch', {
+      key: sessionKey,
+      thinkingLevel: 'high',
+    });
+    expect(gatewayRpcMock.mock.calls.filter(([, params]) => params?.model === 'openai/glm-5')).toHaveLength(1);
+  });
+
+  it('shares one local registration and patches the model when thinking selection starts first', async () => {
+    const createRpc = createDeferred<{ entry: Record<string, never> }>();
+    gatewayRpcMock.mockImplementation((method: string, params: Record<string, unknown>) => {
+      if (method === 'sessions.create') return createRpc.promise;
+      if (Object.prototype.hasOwnProperty.call(params, 'model')) {
+        return Promise.resolve({ resolved: { modelProvider: 'openai', model: 'glm-5' } });
+      }
+      return Promise.resolve({ entry: { thinkingLevel: params.thinkingLevel } });
+    });
+    const store = await loadStore();
+    const sessionKey = 'agent:main:thinking-first';
+    store.setState({
+      currentSessionKey: sessionKey,
+      sessions: [{ key: sessionKey, displayName: sessionKey, createdLocally: true }],
+    });
+
+    const thinkingUpdate = store.getState().updateSessionThinking(sessionKey, 'high');
+    const modelUpdate = store.getState().updateSessionModel(sessionKey, 'openai/glm-5');
+
+    expect(gatewayRpcMock).toHaveBeenCalledTimes(1);
+    expect(gatewayRpcMock).toHaveBeenCalledWith('sessions.create', {
+      key: sessionKey,
+      agentId: 'main',
+    });
+
+    createRpc.resolve({ entry: {} });
+    await Promise.all([thinkingUpdate, modelUpdate]);
+
+    expect(gatewayRpcMock.mock.calls.filter(([method]) => method === 'sessions.create')).toHaveLength(1);
+    expect(gatewayRpcMock).toHaveBeenCalledWith('sessions.patch', {
+      key: sessionKey,
+      thinkingLevel: 'high',
+    });
+    expect(gatewayRpcMock).toHaveBeenCalledWith('sessions.patch', {
+      key: sessionKey,
+      model: 'openai/glm-5',
+    });
+  });
+
+  it('serializes rapid thinking changes and keeps the latest selection', async () => {
+    const firstRpc = createDeferred<never>();
+    const events: string[] = [];
+    gatewayRpcMock.mockImplementation((_method: string, params: { thinkingLevel: string }) => {
+      if (params.thinkingLevel === 'low') {
+        events.push('start:low');
+        return firstRpc.promise.finally(() => events.push('settled:low'));
+      }
+      events.push('start:high');
+      return Promise.resolve({ entry: { thinkingLevel: 'high' } })
+        .then((result) => {
+          events.push('settled:high');
+          return result;
+        });
+    });
+    const store = await loadStore();
+    store.setState({
+      currentSessionKey: 'agent:main:main',
+      thinkingLevel: 'medium',
+      sessions: [{ key: 'agent:main:main', thinkingLevel: 'medium' }],
+    });
+
+    const firstUpdate = store.getState()
+      .updateSessionThinking('agent:main:main', 'low')
+      .then(() => 'fulfilled', () => 'rejected');
+    const finalUpdate = store.getState()
+      .updateSessionThinking('agent:main:main', 'high')
+      .then(() => 'fulfilled', () => 'rejected');
+
+    firstRpc.reject(new Error('low patch failed'));
+    await expect(firstUpdate).resolves.toBe('rejected');
+    await expect(finalUpdate).resolves.toBe('fulfilled');
+    expect(events).toEqual(['start:low', 'settled:low', 'start:high', 'settled:high']);
+    expect(store.getState().sessions[0]?.thinkingLevel).toBe('high');
+    expect(store.getState().thinkingLevel).toBe('high');
+  });
+
+  it('rolls back only the thinking field when persistence fails', async () => {
+    const patchRpc = createDeferred<never>();
+    gatewayRpcMock.mockReturnValue(patchRpc.promise);
+    const store = await loadStore();
+    store.setState({
+      currentSessionKey: 'agent:main:main',
+      thinkingLevel: 'medium',
+      sessions: [{
+        key: 'agent:main:main',
+        model: 'openai/smart-latest',
+        thinkingLevel: 'medium',
+        status: 'idle',
+        label: 'Original label',
+      }],
+    });
+
+    const update = store.getState().updateSessionThinking('agent:main:main', 'high');
+    store.setState((state) => ({
+      sessions: state.sessions.map((session) => session.key === 'agent:main:main'
+        ? { ...session, model: 'openai/glm-5', status: 'running', label: 'Concurrent label' }
+        : session),
+    }));
+    patchRpc.reject(new Error('thinking patch failed'));
+
+    await expect(update).rejects.toThrow('thinking patch failed');
+    expect(store.getState().sessions[0]).toMatchObject({
+      key: 'agent:main:main',
+      model: 'openai/glm-5',
+      thinkingLevel: 'medium',
+      status: 'running',
+      label: 'Concurrent label',
+    });
+    expect(store.getState().thinkingLevel).toBe('medium');
+  });
 });

@@ -16,6 +16,8 @@ describe('Gateway session catalog projection', () => {
       derivedTitle: 'Derived',
       lastMessagePreview: 'Preview',
       thinkingLevel: 'high',
+      thinkingDefault: 'medium',
+      thinkingLevels: ['off', { id: 'medium', label: 'Balanced' }, { id: 'medium' }, { id: '' }],
       model: 'model-a',
       updatedAt: '2026-07-20T00:00:00.000Z',
       status: ' RUNNING ',
@@ -34,6 +36,11 @@ describe('Gateway session catalog projection', () => {
       derivedTitle: 'Derived',
       lastMessagePreview: 'Preview',
       thinkingLevel: 'high',
+      thinkingDefault: 'medium',
+      thinkingLevels: [
+        { id: 'off' },
+        { id: 'medium', label: 'Balanced' },
+      ],
       model: 'model-a',
       updatedAt: Date.parse('2026-07-20T00:00:00.000Z'),
       status: 'running',
@@ -99,11 +106,20 @@ describe('Gateway session catalog projection', () => {
 
   it('preserves explicit false and clears optional fields only when null is present', () => {
     const result = applyGatewaySessionsChanged(
-      [{ key: SESSION_KEY, hasActiveRun: true, model: 'old-model', label: 'Keep me' }],
+      [{
+        key: SESSION_KEY,
+        hasActiveRun: true,
+        model: 'old-model',
+        thinkingDefault: 'medium',
+        thinkingLevels: [{ id: 'low' }],
+        label: 'Keep me',
+      }],
       {
         key: SESSION_KEY,
         hasActiveRun: false,
         model: null,
+        thinkingDefault: null,
+        thinkingLevels: null,
         ts: 10,
       },
       new Map(),
