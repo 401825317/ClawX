@@ -11,6 +11,7 @@
  *   - @openclaw/qqbot -> build/openclaw-plugins/qqbot
  *   - @openclaw/whatsapp -> build/openclaw-plugins/whatsapp
  *   - @tencent-weixin/openclaw-weixin -> build/openclaw-plugins/openclaw-weixin
+ *   - clawx-openai-image (local) -> build/openclaw-plugins/clawx-openai-image
  *
  * The output plugin directory contains:
  *   - plugin source files (index.ts, openclaw.plugin.json, package.json, ...)
@@ -46,6 +47,13 @@ const PLUGINS = [
   { npmName: '@openclaw/qqbot', pluginId: 'qqbot' },
   { npmName: '@openclaw/whatsapp', pluginId: 'whatsapp' },
   { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin' },
+];
+
+const LOCAL_PLUGINS = [
+  {
+    pluginId: 'clawx-openai-image',
+    sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'clawx-openai-image'),
+  },
 ];
 
 function getVirtualStoreNodeModules(realPkgPath) {
@@ -86,6 +94,44 @@ function listPackages(nodeModulesDir) {
     }
   }
   return result;
+}
+
+function readJson(filePath, label) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch (error) {
+    throw new Error(`${label} is missing or invalid: ${filePath} (${error instanceof Error ? error.message : String(error)})`);
+  }
+}
+
+function assertLocalPluginMetadata(pluginDir, pluginId) {
+  const pkg = readJson(path.join(pluginDir, 'package.json'), `Local plugin ${pluginId} package.json`);
+  const manifest = readJson(path.join(pluginDir, 'openclaw.plugin.json'), `Local plugin ${pluginId} manifest`);
+  if (manifest.id !== pluginId) {
+    throw new Error(`Local plugin directory/id mismatch: expected "${pluginId}", manifest has "${String(manifest.id)}"`);
+  }
+  if (pkg.name !== pluginId && pkg.name !== `${pluginId}-plugin`) {
+    throw new Error(`Local plugin ${pluginId} package name mismatch: "${String(pkg.name)}"`);
+  }
+  if (!pkg.version || pkg.version !== manifest.version) {
+    throw new Error(
+      `Local plugin ${pluginId} version mismatch: package=${String(pkg.version)} manifest=${String(manifest.version)}`,
+    );
+  }
+  if (!pkg.main || pkg.main !== manifest.entry || !fs.existsSync(path.join(pluginDir, manifest.entry))) {
+    throw new Error(`Local plugin ${pluginId} has an invalid entrypoint: ${String(manifest.entry)}`);
+  }
+}
+
+function assertRuntimeDependencies(pluginDir, pluginId) {
+  const pkg = readJson(path.join(pluginDir, 'package.json'), `Bundled plugin ${pluginId} package.json`);
+  const missing = Object.keys(pkg.dependencies || {}).filter((depName) => {
+    const depDir = path.join(pluginDir, 'node_modules', ...depName.split('/'));
+    return !fs.existsSync(path.join(depDir, 'package.json'));
+  });
+  if (missing.length > 0) {
+    throw new Error(`Bundled plugin "${pluginId}" is missing runtime dependencies: ${missing.join(', ')}`);
+  }
 }
 
 function bundleOnePlugin({ npmName, pluginId }) {
@@ -186,6 +232,76 @@ function bundleOnePlugin({ npmName, pluginId }) {
   echo`   ✅ ${pluginId}: copied ${copiedCount} deps (skipped dupes: ${skippedDupes})`;
 }
 
+function bundleLocalPlugin({ sourceDir, pluginId }) {
+  if (!fs.existsSync(sourceDir)) {
+    throw new Error(`Missing local plugin source: ${sourceDir}`);
+  }
+  assertLocalPluginMetadata(sourceDir, pluginId);
+
+  const outputDir = path.join(OUTPUT_ROOT, pluginId);
+  echo`📦 Bundling local plugin ${pluginId} -> ${outputDir}`;
+  if (fs.existsSync(outputDir)) {
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+  fs.cpSync(sourceDir, outputDir, {
+    recursive: true,
+    dereference: true,
+    filter: (source) => path.basename(source) !== 'node_modules',
+  });
+
+  const pkg = readJson(path.join(outputDir, 'package.json'), `Local plugin ${pluginId} package.json`);
+  const skipPackages = new Set(['typescript', '@playwright/test', ...Object.keys(pkg.peerDependencies || {})]);
+  const collected = new Map();
+  const queue = [];
+
+  for (const depName of Object.keys(pkg.dependencies || {})) {
+    const depPath = path.join(NODE_MODULES, ...depName.split('/'));
+    if (!fs.existsSync(depPath)) {
+      throw new Error(`Missing dependency "${depName}" for local plugin "${pluginId}". Run pnpm install first.`);
+    }
+    const realDepPath = fs.realpathSync(depPath);
+    collected.set(realDepPath, depName);
+    const virtualNodeModules = getVirtualStoreNodeModules(realDepPath);
+    if (virtualNodeModules) {
+      queue.push({ nodeModulesDir: virtualNodeModules, skipPkg: depName });
+    }
+  }
+
+  while (queue.length > 0) {
+    const { nodeModulesDir, skipPkg } = queue.shift();
+    for (const { name, fullPath } of listPackages(nodeModulesDir)) {
+      if (name === skipPkg || skipPackages.has(name) || name.startsWith('@types/')) continue;
+      let realPath;
+      try {
+        realPath = fs.realpathSync(fullPath);
+      } catch {
+        continue;
+      }
+      if (collected.has(realPath)) continue;
+      collected.set(realPath, name);
+      const dependencyNodeModules = getVirtualStoreNodeModules(realPath);
+      if (dependencyNodeModules && dependencyNodeModules !== nodeModulesDir) {
+        queue.push({ nodeModulesDir: dependencyNodeModules, skipPkg: name });
+      }
+    }
+  }
+
+  const outputNodeModules = path.join(outputDir, 'node_modules');
+  fs.mkdirSync(outputNodeModules, { recursive: true });
+  const copiedNames = new Set();
+  for (const [realPath, packageName] of collected) {
+    if (copiedNames.has(packageName)) continue;
+    copiedNames.add(packageName);
+    const destination = path.join(outputNodeModules, packageName);
+    fs.mkdirSync(normWin(path.dirname(destination)), { recursive: true });
+    fs.cpSync(normWin(realPath), normWin(destination), { recursive: true, dereference: true });
+  }
+
+  assertRuntimeDependencies(outputDir, pluginId);
+  assertLocalPluginMetadata(outputDir, pluginId);
+  echo`   ✅ ${pluginId}: copied ${copiedNames.size} local runtime deps`;
+}
+
 /**
  * Patch plugin entry JS files so the exported `id` matches openclaw.plugin.json.
  * Some plugins (e.g. wecom) ship with a hardcoded ID in their compiled output
@@ -245,6 +361,10 @@ fs.mkdirSync(OUTPUT_ROOT, { recursive: true });
 
 for (const plugin of PLUGINS) {
   bundleOnePlugin(plugin);
+}
+
+for (const plugin of LOCAL_PLUGINS) {
+  bundleLocalPlugin(plugin);
 }
 
 echo`✅ Plugin mirrors ready: ${OUTPUT_ROOT}`;

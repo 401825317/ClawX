@@ -218,6 +218,43 @@ async function installAcpPromptSuccessMock(app: ElectronApplication) {
   });
 }
 
+async function installImageOptionPromptRecorder(app: ElectronApplication) {
+  await app.evaluate(async ({ app: _app }) => {
+    const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
+    type HostInvokeRequest = {
+      id?: string;
+      module?: string;
+      action?: string;
+      payload?: Record<string, unknown>;
+      args?: unknown[];
+    };
+    type IpcInvokeHandler = (event: unknown, request: HostInvokeRequest) => Promise<unknown>;
+    const handlers = (ipcMain as unknown as { _invokeHandlers?: Map<string, IpcInvokeHandler> })._invokeHandlers;
+    const originalHostInvoke = handlers?.get('host:invoke');
+    const globals = globalThis as unknown as { __imageOptionPromptPayloads?: Record<string, unknown>[] };
+    globals.__imageOptionPromptPayloads = [];
+
+    ipcMain.removeHandler('host:invoke');
+    ipcMain.handle('host:invoke', async (event: unknown, request: HostInvokeRequest) => {
+      if (request?.module === 'chat' && request.action === 'sendAcpPrompt') {
+        const requestPayload = request.payload ?? (Array.isArray(request.args) ? request.args[0] : undefined);
+        if (requestPayload && typeof requestPayload === 'object') {
+          globals.__imageOptionPromptPayloads?.push(requestPayload as Record<string, unknown>);
+        }
+        return { id: request.id, ok: true, data: { success: true, generation: 1 } };
+      }
+      return originalHostInvoke?.(event, request) ?? { id: request?.id, ok: true, data: {} };
+    });
+  });
+}
+
+async function getImageOptionPromptPayloads(app: ElectronApplication) {
+  return await app.evaluate(async ({ app: _app }) => {
+    return (globalThis as unknown as { __imageOptionPromptPayloads?: Record<string, unknown>[] })
+      .__imageOptionPromptPayloads ?? [];
+  });
+}
+
 async function installAcpPromptFailureMock(app: ElectronApplication, error: string) {
   await app.evaluate(async ({ app: _app }, promptError) => {
     const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
@@ -502,6 +539,76 @@ test.describe('ClawX ACP inline timeline', () => {
       ]);
 
       await expect(page.locator('.prose').filter({ hasText: 'Streaming response' })).toHaveCount(1);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('forwards image-mode preferences through ACP without directly generating an image', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installAcpChatMocks(app);
+      await installImageOptionPromptRecorder(app);
+      const page = await openChat(app);
+      await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible({ timeout: 30_000 });
+      await page.setViewportSize({ width: 720, height: 720 });
+
+      const sendButton = page.getByTestId('chat-composer-send');
+      const sendBoxBeforeImageMode = await sendButton.boundingBox();
+      await page.getByTestId('chat-composer-mode-image').click();
+      await expect(page.getByTestId('chat-image-aspect-trigger')).toHaveText('1:1');
+      await expect(page.getByTestId('chat-image-quality')).toHaveValue('medium');
+      const [modelPickerBox, imageModeButtonBox, aspectTriggerBox, qualityBox, sendBoxAfterImageMode] = await Promise.all([
+        page.getByTestId('chat-model-picker-button').boundingBox(),
+        page.getByTestId('chat-composer-mode-image').boundingBox(),
+        page.getByTestId('chat-image-aspect-trigger').boundingBox(),
+        page.getByTestId('chat-image-quality').boundingBox(),
+        sendButton.boundingBox(),
+      ]);
+      expect(sendBoxBeforeImageMode).not.toBeNull();
+      expect(modelPickerBox).not.toBeNull();
+      expect(imageModeButtonBox).not.toBeNull();
+      expect(aspectTriggerBox).not.toBeNull();
+      expect(qualityBox).not.toBeNull();
+      expect(sendBoxAfterImageMode).not.toBeNull();
+      expect(modelPickerBox!.x + modelPickerBox!.width).toBeLessThanOrEqual(imageModeButtonBox!.x);
+      expect(Math.abs(sendBoxAfterImageMode!.x - sendBoxBeforeImageMode!.x)).toBeLessThanOrEqual(1);
+      const controlCenterY = aspectTriggerBox!.y + aspectTriggerBox!.height / 2;
+      expect(Math.abs(qualityBox!.y + qualityBox!.height / 2 - controlCenterY)).toBeLessThanOrEqual(1);
+      expect(Math.abs(sendBoxAfterImageMode!.y + sendBoxAfterImageMode!.height / 2 - controlCenterY)).toBeLessThanOrEqual(1);
+
+      await page.getByTestId('chat-image-aspect-trigger').click();
+      const aspectMenuBox = await page.getByTestId('chat-image-aspect-menu').boundingBox();
+      expect(aspectMenuBox).not.toBeNull();
+      expect(aspectMenuBox!.width).toBeGreaterThanOrEqual(218);
+      expect(aspectMenuBox!.width).toBeLessThanOrEqual(222);
+      const widescreenAspectOption = page.getByTestId('chat-image-aspect-16-9');
+      const widescreenAspectHitTest = await widescreenAspectOption.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        const hitTarget = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        return {
+          interactive: hitTarget === element || element.contains(hitTarget),
+          hitTargetTag: hitTarget?.tagName ?? null,
+          hitTargetTestId: hitTarget?.getAttribute('data-testid') ?? null,
+        };
+      });
+      expect(
+        widescreenAspectHitTest,
+        `Aspect menu must receive pointer events: ${JSON.stringify(widescreenAspectHitTest)}`,
+      ).toMatchObject({ interactive: true });
+      await widescreenAspectOption.click();
+      await page.getByTestId('chat-image-quality').selectOption('high');
+      await page.getByTestId('chat-composer-input').fill('Create a product image.');
+      await page.getByTestId('chat-composer-send').click();
+
+      await expect.poll(async () => await getImageOptionPromptPayloads(app)).toEqual([
+        expect.objectContaining({
+          sessionKey: MAIN_SESSION_KEY,
+          message: 'Create a product image.',
+          imageOptions: { size: '3840x2160', quality: 'high' },
+        }),
+      ]);
     } finally {
       await closeElectronApp(app);
     }

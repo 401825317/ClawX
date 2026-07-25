@@ -8,6 +8,7 @@ const IMAGE_GENERATION_TASK_ID = '32aa3a12-a05b-4074-af4e-246cc4a9a303';
 const ONE_PIXEL_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const ONE_PIXEL_PNG_DATA_URL = `data:image/png;base64,${ONE_PIXEL_PNG_BASE64}`;
 const ONE_PIXEL_SVG_BASE64 = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><rect width="16" height="16" fill="black"/></svg>').toString('base64');
+const WIDESCREEN_SVG_BASE64 = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900"><rect width="1600" height="900" fill="black"/></svg>').toString('base64');
 
 type AcpSessionUpdate = Record<string, unknown> & { sessionUpdate: string };
 
@@ -231,6 +232,40 @@ test.describe('ClawX chat run state events', () => {
       await expect(page.getByTestId('acp-image-part').locator('img')).toBeVisible();
       await expect(page.getByTestId('image-preview-unavailable')).toHaveCount(0);
       await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('keeps generated image containers fitted to the image width', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installAcpChatMocks(app);
+      const page = await openChat(app);
+      await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible({ timeout: 30_000 });
+
+      await emitAcpSessionUpdates(app, [{
+        sessionUpdate: 'agent_message',
+        messageId: 'widescreen-generated-image',
+        content: [{
+          type: 'image',
+          mimeType: 'image/svg+xml',
+          data: WIDESCREEN_SVG_BASE64,
+        }],
+      }]);
+
+      const imagePart = page.getByTestId('acp-image-part');
+      const image = imagePart.locator('img');
+      await expect(image).toBeVisible();
+      const [containerBox, imageBox] = await Promise.all([
+        imagePart.boundingBox(),
+        image.boundingBox(),
+      ]);
+
+      expect(containerBox).not.toBeNull();
+      expect(imageBox).not.toBeNull();
+      expect(containerBox!.width - imageBox!.width).toBeLessThanOrEqual(2);
     } finally {
       await closeElectronApp(app);
     }

@@ -1,11 +1,55 @@
 import { definePluginEntry } from 'openclaw/plugin-sdk/core';
-import { createOpenAiCompatibleImageGenerationProvider, toImageDataUrl } from 'openclaw/plugin-sdk/image-generation';
+import { imageSourceUploadFileName } from 'openclaw/plugin-sdk/image-generation';
+import { resolveApiKeyForProvider } from 'openclaw/plugin-sdk/image-generation-core';
+import { isProviderApiKeyConfigured } from 'openclaw/plugin-sdk/provider-auth';
+import { createHash, randomUUID } from 'node:crypto';
+import { readdir, readFile, rename, rm } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { Agent, fetch as undiciFetch } from 'undici';
 
 const PROVIDER_ID = 'clawx-openai-image';
 const DEFAULT_MODEL = 'gpt-image-2';
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_SIZE = '1024x1024';
+const DEFAULT_QUALITY = 'medium';
+const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_MIME_TYPE = 'image/png';
+const OUTPUT_MIME_TYPES = {
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp',
+};
+const SUPPORTED_SIZES = [
+  '1024x1024',
+  '1536x1024',
+  '1024x1536',
+  '2048x2048',
+  '2048x1152',
+  '3840x2160',
+  '2160x3840',
+];
+const SUPPORTED_ASPECT_RATIOS = ['1:1', '3:2', '2:3', '16:9', '9:16'];
 const MAX_INPUT_IMAGES = 5;
+const MAX_UPSTREAM_DIAGNOSTIC_CHARS = 1000;
+const TURN_IMAGE_PREFERENCES_DIRECTORY = 'uclaw-turn-preferences';
+const TURN_IMAGE_PREFERENCE_TTL_MS = 5 * 60 * 1000;
+const TURN_IMAGE_PREFERENCE_CACHE_MAX_ENTRIES = 64;
+const TURN_IMAGE_PREFERENCE_FILE_RE = /^turn-([0-9a-f-]{36})\.json$/iu;
+const IMAGE_MODE_PROMPT_CONTEXT = [
+  'The user selected image generation mode for this turn.',
+  'When the request asks for an image, call image_generate instead of only describing an image.',
+].join(' ');
+const turnImagePreferencesByRun = new Map();
+const imageFetchDispatcher = new Agent({
+  headersTimeout: DEFAULT_TIMEOUT_MS,
+  bodyTimeout: DEFAULT_TIMEOUT_MS,
+});
+const SUPPORTED_EDIT_IMAGE_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+]);
 
 function trimTrailingSlash(value) {
   return String(value || '').trim().replace(/\/+$/u, '');
@@ -23,30 +67,604 @@ function resolveCount(req) {
   return Math.max(1, Math.min(4, Math.trunc(raw)));
 }
 
-function imageToDataUrl(image) {
-  return toImageDataUrl({
-    buffer: image.buffer,
-    mimeType: image.mimeType,
+function normalizeOptionalString(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function turnImagePreferenceDirectory() {
+  const stateDirectory = normalizeOptionalString(process.env.OPENCLAW_STATE_DIR) || join(homedir(), '.openclaw');
+  return join(stateDirectory, TURN_IMAGE_PREFERENCES_DIRECTORY);
+}
+
+function digestPrompt(prompt) {
+  return createHash('sha256').update(prompt, 'utf8').digest('hex');
+}
+
+function normalizeTurnImageOptions(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const size = normalizeOptionalString(value.size);
+  const quality = normalizeOptionalString(value.quality);
+  if (!SUPPORTED_SIZES.includes(size) || !['low', 'medium', 'high'].includes(quality)) return undefined;
+  return { size, quality };
+}
+
+function turnCacheKey(event, ctx) {
+  return normalizeOptionalString(event?.runId)
+    || normalizeOptionalString(ctx?.runId)
+    || normalizeOptionalString(event?.sessionKey)
+    || normalizeOptionalString(ctx?.sessionKey);
+}
+
+function pruneTurnImagePreferenceCache(now = Date.now()) {
+  for (const [key, entry] of turnImagePreferencesByRun) {
+    if (entry.expiresAt <= now) turnImagePreferencesByRun.delete(key);
+  }
+  while (turnImagePreferencesByRun.size > TURN_IMAGE_PREFERENCE_CACHE_MAX_ENTRIES) {
+    const oldestKey = turnImagePreferencesByRun.keys().next().value;
+    if (!oldestKey) return;
+    turnImagePreferencesByRun.delete(oldestKey);
+  }
+}
+
+function cacheTurnImageOptions(event, ctx, imageOptions) {
+  const key = turnCacheKey(event, ctx);
+  if (!key || !imageOptions) return;
+  const now = Date.now();
+  pruneTurnImagePreferenceCache(now);
+  turnImagePreferencesByRun.set(key, {
+    imageOptions,
+    expiresAt: now + TURN_IMAGE_PREFERENCE_TTL_MS,
   });
 }
 
+function getTurnImageOptions(event, ctx) {
+  pruneTurnImagePreferenceCache();
+  const key = turnCacheKey(event, ctx);
+  return key ? turnImagePreferencesByRun.get(key)?.imageOptions : undefined;
+}
+
+/** Atomically claims the UI preference for one ACP prompt without persisting prompt text. */
+async function consumeTurnImageOptions(event, ctx) {
+  const sessionKey = normalizeOptionalString(event?.sessionKey) || normalizeOptionalString(ctx?.sessionKey);
+  const prompt = normalizeOptionalString(event?.prompt);
+  if (!sessionKey || !prompt) return undefined;
+
+  const directory = turnImagePreferenceDirectory();
+  let fileNames;
+  try {
+    fileNames = await readdir(directory);
+  } catch {
+    return undefined;
+  }
+
+  const now = Date.now();
+  const messageDigest = digestPrompt(prompt);
+  const matches = [];
+  for (const fileName of fileNames) {
+    if (!TURN_IMAGE_PREFERENCE_FILE_RE.test(fileName)) continue;
+    const filePath = join(directory, fileName);
+    try {
+      const record = JSON.parse(await readFile(filePath, 'utf8'));
+      const imageOptions = normalizeTurnImageOptions(record?.imageOptions);
+      const expiresAt = Number(record?.expiresAt);
+      if (!imageOptions || !Number.isFinite(expiresAt) || expiresAt <= now) {
+        await rm(filePath, { force: true });
+        continue;
+      }
+      if (record.sessionKey !== sessionKey || record.messageDigest !== messageDigest) continue;
+      matches.push({ filePath, createdAt: Number(record?.createdAt) || 0, imageOptions });
+    } catch {
+      await rm(filePath, { force: true }).catch(() => undefined);
+    }
+  }
+
+  matches.sort((left, right) => left.createdAt - right.createdAt);
+  for (const match of matches) {
+    const claimedPath = `${match.filePath}.${process.pid}.${randomUUID()}.claimed`;
+    try {
+      await rename(match.filePath, claimedPath);
+    } catch {
+      continue;
+    }
+    await rm(claimedPath, { force: true }).catch(() => undefined);
+    return match.imageOptions;
+  }
+
+  return undefined;
+}
+
+function resolveProviderConfig(req) {
+  return req.cfg?.models?.providers?.[PROVIDER_ID] ?? {};
+}
+
+async function resolveApiKey(req) {
+  const auth = await resolveApiKeyForProvider({
+    provider: PROVIDER_ID,
+    cfg: req.cfg,
+    agentDir: req.agentDir,
+    store: req.authStore,
+  });
+  const apiKey = String(auth.apiKey || req.apiKey || '').trim();
+  if (!apiKey) throw new Error('UClaw OpenAI image API key missing');
+  return apiKey;
+}
+
+function isConfigured({ cfg, agentDir }) {
+  const configuredApiKey = cfg?.models?.providers?.[PROVIDER_ID]?.apiKey;
+  if (typeof configuredApiKey === 'string' && configuredApiKey.trim()) return true;
+  return isProviderApiKeyConfigured({ provider: PROVIDER_ID, agentDir });
+}
+
+function appendImagesPath(baseUrl, mode) {
+  return `${trimTrailingSlash(baseUrl)}/images/${mode === 'edit' ? 'edits' : 'generations'}`;
+}
+
+function resolveTimeoutMs(req) {
+  const raw = Number(req.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TIMEOUT_MS;
+}
+
+function imageFileExtensionForMimeType(mimeType) {
+  const normalized = String(mimeType || DEFAULT_MIME_TYPE).split(';')[0].trim().toLowerCase();
+  if (normalized.includes('jpeg') || normalized.includes('jpg')) return 'jpg';
+  if (normalized.includes('webp')) return 'webp';
+  if (normalized.includes('svg')) return 'svg';
+  return 'png';
+}
+
+function compactTimestamp(date = new Date()) {
+  return date.toISOString()
+    .replace(/\.\d{3}Z$/u, 'Z')
+    .replace(/[-:]/gu, '')
+    .replace(/[TZ]/gu, '-')
+    .replace(/-$/u, '');
+}
+
+function uniqueImageFileName(index, mimeType) {
+  return `uclaw-image-${index + 1}-${compactTimestamp()}-${randomUUID().slice(0, 8)}.${imageFileExtensionForMimeType(mimeType)}`;
+}
+
+function nowMs() {
+  return Date.now();
+}
+
+function durationSince(startedAt) {
+  return Math.max(0, nowMs() - startedAt);
+}
+
+function sanitizeErrorMessage(error) {
+  if (error instanceof Error) return error.message;
+  return String(error || 'unknown error');
+}
+
+function sanitizeDiagnosticText(value, maxChars = MAX_UPSTREAM_DIAGNOSTIC_CHARS) {
+  const text = String(value || '')
+    .replace(/(authorization["'\s:=]+)(?:bearer\s+)?[^"',\s}]+/giu, '$1[REDACTED]')
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/giu, 'Bearer [REDACTED]')
+    .replace(/sk-[A-Za-z0-9_-]{8,}/giu, 'sk-[REDACTED]')
+    .replace(
+      /((?:api[_-]?key|access[_-]?token|password|secret|token)["'\s:=]+)([^"',\s}]+)/giu,
+      '$1[REDACTED]',
+    )
+    .replace(/https?:\/\/[^\s"']*(?:access_token|api_key|token|signature|x-amz-signature)[^\s"']*/giu, '[REDACTED_URL]');
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}...[truncated ${text.length - maxChars} chars]`;
+}
+
+function optionalDiagnosticText(value, maxChars) {
+  if (value === undefined || value === null) return null;
+  const text = sanitizeDiagnosticText(value, maxChars).trim();
+  return text || null;
+}
+
+function logImageTiming(event, details = {}) {
+  const message = `[clawx-openai-image] ${event} ${JSON.stringify(details)}`;
+  if (event.endsWith('_failed') || event === 'response_error') {
+    console.error(message);
+    return;
+  }
+  console.info(message);
+}
+
+function normalizeMimeType(mimeType) {
+  return String(mimeType || '').split(';')[0].trim().toLowerCase();
+}
+
+function imageBytes(image) {
+  if (image?.buffer instanceof Uint8Array) {
+    return Buffer.from(image.buffer.buffer, image.buffer.byteOffset, image.buffer.byteLength);
+  }
+  return Buffer.from(image?.buffer || []);
+}
+
+function sniffSupportedImageMimeType(bytes) {
+  if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  if (
+    bytes.length >= 8
+    && bytes[0] === 0x89
+    && bytes[1] === 0x50
+    && bytes[2] === 0x4e
+    && bytes[3] === 0x47
+  ) {
+    return 'image/png';
+  }
+  if (
+    bytes.length >= 12
+    && bytes.subarray(0, 4).toString('ascii') === 'RIFF'
+    && bytes.subarray(8, 12).toString('ascii') === 'WEBP'
+  ) {
+    return 'image/webp';
+  }
+  return '';
+}
+
+function resolveActualImageMimeType(bytes, declaredMimeType, fallbackMimeType = DEFAULT_MIME_TYPE) {
+  const sniffedMimeType = sniffSupportedImageMimeType(bytes);
+  if (sniffedMimeType) return sniffedMimeType;
+  const normalizedDeclaredMimeType = normalizeMimeType(declaredMimeType);
+  if (SUPPORTED_EDIT_IMAGE_MIME_TYPES.has(normalizedDeclaredMimeType)) {
+    return normalizedDeclaredMimeType;
+  }
+  const normalizedFallbackMimeType = normalizeMimeType(fallbackMimeType);
+  return SUPPORTED_EDIT_IMAGE_MIME_TYPES.has(normalizedFallbackMimeType)
+    ? normalizedFallbackMimeType
+    : DEFAULT_MIME_TYPE;
+}
+
+function supportedMimeTypeFromFileName(fileName) {
+  const normalized = String(fileName || '').toLowerCase();
+  if (/\.(jpe?g|jfif)$/u.test(normalized)) return 'image/jpeg';
+  if (normalized.endsWith('.png')) return 'image/png';
+  if (normalized.endsWith('.webp')) return 'image/webp';
+  return '';
+}
+
+function isGenericMimeType(mimeType) {
+  return !mimeType || mimeType === 'application/octet-stream' || mimeType === 'binary/octet-stream';
+}
+
+function resolveEditInputImages(inputImages) {
+  const unsupported = [];
+  const resolvedImages = inputImages.map((image, index) => {
+    const fileName = imageSourceUploadFileName({ image, index });
+    const declaredMimeType = normalizeMimeType(image?.mimeType);
+    const bytes = imageBytes(image);
+    let mimeType = SUPPORTED_EDIT_IMAGE_MIME_TYPES.has(declaredMimeType) ? declaredMimeType : '';
+    if (!mimeType && isGenericMimeType(declaredMimeType)) {
+      mimeType = sniffSupportedImageMimeType(bytes) || supportedMimeTypeFromFileName(fileName);
+    }
+    if (!mimeType) {
+      unsupported.push({
+        fileName,
+        mimeType: declaredMimeType || 'unknown',
+      });
+    }
+    return {
+      bytes,
+      fileName,
+      mimeType,
+    };
+  });
+
+  if (unsupported.length > 0) {
+    const details = unsupported
+      .map(({ fileName, mimeType }) => `${fileName} (${mimeType})`)
+      .join(', ');
+    throw new Error(`UClaw OpenAI 图片编辑只支持 PNG、JPEG 或 WebP 参考图。当前文件不支持：${details}。请先转成 PNG 或 JPEG 后重试。`);
+  }
+
+  return resolvedImages;
+}
+
+function parseDataUrlImage(dataUrl) {
+  const match = String(dataUrl || '').match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.+)$/iu);
+  if (!match) return null;
+  const buffer = Buffer.from(match[2], 'base64');
+  const mimeType = resolveActualImageMimeType(buffer, match[1]);
+  return {
+    buffer,
+    mimeType,
+  };
+}
+
+async function fetchImageUrl(url, context = {}) {
+  const startedAt = nowMs();
+  const trimmed = String(url || '').trim();
+  if (!trimmed) return null;
+  const dataImage = parseDataUrlImage(trimmed);
+  if (dataImage) {
+    logImageTiming('image_data_url_decoded', {
+      requestId: context.requestId,
+      index: context.index,
+      durationMs: durationSince(startedAt),
+      bytes: dataImage.buffer.byteLength,
+      mimeType: dataImage.mimeType,
+    });
+    return dataImage;
+  }
+  if (!/^https?:\/\//iu.test(trimmed)) {
+    throw new Error(`UClaw OpenAI image response returned unsupported image URL: ${trimmed.slice(0, 80)}`);
+  }
+  const parsedUrl = new URL(trimmed);
+  logImageTiming('image_url_fetch_start', {
+    requestId: context.requestId,
+    index: context.index,
+    host: parsedUrl.host,
+    path: parsedUrl.pathname,
+  });
+  try {
+    const response = await undiciFetch(trimmed, {
+      method: 'GET',
+      signal: context.signal,
+      dispatcher: imageFetchDispatcher,
+    });
+    if (!response.ok) {
+      throw new Error(`UClaw OpenAI image URL fetch failed: HTTP ${response.status}`);
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const contentType = resolveActualImageMimeType(buffer, response.headers.get('content-type'));
+    logImageTiming('image_url_fetch_done', {
+      requestId: context.requestId,
+      index: context.index,
+      status: response.status,
+      durationMs: durationSince(startedAt),
+      bytes: buffer.byteLength,
+      mimeType: contentType,
+    });
+    return {
+      buffer,
+      mimeType: contentType,
+    };
+  } catch (error) {
+    logImageTiming('image_url_fetch_failed', {
+      requestId: context.requestId,
+      index: context.index,
+      durationMs: durationSince(startedAt),
+      error: sanitizeErrorMessage(error).slice(0, 240),
+    });
+    throw error;
+  }
+}
+
+async function parseImagesResponse(payload, context = {}) {
+  const startedAt = nowMs();
+  const data = Array.isArray(payload?.data) ? payload.data : [];
+  const images = await Promise.all(data.map(async (entry, index) => {
+    const itemStartedAt = nowMs();
+    const base64 = typeof entry?.b64_json === 'string' ? entry.b64_json.trim() : '';
+    const url = typeof entry?.url === 'string' ? entry.url.trim() : '';
+    const decodedBuffer = base64 ? Buffer.from(base64, 'base64') : null;
+    const fetched = decodedBuffer
+      ? {
+        buffer: decodedBuffer,
+        mimeType: resolveActualImageMimeType(
+          decodedBuffer,
+          entry?.mime_type,
+          context.outputMimeType,
+        ),
+      }
+      : await fetchImageUrl(url, { requestId: context.requestId, index, signal: context.signal });
+    if (!fetched) return null;
+    logImageTiming('image_payload_decoded', {
+      requestId: context.requestId,
+      index,
+      source: base64 ? 'b64_json' : 'url',
+      durationMs: durationSince(itemStartedAt),
+      bytes: fetched.buffer.byteLength,
+      mimeType: fetched.mimeType,
+    });
+    const image = {
+      buffer: fetched.buffer,
+      mimeType: fetched.mimeType,
+      fileName: uniqueImageFileName(index, fetched.mimeType),
+    };
+    if (typeof entry?.revised_prompt === 'string' && entry.revised_prompt.trim()) {
+      image.revisedPrompt = entry.revised_prompt.trim();
+    }
+    return image;
+  }));
+  const parsedImages = images.filter(Boolean);
+  logImageTiming('images_parsed', {
+    requestId: context.requestId,
+    responseItems: data.length,
+    outputImages: parsedImages.length,
+    durationMs: durationSince(startedAt),
+  });
+  return parsedImages;
+}
+
+function logUpstreamResponseError(response, text, payload, context = {}) {
+  const errorPayload = payload && typeof payload === 'object' ? payload.error : null;
+  const errorRecord = errorPayload && typeof errorPayload === 'object' ? errorPayload : {};
+  logImageTiming('response_error', {
+    requestId: context.requestId || null,
+    mode: context.mode || null,
+    status: response.status,
+    statusText: response.statusText || null,
+    upstreamMessage: optionalDiagnosticText(errorRecord.message || payload?.message, 500),
+    upstreamType: optionalDiagnosticText(errorRecord.type || payload?.type, 160),
+    upstreamCode: optionalDiagnosticText(errorRecord.code || payload?.code, 160),
+    upstreamParam: optionalDiagnosticText(errorRecord.param || payload?.param, 160),
+    responseBody: optionalDiagnosticText(text, MAX_UPSTREAM_DIAGNOSTIC_CHARS),
+  });
+}
+
+async function readJsonResponse(response, failureLabel, context = {}) {
+  const text = await response.text();
+  let payload = null;
+  if (text.trim()) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      if (!response.ok) {
+        logUpstreamResponseError(response, text, null, context);
+        throw new Error(`${failureLabel}: HTTP ${response.status}`);
+      }
+      throw new Error(`${failureLabel}: invalid JSON response`);
+    }
+  }
+  if (!response.ok) {
+    logUpstreamResponseError(response, text, payload, context);
+    const message = payload?.error?.message || payload?.message || text || `HTTP ${response.status}`;
+    throw new Error(`${failureLabel}: ${message}`);
+  }
+  return payload;
+}
+
+function resolveOpenAIImageOptions(req) {
+  const openai = req.providerOptions?.openai ?? {};
+  const outputFormat = req.outputFormat ?? req.output_format ?? openai.outputFormat ?? openai.output_format;
+  const background = openai.background ?? req.background;
+  const requestedCompression = openai.outputCompression
+    ?? openai.output_compression
+    ?? req.outputCompression
+    ?? req.output_compression;
+  const outputCompression = outputFormat === 'jpeg' || outputFormat === 'webp'
+    ? requestedCompression
+    : undefined;
+  return {
+    outputFormat,
+    outputMimeType: OUTPUT_MIME_TYPES[outputFormat] || DEFAULT_MIME_TYPE,
+    background,
+    outputCompression,
+    moderation: openai.moderation,
+    user: openai.user,
+  };
+}
+
+function openAIImageOptionEntries(req) {
+  const options = resolveOpenAIImageOptions(req);
+  const quality = normalizeOptionalString(req.quality) || DEFAULT_QUALITY;
+  return {
+    quality,
+    ...(options.outputFormat !== undefined ? { output_format: options.outputFormat } : {}),
+    ...(options.background !== undefined ? { background: options.background } : {}),
+    ...(options.moderation !== undefined ? { moderation: options.moderation } : {}),
+    ...(options.outputCompression !== undefined ? { output_compression: options.outputCompression } : {}),
+    ...(options.user !== undefined ? { user: options.user } : {}),
+  };
+}
+
+function parseDimensions(value) {
+  const match = String(value || '').trim().match(/^(\d+)x(\d+)$/u);
+  if (!match) return null;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+  return { width, height, area: width * height, ratio: width / height };
+}
+
+function parseAspectRatio(value) {
+  const match = String(value || '').trim().match(/^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/u);
+  if (!match) return null;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+  return width / height;
+}
+
+function resolveRequestedSize(req) {
+  const requestedSize = req.size ?? DEFAULT_SIZE;
+  const requestedDimensions = parseDimensions(requestedSize);
+  const requestedRatio = parseAspectRatio(req.aspectRatio);
+  if (!requestedRatio) return requestedSize;
+  if (requestedDimensions && Math.abs(Math.log(requestedDimensions.ratio / requestedRatio)) < 0.01) {
+    return requestedSize;
+  }
+
+  const referenceArea = requestedDimensions?.area ?? parseDimensions(DEFAULT_SIZE).area;
+  return SUPPORTED_SIZES
+    .map((size) => ({ size, dimensions: parseDimensions(size) }))
+    .filter(({ dimensions }) => dimensions)
+    .sort((left, right) => {
+      const leftRatioDistance = Math.abs(Math.log(left.dimensions.ratio / requestedRatio));
+      const rightRatioDistance = Math.abs(Math.log(right.dimensions.ratio / requestedRatio));
+      if (leftRatioDistance !== rightRatioDistance) return leftRatioDistance - rightRatioDistance;
+      return Math.abs(Math.log(left.dimensions.area / referenceArea))
+        - Math.abs(Math.log(right.dimensions.area / referenceArea));
+    })[0]?.size ?? requestedSize;
+}
+
+function buildGenerateBody(req, model, count) {
+  return {
+    model,
+    prompt: req.prompt,
+    n: count,
+    size: resolveRequestedSize(req),
+    ...openAIImageOptionEntries(req),
+  };
+}
+
+function multipartHeader(boundary, name, extra = '') {
+  return Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"${extra}\r\n\r\n`, 'utf8');
+}
+
+function multipartTextPart(boundary, name, value) {
+  return Buffer.concat([
+    multipartHeader(boundary, name),
+    Buffer.from(String(value), 'utf8'),
+    Buffer.from('\r\n', 'utf8'),
+  ]);
+}
+
+function multipartFilePart(boundary, name, fileName, mimeType, bytes) {
+  const safeName = String(fileName || 'image.png').replace(/[\r\n"]/gu, '_');
+  const normalizedMimeType = String(mimeType || DEFAULT_MIME_TYPE).replace(/[\r\n]/gu, '').trim() || DEFAULT_MIME_TYPE;
+  return Buffer.concat([
+    Buffer.from(
+      `--${boundary}\r\n`
+      + `Content-Disposition: form-data; name="${name}"; filename="${safeName}"\r\n`
+      + `Content-Type: ${normalizedMimeType}\r\n\r\n`,
+      'utf8',
+    ),
+    Buffer.from(bytes),
+    Buffer.from('\r\n', 'utf8'),
+  ]);
+}
+
+function buildEditMultipart(req, editImages, model, count) {
+  const boundary = `uclaw-openai-image-${randomUUID()}`;
+  const parts = [
+    multipartTextPart(boundary, 'model', model),
+    multipartTextPart(boundary, 'prompt', req.prompt),
+    multipartTextPart(boundary, 'n', String(count)),
+    multipartTextPart(boundary, 'size', resolveRequestedSize(req)),
+  ];
+  for (const [name, value] of Object.entries(openAIImageOptionEntries(req))) {
+    parts.push(multipartTextPart(boundary, name, value));
+  }
+  editImages.forEach((image, index) => {
+    const fieldName = editImages.length > 1 ? 'image[]' : 'image';
+    parts.push(multipartFilePart(
+      boundary,
+      fieldName,
+      image.fileName,
+      image.mimeType,
+      image.bytes,
+    ));
+  });
+  parts.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'));
+  const body = Buffer.concat(parts);
+  return {
+    body,
+    contentType: `multipart/form-data; boundary=${boundary}`,
+  };
+}
+
 function buildProvider() {
-  return createOpenAiCompatibleImageGenerationProvider({
+  return {
     id: PROVIDER_ID,
-    label: 'ClawX OpenAI Images',
+    label: 'UClaw OpenAI Images',
     defaultModel: DEFAULT_MODEL,
     models: [DEFAULT_MODEL],
-    defaultBaseUrl: DEFAULT_BASE_URL,
-    providerConfigKey: PROVIDER_ID,
-    defaultTimeoutMs: 180_000,
-    useConfiguredRequest: true,
-    resolveBaseUrl: ({ providerConfig, defaultBaseUrl }) => normalizeRelayBaseUrl(providerConfig?.baseUrl, defaultBaseUrl),
-    resolveCount: ({ req }) => resolveCount(req),
+    defaultTimeoutMs: DEFAULT_TIMEOUT_MS,
     capabilities: {
       generate: {
         maxCount: 4,
         supportsSize: true,
-        supportsAspectRatio: false,
+        supportsAspectRatio: true,
         supportsResolution: false,
       },
       edit: {
@@ -54,64 +672,171 @@ function buildProvider() {
         maxCount: 4,
         maxInputImages: MAX_INPUT_IMAGES,
         supportsSize: true,
-        supportsAspectRatio: false,
+        supportsAspectRatio: true,
         supportsResolution: false,
       },
       geometry: {
-        sizes: [
-          '1024x1024',
-          '1536x1024',
-          '1024x1536',
-          '2048x2048',
-          '2048x1152',
-          '3840x2160',
-          '2160x3840',
-        ],
+        sizes: [...SUPPORTED_SIZES],
+        aspectRatios: [...SUPPORTED_ASPECT_RATIOS],
       },
       output: {
-        qualities: [],
-        formats: [],
-        backgrounds: [],
+        qualities: ['low', 'medium', 'high'],
+        formats: ['png', 'jpeg', 'webp'],
+        backgrounds: ['transparent', 'opaque', 'auto'],
       },
     },
-    buildGenerateRequest: ({ req, model, count }) => ({
-      kind: 'json',
-      body: {
-        model,
-        prompt: req.prompt,
-        n: count,
-        size: req.size ?? DEFAULT_SIZE,
-      },
-    }),
-    buildEditRequest: ({ req, inputImages, model, count }) => ({
-      kind: 'json',
-      body: {
-        model,
-        prompt: req.prompt,
-        n: count,
-        size: req.size ?? DEFAULT_SIZE,
-        images: inputImages.map((image) => ({ image_url: imageToDataUrl(image) })),
-      },
-    }),
-    response: {
-      defaultMimeType: 'image/png',
-      fileNamePrefix: 'clawx-image',
-      sniffMimeType: true,
+    isConfigured,
+    async generateImage(req) {
+      const requestId = randomUUID().slice(0, 8);
+      const startedAt = nowMs();
+      const inputImages = req.inputImages ?? [];
+      if (inputImages.length > MAX_INPUT_IMAGES) {
+        throw new Error(`UClaw OpenAI image editing supports up to ${MAX_INPUT_IMAGES} reference images.`);
+      }
+      const mode = inputImages.length > 0 ? 'edit' : 'generate';
+      const editImages = mode === 'edit' ? resolveEditInputImages(inputImages) : [];
+      const providerConfig = resolveProviderConfig(req);
+      const apiKey = await resolveApiKey(req);
+      const model = String(req.model || DEFAULT_MODEL).split('/').pop() || DEFAULT_MODEL;
+      const count = resolveCount(req);
+      const baseUrl = normalizeRelayBaseUrl(providerConfig.baseUrl, DEFAULT_BASE_URL);
+      const outputOptions = resolveOpenAIImageOptions(req);
+      const editMultipart = mode === 'edit' ? buildEditMultipart(req, editImages, model, count) : null;
+      const upstreamUrl = appendImagesPath(baseUrl, mode);
+      const upstreamPath = new URL(upstreamUrl).pathname;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), resolveTimeoutMs(req));
+      const relayRequestAbort = () => controller.abort(req.signal?.reason);
+      if (req.signal?.aborted) relayRequestAbort();
+      else req.signal?.addEventListener('abort', relayRequestAbort, { once: true });
+      try {
+        const requestBody = mode === 'edit'
+          ? editMultipart.body
+          : JSON.stringify(buildGenerateBody(req, model, count));
+        logImageTiming('request_start', {
+          requestId,
+          mode,
+          inputImageCount: inputImages.length,
+          model,
+          path: upstreamPath,
+          count,
+          size: resolveRequestedSize(req),
+          quality: req.quality || null,
+          outputFormat: outputOptions.outputFormat || null,
+          background: outputOptions.background || null,
+          outputCompression: outputOptions.outputCompression ?? null,
+          requestBodyBytes: Buffer.byteLength(requestBody),
+        });
+        const requestStartedAt = nowMs();
+        const response = await undiciFetch(upstreamUrl, {
+          method: 'POST',
+          headers: mode === 'edit'
+            ? {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': editMultipart.contentType,
+            }
+            : {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+            },
+          body: requestBody,
+          signal: controller.signal,
+          dispatcher: imageFetchDispatcher,
+        });
+        logImageTiming('response_headers', {
+          requestId,
+          status: response.status,
+          durationMs: durationSince(requestStartedAt),
+        });
+        const parseStartedAt = nowMs();
+        const payload = await readJsonResponse(
+          response,
+          mode === 'edit' ? 'UClaw OpenAI image edit failed' : 'UClaw OpenAI image generation failed',
+          { requestId, mode },
+        );
+        logImageTiming('response_json_parsed', {
+          requestId,
+          durationMs: durationSince(parseStartedAt),
+          responseItems: Array.isArray(payload?.data) ? payload.data.length : 0,
+        });
+        const images = await parseImagesResponse(payload, {
+          requestId,
+          signal: controller.signal,
+          outputMimeType: outputOptions.outputMimeType,
+        });
+        logImageTiming('request_done', {
+          requestId,
+          mode,
+          totalDurationMs: durationSince(startedAt),
+          outputImages: images.length,
+        });
+        return { images };
+      } catch (error) {
+        logImageTiming('request_failed', {
+          requestId,
+          mode,
+          totalDurationMs: durationSince(startedAt),
+          error: sanitizeErrorMessage(error).slice(0, 240),
+        });
+        throw error;
+      } finally {
+        clearTimeout(timeout);
+        req.signal?.removeEventListener('abort', relayRequestAbort);
+      }
     },
-    missingApiKeyError: 'ClawX OpenAI image API key missing',
-    failureLabels: {
-      generate: 'ClawX OpenAI image generation failed',
-      edit: 'ClawX OpenAI image edit failed',
-    },
+  };
+}
+
+function registerLifecycleHook(api, name, handler, options) {
+  if (typeof api.on === 'function') {
+    api.on(name, handler, options);
+    return;
+  }
+  if (typeof api.registerHook === 'function') {
+    api.registerHook(name, handler, options);
+  }
+}
+
+/** Keeps the model-owned image tool call while applying the current UI constraints. */
+function registerTurnImagePreferenceHooks(api) {
+  registerLifecycleHook(api, 'before_prompt_build', async (event, ctx) => {
+    const imageOptions = await consumeTurnImageOptions(event, ctx);
+    if (!imageOptions) return undefined;
+    cacheTurnImageOptions(event, ctx, imageOptions);
+    return { appendContext: IMAGE_MODE_PROMPT_CONTEXT };
+  }, {
+    name: `${PROVIDER_ID}:turn-image-preferences`,
+    description: 'Consume one composer image preference and retain it for the model-selected image tool call.',
+    timeoutMs: 1000,
+  });
+
+  registerLifecycleHook(api, 'before_tool_call', (event, ctx) => {
+    const toolName = normalizeOptionalString(event?.toolName)?.split(':').at(-1)?.toLowerCase();
+    if (toolName !== 'image_generate') return undefined;
+
+    const imageOptions = getTurnImageOptions(event, ctx);
+    if (!imageOptions) return undefined;
+    return {
+      params: {
+        ...(event?.params ?? {}),
+        size: imageOptions.size,
+        quality: imageOptions.quality,
+      },
+    };
+  }, {
+    name: `${PROVIDER_ID}:turn-image-options`,
+    description: 'Apply the explicit composer size and quality to a model-selected image_generate call.',
+    priority: 100,
   });
 }
 
 export const pluginEntry = definePluginEntry({
   id: PROVIDER_ID,
-  name: 'ClawX OpenAI Image',
-  description: 'Independent OpenAI-compatible image generation provider managed by ClawX.',
+  name: 'UClaw OpenAI Image',
+  description: 'Independent OpenAI-compatible image generation provider managed by UClaw.',
   register(api) {
     api.registerImageGenerationProvider(buildProvider());
+    registerTurnImagePreferenceHooks(api);
   },
 });
 

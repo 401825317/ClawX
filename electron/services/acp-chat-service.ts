@@ -30,6 +30,10 @@ import {
 import { logger } from '../utils/logger';
 import { recordAcpTrace } from './acp-trace';
 import { AcpSessionAccessRegistry, type AcpSessionAccessContext } from './acp-session-access-registry';
+import {
+  acpTurnImagePreferenceStore,
+  type AcpTurnImagePreferenceStore,
+} from './acp-turn-image-preference-store';
 import { expandPath } from '../utils/paths';
 
 type AcpConnection = Pick<ClientSideConnection, 'initialize' | 'newSession' | 'loadSession' | 'prompt' | 'cancel'>;
@@ -152,6 +156,7 @@ export class AcpChatService {
     private readonly accessRegistry: AcpSessionAccessRegistry,
     injectedConnection?: AcpConnection,
     private readonly gateway?: GatewayPairingRpcClient,
+    private readonly turnImagePreferenceStore: AcpTurnImagePreferenceStore = acpTurnImagePreferenceStore,
   ) {
     this.connection = injectedConnection ?? null;
     this.client = {
@@ -372,6 +377,7 @@ export class AcpChatService {
       accessGrant,
     };
     this.livePrompts.set(payload.sessionKey, promptContext);
+    let imagePreferenceId: string | undefined;
     try {
       const promptCwd = payload.cwd === accessGrant.executionCwd
         ? payload.cwd
@@ -388,6 +394,19 @@ export class AcpChatService {
       });
       const connection = await this.ensureConnection();
       const prompt = await this.buildPromptBlocks(payload);
+      const message = payload.message?.trim();
+      if (payload.imageOptions && message) {
+        const preference = await this.turnImagePreferenceStore.enqueue({
+          sessionKey: payload.sessionKey,
+          message,
+          imageOptions: payload.imageOptions,
+        }).catch((error) => {
+          // Composer preferences must never prevent a normal ACP prompt from running.
+          logger.warn(`[acp-chat] Could not queue image generation preferences: ${String(error)}`);
+          return null;
+        });
+        imagePreferenceId = preference?.id;
+      }
       if (this.historicalSessionKey === payload.sessionKey) {
         this.historicalSessionKey = null;
         this.historicalGeneration = null;
@@ -406,6 +425,11 @@ export class AcpChatService {
       });
       return ok(generation);
     } catch (error) {
+      if (imagePreferenceId) {
+        await this.turnImagePreferenceStore.discard(imagePreferenceId).catch((discardError) => {
+          logger.warn(`[acp-chat] Could not discard image generation preferences: ${String(discardError)}`);
+        });
+      }
       logger.error(`[acp-chat] prompt failed: ${String(error)}`);
       this.trace('session/prompt:failed', {
         sessionKey: payload.sessionKey,

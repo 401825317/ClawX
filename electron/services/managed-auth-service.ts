@@ -34,7 +34,6 @@ import {
   UCLAW_DEFAULT_BASE_URL,
   UCLAW_DEFAULT_MODEL,
   UCLAW_LEGACY_AUTH_ACCOUNT_IDS,
-  UCLAW_LEGACY_PROVIDER_IDS,
   UCLAW_MANAGED_SERVICE_NAME,
   UCLAW_OFFLINE_GRACE_SECONDS,
   UCLAW_PROVIDER_ID,
@@ -485,7 +484,6 @@ async function readRelaySecret(migrate = true): Promise<RelaySecret | null> {
   for (const accountId of [
     UCLAW_ACCOUNT_ID,
     UCLAW_COMPATIBILITY_PROVIDER_ID,
-    ...UCLAW_LEGACY_PROVIDER_IDS,
   ]) {
     const secret = await getProviderSecret(accountId, { migrate });
     if (secret?.type === 'api_key') return secret;
@@ -1158,7 +1156,6 @@ async function snapshot(): Promise<ManagedAuthSnapshot> {
     UCLAW_ACCOUNT_ID,
     UCLAW_PROVIDER_ID,
     UCLAW_COMPATIBILITY_PROVIDER_ID,
-    ...UCLAW_LEGACY_PROVIDER_IDS,
     ...getManagedOpenAiTargetAccountIds(providerStore),
     ...getManagedRuntimeOpenAiProviderIds(managedRuntime),
     ...getManagedAgentOpenAiProviderIds(agentModelsFiles),

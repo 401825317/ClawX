@@ -572,7 +572,7 @@ describe('host services', () => {
     expect(syncDeletedProviderToRuntimeMock).not.toHaveBeenCalled();
   });
 
-  it('locks every OpenAI identity while the canonical OpenAI account is UClaw-managed', async () => {
+  it('locks every real OpenAI identity while leaving a name-only Codex custom Provider mutable', async () => {
     const managedAccount = {
       id: 'openai',
       vendorId: 'openai',
@@ -633,19 +633,40 @@ describe('host services', () => {
     const aliasAccount = {
       ...customAccount,
       id: 'openai-codex',
-      label: 'Legacy OpenAI Alias',
+      label: 'Codex Custom Provider',
     };
+
+    await expect(providersApi.createAccount({ account: aliasAccount })).resolves.toEqual({
+      success: true,
+      account: aliasAccount,
+    });
+    await expect(providersApi.setDefaultAccount({ accountId: 'openai-codex' }))
+      .resolves.toEqual({ success: true });
+    await expect(providersApi.save({
+      config: {
+        id: 'openai-codex',
+        name: 'Codex Custom Provider',
+        type: 'custom',
+        enabled: true,
+        createdAt: personalOpenAi.createdAt,
+        updatedAt: personalOpenAi.updatedAt,
+      },
+    })).resolves.toEqual({ success: true });
+    expect(providerServiceMock.createAccount).toHaveBeenCalledWith(aliasAccount, undefined);
+    expect(providerServiceMock.setDefaultAccount).toHaveBeenCalledWith('openai-codex');
+    expect(providerServiceMock._saveProviderInternal).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'openai-codex', type: 'custom' }),
+    );
+    vi.clearAllMocks();
 
     const results = await Promise.all([
       providersApi.createAccount({ account: personalOpenAi }),
-      providersApi.createAccount({ account: aliasAccount }),
       providersApi.createAccount({ account: { ...customAccount, id: 'personal-openai' } }),
       providersApi.updateAccount({ accountId: 'personal-openai', updates: { label: 'Changed' } }),
       providersApi.updateAccount({ accountId: 'custom-local', updates: { vendorId: 'openai' } }),
       providersApi.deleteAccount({ accountId: 'personal-openai' }),
       providersApi.deleteAccountApiKey({ accountId: 'personal-openai' }),
       providersApi.setDefaultAccount({ accountId: 'personal-openai' }),
-      providersApi.setDefaultAccount({ accountId: 'openai-codex' }),
       providersApi.save({
         config: {
           id: 'legacy-openai',
@@ -660,16 +681,6 @@ describe('host services', () => {
         config: {
           id: 'personal-openai',
           name: 'Overwrite As Custom',
-          type: 'custom',
-          enabled: true,
-          createdAt: personalOpenAi.createdAt,
-          updatedAt: personalOpenAi.updatedAt,
-        },
-      }),
-      providersApi.save({
-        config: {
-          id: 'openai-codex',
-          name: 'Legacy Alias',
           type: 'custom',
           enabled: true,
           createdAt: personalOpenAi.createdAt,
@@ -949,6 +960,18 @@ describe('host services', () => {
       error: 'This UClaw-managed provider account can only be changed through UClaw account settings',
     };
 
+    const codexCustomConfig = {
+      ...config,
+      id: 'openai-codex',
+      type: 'custom',
+    };
+    await expect(invoke('provider:save', codexCustomConfig, 'replacement-key'))
+      .resolves.toEqual({ success: true });
+    expect(providerServiceMock.saveLegacyProvider).toHaveBeenCalledWith(codexCustomConfig);
+    expect(providerServiceMock.setLegacyProviderApiKey)
+      .toHaveBeenCalledWith('openai-codex', 'replacement-key');
+    vi.clearAllMocks();
+
     await expect(invoke('provider:save', config, 'replacement-key')).resolves.toEqual(expected);
     await expect(invoke('provider:delete', 'openai')).resolves.toEqual(expected);
     await expect(invoke('provider:setApiKey', 'openai', 'replacement-key')).resolves.toEqual(expected);
@@ -959,11 +982,6 @@ describe('host services', () => {
     await expect(invoke('provider:save', {
       ...config,
       id: 'personal-openai',
-    }, 'replacement-key')).resolves.toEqual(expected);
-    await expect(invoke('provider:save', {
-      ...config,
-      id: 'openai-codex',
-      type: 'custom',
     }, 'replacement-key')).resolves.toEqual(expected);
     await expect(invoke('provider:delete', 'personal-openai')).resolves.toEqual(expected);
     await expect(invoke('provider:setApiKey', 'personal-openai', 'replacement-key')).resolves.toEqual(expected);
@@ -1072,12 +1090,18 @@ describe('host services', () => {
       updatedAt: '2026-07-23T00:00:00.000Z',
     };
 
+    const codexCustomConfig = { ...config, id: 'openai-codex', type: 'custom' };
+    await expect(invoke('save', {
+      config: codexCustomConfig,
+      apiKey: 'replacement-key',
+    })).resolves.toEqual(response('save', { success: true }));
+    expect(providerServiceMock.saveLegacyProvider).toHaveBeenCalledWith(codexCustomConfig);
+    expect(providerServiceMock.setLegacyProviderApiKey)
+      .toHaveBeenCalledWith('openai-codex', 'replacement-key');
+    vi.clearAllMocks();
+
     await expect(invoke('save', { config, apiKey: 'replacement-key' }))
       .resolves.toEqual(response('save', rejected));
-    await expect(invoke('save', {
-      config: { ...config, id: 'openai-codex', type: 'custom' },
-      apiKey: 'replacement-key',
-    })).resolves.toEqual(response('save', rejected));
     await expect(invoke('delete', { providerId: 'personal-openai' }))
       .resolves.toEqual(response('delete', rejected));
     await expect(invoke('setApiKey', { providerId: 'personal-openai', apiKey: 'replacement-key' }))

@@ -8,7 +8,6 @@ import {
   UCLAW_DEFAULT_MODEL,
   UCLAW_DEFAULT_MODEL_CONTEXT_WINDOW,
   UCLAW_DEFAULT_THINKING_LEVEL,
-  UCLAW_LEGACY_PROVIDER_IDS,
   UCLAW_MANAGED_PROVIDER_BASE_URL,
   UCLAW_MANAGED_PROVIDER_ID,
   UCLAW_PROVIDER_REQUEST_TIMEOUT_SECONDS,
@@ -92,7 +91,6 @@ function managedOpenAiProviderIds(additionalProviderIds: Iterable<string>): Set<
   return new Set([
     UCLAW_MANAGED_PROVIDER_ID,
     UCLAW_COMPATIBILITY_PROVIDER_ID,
-    ...UCLAW_LEGACY_PROVIDER_IDS,
     ...additionalProviderIds,
   ]);
 }
@@ -125,6 +123,27 @@ export function createManagedRuntimeProviderEntry(
     agentRuntime: { id: 'pi' },
     models: policy.models.map(managedRuntimeModelEntry),
   };
+}
+
+/** Identify the complete UClaw runtime contract before generic config migration runs. */
+export function isUclawManagedRuntimeProviderEntry(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const baseUrl = typeof value.baseUrl === 'string'
+    ? value.baseUrl.trim().replace(/\/+$/, '')
+    : '';
+  const request = isRecord(value.request) ? value.request : null;
+  const agentRuntime = isRecord(value.agentRuntime) ? value.agentRuntime : null;
+  const models = Array.isArray(value.models) ? value.models : [];
+  return baseUrl === UCLAW_MANAGED_PROVIDER_BASE_URL.replace(/\/+$/, '')
+    && value.api === UCLAW_DEFAULT_API_PROTOCOL
+    && value.timeoutSeconds === UCLAW_PROVIDER_REQUEST_TIMEOUT_SECONDS
+    && request?.allowPrivateNetwork === true
+    && agentRuntime?.id === 'pi'
+    && models.some((model) => (
+      isRecord(model)
+      && model.id === UCLAW_DEFAULT_MODEL
+      && model.contextWindow === UCLAW_DEFAULT_MODEL_CONTEXT_WINDOW
+    ));
 }
 
 function isManagedRuntimeProvider(

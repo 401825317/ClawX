@@ -68,7 +68,6 @@ vi.mock('@electron/utils/junfeiai-distribution', () => ({
   UCLAW_DEFAULT_MODEL_CONTEXT_WINDOW: 258_000,
   UCLAW_DEFAULT_THINKING_LEVEL: 'medium',
   UCLAW_LEGACY_AUTH_ACCOUNT_IDS: ['lingzhiwuxian-auth'],
-  UCLAW_LEGACY_PROVIDER_IDS: ['openai-codex'],
   UCLAW_MANAGED_SERVICE_NAME: 'UClaw',
   UCLAW_OFFLINE_GRACE_SECONDS: 86_400,
   UCLAW_PROVIDER_ID: 'openai',
@@ -525,7 +524,6 @@ beforeEach(() => {
     const managedProviderIds = new Set([
       'openai',
       'lingzhiwuxian',
-      'openai-codex',
       ...additionalProviderIds,
     ]);
     const providerEntry = mocks.createManagedRuntimeProviderEntry(policy);
@@ -664,7 +662,7 @@ describe('managed auth service transaction and compatibility behavior', () => {
     expect(mocks.installManagedAgentOpenAiApiKey).toHaveBeenCalledWith(
       AGENT_AUTH_PROFILES_SNAPSHOT,
       'valid-compatibility-relay',
-      new Set(['openai', 'lingzhiwuxian', 'openai-codex']),
+      new Set(['openai', 'lingzhiwuxian']),
     );
   });
 
@@ -715,7 +713,7 @@ describe('managed auth service transaction and compatibility behavior', () => {
 
     expect(mocks.removeManagedAgentOpenAiCredentialsFromSnapshot).toHaveBeenCalledWith(
       AGENT_AUTH_PROFILES_SNAPSHOT,
-      new Set(['openai', 'lingzhiwuxian', 'openai-codex']),
+      new Set(['openai', 'lingzhiwuxian']),
     );
     expect(mocks.removeManagedAgentOpenAiProviders).toHaveBeenCalledOnce();
     expect(mocks.removeManagedRuntimeOpenAiState).toHaveBeenCalledOnce();
@@ -925,7 +923,7 @@ describe('managed auth service transaction and compatibility behavior', () => {
     expect(mocks.installManagedAgentOpenAiApiKey).toHaveBeenCalledWith(
       AGENT_AUTH_PROFILES_SNAPSHOT,
       'relay-secret',
-      new Set(['openai', 'lingzhiwuxian', 'openai-codex']),
+      new Set(['openai', 'lingzhiwuxian']),
     );
     expect(mocks.removeManagedAgentOpenAiCredentialsFromSnapshot).not.toHaveBeenCalled();
     expect(openClawConfig).toMatchObject({
@@ -967,7 +965,7 @@ describe('managed auth service transaction and compatibility behavior', () => {
           expect.objectContaining({ id: 'gpt-5.4', contextWindow: 258_000 }),
         ],
       }),
-      new Set(['openai', 'lingzhiwuxian', 'openai-codex']),
+      new Set(['openai', 'lingzhiwuxian']),
     );
     expect(mocks.cacheManagedClientTextModelPolicyFromPayload).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -991,7 +989,6 @@ describe('managed auth service transaction and compatibility behavior', () => {
       'openai-secondary',
       'openai-legacy-account',
       'openai',
-      'openai-codex',
       'uclaw-auth',
       'lingzhiwuxian-auth',
       'lingzhiwuxian',
@@ -1588,7 +1585,11 @@ describe('managed auth service transaction and compatibility behavior', () => {
     }));
     const runtimeProviders = (openClawConfig.models as Record<string, unknown>).providers as Record<string, unknown>;
     expect(runtimeProviders.lingzhiwuxian).toEqual(runtimeProviders.openai);
-    expect(runtimeProviders['openai-codex']).toBeUndefined();
+    expect(runtimeProviders['openai-codex']).toEqual({
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+      api: 'openai-chatgpt-responses',
+      models: [{ id: 'gpt-5.4', name: 'Legacy Codex' }],
+    });
     expect(runtimeProviders['legacy-uclaw-relay']).toBeUndefined();
     expect(runtimeProviders['ordinary-custom']).toEqual({
       baseUrl: 'https://llm.example.com/v1',
@@ -1636,7 +1637,7 @@ describe('managed auth service transaction and compatibility behavior', () => {
     expect(providers.moonshot).toEqual({ baseUrl: 'https://api.moonshot.cn/v1' });
   });
 
-  it('removes stale OpenAI auth metadata while preserving unrelated Provider routes', async () => {
+  it('removes managed OpenAI auth metadata while preserving Codex OAuth and unrelated routes', async () => {
     mocks.getManagedOpenAiTargetAccountIds.mockReturnValue(['openai', 'legacy-uclaw-relay']);
     openClawConfig = {
       auth: {
@@ -1665,10 +1666,12 @@ describe('managed auth service transaction and compatibility behavior', () => {
     expect(result.success).toBe(true);
     expect(openClawConfig.auth).toEqual({
       profiles: {
+        'openai-codex:default': { provider: 'openai-codex', mode: 'oauth' },
         'ordinary-custom:default': { provider: 'ordinary-custom', mode: 'api_key' },
         'deepseek:default': { provider: 'deepseek', mode: 'api_key' },
       },
       order: {
+        'openai-codex': ['openai-codex:default'],
         'ordinary-custom': ['ordinary-custom:default'],
         deepseek: ['deepseek:default'],
         routed: ['ordinary-custom:default', 'deepseek:default'],
@@ -1719,7 +1722,7 @@ describe('managed auth service transaction and compatibility behavior', () => {
     expect(mocks.installManagedAgentOpenAiApiKey).toHaveBeenCalledWith(
       AGENT_AUTH_PROFILES_SNAPSHOT,
       'relay-secret',
-      new Set(['openai', 'lingzhiwuxian', 'openai-codex']),
+      new Set(['openai', 'lingzhiwuxian']),
     );
   });
 
@@ -1930,7 +1933,6 @@ describe('managed auth service transaction and compatibility behavior', () => {
     expect(mocks.removeManagedAgentOpenAiCredentialsFromSnapshot).toHaveBeenCalledTimes(1);
     expect(new Set(mocks.removeManagedAgentOpenAiCredentialsFromSnapshot.mock.calls[0]?.[1])).toEqual(new Set([
       'openai',
-      'openai-codex',
       'lingzhiwuxian',
       'legacy-uclaw-relay',
       'runtime-only-relay',
@@ -3076,7 +3078,6 @@ describe('managed auth service transaction and compatibility behavior', () => {
     expect(mocks.deleteProviderSecret).toHaveBeenCalledWith('legacy-uclaw-relay');
     expect(new Set(mocks.removeManagedAgentOpenAiCredentialsFromSnapshot.mock.calls[0]?.[1])).toEqual(new Set([
       'openai',
-      'openai-codex',
       'lingzhiwuxian',
       'legacy-uclaw-relay',
     ]));

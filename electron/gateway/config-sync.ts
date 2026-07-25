@@ -33,7 +33,14 @@ import { buildProxyEnv, resolveProxySettings } from '../utils/proxy';
 import { syncProxyConfigToOpenClaw } from '../utils/openclaw-proxy';
 import { logger } from '../utils/logger';
 import { prependPathEntry } from '../utils/env-path';
-import { copyPluginFromNodeModules, fixupPluginManifest, cpSyncSafe, buildCandidateSources, repairTrustedOfficialPluginInstallRecords, syncTrustedOfficialPluginInstallRecord, resolvePluginNpmPackagePath } from '../utils/plugin-install';
+import {
+  buildCandidateSources,
+  cleanupStalePluginInstallArtifacts,
+  ensurePluginInstalled,
+  findBestBundledPluginSource,
+  findMissingPluginRuntimeDependencies,
+  repairTrustedOfficialPluginInstallRecords,
+} from '../utils/plugin-install';
 import { CLAWX_OPENAI_IMAGE_PROVIDER_KEY } from '../utils/openclaw-image-relay-constants';
 import {
   isUclawManagedDistribution,
@@ -145,16 +152,6 @@ function cleanupStaleBuiltInExtensions(): void {
   }
 }
 
-function readPluginVersion(pkgJsonPath: string): string | null {
-  try {
-    const raw = readFileSync(fsPath(pkgJsonPath), 'utf-8');
-    const parsed = JSON.parse(raw) as { version?: string };
-    return parsed.version ?? null;
-  } catch {
-    return null;
-  }
-}
-
 function measureSync<T>(timings: Record<string, number>, key: string, fn: () => T): T {
   const startedAt = Date.now();
   try {
@@ -191,66 +188,16 @@ function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): boolean 
   for (const channelType of configuredChannels) {
     const pluginInfo = CHANNEL_PLUGIN_MAP[channelType];
     if (!pluginInfo) continue;
-    const { dirName, npmName } = pluginInfo;
-
-    const targetDir = join(homedir(), '.openclaw', 'extensions', dirName);
-    const targetManifest = join(targetDir, 'openclaw.plugin.json');
-    const isInstalled = existsSync(fsPath(targetManifest));
-    const installedVersion = isInstalled ? readPluginVersion(join(targetDir, 'package.json')) : null;
-
-    // Try bundled sources first (packaged mode or if bundle-plugins was run)
-    const bundledSources = buildCandidateSources(dirName);
-    const bundledDir = bundledSources.find((dir) => existsSync(fsPath(join(dir, 'openclaw.plugin.json'))));
-
-    if (bundledDir) {
-      const sourceVersion = readPluginVersion(join(bundledDir, 'package.json'));
-      // Install or upgrade if version differs or plugin not installed
-      if (!isInstalled || (sourceVersion && installedVersion && sourceVersion !== installedVersion)) {
-        logger.info(`[plugin] ${isInstalled ? 'Auto-upgrading' : 'Installing'} ${channelType} plugin${isInstalled ? `: ${installedVersion} → ${sourceVersion}` : `: ${sourceVersion}`} (bundled)`);
-        try {
-          mkdirSync(fsPath(join(homedir(), '.openclaw', 'extensions')), { recursive: true });
-          rmSync(fsPath(targetDir), { recursive: true, force: true });
-          cpSyncSafe(bundledDir, targetDir);
-          fixupPluginManifest(targetDir);
-          syncTrustedOfficialPluginInstallRecord(dirName, targetDir);
-        } catch (err) {
-          logger.warn(`[plugin] Failed to ${isInstalled ? 'auto-upgrade' : 'install'} ${channelType} plugin:`, err);
-          succeeded = false;
-        }
-      } else if (isInstalled) {
-        // Same version already installed — still patch manifest ID in case it was
-        // never corrected (e.g. installed before MANIFEST_ID_FIXES included this plugin).
-        fixupPluginManifest(targetDir);
-        syncTrustedOfficialPluginInstallRecord(dirName, targetDir);
-      }
-      continue;
+    const result = ensurePluginInstalled(
+      pluginInfo.dirName,
+      buildCandidateSources(pluginInfo.dirName),
+      channelType === CLAWX_OPENAI_IMAGE_PROVIDER_KEY ? 'UClaw OpenAI Image' : channelType,
+    );
+    if (result.warning) {
+      logger.warn(`[plugin] ${channelType}: ${result.warning}`);
     }
-
-    // Dev mode fallback: copy from node_modules/ with pnpm dep resolution
-    if (!app.isPackaged) {
-      const npmPkgPath = resolvePluginNpmPackagePath(npmName);
-      if (npmPkgPath && existsSync(fsPath(join(npmPkgPath, 'openclaw.plugin.json')))) {
-        const sourceVersion = readPluginVersion(join(npmPkgPath, 'package.json'));
-        if (!sourceVersion) continue;
-        // Skip only if installed AND same version — but still patch manifest ID.
-        if (isInstalled && installedVersion && sourceVersion === installedVersion) {
-          fixupPluginManifest(targetDir);
-          syncTrustedOfficialPluginInstallRecord(dirName, targetDir);
-          continue;
-        }
-
-        logger.info(`[plugin] ${isInstalled ? 'Auto-upgrading' : 'Installing'} ${channelType} plugin${isInstalled ? `: ${installedVersion} → ${sourceVersion}` : `: ${sourceVersion}`} (dev/node_modules)`);
-
-        try {
-          mkdirSync(fsPath(join(homedir(), '.openclaw', 'extensions')), { recursive: true });
-          copyPluginFromNodeModules(npmPkgPath, targetDir, npmName);
-          fixupPluginManifest(targetDir);
-          syncTrustedOfficialPluginInstallRecord(dirName, targetDir);
-        } catch (err) {
-          logger.warn(`[plugin] Failed to ${isInstalled ? 'auto-upgrade' : 'install'} ${channelType} plugin from node_modules:`, err);
-          succeeded = false;
-        }
-      }
+    if (!result.installed) {
+      succeeded = false;
     }
   }
   return succeeded;
@@ -315,14 +262,15 @@ function buildPluginSourceSignatures(configuredChannels: string[]): Record<strin
     const pluginInfo = CHANNEL_PLUGIN_MAP[channelType];
     if (!pluginInfo) continue;
     const bundledSources = buildCandidateSources(pluginInfo.dirName);
-    const bundledDir = bundledSources.find((dir) => existsSync(fsPath(join(dir, 'openclaw.plugin.json'))));
-    const devPkgPath = join(process.cwd(), 'node_modules', ...pluginInfo.npmName.split('/'));
-    const sourceDir = bundledDir || (!app.isPackaged ? devPkgPath : '');
+    const targetDir = join(homedir(), '.openclaw', 'extensions', pluginInfo.dirName);
+    const sourceDir = findBestBundledPluginSource(bundledSources, targetDir)
+      || (!app.isPackaged ? join(process.cwd(), 'node_modules', ...pluginInfo.npmName.split('/')) : '');
     signatures[channelType] = sourceDir
       ? {
         sourceDir,
         manifest: pathSignature(join(sourceDir, 'openclaw.plugin.json')),
         packageJson: pathSignature(join(sourceDir, 'package.json')),
+        installedMissingRuntimeDependencies: findMissingPluginRuntimeDependencies(targetDir),
       }
       : 'missing';
   }
@@ -466,6 +414,12 @@ export async function syncGatewayConfigBeforeLaunch(
   await measureAsync(timingsMs, 'proxySyncMs', async () => {
     await syncProxyConfigToOpenClaw(appSettings, { preserveExistingWhenDisabled: true });
   });
+
+  try {
+    measureSync(timingsMs, 'pluginInstallArtifactCleanupMs', cleanupStalePluginInstallArtifacts);
+  } catch (err) {
+    logger.warn('Failed to clean stale plugin install artifacts:', err);
+  }
 
   try {
     await measureAsync(timingsMs, 'sanitizeMs', sanitizeOpenClawConfig);

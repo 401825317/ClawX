@@ -142,6 +142,7 @@ UClaw 管理対象ディストリビューションでは、初回セットア�
 UClaw にサインインしたユーザーは、サイドバーからシュリンプストアを開き、残高の確認、チャージ注文の作成、QR コードまたは安全なブラウザーリンクでの支払い、注文履歴のページ表示を行えます。支払い状態は自動的に確認され、支払い完了後に残高が更新されます。
 UClaw が有効なサポート連絡先を公開している場合、サイドバーには「ヘルプとサポート」も表示され、複数の公式 QR 連絡先、対応時間、注記、任意の WeChat ID コピーを利用できます。この公開設定はサインインを必要とせず、Chat や Gateway の状態にも影響しません。
 開発者モードでは、専用の Image Generation ページで、独立した OpenAI 互換の画像生成エンドポイント（Base URL、API キー、`gpt-image-2` などのモデル名）を設定でき、画像生成だけ専用の `/v1/images/generations` サービスを使い、チャットは通常の OpenAI Provider のまま継続できます。
+Chat で画像モードを有効にすると、Composer は ACP を通じて、そのターンだけの画像サイズと品質の設定（既定は `medium`）を渡します。`image_generate` を呼び出すかどうかは Agent モデルが決定し、Composer が画像生成 API を直接呼び出すことはありません。
 OpenAI-compatible ゲートウェイを **Custom プロバイダー** で使う場合、**設定 → AI Providers → Provider 編集** でカスタム `User-Agent` を設定でき、互換性が必要なエンドポイントで有効です。
 プロバイダーの編集や切り替え時、ClawX は `input: ["text", "image"]` など既存のモデル単位の能力メタデータを保持します。新しく選択した Custom プロバイダーのモデルには OpenClaw onboarding と同等の画像入力推論を適用し、不明なモデルはテキスト専用として扱います。
 Custom プロバイダーのモデル行には明示的な `contextWindow` も書き込まれ（モデルファミリーから推定、例：`gpt-5.x` → 272k）、旧バージョンで保存された行は起動時に自動補完されます。これにより OpenClaw は長いセッションを "Context overflow" エラーになる前に圧縮できます。compaction 未設定の場合は `agents.defaults.compaction.mode = "safeguard"` と `reserveTokensFloor = 50000` が既定値として設定されますが、ユーザーが自分で設定したモデル行や圧縮設定が変更されることはありません（`reserveTokensFloor` が未設定の場合のみ補完されることがあります）。

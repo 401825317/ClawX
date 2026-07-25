@@ -156,7 +156,6 @@ describe('managed Provider store transaction', () => {
 
     expect(getManagedOpenAiTargetAccountIds(snapshot)).toEqual([
       'openai',
-      'openai-codex',
       'openai-secondary',
       'legacy-uclaw-relay',
     ]);
@@ -199,6 +198,7 @@ describe('managed Provider store transaction', () => {
           model: 'smart-latest',
           isDefault: false,
         }),
+        'openai-codex': account('openai-codex', 'custom'),
         openai: managed,
         lingzhiwuxian: compatibility,
       },

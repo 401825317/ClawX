@@ -26,11 +26,22 @@ touchedAreas:
   - src/components/settings/ImageGenerationSettings.tsx
   - src/pages/ImageGeneration/index.tsx
   - src/pages/Models/index.tsx
+  - src/pages/Chat/ChatInput.tsx
+  - src/pages/Chat/index.tsx
+  - shared/acp-chat/types.ts
+  - electron/services/acp-chat-service.ts
+  - electron/services/acp-turn-image-preference-store.ts
   - shared/i18n/locales/*/common.json
   - shared/i18n/locales/*/dashboard.json
+  - shared/i18n/locales/*/chat.json
   - tests/unit/openclaw-image-generation.test.ts
   - tests/unit/openclaw-auth.test.ts
+  - tests/unit/acp-turn-image-preference-store.test.ts
+  - tests/unit/acp-chat-service.test.ts
+  - tests/unit/chat-input.test.tsx
+  - tests/unit/clawx-openai-image-plugin.test.ts
   - tests/e2e/image-generation-settings.spec.ts
+  - tests/e2e/chat-acp-inline-timeline.spec.ts
   - tests/e2e/app-smoke.spec.ts
   - README.md
   - README.zh-CN.md
@@ -40,6 +51,8 @@ expectedUserBehavior:
   - Saving settings writes openclaw.json agents.defaults.imageGenerationModel from the explicit custom image endpoint form; default chat provider changes do not auto-sync image models.
   - The custom image endpoint is always the page's configuration target; no extra enable/disable switch is shown before Base URL/model/API key fields.
   - Saving the OpenAI-compatible image endpoint writes a ClawX-owned provider (`clawx-openai-image`) and auth profile, enables `request.allowPrivateNetwork` for trusted custom endpoints, and leaves `models.providers.openai` untouched so chat continues to use the regular OpenAI provider.
+  - Gateway pre-launch ensures a configured `clawx-openai-image` relay is present in `plugins.allow` and `plugins.entries`, retaining any existing allowlist items so OpenClaw treats the local plugin as explicitly trusted.
+  - In chat, image mode records the selected aspect ratio and quality for the current ACP turn. The model still decides whether to call `image_generate`; only a model-selected call receives those explicit parameters.
   - Test generate calls OpenClaw in-process generateImage runtime with the selected agent auth directory (no CLI subprocess).
 requiredProfiles:
   - fast
@@ -50,12 +63,19 @@ requiredRules:
   - api-client-transport-policy
 requiredTests:
   - tests/unit/openclaw-image-generation.test.ts
+  - tests/unit/openclaw-auth.test.ts
+  - tests/unit/acp-turn-image-preference-store.test.ts
+  - tests/unit/acp-chat-service.test.ts
+  - tests/unit/chat-input.test.tsx
+  - tests/unit/clawx-openai-image-plugin.test.ts
   - tests/e2e/image-generation-settings.spec.ts
+  - tests/e2e/chat-acp-inline-timeline.spec.ts
 acceptance:
   - Renderer uses typed hostApi media methods only (src/lib/image-generation.ts); no direct Gateway HTTP or ipcRenderer from pages.
   - Image generation settings and test actions are handled in Main process services.
-  - Unit tests cover model ref parsing, config read/write, custom endpoint model mapping, private-network endpoint opt-in, and the independent image endpoint not mutating `models.providers.openai`.
+  - Unit tests cover model ref parsing, config read/write, custom endpoint model mapping, private-network endpoint opt-in, image plugin allowlist repair, and the independent image endpoint not mutating `models.providers.openai`.
   - E2E verifies the Image Generation page is hidden until developer mode is enabled, is not embedded in Models, and exposes the custom endpoint controls.
+  - Composer image mode defaults to `1:1 / medium`, sends only an ACP preference payload, and preserves OpenClaw's model-owned `image_generate` decision.
 docs:
   required: false
 ---

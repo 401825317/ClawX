@@ -40,9 +40,9 @@ import {
 import { inferCustomModelContextWindow, inferCustomModelInputModalities } from '../shared/providers/model-capabilities';
 import {
   UCLAW_COMPATIBILITY_PROVIDER_ID,
-  UCLAW_LEGACY_PROVIDER_IDS,
   UCLAW_MANAGED_PROVIDER_ID,
 } from '../../shared/junfeiai-endpoints';
+import { isUclawManagedRuntimeProviderEntry } from '../services/providers/managed-runtime-config';
 import { isOpenAiProviderIdentity } from '../services/providers/provider-mutation-lock';
 import {
   CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
@@ -587,7 +587,6 @@ function managedOpenAiProviderIds(additionalProviderIds: Iterable<string>): Set<
   return new Set([
     UCLAW_MANAGED_PROVIDER_ID,
     UCLAW_COMPATIBILITY_PROVIDER_ID,
-    ...UCLAW_LEGACY_PROVIDER_IDS,
     ...additionalProviderIds,
   ]);
 }
@@ -651,22 +650,14 @@ function buildManagedOpenAiClearedStore(
     [...managedProviderIds].map((providerId) => `${providerId}:default`),
   );
   for (const [profileId, profile] of Object.entries(store.profiles)) {
-    if (
-      !managedProviderIds.has(profile.provider)
-      && normalizeAuthProfileProviderKey(profile.provider) !== UCLAW_MANAGED_PROVIDER_ID
-    ) {
-      continue;
-    }
+    if (!managedProviderIds.has(profile.provider)) continue;
     delete store.profiles[profileId];
     removedProfileIds.add(profileId);
   }
 
   if (store.order) {
     for (const [provider, profileIds] of Object.entries(store.order)) {
-      if (
-        managedProviderIds.has(provider)
-        || normalizeAuthProfileProviderKey(provider) === UCLAW_MANAGED_PROVIDER_ID
-      ) {
+      if (managedProviderIds.has(provider)) {
         delete store.order[provider];
         continue;
       }
@@ -683,7 +674,6 @@ function buildManagedOpenAiClearedStore(
     for (const [provider, profileId] of Object.entries(store.lastGood)) {
       if (
         managedProviderIds.has(provider)
-        || normalizeAuthProfileProviderKey(provider) === UCLAW_MANAGED_PROVIDER_ID
         || removedProfileIds.has(profileId)
       ) {
         delete store.lastGood[provider];
@@ -1882,18 +1872,19 @@ function migrateOpenAiCodexOAuthRuntimeToOpenAiInConfig(config: Record<string, u
   const models = (config.models || {}) as Record<string, unknown>;
   const providers = (models.providers || {}) as Record<string, unknown>;
   const codexEntry = providers['openai-codex'];
+  const existingOpenAi = providers[UCLAW_MANAGED_PROVIDER_ID];
 
-  if (isPlainRecord(codexEntry)) {
+  if (isPlainRecord(codexEntry) && !isUclawManagedRuntimeProviderEntry(existingOpenAi)) {
     const codexApi = normalizeOpenClawApiProtocol(codexEntry.api);
     if (codexApi === 'openai-chatgpt-responses') {
-      const existingOpenAi = isPlainRecord(providers.openai) ? providers.openai as Record<string, unknown> : {};
+      const existingOpenAiEntry = isPlainRecord(existingOpenAi) ? existingOpenAi : {};
       providers.openai = {
-        ...existingOpenAi,
+        ...existingOpenAiEntry,
         ...codexEntry,
         baseUrl: OPENAI_CODEX_OAUTH_BASE_URL,
         api: 'openai-chatgpt-responses',
-        agentRuntime: isPlainRecord(existingOpenAi.agentRuntime)
-          ? existingOpenAi.agentRuntime
+        agentRuntime: isPlainRecord(existingOpenAiEntry.agentRuntime)
+          ? existingOpenAiEntry.agentRuntime
           : { id: 'pi' },
       };
       delete providers['openai-codex'];
@@ -2621,24 +2612,52 @@ function readModelsProvidersOpenAi(config: Record<string, unknown>): Record<stri
   return readModelsProvider(config, 'openai');
 }
 
-function ensurePluginRegistrationEnabled(config: Record<string, unknown>, pluginId: string): void {
-  const plugins = isPlainRecord(config.plugins)
-    ? config.plugins
-    : (Array.isArray(config.plugins) ? { load: [...config.plugins] } : {});
-  const entries = isPlainRecord(plugins.entries) ? plugins.entries : {};
-  const entry = isPlainRecord(entries[pluginId]) ? entries[pluginId] as Record<string, unknown> : {};
-  entry.enabled = true;
-  entries[pluginId] = entry;
-  plugins.entries = entries;
+/**
+ * Enable a plugin and include it in OpenClaw's restrictive `plugins.allow`.
+ * Existing allowlist entries are retained so unrelated configured plugins
+ * remain loadable after the allowlist becomes explicit.
+ */
+function ensurePluginRegistrationEnabled(config: Record<string, unknown>, pluginId: string): boolean {
+  const previousPlugins = config.plugins;
+  const plugins = isPlainRecord(previousPlugins)
+    ? previousPlugins
+    : (Array.isArray(previousPlugins) ? { load: [...previousPlugins] } : {});
+  let modified = plugins !== previousPlugins;
 
-  if (Array.isArray(plugins.allow)) {
-    const allow = (plugins.allow as unknown[]).filter((value): value is string => typeof value === 'string');
-    if (!allow.includes(pluginId)) {
-      plugins.allow = [...allow, pluginId];
-    }
+  const previousEntries = plugins.entries;
+  const entries = isPlainRecord(previousEntries) ? previousEntries : {};
+  if (entries !== previousEntries) {
+    plugins.entries = entries;
+    modified = true;
   }
 
-  config.plugins = plugins;
+  const previousEntry = entries[pluginId];
+  const entry = isPlainRecord(previousEntry) ? previousEntry : {};
+  if (entry !== previousEntry) {
+    entries[pluginId] = entry;
+    modified = true;
+  }
+  if (entry.enabled !== true) {
+    entry.enabled = true;
+    modified = true;
+  }
+
+  const previousAllow = plugins.allow;
+  const allow = Array.isArray(previousAllow)
+    ? previousAllow.filter((value): value is string => typeof value === 'string')
+    : [];
+  if (!Array.isArray(previousAllow) || allow.length !== previousAllow.length || !allow.includes(pluginId)) {
+    if (!allow.includes(pluginId)) {
+      allow.push(pluginId);
+    }
+    plugins.allow = allow;
+    modified = true;
+  }
+
+  if (config.plugins !== plugins) {
+    config.plugins = plugins;
+  }
+  return modified;
 }
 
 /**
@@ -3696,6 +3715,16 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
           delete skillsObj[key];
           modified = true;
         }
+      }
+    }
+
+    // A configured local image relay is ClawX-owned. Its plugin must be
+    // explicitly trusted before Gateway startup instead of relying on
+    // OpenClaw's unsafe auto-discovery of local extensions.
+    if (readModelsProvider(config, CLAWX_OPENAI_IMAGE_PROVIDER_KEY)) {
+      if (ensurePluginRegistrationEnabled(config, CLAWX_OPENAI_IMAGE_PROVIDER_KEY)) {
+        modified = true;
+        console.log('[sanitize] Added clawx-openai-image to plugins.allow');
       }
     }
 

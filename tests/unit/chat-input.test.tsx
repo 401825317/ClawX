@@ -120,6 +120,28 @@ function translate(key: string, vars?: Record<string, unknown>): string {
       return 'No matching skills found';
     case 'composer.pickAgent':
       return 'Choose agent';
+    case 'composer.imageMode':
+      return 'Image mode';
+    case 'composer.imageSizeLabel':
+      return 'Image size';
+    case 'composer.imageAspectTall':
+      return 'Tall';
+    case 'composer.imageAspectWide':
+      return 'Wide';
+    case 'composer.imageAspectSquare':
+      return 'Square';
+    case 'composer.imageAspectVertical':
+      return 'Vertical';
+    case 'composer.imageAspectWidescreen':
+      return 'Widescreen';
+    case 'composer.imageQualityLabel':
+      return 'Quality';
+    case 'composer.imageQualityLow':
+      return 'Low';
+    case 'composer.imageQualityMedium':
+      return 'Medium';
+    case 'composer.imageQualityHigh':
+      return 'High';
     case 'composer.clearTarget':
       return 'Clear target agent';
     case 'composer.targetChip':
@@ -330,6 +352,61 @@ describe('ChatInput agent targeting', () => {
       'chat-composer-working-indicator',
     );
     expect(screen.queryByTestId('chat-composer-image-generation-indicator')).not.toBeInTheDocument();
+  });
+
+  it('sends per-session image size and quality preferences only while image mode is active', async () => {
+    const onSend = vi.fn();
+    const view = renderChatInput(onSend);
+
+    expect(screen.queryByTestId('chat-image-options')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('chat-composer-mode-image'));
+    expect(screen.getByTestId('chat-image-aspect-trigger')).toHaveTextContent('1:1');
+    expect(screen.getByTestId('chat-image-quality')).toHaveValue('medium');
+
+    fireEvent.click(screen.getByTestId('chat-image-aspect-trigger'));
+    fireEvent.click(screen.getByTestId('chat-image-aspect-16-9'));
+    fireEvent.change(screen.getByTestId('chat-image-quality'), { target: { value: 'high' } });
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Create a product photo.' } });
+    fireEvent.click(screen.getByTestId('chat-composer-send'));
+
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith(
+        'Create a product photo.',
+        undefined,
+        null,
+        { size: '3840x2160', quality: 'high' },
+      );
+    });
+
+    chatState.currentSessionKey = 'agent:main:other';
+    view.rerender(
+      <TooltipProvider>
+        <ChatInput onSend={onSend} />
+      </TooltipProvider>,
+    );
+    expect(screen.queryByTestId('chat-image-options')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('chat-composer-mode-image'));
+    expect(screen.getByTestId('chat-image-aspect-trigger')).toHaveTextContent('1:1');
+    expect(screen.getByTestId('chat-image-quality')).toHaveValue('medium');
+  });
+
+  it('keeps image controls in the leading action group after the model selector', () => {
+    configureAgentAndModelPickers();
+    renderChatInput();
+
+    fireEvent.click(screen.getByTestId('chat-composer-mode-image'));
+
+    const leadingActions = screen.getByTestId('chat-composer-leading-actions');
+    const modelPicker = screen.getByTestId('chat-model-picker-button');
+    const imageMode = screen.getByTestId('chat-composer-mode-image');
+    const imageOptions = screen.getByTestId('chat-image-options');
+
+    expect(leadingActions).toContainElement(modelPicker);
+    expect(leadingActions).toContainElement(imageMode);
+    expect(leadingActions).toContainElement(imageOptions);
+    expect(modelPicker.compareDocumentPosition(imageMode) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(imageMode.compareDocumentPosition(imageOptions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('shows only text models supplied by managed client-config', () => {

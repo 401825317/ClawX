@@ -10,14 +10,12 @@ export type UclawMarketplaceProvider = 'skillhub' | 'clawhub';
 export type UclawEndpointsConfig = {
   provider: {
     productionOrigin: string;
-    legacyProviderOrigins: string[];
     providerName: 'UClaw';
     managedProviderId: string;
     compatibilityProviderId: 'lingzhiwuxian';
     managedAccountId: string;
     authAccountId: string;
     managedRuntimeContractVersion: number;
-    legacyProviderIds: string[];
     legacyAuthAccountIds: string[];
     defaultModel: string;
     defaultModelContextWindow: number;
@@ -157,12 +155,6 @@ function readProviderOrigin(value: unknown, key: string): string {
   return parsed.origin;
 }
 
-function readProviderOrigins(value: unknown, key: string): string[] {
-  return [...new Set(readNonEmptyStringArray(value, key).map((origin, index) => (
-    readProviderOrigin(origin, `${key}[${index}]`)
-  )))];
-}
-
 function readMarketplaceOrigin(value: unknown, key: string): string {
   const normalized = readNonEmptyString(value, key);
   let parsed: URL;
@@ -251,10 +243,6 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
   return {
     provider: {
       productionOrigin: readProviderOrigin(provider.productionOrigin, 'provider.productionOrigin'),
-      legacyProviderOrigins: readProviderOrigins(
-        provider.legacyProviderOrigins,
-        'provider.legacyProviderOrigins',
-      ),
       providerName: readProviderName(provider.providerName),
       managedProviderId: readNonEmptyString(provider.managedProviderId, 'provider.managedProviderId'),
       compatibilityProviderId: readCompatibilityProviderId(provider.compatibilityProviderId),
@@ -264,7 +252,6 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
         provider.managedRuntimeContractVersion,
         'provider.managedRuntimeContractVersion',
       ),
-      legacyProviderIds: readNonEmptyStringArray(provider.legacyProviderIds, 'provider.legacyProviderIds'),
       legacyAuthAccountIds: readNonEmptyStringArray(provider.legacyAuthAccountIds, 'provider.legacyAuthAccountIds'),
       defaultModel: readNonEmptyString(provider.defaultModel, 'provider.defaultModel'),
       defaultModelContextWindow: readPositiveInteger(
@@ -438,16 +425,13 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
 export const UCLAW_ENDPOINTS_CONFIG = validateUclawEndpointsConfig(rawConfig);
 
 export const UCLAW_PRODUCTION_ORIGIN = UCLAW_ENDPOINTS_CONFIG.provider.productionOrigin;
-export const UCLAW_LEGACY_PROVIDER_ORIGINS = UCLAW_ENDPOINTS_CONFIG.provider.legacyProviderOrigins;
 export const UCLAW_MANAGED_SERVICE_NAME = UCLAW_ENDPOINTS_CONFIG.provider.providerName;
 export const UCLAW_MANAGED_PROVIDER_BASE_URL = `${UCLAW_PRODUCTION_ORIGIN}/v1`;
-export const UCLAW_LEGACY_PROVIDER_BASE_URLS = UCLAW_LEGACY_PROVIDER_ORIGINS.map((origin) => `${origin}/v1`);
 export const UCLAW_MANAGED_PROVIDER_ID = UCLAW_ENDPOINTS_CONFIG.provider.managedProviderId;
 export const UCLAW_COMPATIBILITY_PROVIDER_ID = UCLAW_ENDPOINTS_CONFIG.provider.compatibilityProviderId;
 export const UCLAW_MANAGED_ACCOUNT_ID = UCLAW_ENDPOINTS_CONFIG.provider.managedAccountId;
 export const UCLAW_MANAGED_AUTH_ACCOUNT_ID = UCLAW_ENDPOINTS_CONFIG.provider.authAccountId;
 export const UCLAW_RUNTIME_CONTRACT_VERSION = UCLAW_ENDPOINTS_CONFIG.provider.managedRuntimeContractVersion;
-export const UCLAW_LEGACY_PROVIDER_IDS = UCLAW_ENDPOINTS_CONFIG.provider.legacyProviderIds;
 export const UCLAW_LEGACY_AUTH_ACCOUNT_IDS = UCLAW_ENDPOINTS_CONFIG.provider.legacyAuthAccountIds;
 export const UCLAW_DEFAULT_MODEL = UCLAW_ENDPOINTS_CONFIG.provider.defaultModel;
 export const UCLAW_DEFAULT_API_PROTOCOL = UCLAW_ENDPOINTS_CONFIG.provider.defaultApiProtocol;

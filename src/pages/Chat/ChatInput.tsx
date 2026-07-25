@@ -7,8 +7,9 @@
  * are sent with the message (no base64 over WebSocket).
  */
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { SendHorizontal, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, FolderOpen, Loader2, AtSign, Search, ChevronDown, Check } from 'lucide-react';
+import { SendHorizontal, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, FolderOpen, Loader2, AtSign, Search, ChevronDown, Check, Image as ImageIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { hostApi } from '@/lib/host-api';
@@ -29,6 +30,7 @@ import { rendererExtensionRegistry } from '@/extensions/registry';
 import { collectDroppedFiles } from '@/lib/collect-dropped-files';
 import { fetchQuickAccessSkills } from '@/lib/quick-access-skills';
 import { DEFAULT_WORKSPACE_CWD, isDefaultWorkspacePath, normalizeWorkspacePath } from '@/lib/workspace-context';
+import type { AcpImageGenerationOptions } from '@shared/acp-chat/types';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -49,7 +51,12 @@ export interface ChatWorkspaceOption {
 }
 
 interface ChatInputProps {
-  onSend: (text: string, attachments?: FileAttachment[], targetAgentId?: string | null) => void;
+  onSend: (
+    text: string,
+    attachments?: FileAttachment[],
+    targetAgentId?: string | null,
+    imageOptions?: AcpImageGenerationOptions,
+  ) => void;
   onStop?: () => void;
   disabled?: boolean;
   sending?: boolean;
@@ -64,12 +71,36 @@ interface ChatInputProps {
 // ── Helpers ──────────────────────────────────────────────────────
 
 const DIRECTORY_MIME_TYPE = 'application/x-directory';
+const DEFAULT_IMAGE_OPTIONS: AcpImageGenerationOptions = {
+  size: '1024x1024',
+  quality: 'medium',
+};
+const IMAGE_ASPECT_OPTIONS: ReadonlyArray<{
+  ratio: string;
+  size: AcpImageGenerationOptions['size'];
+  labelKey: string;
+  previewClassName: string;
+  testId: string;
+}> = [
+  { ratio: '2:3', size: '1024x1536', labelKey: 'composer.imageAspectTall', previewClassName: 'h-6 w-4', testId: 'chat-image-aspect-2-3' },
+  { ratio: '3:2', size: '1536x1024', labelKey: 'composer.imageAspectWide', previewClassName: 'h-4 w-6', testId: 'chat-image-aspect-3-2' },
+  { ratio: '1:1', size: '1024x1024', labelKey: 'composer.imageAspectSquare', previewClassName: 'h-5 w-5', testId: 'chat-image-aspect-1-1' },
+  { ratio: '9:16', size: '2160x3840', labelKey: 'composer.imageAspectVertical', previewClassName: 'h-6 w-3.5', testId: 'chat-image-aspect-9-16' },
+  { ratio: '16:9', size: '3840x2160', labelKey: 'composer.imageAspectWidescreen', previewClassName: 'h-3.5 w-6', testId: 'chat-image-aspect-16-9' },
+];
+const IMAGE_QUALITY_OPTIONS: AcpImageGenerationOptions['quality'][] = ['low', 'medium', 'high'];
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatImageQualityLabel(value: AcpImageGenerationOptions['quality'], t: ReturnType<typeof useTranslation>['t']): string {
+  if (value === 'low') return t('composer.imageQualityLow');
+  if (value === 'high') return t('composer.imageQualityHigh');
+  return t('composer.imageQualityMedium');
 }
 
 function getSkillPrefix(skillName: string): string {
@@ -223,6 +254,7 @@ export function ChatInput({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [skillPickerOpen, setSkillPickerOpen] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [imageAspectPickerOpen, setImageAspectPickerOpen] = useState(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [skillQuery, setSkillQuery] = useState('');
   const [quickSkills, setQuickSkills] = useState<QuickAccessSkill[]>([]);
@@ -230,10 +262,13 @@ export function ChatInput({
   const [skillsError, setSkillsError] = useState<string | null>(null);
   const [selectedSkill, setSelectedSkill] = useState<QuickAccessSkill | null>(null);
   const [optimisticModelRef, setOptimisticModelRef] = useState<string | null>(null);
+  const [sessionImageModes, setSessionImageModes] = useState<Record<string, boolean>>({});
+  const [sessionImageOptions, setSessionImageOptions] = useState<Record<string, AcpImageGenerationOptions>>({});
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
   const skillPickerRef = useRef<HTMLDivElement>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
+  const imageAspectPickerRef = useRef<HTMLDivElement>(null);
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
   const modelChangeVersionRef = useRef(0);
   const mountedRef = useRef(true);
@@ -271,6 +306,14 @@ export function ChatInput({
   const currentSession = useMemo(
     () => (sessions ?? []).find((session) => session.key === currentSessionKey) ?? null,
     [currentSessionKey, sessions],
+  );
+  const imageModeActive = sessionImageModes[currentSessionKey] === true;
+  const imageOptions = useMemo<AcpImageGenerationOptions>(
+    () => ({
+      ...DEFAULT_IMAGE_OPTIONS,
+      ...sessionImageOptions[currentSessionKey],
+    }),
+    [currentSessionKey, sessionImageOptions],
   );
   const currentAgentName = useMemo(
     () => currentAgent?.name ?? currentAgentId,
@@ -378,17 +421,19 @@ export function ChatInput({
   }, [agents, currentAgentId, targetAgentId]);
 
   useEffect(() => {
-    if (!pickerOpen && !skillPickerOpen && !modelPickerOpen && !workspaceMenuOpen) return;
+    if (!pickerOpen && !skillPickerOpen && !modelPickerOpen && !imageAspectPickerOpen && !workspaceMenuOpen) return;
     const handlePointerDown = (event: MouseEvent) => {
       const target = event.target as Node;
       const insideAgentPicker = pickerRef.current?.contains(target);
       const insideSkillPicker = skillPickerRef.current?.contains(target);
       const insideModelPicker = modelPickerRef.current?.contains(target);
+      const insideImageAspectPicker = imageAspectPickerRef.current?.contains(target);
       const insideWorkspaceMenu = workspaceMenuRef.current?.contains(target);
-      if (!insideAgentPicker && !insideSkillPicker && !insideModelPicker && !insideWorkspaceMenu) {
+      if (!insideAgentPicker && !insideSkillPicker && !insideModelPicker && !insideImageAspectPicker && !insideWorkspaceMenu) {
         setPickerOpen(false);
         setSkillPickerOpen(false);
         setModelPickerOpen(false);
+        setImageAspectPickerOpen(false);
         setWorkspaceMenuOpen(false);
       }
     };
@@ -396,22 +441,23 @@ export function ChatInput({
     return () => {
       document.removeEventListener('mousedown', handlePointerDown);
     };
-  }, [modelPickerOpen, pickerOpen, skillPickerOpen, workspaceMenuOpen]);
+  }, [imageAspectPickerOpen, modelPickerOpen, pickerOpen, skillPickerOpen, workspaceMenuOpen]);
 
   useEffect(() => {
-    if (!pickerOpen && !skillPickerOpen && !modelPickerOpen && !workspaceMenuOpen) return;
+    if (!pickerOpen && !skillPickerOpen && !modelPickerOpen && !imageAspectPickerOpen && !workspaceMenuOpen) return;
     const handleDocumentKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       setPickerOpen(false);
       setSkillPickerOpen(false);
       setModelPickerOpen(false);
+      setImageAspectPickerOpen(false);
       setWorkspaceMenuOpen(false);
     };
     document.addEventListener('keydown', handleDocumentKeyDown, true);
     return () => {
       document.removeEventListener('keydown', handleDocumentKeyDown, true);
     };
-  }, [modelPickerOpen, pickerOpen, skillPickerOpen, workspaceMenuOpen]);
+  }, [imageAspectPickerOpen, modelPickerOpen, pickerOpen, skillPickerOpen, workspaceMenuOpen]);
 
   useEffect(() => {
     setSelectedSkill((prev) => {
@@ -540,11 +586,36 @@ export function ChatInput({
     });
   }, [currentSessionKey, effectiveModelRef, managedDefaultModelRef, requestedModelRef, t, updateSessionModel]);
 
+  const toggleImageMode = useCallback(() => {
+    setPickerOpen(false);
+    setSkillPickerOpen(false);
+    setModelPickerOpen(false);
+    setImageAspectPickerOpen(false);
+    setWorkspaceMenuOpen(false);
+    setSessionImageModes((current) => ({
+      ...current,
+      [currentSessionKey]: !current[currentSessionKey],
+    }));
+    textareaRef.current?.focus();
+  }, [currentSessionKey]);
+
+  const updateImageOptions = useCallback((next: Partial<AcpImageGenerationOptions>) => {
+    setSessionImageOptions((current) => ({
+      ...current,
+      [currentSessionKey]: {
+        ...DEFAULT_IMAGE_OPTIONS,
+        ...current[currentSessionKey],
+        ...next,
+      },
+    }));
+  }, [currentSessionKey]);
+
   const handleWorkspaceButtonClick = useCallback(() => {
     if (workspaceSelectorDisabled) return;
     setPickerOpen(false);
     setSkillPickerOpen(false);
     setModelPickerOpen(false);
+    setImageAspectPickerOpen(false);
     setWorkspaceMenuOpen((open) => !open);
   }, [workspaceSelectorDisabled]);
 
@@ -784,10 +855,15 @@ export function ChatInput({
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto';
       }
-      onSend(textToSend, attachmentsToSend, targetAgentId);
+      if (imageModeActive) {
+        onSend(textToSend, attachmentsToSend, targetAgentId, { ...imageOptions });
+      } else {
+        onSend(textToSend, attachmentsToSend, targetAgentId);
+      }
       setTargetAgentId(null);
       setPickerOpen(false);
       setSkillPickerOpen(false);
+      setImageAspectPickerOpen(false);
       setWorkspaceMenuOpen(false);
     } finally {
       if (sendAttemptInFlightRef.current?.token === token) {
@@ -800,6 +876,8 @@ export function ChatInput({
     canSendWithoutModelPersistence,
     currentSessionKey,
     effectiveModelRef,
+    imageModeActive,
+    imageOptions,
     onSend,
     requestedModelRef,
     t,
@@ -871,6 +949,7 @@ export function ChatInput({
         setPickerOpen(false);
         setSkillPickerOpen(false);
         setModelPickerOpen(false);
+        setImageAspectPickerOpen(false);
         setWorkspaceMenuOpen(false);
         return;
       }
@@ -1062,7 +1141,8 @@ export function ChatInput({
           </div>
 
           {/* Action Row — icons on their own line */}
-          <div className="mt-1.5 flex items-center gap-1">
+          <div className="mt-1.5 flex min-w-0 items-center gap-1" data-testid="chat-composer-actions">
+            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1" data-testid="chat-composer-leading-actions">
             {/* Attach Button */}
             <Button
               variant="ghost"
@@ -1088,6 +1168,7 @@ export function ChatInput({
                   onClick={() => {
                     setSkillPickerOpen(false);
                     setModelPickerOpen(false);
+                    setImageAspectPickerOpen(false);
                     setWorkspaceMenuOpen(false);
                     setPickerOpen((open) => !open);
                   }}
@@ -1131,6 +1212,7 @@ export function ChatInput({
                 onClick={() => {
                   setPickerOpen(false);
                   setModelPickerOpen(false);
+                  setImageAspectPickerOpen(false);
                   setWorkspaceMenuOpen(false);
                   setSkillPickerOpen((open) => !open);
                 }}
@@ -1204,17 +1286,18 @@ export function ChatInput({
             </div>
 
             {showModelPicker && (
-              <div ref={modelPickerRef} className="relative shrink-0">
+              <div ref={modelPickerRef} className="relative min-w-0 shrink">
                 <button
                   type="button"
                   data-testid="chat-model-picker-button"
                   className={cn(
-                    'inline-flex h-8 max-w-[220px] items-center gap-1 rounded-lg px-1.5 text-meta font-medium text-muted-foreground transition-colors hover:bg-transparent hover:text-foreground focus-visible:outline-none focus-visible:ring-0 disabled:pointer-events-none disabled:opacity-50',
+                    'inline-flex h-8 min-w-0 max-w-[120px] items-center gap-1 rounded-lg px-1.5 text-meta font-medium text-muted-foreground transition-colors hover:bg-transparent hover:text-foreground focus-visible:outline-none focus-visible:ring-0 disabled:pointer-events-none disabled:opacity-50 sm:max-w-[220px]',
                     modelPickerOpen && 'text-foreground',
                   )}
                   onClick={() => {
                     setPickerOpen(false);
                     setSkillPickerOpen(false);
+                    setImageAspectPickerOpen(false);
                     setWorkspaceMenuOpen(false);
                     setModelPickerOpen((open) => !open);
                   }}
@@ -1255,14 +1338,128 @@ export function ChatInput({
                 )}
               </div>
             )}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  data-testid="chat-composer-mode-image"
+                  aria-pressed={imageModeActive}
+                  className={cn(
+                    'h-8 w-8 shrink-0 rounded-lg text-muted-foreground transition-colors hover:bg-black/5 hover:text-foreground dark:hover:bg-white/10',
+                    imageModeActive && 'bg-black/10 text-foreground hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/10',
+                  )}
+                  onClick={toggleImageMode}
+                  disabled={inputDisabled || sending}
+                >
+                  <ImageIcon className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{t('composer.imageMode')}</TooltipContent>
+            </Tooltip>
 
-            {/* Send Button — pushed to the right */}
+            {imageModeActive && (
+              <div className="flex shrink-0 items-center gap-1" data-testid="chat-image-options">
+                <div ref={imageAspectPickerRef} className="relative shrink-0">
+                  <button
+                    type="button"
+                    className={cn(
+                      'inline-flex h-8 min-w-[58px] items-center justify-center gap-1 rounded-lg bg-black/5 px-2 text-xs font-medium text-foreground transition-colors dark:bg-white/10',
+                      imageAspectPickerOpen
+                        ? 'bg-black/10 dark:bg-white/15'
+                        : 'hover:bg-black/10 dark:hover:bg-white/15',
+                    )}
+                    onClick={() => {
+                      setPickerOpen(false);
+                      setSkillPickerOpen(false);
+                      setModelPickerOpen(false);
+                      setWorkspaceMenuOpen(false);
+                      setImageAspectPickerOpen((open) => !open);
+                    }}
+                    disabled={inputDisabled || sending}
+                    data-testid="chat-image-aspect-trigger"
+                    aria-label={t('composer.imageSizeLabel')}
+                    aria-haspopup="menu"
+                    aria-expanded={imageAspectPickerOpen}
+                  >
+                    <span>{IMAGE_ASPECT_OPTIONS.find((option) => option.size === imageOptions.size)?.ratio ?? '1:1'}</span>
+                    <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform', imageAspectPickerOpen && 'rotate-180')} />
+                  </button>
+                  {imageAspectPickerOpen && (
+                    <div
+                      className="absolute bottom-full left-0 z-30 mb-2 w-[220px] rounded-lg border border-black/10 bg-surface-modal p-1 shadow-xl dark:border-white/10"
+                      data-testid="chat-image-aspect-menu"
+                      role="menu"
+                    >
+                      {IMAGE_ASPECT_OPTIONS.map((option) => {
+                        const selected = option.size === imageOptions.size;
+                        return (
+                          <button
+                            key={option.size}
+                            type="button"
+                            className={cn(
+                              'flex h-9 w-full items-center gap-2 rounded-md px-2 text-left transition-colors',
+                              selected
+                                ? 'bg-black/5 text-foreground dark:bg-white/10'
+                                : 'text-muted-foreground hover:bg-black/5 hover:text-foreground dark:hover:bg-white/5',
+                            )}
+                            onClick={() => {
+                              updateImageOptions({ size: option.size });
+                              setImageAspectPickerOpen(false);
+                              requestAnimationFrame(() => textareaRef.current?.focus());
+                            }}
+                            data-testid={option.testId}
+                            role="menuitemradio"
+                            aria-checked={selected}
+                          >
+                            <span className="flex h-6 w-6 shrink-0 items-center justify-center" aria-hidden="true">
+                              <span className={cn(
+                                'block rounded-[3px]',
+                                option.previewClassName,
+                                selected ? 'bg-foreground' : 'bg-muted-foreground/40',
+                              )} />
+                            </span>
+                            <span className="w-8 shrink-0 text-xs font-medium text-foreground">{option.ratio}</span>
+                            <span className="flex-1 whitespace-nowrap text-xs text-muted-foreground">
+                              {t(option.labelKey)}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+                <div className="relative shrink-0">
+                  <Select
+                    value={imageOptions.quality}
+                    onChange={(event) => {
+                      const quality = event.target.value as AcpImageGenerationOptions['quality'];
+                      if (IMAGE_QUALITY_OPTIONS.includes(quality)) updateImageOptions({ quality });
+                    }}
+                    className="h-8 w-[88px] rounded-lg border-0 bg-black/5 px-2 pr-6 text-xs text-foreground [background-image:none] appearance-none hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15"
+                    data-testid="chat-image-quality"
+                    aria-label={t('composer.imageQualityLabel')}
+                  >
+                    {IMAGE_QUALITY_OPTIONS.map((quality) => (
+                      <option key={quality} value={quality}>
+                        {formatImageQualityLabel(quality, t)}
+                      </option>
+                    ))}
+                  </Select>
+                  <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                </div>
+              </div>
+            )}
+            </div>
+
+            {/* Send Button — fixed at the right edge. */}
             <Button
               onClick={sending ? handleStop : handleSend}
               disabled={sending ? !canStop : !canSend}
               size="icon"
               data-testid="chat-composer-send"
-              className={`ml-auto shrink-0 h-8 w-8 rounded-lg transition-colors ${
+              className={`shrink-0 self-end h-8 w-8 rounded-lg transition-colors ${
                 (sending || canSend)
                   ? 'bg-black/5 dark:bg-white/10 text-foreground hover:bg-black/10 dark:hover:bg-white/20'
                   : 'text-muted-foreground/50 hover:bg-transparent bg-transparent'
@@ -1277,6 +1474,7 @@ export function ChatInput({
               )}
             </Button>
           </div>
+
         </div>
         <div className="mt-2.5 flex min-w-0 items-center justify-between gap-2 text-tiny text-muted-foreground/60">
           <div className="flex min-w-0 flex-1 items-center gap-1.5">

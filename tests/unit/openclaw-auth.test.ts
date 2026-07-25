@@ -4,6 +4,7 @@ import { chmod, mkdir, readFile, rm, stat, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { UCLAW_MANAGED_PROVIDER_BASE_URL } from '@shared/junfeiai-endpoints';
+import { createManagedRuntimeProviderEntry } from '@electron/services/providers/managed-runtime-config';
 
 const { testHome, testUserData, getSettingMock } = vi.hoisted(() => {
   const suffix = Math.random().toString(36).slice(2);
@@ -167,7 +168,7 @@ describe('managed auth profiles transaction', () => {
     await rm(testUserData, { recursive: true, force: true });
   });
 
-  it('strictly replaces every OpenAI profile and restores the original OAuth stores', async () => {
+  it('strictly replaces managed profiles, preserves Codex OAuth, and restores the original stores', async () => {
     await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
     const originalStore = {
       version: 1,
@@ -246,6 +247,7 @@ describe('managed auth profiles transaction', () => {
     expect(Object.keys(installedProfiles).sort()).toEqual([
       'deepseek:default',
       'lingzhiwuxian:default',
+      'openai-codex:default',
       'openai:default',
     ]);
     expect(installedProfiles['openai:default']).toEqual({
@@ -258,19 +260,25 @@ describe('managed auth profiles transaction', () => {
       provider: 'lingzhiwuxian',
       key: 'managed-openai-key',
     });
+    expect(installedProfiles['openai-codex:default']).toEqual(
+      originalStore.profiles['openai-codex:default'],
+    );
     expect(installedProfiles['deepseek:default']).toEqual(originalStore.profiles['deepseek:default']);
     expect(installedJson.order).toEqual({
       openai: ['openai:default'],
       lingzhiwuxian: ['lingzhiwuxian:default'],
+      'openai-codex': ['openai-codex:default'],
       deepseek: ['deepseek:default'],
       routed: ['deepseek:default'],
     });
     expect(installedJson.lastGood).toEqual({
       openai: 'openai:default',
       lingzhiwuxian: 'lingzhiwuxian:default',
+      'openai-codex': 'openai-codex:default',
       deepseek: 'deepseek:default',
     });
     expect(installedJson.usageStats).toEqual({
+      'openai-codex:default': { cooldownUntil: 77_777, errorCount: 3 },
       'deepseek:default': { lastUsed: 7 },
     });
     expect(readAuthProfilesFromSqlite('main')).toEqual(installedJson);
@@ -1092,6 +1100,38 @@ describe('sanitizeOpenClawConfig', () => {
     expect(tools.deny).toEqual(['browser', 'skill_workshop']);
     const gateway = result.gateway as Record<string, unknown>;
     expect((gateway.tools as Record<string, unknown>).deny).toEqual(['skill_workshop']);
+  });
+
+  it('trusts the configured ClawX image relay during prelaunch without dropping other allowlist entries', async () => {
+    await writeOpenClawJson({
+      models: {
+        providers: {
+          'clawx-openai-image': {
+            baseUrl: 'https://relay.example.com/v1',
+            api: 'openai-completions',
+            models: [{ id: 'gpt-image-2', name: 'gpt-image-2' }],
+          },
+        },
+      },
+      plugins: {
+        allow: ['custom-plugin'],
+        entries: {
+          'custom-plugin': { enabled: true },
+        },
+      },
+    });
+
+    const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
+    await sanitizeOpenClawConfig();
+
+    const result = await readOpenClawJson();
+    const plugins = result.plugins as Record<string, unknown>;
+    const allow = plugins.allow as string[];
+    const entries = plugins.entries as Record<string, Record<string, unknown>>;
+
+    expect(allow).toContain('custom-plugin');
+    expect(allow).toContain('clawx-openai-image');
+    expect(entries['clawx-openai-image']).toEqual({ enabled: true });
   });
 
   it('migrates legacy tools.web.search.kimi into moonshot plugin config', async () => {
@@ -2610,7 +2650,11 @@ describe('managed agent models transaction', () => {
     });
     expect(providers.openai).toEqual(managedEntry);
     expect(providers.lingzhiwuxian).toEqual(managedEntry);
-    expect(providers['openai-codex']).toBeUndefined();
+    expect(providers['openai-codex']).toEqual({
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+      api: 'openai-chatgpt-responses',
+      models: [{ id: 'gpt-5.4', name: 'Legacy Codex' }],
+    });
     expect(providers['legacy-uclaw-relay']).toBeUndefined();
     expect(providers['ordinary-custom']).toEqual({
       baseUrl: 'https://llm.example.com/v1',
@@ -3176,6 +3220,7 @@ describe('syncOpenAiCompatibleImageRelay', () => {
     const plugins = result.plugins as Record<string, unknown>;
     const entries = plugins.entries as Record<string, unknown>;
     expect((entries['clawx-openai-image'] as Record<string, unknown>).enabled).toBe(true);
+    expect(plugins.allow).toEqual(['clawx-openai-image']);
 
     const auth = await readAuthProfiles('main');
     expect((auth.profiles['clawx-openai-image:default'] as Record<string, unknown>).key).toBe('sk-relay-test');
@@ -3324,6 +3369,48 @@ describe('ensureOpenClawProviderAgentRuntimePins', () => {
     const providers = (result.models as Record<string, unknown>).providers as Record<string, unknown>;
     expect((providers.openai as Record<string, unknown>).agentRuntime).toEqual({ id: 'pi' });
     expect(providers['openai-codex']).toBeUndefined();
+  });
+
+  it('preserves the UClaw runtime when Codex OAuth coexists before Gateway launch', async () => {
+    const managedEntry = createManagedRuntimeProviderEntry({
+      defaultModel: 'smart-latest',
+      models: [{ id: 'smart-latest', label: 'Smart Latest' }],
+    });
+    await writeOpenClawJson({
+      agents: {
+        defaults: {
+          model: { primary: 'openai/smart-latest', fallbacks: [] },
+        },
+      },
+      models: {
+        providers: {
+          openai: managedEntry,
+          lingzhiwuxian: managedEntry,
+          'openai-codex': {
+            baseUrl: 'https://chatgpt.com/backend-api/codex',
+            api: 'openai-chatgpt-responses',
+            models: [{ id: 'gpt-5.5', name: 'GPT-5.5' }],
+          },
+        },
+      },
+    });
+
+    const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
+    await sanitizeOpenClawConfig();
+
+    const result = await readOpenClawJson();
+    const providers = (result.models as Record<string, unknown>).providers as Record<string, unknown>;
+    expect(providers.openai).toEqual(managedEntry);
+    expect(providers.lingzhiwuxian).toEqual(managedEntry);
+    expect(providers['openai-codex']).toEqual({
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+      api: 'openai-chatgpt-responses',
+      agentRuntime: { id: 'pi' },
+      models: [{ id: 'gpt-5.5', name: 'GPT-5.5' }],
+    });
+    expect((result.agents as Record<string, unknown>).defaults).toEqual({
+      model: { primary: 'openai/smart-latest', fallbacks: [] },
+    });
   });
 
   it('migrates legacy openai-codex-responses api values during sanitizeOpenClawConfig', async () => {

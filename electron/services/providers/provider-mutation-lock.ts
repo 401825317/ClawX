@@ -3,8 +3,6 @@ import {
   UCLAW_COMPATIBILITY_PROVIDER_ID,
   UCLAW_DEFAULT_API_PROTOCOL,
   UCLAW_DEFAULT_MODEL,
-  UCLAW_LEGACY_PROVIDER_BASE_URLS,
-  UCLAW_LEGACY_PROVIDER_IDS,
   UCLAW_MANAGED_ACCOUNT_ID,
   UCLAW_MANAGED_AUTH_ACCOUNT_ID,
   UCLAW_MANAGED_PROVIDER_ID,
@@ -16,7 +14,6 @@ const UCLAW_MANAGED_OPENAI_ACCOUNT_ID = UCLAW_MANAGED_PROVIDER_ID;
 const OPENAI_PROVIDER_IDS = new Set([
   UCLAW_MANAGED_PROVIDER_ID,
   UCLAW_COMPATIBILITY_PROVIDER_ID,
-  ...UCLAW_LEGACY_PROVIDER_IDS,
 ]);
 
 const mutationContext = new AsyncLocalStorage<boolean>();
@@ -326,17 +323,16 @@ export function resolveValidUclawManagedRelayPairToken(
   return primary.token;
 }
 
-/** Recognize legacy relay records that were incorrectly stored as custom Providers. */
+/** Recognize managed relay records that were incorrectly stored as custom Providers. */
 function isUclawOpenAiRelayIdentity(value: Record<string, unknown>): boolean {
   if (!hasManagedOpenAiModel(value) || typeof value.baseUrl !== 'string') return false;
 
   const normalized = normalizedProviderBaseUrl(value.baseUrl);
   if (!normalized) return false;
-  return [UCLAW_MANAGED_PROVIDER_BASE_URL, ...UCLAW_LEGACY_PROVIDER_BASE_URLS]
-    .some((baseUrl) => normalizedProviderBaseUrl(baseUrl) === normalized);
+  return normalizedProviderBaseUrl(UCLAW_MANAGED_PROVIDER_BASE_URL) === normalized;
 }
 
-/** Match OpenAI identities, including the canonical and historical runtime aliases. */
+/** Match OpenAI identities, including the canonical and compatibility Providers. */
 export function isOpenAiProviderIdentity(value: unknown): boolean {
   if (typeof value === 'string') return OPENAI_PROVIDER_IDS.has(value.trim());
   if (!isRecord(value)) return false;

@@ -24,11 +24,19 @@ export type AcpPromptMediaItem = {
   mimeType?: string;
 };
 
+/** Per-turn image constraints selected in the composer. */
+export type AcpImageGenerationOptions = {
+  size: '1024x1536' | '1536x1024' | '1024x1024' | '2160x3840' | '3840x2160';
+  quality: 'low' | 'medium' | 'high';
+};
+
 export type AcpChatPromptPayload = AcpSessionKeyPayload & {
   cwd: string;
   message?: string;
   media?: AcpPromptMediaItem[];
   messageId?: string;
+  /** Applied only if the model elects to call OpenClaw's image_generate tool. */
+  imageOptions?: AcpImageGenerationOptions;
 };
 
 export type AcpChatCancelPayload = AcpSessionKeyPayload;

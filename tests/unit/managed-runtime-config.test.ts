@@ -25,6 +25,7 @@ import {
   createManagedRuntimeProviderEntry,
   getManagedRuntimeOpenAiProviderIds,
   installManagedRuntimeProviderState,
+  isUclawManagedRuntimeProviderEntry,
   removeManagedRuntimeOpenAiState,
   restoreManagedRuntimeConfig,
   snapshotManagedRuntimeConfig,
@@ -123,6 +124,15 @@ describe('managed runtime config transaction', () => {
     }));
     expect(providerEntry.models[1]).not.toHaveProperty('reasoning');
     expect(providerEntry.models[1]?.compat).toEqual({ supportsPromptCacheKey: true });
+    expect(isUclawManagedRuntimeProviderEntry(providerEntry)).toBe(true);
+    expect(isUclawManagedRuntimeProviderEntry({
+      ...providerEntry,
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+    })).toBe(false);
+    expect(isUclawManagedRuntimeProviderEntry({
+      ...providerEntry,
+      request: { allowPrivateNetwork: false },
+    })).toBe(false);
 
     await writeFile(configPath, JSON.stringify({
       agents: { defaults: { workspace: '/tmp/keep' } },
@@ -130,6 +140,11 @@ describe('managed runtime config transaction', () => {
         mode: 'merge',
         providers: {
           deepseek: { models: [{ id: 'deepseek-chat' }] },
+          'openai-codex': {
+            baseUrl: 'https://chatgpt.com/backend-api/codex',
+            api: 'openai-chatgpt-responses',
+            models: [{ id: 'gpt-5.5' }],
+          },
           'clawx-openai-image': {
             baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
             models: [{ id: 'gpt-image-2' }],
@@ -152,6 +167,11 @@ describe('managed runtime config transaction', () => {
     expect(installed.models.providers.openai).toEqual(providerEntry);
     expect(installed.models.providers[UCLAW_COMPATIBILITY_PROVIDER_ID]).toEqual(providerEntry);
     expect(installed.models.providers.deepseek).toEqual({ models: [{ id: 'deepseek-chat' }] });
+    expect(installed.models.providers['openai-codex']).toEqual({
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+      api: 'openai-chatgpt-responses',
+      models: [{ id: 'gpt-5.5' }],
+    });
     expect(installed.models.providers['clawx-openai-image']).toEqual({
       baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
       models: [{ id: 'gpt-image-2' }],
@@ -167,6 +187,11 @@ describe('managed runtime config transaction', () => {
       models: {
         providers: {
           openai: { baseUrl: 'https://personal.example/v1', models: [{ id: 'personal-model' }] },
+          'openai-codex': {
+            baseUrl: 'https://chatgpt.com/backend-api/codex',
+            api: 'openai-chatgpt-responses',
+            models: [{ id: 'gpt-5.5' }],
+          },
           'custom-runtime-only': {
             baseUrl: `${UCLAW_MANAGED_PROVIDER_BASE_URL}/`,
             models: [{ id: 'smart-latest' }],
@@ -280,7 +305,25 @@ describe('managed runtime config transaction', () => {
 
   it('does not write a no-op runtime cleanup', async () => {
     const original = Buffer.from(JSON.stringify({
-      models: { providers: { deepseek: { apiKey: 'deepseek-key' } } },
+      agents: { defaults: { model: { primary: 'openai-codex/gpt-5.5', fallbacks: [] } } },
+      models: {
+        providers: {
+          'openai-codex': {
+            baseUrl: 'https://chatgpt.com/backend-api/codex',
+            api: 'openai-chatgpt-responses',
+            models: [{ id: 'gpt-5.5' }],
+          },
+          deepseek: { apiKey: 'deepseek-key' },
+        },
+      },
+      auth: {
+        profiles: {
+          'openai-codex:default': { provider: 'openai-codex', mode: 'oauth' },
+        },
+        order: { 'openai-codex': ['openai-codex:default'] },
+        lastGood: { 'openai-codex': 'openai-codex:default' },
+        usageStats: { 'openai-codex:default': { lastUsed: 1 } },
+      },
     }), 'utf8');
     await writeFile(configPath, original);
     const snapshot = await snapshotManagedRuntimeConfig();
@@ -288,5 +331,6 @@ describe('managed runtime config transaction', () => {
     await removeManagedRuntimeOpenAiState(snapshot);
 
     expect(await readFile(configPath)).toEqual(original);
+    expect(snapshot.applied).toBeUndefined();
   });
 });

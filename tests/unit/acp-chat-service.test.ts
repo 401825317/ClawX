@@ -78,7 +78,14 @@ function createPassthroughAccessRegistry() {
   };
 }
 
-async function createService(connection = createConnection(), accessRegistry = createPassthroughAccessRegistry()) {
+async function createService(
+  connection = createConnection(),
+  accessRegistry = createPassthroughAccessRegistry(),
+  turnImagePreferenceStore?: {
+    enqueue: ReturnType<typeof vi.fn>;
+    discard: ReturnType<typeof vi.fn>;
+  },
+) {
   const send = vi.fn();
   const { AcpChatService } = await import('../../electron/services/acp-chat-service');
   const service = new AcpChatService(
@@ -86,6 +93,7 @@ async function createService(connection = createConnection(), accessRegistry = c
     accessRegistry as never,
     connection as never,
     undefined,
+    turnImagePreferenceStore as never,
   );
   return { service, connection, send, accessRegistry };
 }
@@ -242,6 +250,59 @@ describe('AcpChatService', () => {
       messageId: 'msg-1',
       _meta: { sessionKey: 'agent:pi:session-123', prefixCwd: true },
     });
+  });
+
+  it('queues image composer options without changing the ACP prompt text', async () => {
+    const turnImagePreferenceStore = {
+      enqueue: vi.fn().mockResolvedValue({ id: 'image-pref-1' }),
+      discard: vi.fn().mockResolvedValue(undefined),
+    };
+    const { service, connection } = await createService(
+      createConnection(),
+      createPassthroughAccessRegistry(),
+      turnImagePreferenceStore,
+    );
+
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    await expect(service.sendPrompt({
+      sessionKey: 'agent:pi:s1',
+      cwd: '/repo',
+      message: 'Create a blue coffee cup on a white table.',
+      imageOptions: { size: '3840x2160', quality: 'medium' },
+    })).resolves.toEqual({ success: true, generation: 1 });
+
+    expect(turnImagePreferenceStore.enqueue).toHaveBeenCalledWith({
+      sessionKey: 'agent:pi:s1',
+      message: 'Create a blue coffee cup on a white table.',
+      imageOptions: { size: '3840x2160', quality: 'medium' },
+    });
+    expect(connection.prompt).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: [{ type: 'text', text: 'Create a blue coffee cup on a white table.' }],
+    }));
+  });
+
+  it('discards an unclaimed image preference when ACP rejects the prompt', async () => {
+    const connection = createConnection();
+    connection.prompt.mockRejectedValueOnce(new Error('ACP unavailable'));
+    const turnImagePreferenceStore = {
+      enqueue: vi.fn().mockResolvedValue({ id: 'image-pref-2' }),
+      discard: vi.fn().mockResolvedValue(undefined),
+    };
+    const { service } = await createService(
+      connection,
+      createPassthroughAccessRegistry(),
+      turnImagePreferenceStore,
+    );
+
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    await expect(service.sendPrompt({
+      sessionKey: 'agent:pi:s1',
+      cwd: '/repo',
+      message: 'Create an image.',
+      imageOptions: { size: '1024x1024', quality: 'medium' },
+    })).resolves.toEqual({ success: false, error: 'ACP unavailable' });
+
+    expect(turnImagePreferenceStore.discard).toHaveBeenCalledWith('image-pref-2');
   });
 
   it('rewrites fresh-session ACP updates to the ClawX session key for the renderer', async () => {

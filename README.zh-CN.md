@@ -143,6 +143,7 @@ UClaw 托管分发会在首次设置中提供账号登录、注册、验证码�
 已登录的 UClaw 用户可以从侧栏进入虾粮商店，查看虾粮余额、创建充值订单、通过二维码或安全的浏览器链接完成支付，并分页查看历史订单。系统会自动检查支付状态，并在支付成功后刷新余额。
 当 UClaw 发布已启用的客服配置时，侧栏还会显示“帮助与客服”，可查看一个或多个官方客服二维码、工作时间、备注，并可复制微信号。该公共配置不要求登录，也不会影响 Chat 或 Gateway 状态。
 在开发者模式下，独立的“图像生成”页面支持配置 OpenAI 兼容生图端点（Base URL、API Key 和模型名，例如 `gpt-image-2`），生图请求会走专用的 `/v1/images/generations` 服务，聊天仍继续使用正常的 OpenAI Provider。
+聊天输入框开启“图片模式”后，会通过 ACP 传递本轮图片尺寸和质量偏好（默认 `medium`）。是否调用 `image_generate` 仍由 Agent 模型决定，输入框不会直接发起生图请求。
 如果你通过 **自定义（Custom）Provider** 对接 OpenAI-compatible 网关，可以在 **设置 → AI Providers → 编辑 Provider** 中配置自定义 `User-Agent`，以提高兼容性。
 编辑或切换 Provider 时，ClawX 会保留已有的模型级能力元数据，例如 `input: ["text", "image"]`。新选择的自定义 Provider 模型会使用与 OpenClaw onboarding 一致的图片输入能力推断；未知模型默认按纯文本模型处理。
 自定义 Provider 的模型行还会写入显式的 `contextWindow`（按模型系列推断，例如 `gpt-5.x` → 272k），旧版本保存的模型行会在启动时自动回填，使 OpenClaw 能在长会话超限前主动压缩上下文，避免出现 "Context overflow" 报错。当你没有配置 compaction 时，ClawX 会默认写入 `agents.defaults.compaction.mode = "safeguard"` 和 `reserveTokensFloor = 50000`；你手动配置过的模型行或压缩配置永远不会被修改（仅可能回填缺失的 `reserveTokensFloor`）。

@@ -30,8 +30,8 @@ describe('provider mutation identity guard', () => {
       .toThrow(ManagedProviderMutationError);
   });
 
-  it('recognizes the UClaw smart-latest relay even when legacy data labels it custom', () => {
-    const legacyRelay = {
+  it('recognizes the current UClaw smart-latest relay even when data labels it custom', () => {
+    const managedRelay = {
       id: 'legacy-relay',
       vendorId: 'custom',
       type: 'custom',
@@ -39,21 +39,21 @@ describe('provider mutation identity guard', () => {
       modelId: 'smart-latest',
     };
 
-    expect(isOpenAiProviderIdentity(legacyRelay)).toBe(true);
-    expect(() => assertProviderMutationAllowed(managedOpenAi, legacyRelay))
+    expect(isOpenAiProviderIdentity(managedRelay)).toBe(true);
+    expect(() => assertProviderMutationAllowed(managedOpenAi, managedRelay))
       .toThrow(ManagedProviderMutationError);
 
     expect(isOpenAiProviderIdentity({
-      ...legacyRelay,
+      ...managedRelay,
       modelId: 'custom-1234/smart-latest',
     })).toBe(true);
     expect(isOpenAiProviderIdentity({
-      ...legacyRelay,
+      ...managedRelay,
       modelId: undefined,
       metadata: { customModels: ['smart-latest'] },
     })).toBe(true);
     expect(isOpenAiProviderIdentity({
-      ...legacyRelay,
+      ...managedRelay,
       modelId: undefined,
       models: [{ id: 'smart-latest' }],
     })).toBe(true);
@@ -74,9 +74,16 @@ describe('provider mutation identity guard', () => {
       baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
       model: 'other-model',
     };
+    const codexCustom = {
+      id: 'openai-codex',
+      vendorId: 'custom',
+      type: 'custom',
+    };
 
     expect(isOpenAiProviderIdentity(ordinaryCustom)).toBe(false);
     expect(isOpenAiProviderIdentity(sameHostDifferentModel)).toBe(false);
+    expect(isOpenAiProviderIdentity('openai-codex')).toBe(false);
+    expect(isOpenAiProviderIdentity(codexCustom)).toBe(false);
     expect(isOpenAiProviderIdentity({
       ...sameHostDifferentModel,
       model: undefined,
@@ -84,11 +91,13 @@ describe('provider mutation identity guard', () => {
     })).toBe(false);
     expect(() => assertProviderMutationAllowed(managedOpenAi, ordinaryCustom)).not.toThrow();
     expect(() => assertProviderMutationAllowed(managedOpenAi, sameHostDifferentModel)).not.toThrow();
+    expect(() => assertProviderMutationAllowed(managedOpenAi, codexCustom)).not.toThrow();
   });
 
   it.each([
     ['different protocol', 'http://zz-cn.lingzhiwuxian.com/v1'],
-    ['current host with different protocol', 'https://127.0.0.1:8083/v1'],
+    ['temporary local debug endpoint', 'http://127.0.0.1:8083/v1'],
+    ['unrelated local endpoint', 'https://127.0.0.1:8083/v1'],
     ['query parameters', 'https://zz-cn.lingzhiwuxian.com/v1?tenant=other'],
     ['URL credentials', 'https://user:password@zz-cn.lingzhiwuxian.com/v1'],
     ['URL fragment', 'https://zz-cn.lingzhiwuxian.com/v1#other'],
