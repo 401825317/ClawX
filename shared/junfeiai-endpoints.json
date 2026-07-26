@@ -58,6 +58,14 @@
       "bootstrap": "/api/clawx/bootstrap"
     }
   },
+  "updates": {
+    "checkTimeoutMs": 30000,
+    "downloadTimeoutMs": 1800000,
+    "routes": {
+      "feed": "/api/clawx/updates/feed",
+      "latest": "/api/clawx/updates/latest"
+    }
+  },
   "runtimeDefaults": {
     "tools": {
       "exec": {

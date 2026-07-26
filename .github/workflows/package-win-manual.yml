@@ -7,6 +7,14 @@ on:
         description: 'Git ref to build (branch, tag, or SHA). Leave empty for current default ref.'
         required: false
         default: ''
+      package_type:
+        description: 'Windows package type'
+        required: true
+        default: 'usb_zip'
+        type: choice
+        options:
+          - usb_zip
+          - installer
 
 permissions:
   contents: read
@@ -19,16 +27,22 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || github.ref }}
+          ref: ${{ inputs.ref || github.sha }}
           fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: '22.19.0'
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+          cache: false
 
       - name: Get pnpm store directory
         shell: bash
@@ -49,20 +63,56 @@ jobs:
           git config --global --add "url.https://github.com/.insteadOf" "ssh://git@github.com/"
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
-      - name: Download uv binaries for Windows
-        run: pnpm run uv:download:win
+      - name: Read app version
+        shell: pwsh
+        run: |
+          $appVersion = node -p "require('./package.json').version"
+          "APP_VERSION=$appVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Download agent-browser binaries for Windows
-        run: pnpm run agent-browser:download:win
+      - name: Build Windows USB ZIP
+        if: ${{ inputs.package_type == 'usb_zip' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm run package:win:usb
 
-      - name: Build Windows package (no publish)
+      - name: Build Windows installer
+        if: ${{ inputs.package_type == 'installer' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: pnpm run package:win
 
+      - name: Refresh final NSIS blockmap and update metadata
+        if: ${{ inputs.package_type == 'installer' }}
+        shell: pwsh
+        run: pnpm run release:refresh:win
+
+      - name: Validate final Windows NSIS installer lifecycle
+        if: ${{ inputs.package_type == 'installer' }}
+        shell: pwsh
+        run: pnpm run release:validate:win
+
+      - name: Upload Windows USB ZIP
+        if: ${{ inputs.package_type == 'usb_zip' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: release/UClaw-${{ env.APP_VERSION }}-win-x64-usb.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Windows USB metadata
+        if: ${{ inputs.package_type == 'usb_zip' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: release/UClaw-${{ env.APP_VERSION }}-win-x64-usb.json
+          archive: false
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Upload Windows Installer (x64)
+        if: ${{ inputs.package_type == 'installer' }}
         uses: actions/upload-artifact@v4
         with:
           name: windows-installer-x64
@@ -70,15 +120,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Upload Windows Installer (arm64)
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-installer-arm64
-          path: release/*-win-arm64.exe
-          if-no-files-found: warn
-          retention-days: 7
-
       - name: Upload Windows Blockmap Files
+        if: ${{ inputs.package_type == 'installer' }}
         uses: actions/upload-artifact@v4
         with:
           name: windows-blockmap
@@ -87,11 +130,21 @@ jobs:
           retention-days: 7
 
       - name: Upload Windows Update Manifests
+        if: ${{ inputs.package_type == 'installer' }}
         uses: actions/upload-artifact@v4
         with:
           name: windows-update-manifests
           path: |
             release/*.yml
             !release/builder-debug.yml
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload NSIS validation report
+        if: ${{ always() && inputs.package_type == 'installer' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-nsis-validation-report
+          path: release/regression/nsis-*/*
           if-no-files-found: warn
           retention-days: 7

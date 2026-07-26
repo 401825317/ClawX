@@ -412,8 +412,12 @@ pnpm build                # 完整生产构建（含打包资源）
 pnpm package              # 为当前平台打包（包含预装技能资源）
 pnpm package:mac          # 为 macOS 打包
 pnpm package:win          # 为 Windows 打包
+pnpm package:win:usb      # 构建 Windows x64 USB 便携包（仅 Windows，要求源码工作区干净）
+pnpm package:win:verify   # 构建并执行最终 NSIS 元数据与安装生命周期门禁
 pnpm package:linux        # 为 Linux 打包
 ```
+
+Windows USB 构建会输出 `UClaw-<version>-win-x64-usb.zip` 及同名 JSON 元数据。持久数据保存在 `UClawData`，高频状态使用本机隔离运行目录；便携更新只有在 ZIP 格式、文件大小和 SHA-512 全部校验通过后才会安装。Windows 发布流程会在签名后重建 NSIS blockmap 和更新元数据，并在发布产物前验证安装、启动、覆盖升级、卸载及用户数据保留。
 
 在无头 Linux 环境下，Electron 测试需要显示服务；可使用 `xvfb-run -a pnpm run test:e2e`。
 

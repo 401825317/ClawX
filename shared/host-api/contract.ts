@@ -110,10 +110,20 @@ export type DialogMessageResult = {
 };
 export type WindowSyncTrafficLightPayload = { sidebarCollapsed: boolean };
 export type UpdateChannel = 'stable' | 'beta' | 'dev';
+export type UpdateMode = 'installed' | 'portable';
 export type UpdateInfoSnapshot = {
   version: string;
   releaseDate?: string;
   releaseNotes?: string | null;
+  downloadUrl?: string;
+  channel?: string;
+  platform?: string;
+  arch?: string;
+  packageType?: string;
+  fileName?: string;
+  sha512?: string;
+  size?: number;
+  mandatory?: boolean;
 };
 export type UpdateProgressSnapshot = {
   total: number;
@@ -124,11 +134,17 @@ export type UpdateProgressSnapshot = {
 };
 export type UpdateStatusSnapshot = {
   status: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
+  mode?: UpdateMode;
   info?: UpdateInfoSnapshot;
   progress?: UpdateProgressSnapshot;
   error?: string;
+  downloadPath?: string;
 };
 export type UpdateCheckResult = HostSuccess & { status?: UpdateStatusSnapshot };
+export type UpdateActionResult = HostSuccess & {
+  status?: UpdateStatusSnapshot;
+  downloadPath?: string;
+};
 export type UpdateSetChannelPayload = { channel: UpdateChannel };
 export type UpdateSetAutoDownloadPayload = { enable: boolean };
 
@@ -919,8 +935,8 @@ export type HostApiContract = {
     status: () => UpdateStatusSnapshot;
     version: () => string;
     check: () => UpdateCheckResult;
-    download: () => HostSuccess;
-    install: () => HostSuccess;
+    download: () => UpdateActionResult;
+    install: () => UpdateActionResult;
     setChannel: (payload: UpdateSetChannelPayload) => HostSuccess;
     setAutoDownload: (payload: UpdateSetAutoDownloadPayload) => HostSuccess;
     cancelAutoInstall: () => HostSuccess;

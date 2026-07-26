@@ -411,8 +411,12 @@ pnpm build                # Full production build (with packaging assets)
 pnpm package              # Package for current platform (includes bundled preinstalled skills)
 pnpm package:mac          # Package for macOS
 pnpm package:win          # Package for Windows
+pnpm package:win:usb      # Build the Windows x64 USB ZIP (Windows only, clean source required)
+pnpm package:win:verify   # Build and run the final NSIS metadata/install lifecycle gate
 pnpm package:linux        # Package for Linux
 ```
+
+The Windows USB build emits `UClaw-<version>-win-x64-usb.zip` and matching JSON metadata. It keeps durable data in `UClawData`, uses an isolated local runtime profile for high-frequency state, and installs portable updates only after ZIP, size, and SHA-512 verification. Windows release jobs rebuild the NSIS block map and update metadata after signing, then validate install, startup, overwrite upgrade, uninstall, and user-data retention before publishing artifacts.
 
 On headless Linux, run Electron tests under a display server such as `xvfb-run -a pnpm run test:e2e`.
 

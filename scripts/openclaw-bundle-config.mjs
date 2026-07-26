@@ -38,3 +38,19 @@ export const ELECTRON_MAIN_RUNTIME_PACKAGES = [
   '@whiskeysockets/baileys',
   'qrcode-terminal',
 ];
+
+/** Third-party OpenClaw plugins copied into every packaged runtime. */
+export const BUNDLED_OPENCLAW_PLUGINS = [
+  { npmName: '@soimy/dingtalk', pluginId: 'dingtalk', manifestId: 'dingtalk' },
+  { npmName: '@wecom/wecom-openclaw-plugin', pluginId: 'wecom', manifestId: 'wecom-openclaw-plugin' },
+  { npmName: '@larksuite/openclaw-lark', pluginId: 'feishu-openclaw-plugin', manifestId: 'openclaw-lark' },
+  { npmName: '@openclaw/discord', pluginId: 'discord', manifestId: 'discord' },
+  { npmName: '@openclaw/qqbot', pluginId: 'qqbot', manifestId: 'qqbot' },
+  { npmName: '@openclaw/whatsapp', pluginId: 'whatsapp', manifestId: 'whatsapp' },
+  { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin', manifestId: 'openclaw-weixin' },
+];
+
+/** Local UClaw plugins mirrored and copied into every packaged runtime. */
+export const LOCAL_OPENCLAW_PLUGIN_IDS = [
+  'clawx-openai-image',
+];

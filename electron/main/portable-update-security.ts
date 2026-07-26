@@ -1,0 +1,166 @@
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { open, stat } from 'node:fs/promises';
+import { basename, extname } from 'node:path';
+
+export interface PortableUpdatePackageMetadata {
+  version: string;
+  downloadUrl?: string;
+  fileName?: string;
+  file_name?: string;
+  sha512?: string;
+  size?: number;
+}
+
+type ParsedPortableVersion = {
+  core: number[];
+  prerelease: string[] | null;
+};
+
+/** Parse the SemVer fields used to decide whether a portable update is newer. */
+function parsePortableVersion(value: string): ParsedPortableVersion {
+  const withoutBuild = value.trim().replace(/^v/i, '').split('+', 1)[0];
+  const prereleaseSeparator = withoutBuild.indexOf('-');
+  const coreValue = prereleaseSeparator >= 0
+    ? withoutBuild.slice(0, prereleaseSeparator)
+    : withoutBuild;
+  const prereleaseValue = prereleaseSeparator >= 0
+    ? withoutBuild.slice(prereleaseSeparator + 1)
+    : '';
+
+  return {
+    core: coreValue.split('.').map((part) => (/^\d+$/.test(part) ? Number.parseInt(part, 10) : 0)),
+    prerelease: prereleaseValue ? prereleaseValue.split('.') : null,
+  };
+}
+
+/** Compare portable package versions using SemVer prerelease ordering. */
+export function comparePortableUpdateVersions(leftValue: string, rightValue: string): number {
+  const left = parsePortableVersion(leftValue);
+  const right = parsePortableVersion(rightValue);
+  const coreLength = Math.max(left.core.length, right.core.length);
+
+  for (let index = 0; index < coreLength; index++) {
+    const difference = (left.core[index] ?? 0) - (right.core[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+
+  if (!left.prerelease && !right.prerelease) return 0;
+  if (!left.prerelease) return 1;
+  if (!right.prerelease) return -1;
+
+  const prereleaseLength = Math.max(left.prerelease.length, right.prerelease.length);
+  for (let index = 0; index < prereleaseLength; index++) {
+    const leftPart = left.prerelease[index];
+    const rightPart = right.prerelease[index];
+    if (leftPart === undefined) return -1;
+    if (rightPart === undefined) return 1;
+    if (leftPart === rightPart) continue;
+
+    const leftIsNumber = /^\d+$/.test(leftPart);
+    const rightIsNumber = /^\d+$/.test(rightPart);
+    if (leftIsNumber && rightIsNumber) {
+      return Number.parseInt(leftPart, 10) - Number.parseInt(rightPart, 10);
+    }
+    if (leftIsNumber) return -1;
+    if (rightIsNumber) return 1;
+    return leftPart < rightPart ? -1 : 1;
+  }
+
+  return 0;
+}
+
+export function sanitizePortableUpdateFilename(name: string): string {
+  return Array.from(name)
+    .map((char) => (char.charCodeAt(0) < 32 || /[<>:"/\\|?*]/.test(char) ? '-' : char))
+    .join('')
+    .trim();
+}
+
+function basenameFromUrl(downloadUrl: string): string {
+  try {
+    const parsed = new URL(downloadUrl);
+    return basename(decodeURIComponent(parsed.pathname));
+  } catch {
+    return basename(downloadUrl);
+  }
+}
+
+export function filenameFromPortableUpdateInfo(
+  info: PortableUpdatePackageMetadata,
+  platform: string,
+  arch: string,
+): string {
+  const declaredName = sanitizePortableUpdateFilename(info.fileName || info.file_name || '');
+  if (declaredName && extname(declaredName)) {
+    return declaredName;
+  }
+
+  if (info.downloadUrl) {
+    const urlName = sanitizePortableUpdateFilename(basenameFromUrl(info.downloadUrl));
+    if (urlName && extname(urlName)) {
+      return urlName;
+    }
+  }
+
+  return `UClaw-${info.version}-${platform}-${arch}-usb.zip`;
+}
+
+export function assertPortableUpdateZipFilename(filename: string): void {
+  const extension = extname(filename).toLowerCase();
+  const blockedExtensions = new Set(['.exe', '.msi', '.dmg', '.pkg', '.appimage', '.deb', '.rpm']);
+  if (blockedExtensions.has(extension)) {
+    throw new Error(`Portable update package type is not allowed: ${extension}`);
+  }
+  if (extension !== '.zip') {
+    throw new Error('Portable updates must be distributed as .zip packages');
+  }
+}
+
+export async function calculateFileSha512(filePath: string): Promise<string> {
+  const hash = createHash('sha512');
+  await new Promise<void>((resolve, reject) => {
+    const stream = createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', resolve);
+  });
+  return hash.digest('hex');
+}
+
+async function assertZipMagic(filePath: string): Promise<void> {
+  const handle = await open(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(4);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead < 4 || buffer[0] !== 0x50 || buffer[1] !== 0x4b) {
+      throw new Error('Portable update package is not a valid zip file');
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function verifyPortableUpdatePackage(
+  filePath: string,
+  info: Pick<PortableUpdatePackageMetadata, 'sha512' | 'size'>,
+): Promise<{ size: number; sha512: string }> {
+  const file = await stat(filePath);
+  if (info.size && info.size > 0 && file.size !== info.size) {
+    throw new Error(`Portable update size mismatch: expected ${info.size}, got ${file.size}`);
+  }
+
+  const expectedSha512 = info.sha512?.trim().toLowerCase();
+  if (!expectedSha512) {
+    throw new Error('Portable update sha512 is required');
+  }
+
+  await assertZipMagic(filePath);
+
+  const actualSha512 = await calculateFileSha512(filePath);
+  if (actualSha512.toLowerCase() !== expectedSha512) {
+    throw new Error('Portable update sha512 mismatch');
+  }
+
+  return { size: file.size, sha512: actualSha512 };
+}

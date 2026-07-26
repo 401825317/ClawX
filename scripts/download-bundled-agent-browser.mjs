@@ -114,12 +114,20 @@ function printSummary() {
 // Main logic
 const downloadAll = argv.all;
 const platform = argv.platform;
+const target = argv.target;
 
 echo(chalk.cyan(`🔧 agent-browser bundler — version ${AGENT_BROWSER_VERSION}`));
 echo(chalk.cyan(`   source: ${BASE_URL}`));
 echo(chalk.cyan(`   output: ${OUTPUT_BASE}/<platform-arch>/`));
 
-if (downloadAll) {
+if (target) {
+  if (!TARGETS[target]) {
+    echo(chalk.red(`❌ Unknown target: ${target}`));
+    echo(`Available targets: ${Object.keys(TARGETS).join(', ')}`);
+    process.exit(1);
+  }
+  await setupTarget(target);
+} else if (downloadAll) {
   echo(chalk.cyan`🌐 Downloading agent-browser binaries for ALL supported platforms...`);
   for (const id of Object.keys(TARGETS)) {
     await setupTarget(id);

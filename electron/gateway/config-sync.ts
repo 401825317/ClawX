@@ -1,7 +1,6 @@
 import { app } from 'electron';
 import path from 'path';
 import { existsSync, readFileSync, mkdirSync, readdirSync, rmSync, symlinkSync } from 'fs';
-import { homedir } from 'os';
 import { join } from 'path';
 
 function fsPath(filePath: string): string {
@@ -140,7 +139,7 @@ function listBundledOpenClawExtensionPluginIds(): string[] {
 
 function cleanupStaleBuiltInExtensions(): void {
   for (const ext of listBundledOpenClawExtensionPluginIds()) {
-    const extDir = join(homedir(), '.openclaw', 'extensions', ext);
+    const extDir = join(getOpenClawConfigDir(), 'extensions', ext);
     if (existsSync(fsPath(extDir))) {
       logger.info(`[plugin] Removing stale built-in extension copy: ${ext}`);
       try {
@@ -217,7 +216,7 @@ function cleanupUnconfiguredChannelPlugins(configuredChannels: string[]): boolea
     if (configuredSet.has(channelType)) continue;
 
     const { dirName } = pluginInfo;
-    const targetDir = join(homedir(), '.openclaw', 'extensions', dirName);
+    const targetDir = join(getOpenClawConfigDir(), 'extensions', dirName);
     if (!existsSync(fsPath(targetDir))) continue;
 
     logger.info(`[plugin] Removing unconfigured channel plugin: ${channelType} (${dirName})`);
@@ -262,7 +261,7 @@ function buildPluginSourceSignatures(configuredChannels: string[]): Record<strin
     const pluginInfo = CHANNEL_PLUGIN_MAP[channelType];
     if (!pluginInfo) continue;
     const bundledSources = buildCandidateSources(pluginInfo.dirName);
-    const targetDir = join(homedir(), '.openclaw', 'extensions', pluginInfo.dirName);
+    const targetDir = join(getOpenClawConfigDir(), 'extensions', pluginInfo.dirName);
     const sourceDir = findBestBundledPluginSource(bundledSources, targetDir)
       || (!app.isPackaged ? join(process.cwd(), 'node_modules', ...pluginInfo.npmName.split('/')) : '');
     signatures[channelType] = sourceDir
@@ -284,7 +283,7 @@ function buildPluginMaintenanceCacheKey(openclawDir: string, configuredChannels:
     openclawDir,
     cwd: process.cwd(),
     configuredChannels: [...configuredChannels].sort(),
-    extensionsDir: directoryChildrenSignature(join(homedir(), '.openclaw', 'extensions')),
+    extensionsDir: directoryChildrenSignature(join(getOpenClawConfigDir(), 'extensions')),
     sourceSignatures: buildPluginSourceSignatures(configuredChannels),
   });
 }

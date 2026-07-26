@@ -2,6 +2,7 @@
  * Electron Main Process Entry
  * Manages window creation, system tray, and IPC handlers
  */
+import { portableModeInfo } from '../utils/portable-bootstrap';
 import { app, BrowserWindow, nativeImage, session, shell, type Session } from 'electron';
 import { join } from 'path';
 import { GatewayManager } from '../gateway/manager';
@@ -33,6 +34,7 @@ import { getMacTrafficLightPosition, syncMacTrafficLightPosition } from './traff
 import { getSetting } from '../utils/store';
 import { applyProxySettings } from './proxy';
 import { syncLaunchAtStartupSettingFromStore } from './launch-at-startup';
+import { PortableRuntimeSnapshotService } from '../utils/portable-runtime-state';
 import { WebBrowserGuestRegistry, installWebBrowserGuestPolicy } from './web-browser-policy';
 import { configureWebBrowserSession } from './web-browser-session';
 import {
@@ -64,7 +66,25 @@ if (requestedRemoteDebuggingPort) {
   app.commandLine.appendSwitch('remote-debugging-port', requestedRemoteDebuggingPort);
 }
 
-if (isE2EMode && requestedUserDataDir) {
+if (portableModeInfo.enabled && portableModeInfo.runtimeElectronCacheDir) {
+  app.commandLine.appendSwitch('disk-cache-dir', portableModeInfo.runtimeElectronCacheDir);
+}
+
+if (portableModeInfo.enabled && portableModeInfo.clawxDataDir) {
+  app.setPath('userData', portableModeInfo.clawxDataDir);
+  if (portableModeInfo.sessionDataDir) {
+    app.setPath('sessionData', portableModeInfo.sessionDataDir);
+  }
+  if (portableModeInfo.runtimeLogsDir) {
+    app.setPath('logs', portableModeInfo.runtimeLogsDir);
+  }
+  if (portableModeInfo.runtimeCrashDumpsDir) {
+    app.setPath('crashDumps', portableModeInfo.runtimeCrashDumpsDir);
+  }
+  if (portableModeInfo.runtimeTempDir) {
+    app.setPath('temp', portableModeInfo.runtimeTempDir);
+  }
+} else if (isE2EMode && requestedUserDataDir) {
   app.setPath('userData', requestedUserDataDir);
 }
 
@@ -140,6 +160,12 @@ const webBrowserGuestRegistry = new WebBrowserGuestRegistry();
 let webBrowserSession!: Session;
 const mainWindowFocusState = createMainWindowFocusState();
 const quitLifecycleState = createQuitLifecycleState();
+const portableRuntimeSnapshotService = portableModeInfo.portableRuntimeLayout
+  ? new PortableRuntimeSnapshotService(
+      portableModeInfo.portableRuntimeLayout,
+      (message, details) => logger.info(message, details),
+    )
+  : null;
 
 function sendMainWindowEvent(channel: string, payload: unknown): void {
   const win = mainWindow;
@@ -318,6 +344,7 @@ async function initialize(): Promise<void> {
   // Initialize logger first
   logger.init();
   logger.info('=== ClawX Application Starting ===');
+  portableRuntimeSnapshotService?.start();
   logger.debug(
     `Runtime: platform=${process.platform}/${process.arch}, electron=${process.versions.electron}, node=${process.versions.node}, packaged=${app.isPackaged}, pid=${process.pid}, ppid=${process.ppid}`
   );
@@ -336,7 +363,11 @@ async function initialize(): Promise<void> {
 
     // Apply persisted proxy settings before creating windows or network requests.
     await applyProxySettings();
-    await syncLaunchAtStartupSettingFromStore();
+    if (portableModeInfo.enabled) {
+      logger.info('Portable mode enabled: launch-at-startup sync is skipped');
+    } else {
+      await syncLaunchAtStartupSettingFromStore();
+    }
   } else {
     logger.info('Running in E2E mode: startup side effects minimized');
   }
@@ -688,6 +719,13 @@ if (gotTheLock) {
       setTimeout(() => resolve('timeout'), 5000);
     });
 
+    const finalizeShutdown = async (): Promise<void> => {
+      portableRuntimeSnapshotService?.stop();
+      await portableRuntimeSnapshotService?.sync('shutdown');
+      markQuitCleanupCompleted(quitLifecycleState);
+      app.quit();
+    };
+
     void Promise.race([stopPromise.then(() => 'stopped' as const), timeoutPromise]).then((result) => {
       if (result === 'timeout') {
         logger.warn('Gateway shutdown timed out during app quit; proceeding with forced quit');
@@ -697,10 +735,12 @@ if (gotTheLock) {
           }
         }).catch((err) => {
           logger.warn('Forced gateway termination failed after quit timeout:', err);
+        }).finally(() => {
+          void finalizeShutdown();
         });
+        return;
       }
-      markQuitCleanupCompleted(quitLifecycleState);
-      app.quit();
+      void finalizeShutdown();
     });
   });
 

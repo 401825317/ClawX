@@ -118,8 +118,16 @@ async function setupTarget(id) {
 // Main logic
 const downloadAll = argv.all;
 const platform = argv.platform;
+const target = argv.target;
 
-if (downloadAll) {
+if (target) {
+  if (!TARGETS[target]) {
+    echo(chalk.red`❌ Unknown target: ${target}`);
+    echo(`Available targets: ${Object.keys(TARGETS).join(', ')}`);
+    process.exit(1);
+  }
+  await setupTarget(target);
+} else if (downloadAll) {
   // Download for all platforms
   echo(chalk.cyan`🌐 Downloading uv binaries for ALL supported platforms...`);
   for (const id of Object.keys(TARGETS)) {

@@ -67,6 +67,14 @@ export type UclawEndpointsConfig = {
       bootstrap: string;
     };
   };
+  updates: {
+    checkTimeoutMs: number;
+    downloadTimeoutMs: number;
+    routes: {
+      feed: string;
+      latest: string;
+    };
+  };
   runtimeDefaults: {
     tools: {
       exec: {
@@ -232,6 +240,8 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
   const billingRoutes = readRecord(billing.routes, 'billing.routes');
   const support = readRecord(root.support, 'support');
   const supportRoutes = readRecord(support.routes, 'support.routes');
+  const updates = readRecord(root.updates, 'updates');
+  const updateRoutes = readRecord(updates.routes, 'updates.routes');
   const runtimeDefaults = readRecord(root.runtimeDefaults, 'runtimeDefaults');
   const tools = readRecord(runtimeDefaults.tools, 'runtimeDefaults.tools');
   const exec = readRecord(tools.exec, 'runtimeDefaults.tools.exec');
@@ -378,6 +388,14 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
         bootstrap: readApiPath(supportRoutes.bootstrap, 'support.routes.bootstrap'),
       },
     },
+    updates: {
+      checkTimeoutMs: readPositiveInteger(updates.checkTimeoutMs, 'updates.checkTimeoutMs'),
+      downloadTimeoutMs: readPositiveInteger(updates.downloadTimeoutMs, 'updates.downloadTimeoutMs'),
+      routes: {
+        feed: readApiPath(updateRoutes.feed, 'updates.routes.feed'),
+        latest: readApiPath(updateRoutes.latest, 'updates.routes.latest'),
+      },
+    },
     runtimeDefaults: {
       tools: {
         exec: {
@@ -461,6 +479,10 @@ export const UCLAW_BILLING_ROUTES = UCLAW_ENDPOINTS_CONFIG.billing.routes;
 export const UCLAW_SUPPORT_REQUEST_TIMEOUT_MS = UCLAW_ENDPOINTS_CONFIG.support.requestTimeoutMs;
 export const UCLAW_SUPPORT_REFRESH_INTERVAL_MS = UCLAW_ENDPOINTS_CONFIG.support.refreshIntervalMs;
 export const UCLAW_SUPPORT_ROUTES = UCLAW_ENDPOINTS_CONFIG.support.routes;
+
+export const UCLAW_UPDATE_CHECK_TIMEOUT_MS = UCLAW_ENDPOINTS_CONFIG.updates.checkTimeoutMs;
+export const UCLAW_UPDATE_DOWNLOAD_TIMEOUT_MS = UCLAW_ENDPOINTS_CONFIG.updates.downloadTimeoutMs;
+export const UCLAW_UPDATE_ROUTES = UCLAW_ENDPOINTS_CONFIG.updates.routes;
 
 export const UCLAW_EXEC_SECURITY = UCLAW_ENDPOINTS_CONFIG.runtimeDefaults.tools.exec.security;
 export const UCLAW_EXEC_ASK = UCLAW_ENDPOINTS_CONFIG.runtimeDefaults.tools.exec.ask;

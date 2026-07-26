@@ -10,11 +10,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { existsSync, cpSync, copyFileSync, statSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync, realpathSync, renameSync } from 'node:fs';
 import { readdir, stat, copyFile, mkdir } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { logger } from './logger';
 import { upsertPluginInstallRecordsIntoSqlite, ensureOpenClawStateDirExists } from './plugin-install-index';
-import { resolveOpenClawStateDir } from './paths';
+import { resolveOpenClawConfigPath, resolveOpenClawStateDir } from './paths';
 import {
   isTransientPluginInstallPath,
   resolvePluginInstallWorkPaths,
@@ -329,8 +328,6 @@ const PLUGIN_NPM_NAMES: Record<string, string> = {
   'openclaw-weixin': '@tencent-weixin/openclaw-weixin',
 };
 
-const OPENCLAW_CONFIG_PATH = join(homedir(), '.openclaw', 'openclaw.json');
-
 /**
  * Official @openclaw/* channel plugins that ClawX mirrors into
  * ~/.openclaw/extensions/. OpenClaw 2026.6+ requires matching
@@ -433,11 +430,12 @@ export function syncTrustedOfficialPluginInstallRecord(
   let jsonChanged = false;
   try {
     ensureOpenClawStateDirExists();
-    if (!existsSync(fsPath(OPENCLAW_CONFIG_PATH))) {
+    const configPath = resolveOpenClawConfigPath();
+    if (!existsSync(fsPath(configPath))) {
       return false;
     }
 
-    const raw = readFileSync(fsPath(OPENCLAW_CONFIG_PATH), 'utf-8');
+    const raw = readFileSync(fsPath(configPath), 'utf-8');
     const config = JSON.parse(raw) as Record<string, unknown>;
     let plugins = config.plugins;
     if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) {
@@ -456,7 +454,7 @@ export function syncTrustedOfficialPluginInstallRecord(
       installsRecord[pluginDirName] = expected;
       pluginsRecord.installs = installsRecord;
       writeFileSync(
-        fsPath(OPENCLAW_CONFIG_PATH),
+        fsPath(configPath),
         `${JSON.stringify(config, null, 2)}\n`,
         'utf-8',
       );
@@ -477,7 +475,7 @@ export function syncTrustedOfficialPluginInstallRecord(
 /** Repair trusted install metadata for all mirrored official plugins on disk. */
 export function repairTrustedOfficialPluginInstallRecords(): void {
   for (const pluginDirName of Object.keys(TRUSTED_OFFICIAL_EXTENSION_PLUGINS)) {
-    const targetDir = join(homedir(), '.openclaw', 'extensions', pluginDirName);
+    const targetDir = join(resolveOpenClawStateDir(), 'extensions', pluginDirName);
     if (!existsSync(fsPath(join(targetDir, 'openclaw.plugin.json')))) {
       continue;
     }

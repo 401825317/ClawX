@@ -37,12 +37,37 @@ function getElectronApp() {
   return fallbackApp;
 }
 
+function resolveOsHomeDir(): string {
+  return homedir()
+    || process.env.HOME?.trim()
+    || process.env.USERPROFILE?.trim()
+    || process.cwd();
+}
+
+/** Resolve the home directory OpenClaw uses for its own `~` paths. */
+export function resolveOpenClawEffectiveHomeDir(env: NodeJS.ProcessEnv = process.env): string {
+  const configured = env.OPENCLAW_HOME?.trim();
+  if (!configured) return resolveOsHomeDir();
+  if (configured === '~' || configured.startsWith('~/') || configured.startsWith('~\\')) {
+    return resolve(configured.replace(/^~(?=$|[\\/])/, resolveOsHomeDir()));
+  }
+  return resolve(configured);
+}
+
 /**
  * Expand ~ to home directory
  */
 export function expandPath(path: string): string {
-  if (path.startsWith('~')) {
-    return path.replace('~', homedir());
+  if (path === '~' || path.startsWith('~/') || path.startsWith('~\\')) {
+    return resolve(path.replace(/^~(?=$|[\\/])/, resolveOsHomeDir()));
+  }
+  return path;
+}
+
+/** Expand OpenClaw-owned paths against OPENCLAW_HOME in portable mode. */
+export function expandOpenClawPath(path: string, env: NodeJS.ProcessEnv = process.env): string {
+  if (path === '~' || path.startsWith('~/') || path.startsWith('~\\')) {
+    return resolve(path.replace(/^~(?=$|[\\/])/, resolveOpenClawEffectiveHomeDir(env)));
   }
   return path;
 }
@@ -51,17 +76,17 @@ export function expandPath(path: string): string {
  * Get OpenClaw config directory
  */
 export function getOpenClawConfigDir(): string {
-  return join(homedir(), '.openclaw');
+  return resolveOpenClawConfigDir();
 }
 
 export function resolveOpenClawStateDir(env: NodeJS.ProcessEnv = process.env): string {
   const configured = env.OPENCLAW_STATE_DIR?.trim();
-  return resolve(expandPath(configured || join(homedir(), '.openclaw')));
+  return resolve(expandOpenClawPath(configured || join(resolveOpenClawEffectiveHomeDir(env), '.openclaw'), env));
 }
 
 export function resolveOpenClawConfigPath(env: NodeJS.ProcessEnv = process.env): string {
-  const configured = env.OPENCLAW_CONFIG_PATH?.trim();
-  return resolve(expandPath(configured || join(resolveOpenClawStateDir(env), 'openclaw.json')));
+  const configured = env.OPENCLAW_CONFIG_PATH?.trim() || env.OPENCLAW_CONFIG?.trim();
+  return resolve(expandOpenClawPath(configured || join(resolveOpenClawStateDir(env), 'openclaw.json'), env));
 }
 
 export function resolveOpenClawConfigDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -79,7 +104,7 @@ export function getOpenClawSkillsDir(): string {
  * Get ClawX config directory
  */
 export function getClawXConfigDir(): string {
-  return join(homedir(), '.clawx');
+  return resolve(process.env.CLAWX_USER_DATA_DIR?.trim() || join(resolveOsHomeDir(), '.clawx'));
 }
 
 /**

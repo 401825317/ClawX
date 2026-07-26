@@ -7,6 +7,7 @@
  * Current plugins:
  *   - @soimy/dingtalk -> build/openclaw-plugins/dingtalk
  *   - @wecom/wecom-openclaw-plugin -> build/openclaw-plugins/wecom
+ *   - @larksuite/openclaw-lark -> build/openclaw-plugins/feishu-openclaw-plugin
  *   - @openclaw/discord -> build/openclaw-plugins/discord
  *   - @openclaw/qqbot -> build/openclaw-plugins/qqbot
  *   - @openclaw/whatsapp -> build/openclaw-plugins/whatsapp
@@ -22,6 +23,7 @@ import 'zx/globals';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { BUNDLED_OPENCLAW_PLUGINS, LOCAL_OPENCLAW_PLUGIN_IDS } from './openclaw-bundle-config.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -39,22 +41,21 @@ function normWin(p) {
   return '\\\\?\\' + p.replace(/\//g, '\\');
 }
 
-const PLUGINS = [
-  { npmName: '@soimy/dingtalk', pluginId: 'dingtalk' },
-  { npmName: '@wecom/wecom-openclaw-plugin', pluginId: 'wecom' },
-  { npmName: '@larksuite/openclaw-lark', pluginId: 'feishu-openclaw-plugin' },
-  { npmName: '@openclaw/discord', pluginId: 'discord' },
-  { npmName: '@openclaw/qqbot', pluginId: 'qqbot' },
-  { npmName: '@openclaw/whatsapp', pluginId: 'whatsapp' },
-  { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin' },
-];
+function realpathSyncSafe(filePath) {
+  if (process.platform === 'win32') {
+    try {
+      return fs.realpathSync.native(normWin(filePath));
+    } catch {
+      return fs.realpathSync(filePath);
+    }
+  }
+  return fs.realpathSync(filePath);
+}
 
-const LOCAL_PLUGINS = [
-  {
-    pluginId: 'clawx-openai-image',
-    sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'clawx-openai-image'),
-  },
-];
+const LOCAL_PLUGINS = LOCAL_OPENCLAW_PLUGIN_IDS.map((pluginId) => ({
+  pluginId,
+  sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', pluginId),
+}));
 
 function getVirtualStoreNodeModules(realPkgPath) {
   let dir = realPkgPath;
@@ -104,6 +105,44 @@ function readJson(filePath, label) {
   }
 }
 
+function getDeclaredPluginEntries(pkg, manifest) {
+  return [...new Set([
+    manifest.entry,
+    pkg.main,
+    pkg.module,
+    ...(Array.isArray(pkg.openclaw?.extensions) ? pkg.openclaw.extensions : []),
+    ...(Array.isArray(pkg.openclaw?.runtimeExtensions) ? pkg.openclaw.runtimeExtensions : []),
+  ].filter((entry) => typeof entry === 'string' && entry.trim()))];
+}
+
+function assertBundledPluginMetadata(pluginDir, plugin) {
+  const pkg = readJson(path.join(pluginDir, 'package.json'), `Bundled plugin ${plugin.pluginId} package.json`);
+  const manifest = readJson(
+    path.join(pluginDir, 'openclaw.plugin.json'),
+    `Bundled plugin ${plugin.pluginId} manifest`,
+  );
+  if (pkg.name !== plugin.npmName) {
+    throw new Error(`Bundled plugin ${plugin.pluginId} package name mismatch: "${String(pkg.name)}"`);
+  }
+  if (manifest.id !== plugin.manifestId) {
+    throw new Error(`Bundled plugin ${plugin.pluginId} manifest id mismatch: "${String(manifest.id)}"`);
+  }
+  if (!pkg.version) {
+    throw new Error(`Bundled plugin ${plugin.pluginId} package version is missing`);
+  }
+  if (manifest.version !== undefined && manifest.version !== pkg.version) {
+    throw new Error(
+      `Bundled plugin ${plugin.pluginId} version mismatch: package=${String(pkg.version)} manifest=${String(manifest.version)}`,
+    );
+  }
+  const entries = getDeclaredPluginEntries(pkg, manifest);
+  if (entries.length === 0 || !entries.some((entry) => fs.existsSync(path.join(pluginDir, entry)))) {
+    throw new Error(
+      `Bundled plugin ${plugin.pluginId} has no existing declared entrypoint: ${entries.join(', ') || 'none'}`,
+    );
+  }
+}
+
 function assertLocalPluginMetadata(pluginDir, pluginId) {
   const pkg = readJson(path.join(pluginDir, 'package.json'), `Local plugin ${pluginId} package.json`);
   const manifest = readJson(path.join(pluginDir, 'openclaw.plugin.json'), `Local plugin ${pluginId} manifest`);
@@ -121,11 +160,19 @@ function assertLocalPluginMetadata(pluginDir, pluginId) {
   if (!pkg.main || pkg.main !== manifest.entry || !fs.existsSync(path.join(pluginDir, manifest.entry))) {
     throw new Error(`Local plugin ${pluginId} has an invalid entrypoint: ${String(manifest.entry)}`);
   }
+  if (pkg.openclaw?.extensions !== undefined
+    && (!Array.isArray(pkg.openclaw.extensions) || !pkg.openclaw.extensions.includes(`./${manifest.entry}`))) {
+    throw new Error(`Local plugin ${pluginId} package.json declares an inconsistent OpenClaw entry`);
+  }
 }
 
 function assertRuntimeDependencies(pluginDir, pluginId) {
   const pkg = readJson(path.join(pluginDir, 'package.json'), `Bundled plugin ${pluginId} package.json`);
-  const missing = Object.keys(pkg.dependencies || {}).filter((depName) => {
+  const dependencies = Object.keys({
+    ...(pkg.dependencies && typeof pkg.dependencies === 'object' ? pkg.dependencies : {}),
+    ...(pkg.optionalDependencies && typeof pkg.optionalDependencies === 'object' ? pkg.optionalDependencies : {}),
+  });
+  const missing = dependencies.filter((depName) => {
     const depDir = path.join(pluginDir, 'node_modules', ...depName.split('/'));
     return !fs.existsSync(path.join(depDir, 'package.json'));
   });
@@ -134,13 +181,14 @@ function assertRuntimeDependencies(pluginDir, pluginId) {
   }
 }
 
-function bundleOnePlugin({ npmName, pluginId }) {
+function bundleOnePlugin(plugin) {
+  const { npmName, pluginId } = plugin;
   const pkgPath = path.join(NODE_MODULES, ...npmName.split('/'));
   if (!fs.existsSync(pkgPath)) {
     throw new Error(`Missing dependency "${npmName}". Run pnpm install first.`);
   }
 
-  const realPluginPath = fs.realpathSync(pkgPath);
+  const realPluginPath = realpathSyncSafe(pkgPath);
   const outputDir = path.join(OUTPUT_ROOT, pluginId);
 
   echo`📦 Bundling plugin ${npmName} -> ${outputDir}`;
@@ -180,7 +228,7 @@ function bundleOnePlugin({ npmName, pluginId }) {
 
       let realPath;
       try {
-        realPath = fs.realpathSync(fullPath);
+        realPath = realpathSyncSafe(fullPath);
       } catch {
         continue;
       }
@@ -228,6 +276,8 @@ function bundleOnePlugin({ npmName, pluginId }) {
   //    their JS output than what openclaw.plugin.json declares.  The Gateway
   //    validates that these match, so we fix it post-copy.
   patchPluginId(outputDir, pluginId);
+  assertRuntimeDependencies(outputDir, pluginId);
+  assertBundledPluginMetadata(outputDir, plugin);
 
   echo`   ✅ ${pluginId}: copied ${copiedCount} deps (skipped dupes: ${skippedDupes})`;
 }
@@ -259,7 +309,7 @@ function bundleLocalPlugin({ sourceDir, pluginId }) {
     if (!fs.existsSync(depPath)) {
       throw new Error(`Missing dependency "${depName}" for local plugin "${pluginId}". Run pnpm install first.`);
     }
-    const realDepPath = fs.realpathSync(depPath);
+    const realDepPath = realpathSyncSafe(depPath);
     collected.set(realDepPath, depName);
     const virtualNodeModules = getVirtualStoreNodeModules(realDepPath);
     if (virtualNodeModules) {
@@ -273,7 +323,7 @@ function bundleLocalPlugin({ sourceDir, pluginId }) {
       if (name === skipPkg || skipPackages.has(name) || name.startsWith('@types/')) continue;
       let realPath;
       try {
-        realPath = fs.realpathSync(fullPath);
+        realPath = realpathSyncSafe(fullPath);
       } catch {
         continue;
       }
@@ -357,9 +407,12 @@ function patchPluginId(pluginDir, expectedId) {
 }
 
 echo`📦 Bundling OpenClaw plugin mirrors...`;
+if (fs.existsSync(OUTPUT_ROOT)) {
+  fs.rmSync(OUTPUT_ROOT, { recursive: true, force: true });
+}
 fs.mkdirSync(OUTPUT_ROOT, { recursive: true });
 
-for (const plugin of PLUGINS) {
+for (const plugin of BUNDLED_OPENCLAW_PLUGINS) {
   bundleOnePlugin(plugin);
 }
 

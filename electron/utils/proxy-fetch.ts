@@ -4,6 +4,19 @@
  * for non-Electron test environments.
  */
 
+// The Electron main-process tsconfig intentionally omits the DOM library.
+// Complete the fetch response surface used by Node/Electron network calls.
+declare global {
+  interface Response {
+    readonly ok: boolean;
+    readonly status: number;
+    readonly statusText: string;
+    readonly body: unknown;
+    json: () => Promise<any>;
+    text: () => Promise<string>;
+  }
+}
+
 export async function proxyAwareFetch(
   input: string | URL,
   init?: RequestInit

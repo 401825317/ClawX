@@ -6,9 +6,9 @@ import { chmodSync, existsSync, mkdirSync, statSync, unlinkSync } from 'fs';
 import { access, readFile } from 'fs/promises';
 import { constants } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
 import { createHash } from 'crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { resolveOpenClawStateDir } from './paths';
 
 const AUTH_PROFILE_FILENAME = 'auth-profiles.json';
 const AUTH_SQLITE_FILENAME = 'openclaw-agent.sqlite';
@@ -111,7 +111,7 @@ export interface AuthProfilesSqlitePrimaryRowsSnapshot {
 }
 
 function getAgentAuthDir(agentId: string): string {
-  return join(homedir(), '.openclaw', 'agents', agentId, 'agent');
+  return join(resolveOpenClawStateDir(), 'agents', agentId, 'agent');
 }
 
 export function getAuthProfilesJsonPath(agentId: string): string {

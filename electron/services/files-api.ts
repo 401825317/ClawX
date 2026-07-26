@@ -3,7 +3,6 @@ import crypto from 'node:crypto';
 import { constants } from 'node:fs';
 import type { Stats } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import {
   basename,
   dirname,
@@ -378,7 +377,7 @@ function getWorkspaceBinaryCap(value: unknown): number {
 
 function getFilePreviewWriteRoots(): string[] {
   const roots: string[] = [];
-  roots.push(resolve(join(homedir(), '.openclaw')));
+  roots.push(resolve(resolveOpenClawStateDir()));
   try {
     roots.push(resolve(app.getPath('userData')));
   } catch {

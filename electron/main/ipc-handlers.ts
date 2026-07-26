@@ -12,7 +12,14 @@ import { ClawHubService } from '../gateway/clawhub';
 import {
   type ProviderConfig,
 } from '../utils/secure-storage';
-import { getOpenClawStatus, getOpenClawSkillsDir, ensureDir, expandPath } from '../utils/paths';
+import {
+  getOpenClawStatus,
+  getOpenClawSkillsDir,
+  ensureDir,
+  expandOpenClawPath,
+  expandPath,
+  resolveOpenClawStateDir,
+} from '../utils/paths';
 import { getOpenClawCliCommand } from '../utils/openclaw-cli';
 import { getAllSettings, getSetting, resetSettings, setSetting, type AppSettings } from '../utils/store';
 import {
@@ -577,16 +584,20 @@ export function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): 
           }
           if (request.action === 'download') {
             try {
-              await appUpdater.downloadUpdate();
-              data = { success: true };
+              const result = await appUpdater.downloadUpdate();
+              data = { success: true, ...result, status: appUpdater.getStatus() };
             } catch (error) {
-              data = { success: false, error: String(error) };
+              data = { success: false, error: String(error), status: appUpdater.getStatus() };
             }
             break;
           }
           if (request.action === 'install') {
-            appUpdater.quitAndInstall();
-            data = { success: true };
+            try {
+              await appUpdater.installDownloadedUpdate();
+              data = { success: true, status: appUpdater.getStatus() };
+            } catch (error) {
+              data = { success: false, error: String(error), status: appUpdater.getStatus() };
+            }
             break;
           }
           if (request.action === 'setChannel') {
@@ -1461,7 +1472,7 @@ function getMimeType(ext: string): string {
   return EXT_MIME_MAP[ext.toLowerCase()] || 'application/octet-stream';
 }
 
-const OUTBOUND_DIR = join(homedir(), '.openclaw', 'media', 'outbound');
+const OUTBOUND_DIR = join(resolveOpenClawStateDir(), 'media', 'outbound');
 
 // ── File preview (sandboxed) ──────────────────────────────────────────
 //
@@ -1530,8 +1541,9 @@ function isPathInside(child: string, parent: string): boolean {
  */
 function getFilePreviewWriteRoots(): string[] {
   const roots: string[] = [];
-  const openclawDir = join(homedir(), '.openclaw');
+  const openclawDir = resolveOpenClawStateDir();
   roots.push(resolve(openclawDir));
+  roots.push(resolve(expandOpenClawPath('~/.openclaw')));
   try {
     roots.push(resolve(app.getPath('userData')));
   } catch {
@@ -1557,7 +1569,10 @@ async function resolveSandboxedPath(
   // OpenClaw stores agent.workspace / agentDir paths as `~/.openclaw/...`
   // literals; expand the tilde before realpath so sandbox resolution
   // matches what the user actually sees on disk.
-  const expanded = expandPath(input);
+  const normalizedInput = input.replace(/\\/g, '/');
+  const expanded = normalizedInput === '~/.openclaw' || normalizedInput.startsWith('~/.openclaw/')
+    ? expandOpenClawPath(input)
+    : expandPath(input);
   const fsP = await import('fs/promises');
   let real: string;
   try {

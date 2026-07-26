@@ -9,9 +9,11 @@ import { hostEvents } from '@/lib/host-events';
 import type {
   UpdateChannel,
   UpdateInfoSnapshot,
+  UpdateMode,
   UpdateProgressSnapshot,
   UpdateStatusSnapshot,
 } from '@shared/host-api/contract';
+import { UCLAW_UPDATE_CHECK_TIMEOUT_MS } from '@shared/junfeiai-endpoints';
 
 export type UpdateInfo = UpdateInfoSnapshot;
 export type ProgressInfo = UpdateProgressSnapshot;
@@ -19,10 +21,12 @@ export type UpdateStatus = UpdateStatusSnapshot['status'];
 
 interface UpdateState {
   status: UpdateStatus;
+  mode: UpdateMode;
   currentVersion: string;
   updateInfo: UpdateInfo | null;
   progress: ProgressInfo | null;
   error: string | null;
+  downloadPath: string | null;
   isInitialized: boolean;
   /** Seconds remaining before auto-install, or null if inactive. */
   autoInstallCountdown: number | null;
@@ -31,7 +35,7 @@ interface UpdateState {
   init: () => Promise<void>;
   checkForUpdates: () => Promise<void>;
   downloadUpdate: () => Promise<void>;
-  installUpdate: () => void;
+  installUpdate: () => Promise<void>;
   cancelAutoInstall: () => Promise<void>;
   setChannel: (channel: UpdateChannel) => Promise<void>;
   setAutoDownload: (enable: boolean) => Promise<void>;
@@ -42,10 +46,12 @@ let updateInitPromise: Promise<void> | null = null;
 
 export const useUpdateStore = create<UpdateState>((set, get) => ({
   status: 'idle',
+  mode: 'installed',
   currentVersion: '0.0.0',
   updateInfo: null,
   progress: null,
   error: null,
+  downloadPath: null,
   isInitialized: false,
   autoInstallCountdown: null,
 
@@ -67,9 +73,11 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
         const status = await hostApi.updates.status();
         set({
           status: status.status,
+          mode: status.mode || 'installed',
           updateInfo: status.info || null,
           progress: status.progress || null,
           error: status.error || null,
+          downloadPath: status.downloadPath || null,
         });
       } catch (error) {
         console.error('Failed to get update status:', error);
@@ -81,9 +89,11 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
       hostEvents.onUpdateStatusChanged((status) => {
         set({
           status: status.status,
+          mode: status.mode || get().mode,
           updateInfo: status.info || null,
           progress: status.progress || null,
           error: status.error || null,
+          downloadPath: status.downloadPath || null,
         });
       });
 
@@ -121,15 +131,20 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
     try {
       const result = await Promise.race([
         hostApi.updates.check(),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Update check timed out')), 30000))
+        new Promise<never>((_, reject) => setTimeout(
+          () => reject(new Error('Update check timed out')),
+          UCLAW_UPDATE_CHECK_TIMEOUT_MS,
+        )),
       ]);
       
       if (result.status) {
         set({
           status: result.status.status,
+          mode: result.status.mode || get().mode,
           updateInfo: result.status.info || null,
           progress: result.status.progress || null,
           error: result.status.error || null,
+          downloadPath: result.status.downloadPath || null,
         });
       } else if (!result.success) {
         set({ status: 'error', error: result.error || 'Failed to check for updates' });
@@ -153,15 +168,58 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
       const result = await hostApi.updates.download();
       
       if (!result.success) {
-        set({ status: 'error', error: result.error || 'Failed to download update' });
+        set({
+          status: result.status?.status || 'error',
+          mode: result.status?.mode || get().mode,
+          updateInfo: result.status?.info || get().updateInfo,
+          progress: result.status?.progress || get().progress,
+          error: result.status?.error || result.error || 'Failed to download update',
+          downloadPath: result.status?.downloadPath || get().downloadPath,
+        });
+      } else if (result.status) {
+        set({
+          status: result.status.status,
+          mode: result.status.mode || get().mode,
+          updateInfo: result.status.info || get().updateInfo,
+          progress: result.status.progress || null,
+          error: result.status.error || null,
+          downloadPath: result.status.downloadPath || result.downloadPath || get().downloadPath,
+        });
+      } else if (result.downloadPath) {
+        set({ downloadPath: result.downloadPath });
       }
     } catch (error) {
       set({ status: 'error', error: String(error) });
     }
   },
 
-  installUpdate: () => {
-    void hostApi.updates.install();
+  installUpdate: async () => {
+    try {
+      const result = await hostApi.updates.install();
+      if (!result.success) {
+        set({
+          status: result.status?.status || 'error',
+          mode: result.status?.mode || get().mode,
+          updateInfo: result.status?.info || get().updateInfo,
+          progress: result.status?.progress || get().progress,
+          error: result.status?.error || result.error || 'Failed to install update',
+          downloadPath: result.status?.downloadPath || get().downloadPath,
+        });
+        return;
+      }
+      if (result.status) {
+        set({
+          status: result.status.status,
+          mode: result.status.mode || get().mode,
+          updateInfo: result.status.info || get().updateInfo,
+          progress: result.status.progress || get().progress,
+          error: result.status.error || null,
+          downloadPath: result.status.downloadPath || get().downloadPath,
+        });
+      }
+    } catch (error) {
+      set({ status: 'error', error: String(error) });
+    }
   },
 
   cancelAutoInstall: async () => {
