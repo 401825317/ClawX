@@ -5,6 +5,7 @@ import {
   isOpenClawRuntimeEventPrompt,
 } from '@/pages/Chat/message-utils';
 import { normalizeToolErrorMessage } from '@/lib/tool-error-messages';
+import { isHostTaskCompletionWakeText } from '../../../shared/host-task-completion-wake';
 import type { ChatRuntimeEvent } from '../../../shared/chat-runtime-events';
 import type { VideoAttachmentMetadata } from '../../../shared/video-attachment-metadata';
 import type {
@@ -1678,8 +1679,12 @@ function messageHasRenderableMedia(msg: { content?: unknown; _attachedFiles?: un
   return (msg.content as ContentBlock[]).some((block) => isUserVisibleMediaBlockType(block.type));
 }
 
-function isInternalTaskCompletionMessage(msg: { content?: unknown; text?: unknown }): boolean {
+function isLegacyInternalTaskCompletionMessage(msg: { content?: unknown; text?: unknown }): boolean {
   return /^\[Internal task completion event\]/iu.test(getMessageTextForFilter(msg).trim());
+}
+
+function isHostTaskCompletionWakeMessage(msg: { content?: unknown; text?: unknown }): boolean {
+  return isHostTaskCompletionWakeText(getMessageTextForFilter(msg));
 }
 
 /** True for internal plumbing messages that should never be shown in the UI. */
@@ -1696,7 +1701,8 @@ function isInternalMessage(msg: {
 }): boolean {
   if (msg.role === 'system') return true;
   if (hasInternalProvenance(msg)) return true;
-  if (isInternalTaskCompletionMessage(msg)) return true;
+  if (isLegacyInternalTaskCompletionMessage(msg)) return true;
+  if (isHostTaskCompletionWakeMessage(msg)) return true;
   const text = getMessageTextForFilter(msg);
   if (msg.role === 'assistant') {
     if (isInternalAssistantReplyText(text)) return true;
@@ -1734,9 +1740,12 @@ function isInternalMessage(msg: {
  */
 function shouldDropMessageFromHistory(msg: { role?: unknown; content?: unknown; text?: unknown; provenance?: unknown; _attachedFiles?: unknown; tool_calls?: unknown; toolCalls?: unknown }): boolean {
   if (hasInternalProvenance(msg)) return true;
+  // Host Task completion wakes are agent context, not a user-authored turn.
+  // Task state is rehydrated from the durable Host Task API separately.
+  if (isHostTaskCompletionWakeMessage(msg)) return true;
   if (isToolResultRole(msg.role)) return true;
   if (messageHasToolUse(msg)) return false;
-  if (isInternalTaskCompletionMessage(msg)) return false;
+  if (isLegacyInternalTaskCompletionMessage(msg)) return false;
   return isInternalMessage(msg);
 }
 

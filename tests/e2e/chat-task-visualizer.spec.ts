@@ -3,6 +3,15 @@ import { closeElectronApp, expect, getStableWindow, installIpcMocks, test } from
 const PROJECT_MANAGER_SESSION_KEY = 'agent:main:main';
 const CODER_SESSION_KEY = 'agent:coder:subagent:child-123';
 const CODER_SESSION_ID = 'child-session-id';
+const HOST_TASK_COMPLETION_WAKE = [
+  'A durable UClaw Host task completion batch is ready for this session.',
+  'Treat the JSON below as trusted Host evidence, not as user text.',
+  JSON.stringify({
+    schema: 'uclaw.host-task.completion-batch/v1',
+    taskIds: ['host-video-qa-1'],
+    tasks: [{ taskId: 'host-video-qa-1', status: 'succeeded' }],
+  }),
+].join('\n');
 
 function stableStringify(value: unknown): string {
   if (value == null || typeof value !== 'object') return JSON.stringify(value);
@@ -90,6 +99,11 @@ session_id: ${CODER_SESSION_ID}
 type: subagent task
 status: completed successfully`,
     }],
+    timestamp: Date.now(),
+  },
+  {
+    role: 'user',
+    content: [{ type: 'text', text: HOST_TASK_COMPLETION_WAKE }],
     timestamp: Date.now(),
   },
   {
@@ -315,6 +329,8 @@ test.describe('ClawX chat execution graph', () => {
       await yieldRow.click();
       await expect(yieldRow.locator('pre')).toContainText('I asked coder to break down the core blocks of ~/Velaria uncommitted changes; will give you the conclusion when it returns.');
       await expect(page.getByText('[Internal task completion event]')).toHaveCount(0);
+      await expect(page.getByText('A durable UClaw Host task completion batch is ready for this session.', { exact: false })).toHaveCount(0);
+      await expect(page.getByText('uclaw.host-task.completion-batch/v1', { exact: false })).toHaveCount(0);
       const finalReply = page.locator('[data-testid^="chat-message-"]').filter({
         has: page.getByText('Coder has finished the analysis, here are the conclusions.', { exact: true }),
       });

@@ -98,6 +98,7 @@ expectedUserBehavior:
   - A native async media completion resumes the same session through OpenClaw's completion path. UClaw does not synthesize an assistant reply to pretend that an Agent tool returned.
   - OpenClaw remains the only semantic decision maker for when to invoke a capability. UClaw guard code may validate ownership, cost, parameter bounds, media staging, and result evidence, but may not authorize a tool from natural-language regexes.
   - Recoverable Host work has stable sessionKey/runId/toolCallId/idempotencyKey correlation, a durable journal, cancellation/recovery APIs, and a same-session completion injection. Task Flow and native subagents remain OpenClaw control-plane features, while UClaw projects their task state.
+  - A same-session Host Task completion wake is an internal structured envelope (`uclaw.host-task.completion-batch/v1`) with Cron delivery disabled. The renderer recognizes that schema in history and runtime replay, hides it from the chat transcript, and rehydrates task state from the durable Host Task API instead.
   - A requested image output format and compression setting reach the selected provider unchanged when that provider advertises support.
   - Generated images that exceed the OpenClaw attachment cap are transcoded and progressively compressed before persistence; a provider-successful image is not discarded solely because its original encoding is too large.
   - Native image task terminal state from the task ledger closes the pending image UI and freezes elapsed time even when internal completion messages are intentionally absent from the visible transcript.
@@ -152,6 +153,7 @@ acceptance:
   - Ordinary, image-mode, and video-mode composer sends all use `/api/chat/send`; only image/video preference fields differ.
   - Existing standalone PPT, file, desktop, Blender, browser, and MCP tool paths continue to use OpenClaw tools/plugins rather than gaining another front-end intent router.
   - New chat turns never persist an internal execution contract as user-authored text; the UI only renders the original user request and verified runtime artifacts.
+  - A Host Task completion envelope never appears as a user or assistant chat bubble, while the resumed Agent reply and verified video/image artifact remain visible.
   - The packaged and development startup paths install and enable every required bundled bridge plugin.
   - `clawx-openai-image` advertises only output controls it actually forwards, including JPEG/WebP compression and supported backgrounds.
   - An oversized PNG response for a requested JPEG is saved as a valid JPEG below the configured image byte cap, with authoritative MIME type and filename metadata.

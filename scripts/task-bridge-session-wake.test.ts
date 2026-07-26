@@ -106,9 +106,11 @@ test('same-session pending wake is replaced with one merged durable cron job', a
     sessionTarget: string;
     schedule: { at: string };
     payload: { message: string };
+    delivery: { mode: string };
   };
   assert.equal(addParams.sessionTarget, `session:${first.sessionKey}`);
   assert.equal(addParams.schedule.at, new Date(3_000).toISOString());
+  assert.deepEqual(addParams.delivery, { mode: 'none' });
   assert.deepEqual(extractTaskBridgeWakeTaskIds(addParams.payload.message), ['task-2', 'task-1']);
 });
 
