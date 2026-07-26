@@ -143,6 +143,7 @@ export function Sidebar() {
   const sidebarWidth = useSettingsStore((state) => state.sidebarWidth);
   const setSidebarWidth = useSettingsStore((state) => state.setSidebarWidth);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
+  const runtimeKind = useSettingsStore((state) => state.runtimeKind);
   const chatWorkspacePath = useSettingsStore((state) => state.chatWorkspacePath);
   const workspaceLabels = useSettingsStore((state) => state.workspaceLabels);
   const setWorkspaceLabel = useSettingsStore((state) => state.setWorkspaceLabel);
@@ -200,6 +201,7 @@ export function Sidebar() {
 
   const navigate = useNavigate();
   const isOnChat = useLocation().pathname === '/';
+  const { t, i18n } = useTranslation(['common', 'chat']);
 
   const getSessionLabel = (session: ChatSession) => {
     const candidates = [
@@ -214,7 +216,13 @@ export function Sidebar() {
     ))?.trim() ?? session.key;
   };
 
-  const openControlUi = async (view?: 'dreams', label = 'OpenClaw Page') => {
+  const controlUiLabel = gatewayStatus.runtimeKind === 'cc-connect'
+    ? t('common:sidebar.ccConnectPage')
+    : t('common:sidebar.openClawPage');
+  const dreamsNavEnabled = devModeUnlocked
+    && (gatewayStatus.runtimeKind ?? runtimeKind) === 'openclaw';
+
+  const openControlUi = async (view?: 'dreams', label = controlUiLabel) => {
     try {
       const result = await hostApi.gateway.controlUi(view);
       if (result.success && result.url) {
@@ -228,10 +236,9 @@ export function Sidebar() {
   };
 
   const openDevConsole = async () => {
-    await openControlUi(undefined, 'OpenClaw Page');
+    await openControlUi(undefined, controlUiLabel);
   };
 
-  const { t, i18n } = useTranslation(['common', 'chat']);
   const [sessionToDelete, setSessionToDelete] = useState<{ key: string; label: string } | null>(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [workspaceToDelete, setWorkspaceToDelete] = useState<{
@@ -472,12 +479,12 @@ export function Sidebar() {
             label: t('common:sidebar.imageGeneration'),
             testId: 'sidebar-nav-image-generation',
           },
-          {
+          ...(dreamsNavEnabled ? [{
             to: '/dreams',
             icon: <Moon className="h-4 w-4" strokeWidth={2} />,
             label: t('common:sidebar.openClawDreams'),
             testId: 'sidebar-nav-dreams',
-          },
+          }] : []),
         ]
       : []),
   ];
@@ -716,7 +723,7 @@ export function Sidebar() {
                   {!collapsed && (
                     <div className="space-y-0.5">
                       {visibleSessions.map(({ session: s, activityMs }) => {
-                        const agentId = getAgentIdFromSessionKey(s.key);
+                        const agentId = s.agentId || getAgentIdFromSessionKey(s.key);
                         const agentName = agentNameById[agentId] || agentId;
                         const isEditing = editingSessionKey === s.key;
                         const isCurrentSession = isOnChat && currentSessionKey === s.key;
@@ -804,7 +811,7 @@ export function Sidebar() {
                                         aria-label={channelName}
                                         className="shrink-0 truncate rounded-full bg-blue-500/10 px-2 py-0.5 text-2xs font-medium text-blue-700 dark:bg-blue-400/10 dark:text-blue-400"
                                       >
-                                        {channelName}
+                                        {channelName}:{' '}
                                       </span>
                                     )}
                                     <span className="truncate">{sessionLabel}</span>
@@ -964,7 +971,7 @@ export function Sidebar() {
             {!sidebarCollapsed && (
               <>
                 <span className="flex-1 text-left overflow-hidden text-ellipsis whitespace-nowrap">
-                  {t('common:sidebar.openClawPage')}
+                  {controlUiLabel}
                 </span>
                 <ExternalLink className="ml-auto h-3 w-3 shrink-0 opacity-50 text-current" />
               </>

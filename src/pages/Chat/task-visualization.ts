@@ -25,6 +25,15 @@ export interface TaskStep {
   parentId?: string;
   /** Extracted URL for web_fetch tool, used to render a clickable link icon. */
   url?: string;
+  approval?: {
+    runId: string;
+    kind?: string;
+    status?: string;
+    actions: Array<{
+      action: string;
+      label?: string;
+    }>;
+  };
 }
 
 /**
@@ -456,6 +465,14 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
           kind: 'system',
           detail: runtimeDetail(event.message),
           depth: 1,
+          approval: event.actions?.length
+            ? {
+                runId: event.runId,
+                kind: event.kind,
+                status: event.status,
+                actions: event.actions,
+              }
+            : undefined,
         });
         break;
       }
@@ -494,6 +511,9 @@ export function deriveTaskSteps({
   const streamMessage = streamingMessage && typeof streamingMessage === 'object'
     ? streamingMessage as RawMessage
     : null;
+  const formatToolInput = (input: unknown): string => (
+    typeof input === 'string' ? input : JSON.stringify(input, null, 2)
+  );
 
   // The final answer the user sees as a chat bubble. We avoid folding it into
   // the graph to prevent duplication. When a run is still streaming, the
@@ -534,7 +554,7 @@ export function deriveTaskSteps({
         label: tool.name,
         status: 'completed',
         kind: 'tool',
-        detail: normalizeText(JSON.stringify(tool.input, null, 2)),
+        detail: normalizeText(formatToolInput(tool.input)),
         depth: 1,
         url,
       });
@@ -587,7 +607,7 @@ export function deriveTaskSteps({
         label: tool.name,
         status: 'running',
         kind: 'tool',
-        detail: normalizeText(JSON.stringify(tool.input, null, 2)),
+        detail: normalizeText(formatToolInput(tool.input)),
         depth: 1,
         url,
       });

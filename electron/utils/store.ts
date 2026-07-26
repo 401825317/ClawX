@@ -7,6 +7,8 @@ import { randomBytes } from 'crypto';
 import { app } from 'electron';
 import { resolveSupportedLanguage } from '@shared/language';
 import { DEFAULT_WORKSPACE_CWD } from '@shared/workspace';
+import type { RuntimeKind } from '@shared/types/gateway';
+import { getClawXDataLayout, resolveClawXDataRoot } from './clawx-data-layout';
 
 // Lazy-load electron-store (ESM module)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -34,6 +36,7 @@ export interface AppSettings {
 
   // Gateway
   gatewayAutoStart: boolean;
+  runtimeKind: RuntimeKind;
   gatewayPort: number;
   gatewayToken: string;
   proxyEnabled: boolean;
@@ -88,6 +91,7 @@ function createDefaultSettings(): AppSettings {
 
     // Gateway
     gatewayAutoStart: true,
+    runtimeKind: 'openclaw',
     gatewayPort: 18789,
     gatewayToken: generateToken(),
     proxyEnabled: false,
@@ -125,6 +129,7 @@ async function getSettingsStore() {
     const Store = (await import('electron-store')).default;
     settingsStoreInstance = new Store<AppSettings>({
       name: 'settings',
+      cwd: getClawXDataLayout(resolveClawXDataRoot(process.env, app.getPath('userData'))).appDir,
       defaults: createDefaultSettings(),
     });
   }

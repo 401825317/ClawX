@@ -55,6 +55,7 @@ requiredRules:
   - active-config-guards
   - provider-default-invariant
   - provider-model-metadata-preservation
+  - cc-connect-runtime-validation
   - provider-model-selection-authority
   - sidebar-session-attention-authority
   - web-browser-security-and-lifecycle

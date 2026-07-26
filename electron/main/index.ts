@@ -5,6 +5,9 @@
 import { app, BrowserWindow, nativeImage, session, shell, type Session } from 'electron';
 import { join } from 'path';
 import { GatewayManager } from '../gateway/manager';
+import { RuntimeManager } from '../runtime/manager';
+import { OpenClawRuntimeProvider } from '../runtime/openclaw-provider';
+import { CcConnectRuntimeProvider } from '../runtime/cc-connect-provider';
 import { registerIpcHandlers } from './ipc-handlers';
 import { HostApiRegistry } from './ipc/host-invoke';
 import { createTray } from './tray';
@@ -53,19 +56,22 @@ import { deviceOAuthManager } from '../utils/device-oauth';
 import { browserOAuthManager } from '../utils/browser-oauth';
 import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { syncAllProviderAuthToRuntime } from '../services/providers/provider-runtime-sync';
+import { getClawXDataLayout, initializeClawXDataLayout } from '../utils/clawx-data-layout';
+import { migrateLegacyProviderSecretsToVault } from '../services/secrets/secret-store';
+import { migrateLegacyClawXData } from '../utils/clawx-data-migration';
 
 const WINDOWS_APP_USER_MODEL_ID = 'app.clawx.desktop';
 const isE2EMode = process.env.CLAWX_E2E === '1';
-const requestedUserDataDir = process.env.CLAWX_USER_DATA_DIR?.trim();
+const enforceWriterLockInE2E = process.env.CLAWX_E2E_ENFORCE_WRITER_LOCK === '1';
 const requestedRemoteDebuggingPort = process.env.CLAWX_REMOTE_DEBUGGING_PORT?.trim();
+const legacyElectronUserDataDir = app.getPath('userData');
+const clawXDataLayout = getClawXDataLayout();
 
 if (requestedRemoteDebuggingPort) {
   app.commandLine.appendSwitch('remote-debugging-port', requestedRemoteDebuggingPort);
 }
 
-if (isE2EMode && requestedUserDataDir) {
-  app.setPath('userData', requestedUserDataDir);
-}
+app.setPath('userData', clawXDataLayout.electronUserDataDir);
 
 // Disable GPU hardware acceleration globally for maximum stability across
 // all GPU configurations (no GPU, integrated, discrete).
@@ -104,12 +110,17 @@ if (!gotElectronLock) {
 }
 let releaseProcessInstanceFileLock: () => void = () => {};
 let gotFileLock = true;
-if (gotElectronLock && !isE2EMode) {
+if (gotElectronLock && (!isE2EMode || enforceWriterLockInE2E)) {
   try {
     const fileLock = acquireProcessInstanceFileLock({
-      userDataDir: app.getPath('userData'),
-      lockName: 'clawx',
-      force: true, // Electron lock already guarantees exclusivity; force-clean orphan/recycled-PID locks
+      userDataDir: clawXDataLayout.locksDir,
+      lockName: 'writer',
+      lockPath: clawXDataLayout.writerLockPath,
+      metadata: {
+        appVersion: app.getVersion(),
+        channel: process.env.CLAWX_RELEASE_CHANNEL?.trim() || (app.isPackaged ? 'stable' : 'dev'),
+        executable: process.execPath,
+      },
     });
     gotFileLock = fileLock.acquired;
     releaseProcessInstanceFileLock = fileLock.release;
@@ -125,14 +136,28 @@ if (gotElectronLock && !isE2EMode) {
       app.exit(0);
     }
   } catch (error) {
-    console.warn('[ClawX] Failed to acquire process instance file lock; continuing with Electron single-instance lock only', error);
+    gotFileLock = false;
+    console.error('[ClawX] Failed to acquire process instance file lock; refusing to start a shared-root writer', error);
+    app.exit(1);
   }
 }
 const gotTheLock = gotElectronLock && gotFileLock;
 
+if (gotTheLock) {
+  try {
+    // No shared-root state may be created or migrated until this process owns
+    // the cross-install writer lock.
+    initializeClawXDataLayout(clawXDataLayout);
+  } catch (error) {
+    releaseProcessInstanceFileLock();
+    throw error;
+  }
+}
+
 // Global references
 let mainWindow: BrowserWindow | null = null;
 let gatewayManager!: GatewayManager;
+let runtimeManager!: RuntimeManager;
 let clawHubService!: ClawHubService;
 const hostApiRegistry = new HostApiRegistry();
 const webBrowserGuestRegistry = new WebBrowserGuestRegistry();
@@ -320,6 +345,17 @@ async function initialize(): Promise<void> {
   logger.debug(
     `Runtime: platform=${process.platform}/${process.arch}, electron=${process.versions.electron}, node=${process.versions.node}, packaged=${app.isPackaged}, pid=${process.pid}, ppid=${process.ppid}`
   );
+  const legacyMigration = await migrateLegacyClawXData({
+    legacyElectronUserDataDir,
+    layout: clawXDataLayout,
+  });
+  if (legacyMigration.copied.length > 0) {
+    logger.info(`Imported ${legacyMigration.copied.length} legacy ClawX data path(s) into ${clawXDataLayout.root}`);
+  }
+  const migratedSecretCount = await migrateLegacyProviderSecretsToVault();
+  if (migratedSecretCount > 0) {
+    logger.info(`Migrated ${migratedSecretCount} provider credential account(s) into the encrypted ClawX vault`);
+  }
 
   webBrowserSession = configureWebBrowserSession({
     registry: webBrowserGuestRegistry,
@@ -372,6 +408,7 @@ async function initialize(): Promise<void> {
   // Register IPC handlers
   registerIpcHandlers(
     gatewayManager,
+    runtimeManager,
     clawHubService,
     window,
     hostApiRegistry,
@@ -379,6 +416,7 @@ async function initialize(): Promise<void> {
     webBrowserGuestRegistry,
   );
 
+  await runtimeManager.getActiveKind();
   loadMainWindow(window);
 
   // Create system tray
@@ -389,6 +427,7 @@ async function initialize(): Promise<void> {
   // Initialize extension system
   await extensionRegistry.initialize({
     gatewayManager,
+    runtimeManager,
     getMainWindow: () => mainWindow,
     hostApi: {
       register: (extensionId, contributions) => (
@@ -465,44 +504,44 @@ async function initialize(): Promise<void> {
 
   // Bridge gateway and host-side events before any auto-start logic runs, so
   // renderer subscribers observe the full startup lifecycle.
-  gatewayManager.on('status', (status: { state: string }) => {
+  runtimeManager.on('status', (status: { state: string; runtimeKind?: string }) => {
     sendMainWindowEvent('gateway:status-changed', status);
-    if (status.state === 'running' && !isE2EMode) {
+    if (status.runtimeKind === 'openclaw' && status.state === 'running' && !isE2EMode) {
       void ensureClawXContext().catch((error) => {
         logger.warn('Failed to re-merge ClawX context after gateway reconnect:', error);
       });
     }
   });
 
-  gatewayManager.on('error', (error) => {
+  runtimeManager.on('error', (error) => {
     sendMainWindowEvent('gateway:error', { message: error.message });
   });
 
-  gatewayManager.on('notification', (notification) => {
+  runtimeManager.on('notification', (notification) => {
     sendMainWindowEvent('gateway:notification', notification);
   });
 
-  gatewayManager.on('gateway:health', (data) => {
+  runtimeManager.on('gateway:health', (data) => {
     sendMainWindowEvent('gateway:health-changed', data);
   });
 
-  gatewayManager.on('gateway:presence', (data) => {
+  runtimeManager.on('gateway:presence', (data) => {
     sendMainWindowEvent('gateway:presence-changed', data);
   });
 
-  gatewayManager.on('chat:message', (data) => {
+  runtimeManager.on('chat:message', (data) => {
     sendMainWindowEvent('gateway:chat-message', data);
   });
 
-  gatewayManager.on('chat:runtime-event', (data) => {
+  runtimeManager.on('chat:runtime-event', (data) => {
     sendMainWindowEvent('chat:runtime-event', data);
   });
 
-  gatewayManager.on('channel:status', (data) => {
+  runtimeManager.on('channel:status', (data) => {
     sendMainWindowEvent('gateway:channel-status', data);
   });
 
-  gatewayManager.on('exit', (code) => {
+  runtimeManager.on('exit', (code) => {
     sendMainWindowEvent('gateway:exit', { code });
   });
 
@@ -546,12 +585,14 @@ async function initialize(): Promise<void> {
   const gatewayAutoStart = await getSetting('gatewayAutoStart');
   if (!isE2EMode && gatewayAutoStart) {
     try {
-      await syncAllProviderAuthToRuntime();
-      logger.debug('Auto-starting Gateway...');
-      await gatewayManager.start();
-      logger.info('Gateway auto-start succeeded');
+      if (await runtimeManager.getActiveKind() === 'openclaw') {
+        await syncAllProviderAuthToRuntime();
+      }
+      logger.debug(`Auto-starting ${await runtimeManager.getActiveKind()} runtime...`);
+      await runtimeManager.start();
+      logger.info('Runtime auto-start succeeded');
     } catch (error) {
-      logger.error('Gateway auto-start failed:', error);
+      logger.error('Runtime auto-start failed:', error);
       mainWindow?.webContents.send('gateway:error', String(error));
     }
   } else if (isE2EMode) {
@@ -604,6 +645,10 @@ if (gotTheLock) {
   }
 
   gatewayManager = new GatewayManager();
+  runtimeManager = new RuntimeManager({
+    openclaw: new OpenClawRuntimeProvider(gatewayManager),
+    ccConnect: new CcConnectRuntimeProvider(),
+  });
   clawHubService = new ClawHubService();
 
   // Register builtin extensions and load manifest
@@ -673,8 +718,8 @@ if (gotTheLock) {
 
     void extensionRegistry.teardownAll();
 
-    const stopPromise = gatewayManager.stop().catch((err) => {
-      logger.warn('gatewayManager.stop() error during quit:', err);
+    const stopPromise = runtimeManager.stop().catch((err) => {
+      logger.warn('runtimeManager.stop() error during quit:', err);
     });
     const timeoutPromise = new Promise<'timeout'>((resolve) => {
       setTimeout(() => resolve('timeout'), 5000);
@@ -682,14 +727,16 @@ if (gotTheLock) {
 
     void Promise.race([stopPromise.then(() => 'stopped' as const), timeoutPromise]).then((result) => {
       if (result === 'timeout') {
-        logger.warn('Gateway shutdown timed out during app quit; proceeding with forced quit');
-        void gatewayManager.forceTerminateOwnedProcessForQuit().then((terminated) => {
-          if (terminated) {
-            logger.warn('Forced gateway process termination completed after quit timeout');
-          }
-        }).catch((err) => {
-          logger.warn('Forced gateway termination failed after quit timeout:', err);
-        });
+        logger.warn('Runtime shutdown timed out during app quit; proceeding with forced quit');
+        if (runtimeManager.getActiveProvider().kind === 'openclaw') {
+          void gatewayManager.forceTerminateOwnedProcessForQuit().then((terminated) => {
+            if (terminated) {
+              logger.warn('Forced gateway process termination completed after quit timeout');
+            }
+          }).catch((err) => {
+            logger.warn('Forced gateway termination failed after quit timeout:', err);
+          });
+        }
       }
       markQuitCleanupCompleted(quitLifecycleState);
       app.quit();
@@ -703,6 +750,7 @@ if (gotTheLock) {
     logger.error(`${reason}:`, error);
     try {
       void gatewayManager?.stop().catch(() => { /* ignore */ });
+      void runtimeManager?.stop().catch(() => { /* ignore */ });
     } catch {
       // ignore — stop() may not be callable if state is corrupted
     }
@@ -722,4 +770,4 @@ if (gotTheLock) {
 }
 
 // Export for testing
-export { mainWindow, gatewayManager };
+export { mainWindow, gatewayManager, runtimeManager };
