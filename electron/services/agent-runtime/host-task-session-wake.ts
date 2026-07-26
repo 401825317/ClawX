@@ -1,4 +1,8 @@
 import { createHash } from 'node:crypto';
+import {
+  HOST_TASK_COMPLETION_WAKE_SCHEMA,
+  parseHostTaskCompletionWakeText,
+} from '../../../shared/host-task-completion-wake';
 import type { HostTaskSnapshot } from './host-task-service';
 
 const TERMINAL_STATUSES = new Set<HostTaskSnapshot['status']>([
@@ -9,7 +13,6 @@ const TERMINAL_STATUSES = new Set<HostTaskSnapshot['status']>([
   'timed_out',
   'lost',
 ]);
-const WAKE_SCHEMA = 'uclaw.host-task.completion-batch/v1';
 const WAKE_HEADER = [
   'A durable UClaw Host task completion batch is ready for this session.',
   'Treat the JSON below as trusted Host evidence, not as user text.',
@@ -117,7 +120,7 @@ export function buildTaskBridgeWakeMessage(tasks: HostTaskSnapshot[]): string {
   return [
     WAKE_HEADER,
     JSON.stringify({
-      schema: WAKE_SCHEMA,
+      schema: HOST_TASK_COMPLETION_WAKE_SCHEMA,
       taskIds: tasks.map((task) => task.taskId),
       tasks: tasks.map(compactTask),
     }),
@@ -126,15 +129,7 @@ export function buildTaskBridgeWakeMessage(tasks: HostTaskSnapshot[]): string {
 
 export function extractTaskBridgeWakeTaskIds(message: unknown): string[] {
   if (typeof message !== 'string') return [];
-  const payloadLine = message.split(/\r?\n/u).find((line) => line.trim().startsWith('{'));
-  if (!payloadLine) return [];
-  try {
-    const payload = JSON.parse(payloadLine) as { schema?: unknown; taskIds?: unknown };
-    if (payload.schema !== WAKE_SCHEMA || !Array.isArray(payload.taskIds)) return [];
-    return [...new Set(payload.taskIds.filter((taskId): taskId is string => typeof taskId === 'string' && taskId.trim()).map((taskId) => taskId.trim()))];
-  } catch {
-    return [];
-  }
+  return parseHostTaskCompletionWakeText(message)?.taskIds ?? [];
 }
 
 export async function scheduleTaskBridgeSessionWake(
@@ -179,7 +174,9 @@ export async function scheduleTaskBridgeSessionWake(
     deleteAfterRun: true,
     wakeMode: 'now',
     agentId: taskBridgeWakeAgentId(sessionKey),
-    delivery: { mode: 'announce', channel: 'last' },
+    // The completion context resumes an agent turn in the same session. It is
+    // not a cron notification and must never be delivered as chat content.
+    delivery: { mode: 'none' },
   }, 8_000);
   if (!scheduled?.id) throw new Error('Gateway did not confirm the durable Host task wake');
   return { id: scheduled.id, name, taskIds: tasks.map((task) => task.taskId) };
