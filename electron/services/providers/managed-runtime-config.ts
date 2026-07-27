@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
 import { mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
-import type { ManagedClientTextModelPolicy } from '../../../shared/managed-client-config';
+import type {
+  ManagedClientTextModelPolicy,
+  ManagedClientVideoModelPolicy,
+} from '../../../shared/managed-client-config';
 import {
   UCLAW_COMPATIBILITY_PROVIDER_ID,
   UCLAW_DEFAULT_API_PROTOCOL,
@@ -11,6 +14,12 @@ import {
   UCLAW_MANAGED_PROVIDER_BASE_URL,
   UCLAW_MANAGED_PROVIDER_ID,
   UCLAW_PROVIDER_REQUEST_TIMEOUT_SECONDS,
+  UCLAW_VIDEO_API_PROTOCOL,
+  UCLAW_VIDEO_GENERATION_MAX_DOWNLOAD_BYTES,
+  UCLAW_VIDEO_GENERATION_POLL_INTERVAL_MS,
+  UCLAW_VIDEO_GENERATION_TIMEOUT_MS,
+  UCLAW_VIDEO_PROVIDER_ID,
+  UCLAW_VIDEO_RESOLUTION_SIZES,
 } from '../../../shared/junfeiai-endpoints';
 import { resolveOpenClawConfigPath } from '../../utils/paths';
 import { withConfigLock } from '../../utils/config-mutex';
@@ -41,6 +50,13 @@ export type ManagedRuntimeProviderEntry = {
   request: { allowPrivateNetwork: true };
   agentRuntime: { id: 'pi' };
   models: Array<Record<string, unknown> & { id: string; name: string }>;
+};
+
+export type ManagedRuntimeVideoProviderEntry = {
+  baseUrl: string;
+  api: string;
+  request: { allowPrivateNetwork: true };
+  models: Array<{ id: string; name: string }>;
 };
 
 const UCLAW_RESPONSES_REASONING_COMPAT = {
@@ -91,6 +107,7 @@ function managedOpenAiProviderIds(additionalProviderIds: Iterable<string>): Set<
   return new Set([
     UCLAW_MANAGED_PROVIDER_ID,
     UCLAW_COMPATIBILITY_PROVIDER_ID,
+    UCLAW_VIDEO_PROVIDER_ID,
     ...additionalProviderIds,
   ]);
 }
@@ -122,6 +139,21 @@ export function createManagedRuntimeProviderEntry(
     request: { allowPrivateNetwork: true },
     agentRuntime: { id: 'pi' },
     models: policy.models.map(managedRuntimeModelEntry),
+  };
+}
+
+/** Create the OpenAI-compatible transport entry consumed by the UClaw video plugin. */
+export function createManagedRuntimeVideoProviderEntry(
+  policy: ManagedClientVideoModelPolicy,
+): ManagedRuntimeVideoProviderEntry {
+  return {
+    baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
+    api: UCLAW_VIDEO_API_PROTOCOL,
+    request: { allowPrivateNetwork: true },
+    models: policy.models.map((model) => ({
+      id: model.id,
+      name: model.label?.trim() || model.id,
+    })),
   };
 }
 
@@ -331,19 +363,17 @@ function isManagedModelRef(value: unknown, managedProviderIds: ReadonlySet<strin
   return managedProviderIds.has(providerId) || isOpenAiProviderIdentity(providerId);
 }
 
-function removeManagedRuntimeModelDefaults(
-  config: JsonRecord,
+function removeManagedModelDefault(
+  defaults: JsonRecord,
+  key: 'model' | 'videoGenerationModel',
   managedProviderIds: ReadonlySet<string>,
 ): boolean {
-  if (!isRecord(config.agents) || !isRecord(config.agents.defaults)) return false;
-  const agents = { ...config.agents };
-  const defaults = { ...config.agents.defaults };
-  const rawModel = defaults.model;
+  const rawModel = defaults[key];
   let changed = false;
 
   if (typeof rawModel === 'string') {
     if (!isManagedModelRef(rawModel, managedProviderIds)) return false;
-    delete defaults.model;
+    delete defaults[key];
     changed = true;
   } else if (isRecord(rawModel)) {
     const model = { ...rawModel };
@@ -367,10 +397,28 @@ function removeManagedRuntimeModelDefaults(
       if (Array.isArray(model.fallbacks) && model.fallbacks.length === 0) {
         delete model.fallbacks;
       }
-      if (Object.keys(model).length > 0) defaults.model = model;
-      else delete defaults.model;
+      if (Object.keys(model).length > 0) defaults[key] = model;
+      else delete defaults[key];
     }
   }
+
+  return changed;
+}
+
+function removeManagedRuntimeModelDefaults(
+  config: JsonRecord,
+  managedProviderIds: ReadonlySet<string>,
+): boolean {
+  if (!isRecord(config.agents) || !isRecord(config.agents.defaults)) return false;
+  const agents = { ...config.agents };
+  const defaults = { ...config.agents.defaults };
+  const modelChanged = removeManagedModelDefault(defaults, 'model', managedProviderIds);
+  const videoModelChanged = removeManagedModelDefault(
+    defaults,
+    'videoGenerationModel',
+    managedProviderIds,
+  );
+  const changed = modelChanged || videoModelChanged;
 
   if (!changed) return false;
   agents.defaults = defaults;
@@ -378,14 +426,75 @@ function removeManagedRuntimeModelDefaults(
   return true;
 }
 
-/** Install both managed Provider catalogs and the canonical OpenAI default route. */
+function managedVideoPluginConfig(policy: ManagedClientVideoModelPolicy): JsonRecord {
+  return {
+    defaultModel: policy.defaultModel,
+    defaultResolution: policy.defaultResolution,
+    defaultDurationSeconds: policy.defaultDurationSeconds,
+    pollIntervalMs: UCLAW_VIDEO_GENERATION_POLL_INTERVAL_MS,
+    timeoutMs: UCLAW_VIDEO_GENERATION_TIMEOUT_MS,
+    maxDownloadBytes: UCLAW_VIDEO_GENERATION_MAX_DOWNLOAD_BYTES,
+    resolutionSizes: { ...UCLAW_VIDEO_RESOLUTION_SIZES },
+    models: policy.models.map((model) => ({
+      ...model,
+      modes: [...model.modes],
+      resolutions: [...model.resolutions],
+      durations: [...model.durations],
+    })),
+  };
+}
+
+function installManagedVideoPlugin(config: JsonRecord, policy: ManagedClientVideoModelPolicy): void {
+  const plugins = isRecord(config.plugins) ? { ...config.plugins } : {};
+  const allow = Array.isArray(plugins.allow)
+    ? plugins.allow.filter((entry): entry is string => typeof entry === 'string')
+    : [];
+  if (!allow.includes(UCLAW_VIDEO_PROVIDER_ID)) allow.push(UCLAW_VIDEO_PROVIDER_ID);
+  const entries = isRecord(plugins.entries) ? { ...plugins.entries } : {};
+  entries[UCLAW_VIDEO_PROVIDER_ID] = {
+    enabled: true,
+    config: managedVideoPluginConfig(policy),
+  };
+  plugins.allow = allow;
+  plugins.entries = entries;
+  config.plugins = plugins;
+}
+
+function removeManagedVideoPlugin(config: JsonRecord): boolean {
+  if (!isRecord(config.plugins)) return false;
+  const plugins = { ...config.plugins };
+  let changed = false;
+  if (Array.isArray(plugins.allow)) {
+    const allow = plugins.allow.filter((entry) => entry !== UCLAW_VIDEO_PROVIDER_ID);
+    if (allow.length !== plugins.allow.length) {
+      changed = true;
+      if (allow.length > 0) plugins.allow = allow;
+      else delete plugins.allow;
+    }
+  }
+  if (isRecord(plugins.entries) && Object.hasOwn(plugins.entries, UCLAW_VIDEO_PROVIDER_ID)) {
+    const entries = { ...plugins.entries };
+    delete entries[UCLAW_VIDEO_PROVIDER_ID];
+    changed = true;
+    if (Object.keys(entries).length > 0) plugins.entries = entries;
+    else delete plugins.entries;
+  }
+  if (!changed) return false;
+  if (Object.keys(plugins).length > 0) config.plugins = plugins;
+  else delete config.plugins;
+  return true;
+}
+
+/** Install managed text/video Providers, defaults, and plugin ownership in one config generation. */
 export async function installManagedRuntimeProviderState(
   snapshot: ManagedRuntimeConfigSnapshot,
   policy: ManagedClientTextModelPolicy,
+  videoPolicy: ManagedClientVideoModelPolicy,
   additionalProviderIds: Iterable<string> = [],
 ): Promise<void> {
   const managedProviderIds = managedOpenAiProviderIds(additionalProviderIds);
   const providerEntry = createManagedRuntimeProviderEntry(policy);
+  const videoProviderEntry = createManagedRuntimeVideoProviderEntry(videoPolicy);
   await updateManagedRuntimeConfig(snapshot, (config) => {
     const before = JSON.stringify(config);
     const agents = isRecord(config.agents) ? { ...config.agents } : {};
@@ -396,6 +505,11 @@ export async function installManagedRuntimeProviderState(
     };
     defaults.thinkingDefault = UCLAW_DEFAULT_THINKING_LEVEL;
     defaults.reasoningDefault = 'on';
+    defaults.videoGenerationModel = {
+      primary: `${UCLAW_VIDEO_PROVIDER_ID}/${videoPolicy.defaultModel}`,
+      fallbacks: [],
+      timeoutMs: UCLAW_VIDEO_GENERATION_TIMEOUT_MS,
+    };
     agents.defaults = defaults;
     config.agents = agents;
 
@@ -410,8 +524,10 @@ export async function installManagedRuntimeProviderState(
     }
     providers[UCLAW_MANAGED_PROVIDER_ID] = structuredClone(providerEntry);
     providers[UCLAW_COMPATIBILITY_PROVIDER_ID] = structuredClone(providerEntry);
+    providers[UCLAW_VIDEO_PROVIDER_ID] = structuredClone(videoProviderEntry);
     models.providers = providers;
     config.models = models;
+    installManagedVideoPlugin(config, videoPolicy);
     return JSON.stringify(config) !== before;
   });
 }
@@ -426,6 +542,7 @@ export async function removeManagedRuntimeOpenAiState(
     await updateManagedRuntimeConfig(snapshot, (config) => {
       let changed = removeManagedRuntimeAuthMetadata(config, managedProviderIds);
       changed = removeManagedRuntimeModelDefaults(config, managedProviderIds) || changed;
+      changed = removeManagedVideoPlugin(config) || changed;
       if (!isRecord(config.models) || !isRecord(config.models.providers)) return changed;
 
       const models = { ...config.models };

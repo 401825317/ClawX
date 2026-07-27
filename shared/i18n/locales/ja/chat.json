@@ -299,6 +299,10 @@
         "pickAgent": "Agent を選択",
         "pickModel": "モデルを選択",
         "pickThinking": "推論レベルを選択",
+        "settingsSummary": "モデル: {{model}}、推論レベル: {{thinking}}",
+        "resetSettings": "デフォルト設定に戻す",
+        "modelSetting": "モデル",
+        "thinkingSetting": "推論レベル",
         "thinkingInherit": "継承（{{level}}）",
         "thinkingSwitchFailed": "推論レベルを切り替えられませんでした: {{error}}",
         "thinkingLevels": {

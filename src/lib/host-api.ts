@@ -59,7 +59,10 @@ import type {
   ManagedAuthVerificationCodePayload,
   ManagedAuthVerifyPayload,
 } from '@shared/managed-auth';
-import type { ManagedClientTextModelRequest } from '@shared/managed-client-config';
+import type {
+  ManagedClientTextModelRequest,
+  ManagedClientVideoModelRequest,
+} from '@shared/managed-client-config';
 import type {
   BillingCreateOrderPayload,
   BillingOrderHistoryPayload,
@@ -331,6 +334,9 @@ export const hostApi = {
   managedClientConfig: {
     textModels: (input?: ManagedClientTextModelRequest) => (
       invokeHost('managedClientConfig', 'textModels', input)
+    ),
+    videoModels: (input?: ManagedClientVideoModelRequest) => (
+      invokeHost('managedClientConfig', 'videoModels', input)
     ),
   },
   billing: {

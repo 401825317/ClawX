@@ -327,14 +327,28 @@ test.describe('ClawX chat model picker', () => {
         win?.webContents.send('gateway:status-changed', { state: 'running', port: 18789, pid: 12345, gatewayReady: true });
       });
 
-      await expect(page.getByTestId('chat-model-picker-button')).toContainText('Smart routing');
-      await page.getByTestId('chat-model-picker-button').click();
+      await expect(page.getByTestId('chat-settings-model-summary')).toContainText('Smart routing');
+      await page.getByTestId('chat-settings-picker-button').click();
+      await page.getByTestId('chat-settings-model-row').hover();
       await expect(page.getByTestId('chat-model-picker-menu')).toBeVisible();
+      await expect(page.getByTestId('chat-settings-picker-menu')).toBeVisible();
+      const [settingsMenuBox, modelMenuBox, resetItemBox, modelRowBox] = await Promise.all([
+        page.getByTestId('chat-settings-picker-menu').boundingBox(),
+        page.getByTestId('chat-model-picker-menu').boundingBox(),
+        page.getByTestId('chat-settings-reset').boundingBox(),
+        page.getByTestId('chat-settings-model-row').boundingBox(),
+      ]);
+      expect(settingsMenuBox?.width).toBeLessThanOrEqual(146);
+      expect(modelMenuBox?.width).toBeLessThanOrEqual(130);
+      expect(resetItemBox?.height).toBeLessThanOrEqual(34);
+      expect(modelRowBox?.height).toBeLessThanOrEqual(34);
+      await expect(page.getByTestId('chat-settings-model-row')).toHaveCSS('font-size', '12px');
       await expect(page.getByTestId('chat-model-picker-menu')).toContainText('DeepSeek V4 Pro');
       await expect(page.getByTestId('chat-model-picker-menu')).not.toContainText('Alpha');
       await expect(page.getByTestId('chat-model-picker-menu')).not.toContainText('Moonshot');
-      await page.getByTestId('chat-model-picker-menu').getByRole('button', { name: 'DeepSeek V4 Pro' }).click();
-      await expect(page.getByTestId('chat-model-picker-button')).toContainText('DeepSeek V4 Pro');
+      await page.getByTestId('chat-model-picker-menu').getByRole('menuitemradio', { name: 'DeepSeek V4 Pro' }).click();
+      await expect(page.getByTestId('chat-settings-model-summary')).toContainText('DeepSeek V4 Pro');
+      await expect(page.getByTestId('chat-settings-picker-menu')).toBeHidden();
 
       await expect.poll(async () => app.evaluate((_electron, expectedModelRef) => (
         ((globalThis as typeof globalThis & {
@@ -365,12 +379,15 @@ test.describe('ClawX chat model picker', () => {
         || request.path === 'gateway:config.patch'
       )).toBe(false);
 
-      await expect(page.getByTestId('chat-thinking-picker-button')).toContainText('Medium');
-      await page.getByTestId('chat-thinking-picker-button').click();
+      await expect(page.getByTestId('chat-settings-thinking-summary')).toContainText('Medium');
+      await page.getByTestId('chat-settings-picker-button').click();
+      await expect(page.getByTestId('chat-settings-picker-menu')).toBeVisible();
+      await page.getByTestId('chat-settings-thinking-row').hover();
       await expect(page.getByTestId('chat-thinking-picker-menu')).toBeVisible();
       await expect(page.getByTestId('chat-thinking-picker-menu')).toContainText('Extra high');
       await page.getByTestId('chat-thinking-option-high').click();
-      await expect(page.getByTestId('chat-thinking-picker-button')).toContainText('High');
+      await expect(page.getByTestId('chat-settings-thinking-summary')).toContainText('High');
+      await expect(page.getByTestId('chat-settings-picker-menu')).toBeHidden();
       await expect.poll(async () => app.evaluate(() => (
         ((globalThis as typeof globalThis & {
           __chatModelPickerRequests?: Array<{ path: string; body: unknown }>;
@@ -383,10 +400,12 @@ test.describe('ClawX chat model picker', () => {
       ))).toBe(true);
 
       await page.getByTestId('sidebar-new-chat').click();
-      await expect(page.getByTestId('chat-model-picker-button')).toContainText('Smart routing');
-      await expect(page.getByTestId('chat-thinking-picker-button')).toContainText('Medium');
-      await page.getByTestId('chat-model-picker-button').click();
-      await page.getByTestId('chat-model-picker-menu').getByRole('button', { name: 'DeepSeek V4 Pro' }).click();
+      await expect(page.getByTestId('chat-settings-model-summary')).toContainText('Smart routing');
+      await expect(page.getByTestId('chat-settings-thinking-summary')).toContainText('Medium');
+      await page.getByTestId('chat-settings-picker-button').click();
+      await expect(page.getByTestId('chat-settings-picker-menu')).toBeVisible();
+      await page.getByTestId('chat-settings-model-row').hover();
+      await page.getByTestId('chat-model-picker-menu').getByRole('menuitemradio', { name: 'DeepSeek V4 Pro' }).click();
 
       await expect.poll(async () => app.evaluate((_electron, expectedModelRef) => (
         ((globalThis as typeof globalThis & {

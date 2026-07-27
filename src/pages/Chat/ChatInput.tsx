@@ -7,8 +7,10 @@
  * are sent with the message (no base64 over WebSocket).
  */
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { SendHorizontal, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, FolderOpen, Loader2, AtSign, Search, ChevronDown, Check, Image as ImageIcon, Brain } from 'lucide-react';
+import * as DropdownMenuPrimitive from '@radix-ui/react-dropdown-menu';
+import { SendHorizontal, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, FolderOpen, Loader2, AtSign, Search, ChevronDown, ChevronRight, Check, Image as ImageIcon, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -91,6 +93,7 @@ const IMAGE_ASPECT_OPTIONS: ReadonlyArray<{
 ];
 const IMAGE_QUALITY_OPTIONS: AcpImageGenerationOptions['quality'][] = ['low', 'medium', 'high'];
 const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
+const INHERIT_THINKING_VALUE = '__inherit__';
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -255,8 +258,7 @@ export function ChatInput({
   const [targetAgentId, setTargetAgentId] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [skillPickerOpen, setSkillPickerOpen] = useState(false);
-  const [modelPickerOpen, setModelPickerOpen] = useState(false);
-  const [thinkingPickerOpen, setThinkingPickerOpen] = useState(false);
+  const [settingsPickerOpen, setSettingsPickerOpen] = useState(false);
   const [imageAspectPickerOpen, setImageAspectPickerOpen] = useState(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [skillQuery, setSkillQuery] = useState('');
@@ -270,8 +272,6 @@ export function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
   const skillPickerRef = useRef<HTMLDivElement>(null);
-  const modelPickerRef = useRef<HTMLDivElement>(null);
-  const thinkingPickerRef = useRef<HTMLDivElement>(null);
   const imageAspectPickerRef = useRef<HTMLDivElement>(null);
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
   const modelChangeVersionRef = useRef(0);
@@ -282,6 +282,12 @@ export function ChatInput({
     token: symbol;
   } | null>(null);
   const isComposingRef = useRef(false);
+  const closeSettingsPicker = useCallback(() => {
+    setSettingsPickerOpen(false);
+  }, []);
+  const handleSettingsPickerOpenChange = useCallback((open: boolean) => {
+    setSettingsPickerOpen(open);
+  }, []);
   const gatewayStatus = useGatewayStore((s) => s.status);
   const agents = useAgentsStore((s) => s.agents);
   const defaultModelRef = useAgentsStore((s) => s.defaultModelRef);
@@ -399,6 +405,7 @@ export function ChatInput({
   }, [quickSkills, skillQuery]);
   const showAgentPicker = mentionableAgents.length > 0;
   const showModelPicker = modelOptions.length > 0;
+  const settingsAreDefault = effectiveModelRef === managedDefaultModelRef && !selectedThinkingLevel;
   const chatComposerStatusComponents = rendererExtensionRegistry.getChatComposerStatusComponents();
   const isGatewayUsable = gatewayStatus.state === 'running' && gatewayStatus.gatewayReady !== false;
   const inputDisabled = disabled;
@@ -459,20 +466,16 @@ export function ChatInput({
   }, [agents, currentAgentId, targetAgentId]);
 
   useEffect(() => {
-    if (!pickerOpen && !skillPickerOpen && !modelPickerOpen && !thinkingPickerOpen && !imageAspectPickerOpen && !workspaceMenuOpen) return;
+    if (!pickerOpen && !skillPickerOpen && !imageAspectPickerOpen && !workspaceMenuOpen) return;
     const handlePointerDown = (event: MouseEvent) => {
       const target = event.target as Node;
       const insideAgentPicker = pickerRef.current?.contains(target);
       const insideSkillPicker = skillPickerRef.current?.contains(target);
-      const insideModelPicker = modelPickerRef.current?.contains(target);
-      const insideThinkingPicker = thinkingPickerRef.current?.contains(target);
       const insideImageAspectPicker = imageAspectPickerRef.current?.contains(target);
       const insideWorkspaceMenu = workspaceMenuRef.current?.contains(target);
-      if (!insideAgentPicker && !insideSkillPicker && !insideModelPicker && !insideThinkingPicker && !insideImageAspectPicker && !insideWorkspaceMenu) {
+      if (!insideAgentPicker && !insideSkillPicker && !insideImageAspectPicker && !insideWorkspaceMenu) {
         setPickerOpen(false);
         setSkillPickerOpen(false);
-        setModelPickerOpen(false);
-        setThinkingPickerOpen(false);
         setImageAspectPickerOpen(false);
         setWorkspaceMenuOpen(false);
       }
@@ -481,16 +484,15 @@ export function ChatInput({
     return () => {
       document.removeEventListener('mousedown', handlePointerDown);
     };
-  }, [imageAspectPickerOpen, modelPickerOpen, pickerOpen, skillPickerOpen, thinkingPickerOpen, workspaceMenuOpen]);
+  }, [imageAspectPickerOpen, pickerOpen, skillPickerOpen, workspaceMenuOpen]);
 
   useEffect(() => {
-    if (!pickerOpen && !skillPickerOpen && !modelPickerOpen && !thinkingPickerOpen && !imageAspectPickerOpen && !workspaceMenuOpen) return;
+    if (!pickerOpen && !skillPickerOpen && !settingsPickerOpen && !imageAspectPickerOpen && !workspaceMenuOpen) return;
     const handleDocumentKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       setPickerOpen(false);
       setSkillPickerOpen(false);
-      setModelPickerOpen(false);
-      setThinkingPickerOpen(false);
+      closeSettingsPicker();
       setImageAspectPickerOpen(false);
       setWorkspaceMenuOpen(false);
     };
@@ -498,7 +500,7 @@ export function ChatInput({
     return () => {
       document.removeEventListener('keydown', handleDocumentKeyDown, true);
     };
-  }, [imageAspectPickerOpen, modelPickerOpen, pickerOpen, skillPickerOpen, thinkingPickerOpen, workspaceMenuOpen]);
+  }, [closeSettingsPicker, imageAspectPickerOpen, pickerOpen, settingsPickerOpen, skillPickerOpen, workspaceMenuOpen]);
 
   useEffect(() => {
     setSelectedSkill((prev) => {
@@ -508,12 +510,12 @@ export function ChatInput({
       return null;
     });
     setSkillPickerOpen(false);
-    setThinkingPickerOpen(false);
+    closeSettingsPicker();
     setWorkspaceMenuOpen(false);
     setSkillQuery('');
     setQuickSkills([]);
     setSkillsError(null);
-  }, [currentAgentId]);
+  }, [closeSettingsPicker, currentAgentId]);
 
   useEffect(() => {
     if (!selectedSkill) return;
@@ -599,7 +601,7 @@ export function ChatInput({
 
   const handleSelectModel = useCallback((modelRef: string) => {
     if (modelRef === effectiveModelRef && requestedModelRef === effectiveModelRef) {
-      setModelPickerOpen(false);
+      closeSettingsPicker();
       textareaRef.current?.focus();
       return;
     }
@@ -609,7 +611,7 @@ export function ChatInput({
     const changeVersion = modelChangeVersionRef.current + 1;
     modelChangeVersionRef.current = changeVersion;
     setOptimisticModelRef(modelRef);
-    setModelPickerOpen(false);
+    closeSettingsPicker();
     textareaRef.current?.focus();
 
     const sessionKey = currentSessionKey;
@@ -626,17 +628,17 @@ export function ChatInput({
         toast.error(t('composer.modelSwitchFailed', { error: String(error) }));
       }
     });
-  }, [currentSessionKey, effectiveModelRef, managedDefaultModelRef, requestedModelRef, t, updateSessionModel]);
+  }, [closeSettingsPicker, currentSessionKey, effectiveModelRef, managedDefaultModelRef, requestedModelRef, t, updateSessionModel]);
 
   const handleSelectThinking = useCallback((nextThinkingLevel: string) => {
     const normalizedThinkingLevel = nextThinkingLevel.trim() || null;
     if (normalizedThinkingLevel === (selectedThinkingLevel || null)) {
-      setThinkingPickerOpen(false);
+      closeSettingsPicker();
       textareaRef.current?.focus();
       return;
     }
 
-    setThinkingPickerOpen(false);
+    closeSettingsPicker();
     textareaRef.current?.focus();
     const sessionKey = currentSessionKey;
     const sessionGeneration = currentSessionGenerationRef.current;
@@ -649,13 +651,18 @@ export function ChatInput({
         toast.error(t('composer.thinkingSwitchFailed', { error: String(error) }));
       }
     });
-  }, [currentSessionKey, selectedThinkingLevel, t, updateSessionThinking]);
+  }, [closeSettingsPicker, currentSessionKey, selectedThinkingLevel, t, updateSessionThinking]);
+
+  const handleResetSettings = useCallback(() => {
+    closeSettingsPicker();
+    handleSelectModel(managedDefaultModelRef);
+    handleSelectThinking('');
+  }, [closeSettingsPicker, handleSelectModel, handleSelectThinking, managedDefaultModelRef]);
 
   const toggleImageMode = useCallback(() => {
     setPickerOpen(false);
     setSkillPickerOpen(false);
-    setModelPickerOpen(false);
-    setThinkingPickerOpen(false);
+    closeSettingsPicker();
     setImageAspectPickerOpen(false);
     setWorkspaceMenuOpen(false);
     setSessionImageModes((current) => ({
@@ -663,7 +670,7 @@ export function ChatInput({
       [currentSessionKey]: !current[currentSessionKey],
     }));
     textareaRef.current?.focus();
-  }, [currentSessionKey]);
+  }, [closeSettingsPicker, currentSessionKey]);
 
   const updateImageOptions = useCallback((next: Partial<AcpImageGenerationOptions>) => {
     setSessionImageOptions((current) => ({
@@ -680,11 +687,10 @@ export function ChatInput({
     if (workspaceSelectorDisabled) return;
     setPickerOpen(false);
     setSkillPickerOpen(false);
-    setModelPickerOpen(false);
-    setThinkingPickerOpen(false);
+    closeSettingsPicker();
     setImageAspectPickerOpen(false);
     setWorkspaceMenuOpen((open) => !open);
-  }, [workspaceSelectorDisabled]);
+  }, [closeSettingsPicker, workspaceSelectorDisabled]);
 
   const handleWorkspaceKeyDown = useCallback((event: React.KeyboardEvent) => {
     if (event.key !== 'Escape') return;
@@ -933,7 +939,7 @@ export function ChatInput({
       setTargetAgentId(null);
       setPickerOpen(false);
       setSkillPickerOpen(false);
-      setThinkingPickerOpen(false);
+      closeSettingsPicker();
       setImageAspectPickerOpen(false);
       setWorkspaceMenuOpen(false);
     } finally {
@@ -945,6 +951,7 @@ export function ChatInput({
     input,
     attachments,
     canSendWithoutModelPersistence,
+    closeSettingsPicker,
     currentSessionKey,
     effectiveModelRef,
     imageModeActive,
@@ -1020,7 +1027,7 @@ export function ChatInput({
       if (e.key === 'Escape') {
         setPickerOpen(false);
         setSkillPickerOpen(false);
-        setModelPickerOpen(false);
+        closeSettingsPicker();
         setImageAspectPickerOpen(false);
         setWorkspaceMenuOpen(false);
         return;
@@ -1034,7 +1041,7 @@ export function ChatInput({
         void handleSend();
       }
     },
-    [handleSend, input, moveCaretTo, selectedSkill, skillTokenRanges],
+    [closeSettingsPicker, handleSend, input, moveCaretTo, selectedSkill, skillTokenRanges],
   );
 
   // Handle paste (Ctrl/Cmd+V with files)
@@ -1239,8 +1246,7 @@ export function ChatInput({
                   )}
                   onClick={() => {
                     setSkillPickerOpen(false);
-                    setModelPickerOpen(false);
-                    setThinkingPickerOpen(false);
+                    closeSettingsPicker();
                     setImageAspectPickerOpen(false);
                     setWorkspaceMenuOpen(false);
                     setPickerOpen((open) => !open);
@@ -1284,8 +1290,7 @@ export function ChatInput({
                 )}
                 onClick={() => {
                   setPickerOpen(false);
-                  setModelPickerOpen(false);
-                  setThinkingPickerOpen(false);
+                  closeSettingsPicker();
                   setImageAspectPickerOpen(false);
                   setWorkspaceMenuOpen(false);
                   setSkillPickerOpen((open) => !open);
@@ -1359,135 +1364,143 @@ export function ChatInput({
               )}
             </div>
 
-            {showModelPicker && (
-              <div ref={modelPickerRef} className="relative min-w-0 shrink">
+            <DropdownMenu open={settingsPickerOpen} onOpenChange={handleSettingsPickerOpenChange}>
+              <DropdownMenuTrigger asChild>
                 <button
                   type="button"
-                  data-testid="chat-model-picker-button"
+                  data-testid="chat-settings-picker-button"
                   className={cn(
-                    'inline-flex h-8 min-w-0 max-w-[120px] items-center gap-1 rounded-lg px-1.5 text-meta font-medium text-muted-foreground transition-colors hover:bg-transparent hover:text-foreground focus-visible:outline-none focus-visible:ring-0 disabled:pointer-events-none disabled:opacity-50 sm:max-w-[220px]',
-                    modelPickerOpen && 'text-foreground',
+                    'inline-flex h-8 min-w-0 max-w-[176px] shrink items-center gap-1.5 rounded-lg bg-black/[0.04] px-2.5 text-meta font-medium text-muted-foreground transition-colors hover:bg-black/[0.07] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 disabled:pointer-events-none disabled:opacity-50 dark:bg-white/[0.07] dark:hover:bg-white/10 sm:max-w-[280px]',
+                    settingsPickerOpen && 'bg-black/[0.07] text-foreground dark:bg-white/10',
                   )}
                   onClick={() => {
                     setPickerOpen(false);
                     setSkillPickerOpen(false);
-                    setThinkingPickerOpen(false);
                     setImageAspectPickerOpen(false);
                     setWorkspaceMenuOpen(false);
-                    setModelPickerOpen((open) => !open);
                   }}
                   disabled={inputDisabled || sending || !currentAgent}
-                  title={t('composer.pickModel')}
+                  title={t('composer.settingsSummary', { model: currentModelLabel, thinking: thinkingButtonLabel })}
+                  aria-label={t('composer.settingsSummary', { model: currentModelLabel, thinking: thinkingButtonLabel })}
                 >
-                  <span className="truncate">{currentModelLabel}</span>
-                  <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform', modelPickerOpen && 'rotate-180')} />
+                  {(modelPersisting || thinkingPersisting) && (
+                    <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
+                  )}
+                  <span className="min-w-0 truncate text-foreground/90" data-testid="chat-settings-model-summary">
+                    {currentModelLabel}
+                  </span>
+                  <span className="h-3 w-px shrink-0 bg-black/15 dark:bg-white/20" aria-hidden="true" />
+                  <span className="shrink-0" data-testid="chat-settings-thinking-summary">{thinkingButtonLabel}</span>
+                  <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform', settingsPickerOpen && 'rotate-180')} />
                 </button>
-                {modelPickerOpen && (
-                  <div
-                    className="absolute left-0 bottom-full z-20 mb-2 w-72 overflow-hidden rounded-2xl border border-black/10 bg-surface-modal p-1.5 shadow-xl dark:border-white/10"
-                    data-testid="chat-model-picker-menu"
-                  >
-                    <div className="px-3 py-2 text-tiny font-medium text-muted-foreground/80">
-                      {t('composer.modelPickerTitle')}
-                    </div>
-                    <div className="max-h-64 overflow-y-auto">
-                      {modelOptions.map((option) => (
-                        <button
-                          key={option.modelRef}
-                          type="button"
-                          onClick={() => void handleSelectModel(option.modelRef)}
-                          className={cn(
-                            'flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left text-sm font-medium transition-colors',
-                            option.modelRef === effectiveModelRef ? 'bg-primary/10 text-foreground' : 'hover:bg-black/5 dark:hover:bg-white/5'
-                          )}
-                          data-testid={`chat-model-picker-option-${option.label}`}
-                        >
-                          <span className="truncate">{option.label}</span>
-                          {option.modelRef === effectiveModelRef && (
-                            <span className="h-1.5 w-1.5 rounded-full bg-primary" />
-                          )}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div ref={thinkingPickerRef} className="relative shrink-0">
-              <button
-                type="button"
-                data-testid="chat-thinking-picker-button"
-                className={cn(
-                  'inline-flex h-8 max-w-[112px] items-center gap-1 rounded-lg px-1.5 text-meta font-medium text-muted-foreground transition-colors hover:bg-transparent hover:text-foreground focus-visible:outline-none focus-visible:ring-0 disabled:pointer-events-none disabled:opacity-50',
-                  thinkingPickerOpen && 'text-foreground',
-                )}
-                onClick={() => {
-                  setPickerOpen(false);
-                  setSkillPickerOpen(false);
-                  setModelPickerOpen(false);
-                  setImageAspectPickerOpen(false);
-                  setWorkspaceMenuOpen(false);
-                  setThinkingPickerOpen((open) => !open);
-                }}
-                disabled={inputDisabled || sending || !currentAgent}
-                title={t('composer.pickThinking')}
-                aria-label={t('composer.pickThinking')}
-                aria-haspopup="menu"
-                aria-expanded={thinkingPickerOpen}
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                align="end"
+                side="top"
+                sideOffset={4}
+                collisionPadding={12}
+                className="min-w-0 w-[min(144px,calc(100vw-24px))] rounded-lg border-black/10 p-1 shadow-md dark:border-white/10"
+                data-testid="chat-settings-picker-menu"
               >
-                <Brain className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                <span className="truncate">{thinkingButtonLabel}</span>
-                <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform', thinkingPickerOpen && 'rotate-180')} />
-              </button>
-              {thinkingPickerOpen && (
-                <div
-                  className="absolute bottom-full left-0 z-20 mb-2 w-48 overflow-hidden rounded-lg border border-black/10 bg-surface-modal p-1 shadow-xl dark:border-white/10"
-                  data-testid="chat-thinking-picker-menu"
-                  role="menu"
+                <DropdownMenuItem
+                  data-testid="chat-settings-reset"
+                  onSelect={handleResetSettings}
+                  disabled={settingsAreDefault}
+                  className="flex h-8 gap-1.5 rounded-md bg-black/[0.04] px-2 text-xs font-medium text-foreground data-[highlighted]:bg-black/[0.07] data-[disabled]:text-muted-foreground data-[disabled]:opacity-70 dark:bg-white/[0.06] dark:data-[highlighted]:bg-white/10"
                 >
-                  <button
-                    type="button"
-                    data-testid="chat-thinking-option-inherit"
-                    role="menuitemradio"
-                    aria-checked={!selectedThinkingLevel}
-                    onClick={() => handleSelectThinking('')}
-                    className={cn(
-                      'flex w-full items-center justify-between gap-3 rounded-md px-2 py-2 text-left text-xs font-medium transition-colors',
-                      !selectedThinkingLevel
-                        ? 'bg-black/5 text-foreground dark:bg-white/10'
-                        : 'hover:bg-black/5 dark:hover:bg-white/5',
-                    )}
+                  <RotateCcw className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden="true" />
+                  <span className="min-w-0 flex-1 truncate">{t('composer.resetSettings')}</span>
+                </DropdownMenuItem>
+                <DropdownMenuPrimitive.Separator className="my-0.5 h-px bg-black/[0.06] dark:bg-white/10" />
+
+                <DropdownMenuPrimitive.Sub>
+                  <DropdownMenuPrimitive.SubTrigger
+                    data-testid="chat-settings-model-row"
+                    disabled={!showModelPicker}
+                    className="flex h-8 w-full cursor-default select-none items-center gap-1.5 rounded-md px-2 text-left text-xs outline-none transition-colors data-[highlighted]:bg-black/5 data-[state=open]:bg-black/5 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 dark:data-[highlighted]:bg-white/[0.06] dark:data-[state=open]:bg-white/[0.06]"
                   >
-                    <span className="truncate">{t('composer.thinkingInherit', { level: inheritedThinkingLabel })}</span>
-                    {!selectedThinkingLevel && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />}
-                  </button>
-                  {thinkingOptions.map((option) => {
-                    const label = thinkingLevelLabel(option.id, option.label);
-                    const selected = option.id === selectedThinkingLevel;
-                    return (
-                      <button
-                        key={option.id}
-                        type="button"
-                        data-testid={`chat-thinking-option-${option.id}`}
-                        role="menuitemradio"
-                        aria-checked={selected}
-                        onClick={() => handleSelectThinking(option.id)}
-                        className={cn(
-                          'flex w-full items-center justify-between gap-3 rounded-md px-2 py-2 text-left text-xs font-medium transition-colors',
-                          selected
-                            ? 'bg-black/5 text-foreground dark:bg-white/10'
-                            : 'hover:bg-black/5 dark:hover:bg-white/5',
-                        )}
+                    <span className="min-w-0 flex-1 truncate font-medium text-foreground">{t('composer.modelSetting')}</span>
+                    <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden="true" />
+                  </DropdownMenuPrimitive.SubTrigger>
+                  <DropdownMenuPrimitive.Portal>
+                    <DropdownMenuPrimitive.SubContent
+                      sideOffset={4}
+                      collisionPadding={12}
+                      className="z-50 max-h-[min(264px,calc(100vh-24px))] w-[min(128px,calc(100vw-24px))] overflow-y-auto rounded-lg border border-black/10 bg-surface-modal p-1 text-popover-foreground shadow-md outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 dark:border-white/10"
+                      data-testid="chat-model-picker-menu"
+                    >
+                      <DropdownMenuPrimitive.RadioGroup
+                        value={effectiveModelRef || ''}
+                        onValueChange={handleSelectModel}
                       >
-                        <span className="truncate">{label}</span>
-                        {selected && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
+                        {modelOptions.map((option) => (
+                          <DropdownMenuPrimitive.RadioItem
+                            key={option.modelRef}
+                            value={option.modelRef}
+                            className="flex min-h-8 w-full cursor-default select-none items-center justify-between gap-1.5 rounded-md px-2 py-1 text-left text-xs font-normal text-foreground outline-none transition-colors data-[highlighted]:bg-black/5 data-[state=checked]:bg-black/5 dark:data-[highlighted]:bg-white/[0.06] dark:data-[state=checked]:bg-white/10"
+                            data-testid={`chat-model-picker-option-${option.label}`}
+                            title={option.label}
+                          >
+                            <span className="min-w-0 truncate">{option.label}</span>
+                            <DropdownMenuPrimitive.ItemIndicator>
+                              <Check className="h-3 w-3 shrink-0 text-primary" aria-hidden="true" />
+                            </DropdownMenuPrimitive.ItemIndicator>
+                          </DropdownMenuPrimitive.RadioItem>
+                        ))}
+                      </DropdownMenuPrimitive.RadioGroup>
+                    </DropdownMenuPrimitive.SubContent>
+                  </DropdownMenuPrimitive.Portal>
+                </DropdownMenuPrimitive.Sub>
+
+                <DropdownMenuPrimitive.Sub>
+                  <DropdownMenuPrimitive.SubTrigger
+                    data-testid="chat-settings-thinking-row"
+                    className="flex h-8 w-full cursor-default select-none items-center gap-1.5 rounded-md px-2 text-left text-xs outline-none transition-colors data-[highlighted]:bg-black/5 data-[state=open]:bg-black/5 dark:data-[highlighted]:bg-white/[0.06] dark:data-[state=open]:bg-white/[0.06]"
+                  >
+                    <span className="min-w-0 flex-1 truncate font-medium text-foreground">{t('composer.thinkingSetting')}</span>
+                    <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden="true" />
+                  </DropdownMenuPrimitive.SubTrigger>
+                  <DropdownMenuPrimitive.Portal>
+                    <DropdownMenuPrimitive.SubContent
+                      sideOffset={4}
+                      collisionPadding={12}
+                      className="z-50 max-h-[min(264px,calc(100vh-24px))] w-[min(128px,calc(100vw-24px))] overflow-y-auto rounded-lg border border-black/10 bg-surface-modal p-1 text-popover-foreground shadow-md outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 dark:border-white/10"
+                      data-testid="chat-thinking-picker-menu"
+                    >
+                      <DropdownMenuPrimitive.RadioGroup
+                        value={selectedThinkingLevel || INHERIT_THINKING_VALUE}
+                        onValueChange={(value) => handleSelectThinking(value === INHERIT_THINKING_VALUE ? '' : value)}
+                      >
+                        <DropdownMenuPrimitive.RadioItem
+                          value={INHERIT_THINKING_VALUE}
+                          data-testid="chat-thinking-option-inherit"
+                          className="flex min-h-8 w-full cursor-default select-none items-center justify-between gap-1.5 rounded-md px-2 py-1 text-left text-xs font-normal text-foreground outline-none transition-colors data-[highlighted]:bg-black/5 data-[state=checked]:bg-black/5 dark:data-[highlighted]:bg-white/[0.06] dark:data-[state=checked]:bg-white/10"
+                        >
+                          <span className="min-w-0 truncate">{t('composer.thinkingInherit', { level: inheritedThinkingLabel })}</span>
+                          <DropdownMenuPrimitive.ItemIndicator>
+                            <Check className="h-3 w-3 shrink-0 text-primary" aria-hidden="true" />
+                          </DropdownMenuPrimitive.ItemIndicator>
+                        </DropdownMenuPrimitive.RadioItem>
+                        {thinkingOptions.map((option) => (
+                          <DropdownMenuPrimitive.RadioItem
+                            key={option.id}
+                            value={option.id}
+                            data-testid={`chat-thinking-option-${option.id}`}
+                            className="flex min-h-8 w-full cursor-default select-none items-center justify-between gap-1.5 rounded-md px-2 py-1 text-left text-xs font-normal text-foreground outline-none transition-colors data-[highlighted]:bg-black/5 data-[state=checked]:bg-black/5 dark:data-[highlighted]:bg-white/[0.06] dark:data-[state=checked]:bg-white/10"
+                            title={thinkingLevelLabel(option.id, option.label)}
+                          >
+                            <span className="min-w-0 truncate">{thinkingLevelLabel(option.id, option.label)}</span>
+                            <DropdownMenuPrimitive.ItemIndicator>
+                              <Check className="h-3 w-3 shrink-0 text-primary" aria-hidden="true" />
+                            </DropdownMenuPrimitive.ItemIndicator>
+                          </DropdownMenuPrimitive.RadioItem>
+                        ))}
+                      </DropdownMenuPrimitive.RadioGroup>
+                    </DropdownMenuPrimitive.SubContent>
+                  </DropdownMenuPrimitive.Portal>
+                </DropdownMenuPrimitive.Sub>
+              </DropdownMenuContent>
+            </DropdownMenu>
 
             <Tooltip>
               <TooltipTrigger asChild>
@@ -1524,8 +1537,7 @@ export function ChatInput({
                     onClick={() => {
                       setPickerOpen(false);
                       setSkillPickerOpen(false);
-                      setModelPickerOpen(false);
-                      setThinkingPickerOpen(false);
+                      closeSettingsPicker();
                       setWorkspaceMenuOpen(false);
                       setImageAspectPickerOpen((open) => !open);
                     }}

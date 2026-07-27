@@ -9,7 +9,10 @@ import {
 } from '../gateway/managed-runtime-mutation-barrier';
 import { waitForPortFree } from '../gateway/supervisor';
 import type { ProviderAccount, ProviderSecret } from '../shared/providers/types';
-import type { ManagedClientTextModelPolicy } from '../../shared/managed-client-config';
+import type {
+  ManagedClientTextModelPolicy,
+  ManagedClientVideoModelPolicy,
+} from '../../shared/managed-client-config';
 import type {
   ManagedAuthActivationCheckResult,
   ManagedAuthBootstrap,
@@ -98,7 +101,7 @@ import {
   type ManagedAgentModelsFilesSnapshot,
 } from '../utils/openclaw-auth';
 import { getClawXProviderStore } from './providers/store-instance';
-import { cacheManagedClientTextModelPolicyFromPayload } from './managed-client-config-service';
+import { cacheManagedClientModelPoliciesFromPayload } from './managed-client-config-service';
 import { logger } from '../utils/logger';
 import { withProviderMutationLock } from './providers/provider-mutation-lock';
 
@@ -1111,9 +1114,15 @@ async function syncManagedRuntimeDefaults(
   runtimeSnapshot: ManagedRuntimeConfigSnapshot,
   managedProviderIds: ReadonlySet<string>,
   policy: ManagedClientTextModelPolicy,
+  videoPolicy: ManagedClientVideoModelPolicy,
 ): Promise<void> {
   const providerEntry = createManagedRuntimeProviderEntry(policy);
-  await installManagedRuntimeProviderState(runtimeSnapshot, policy, managedProviderIds);
+  await installManagedRuntimeProviderState(
+    runtimeSnapshot,
+    policy,
+    videoPolicy,
+    managedProviderIds,
+  );
   await updateManagedAgentModelProviderStrict(agentModelsFiles, providerEntry, managedProviderIds);
 }
 
@@ -1274,6 +1283,7 @@ async function clearManagedStartupRuntime(previous: ManagedAuthSnapshot): Promis
  */
 export async function reconcileManagedProviderRuntimeForStartup(
   policy: ManagedClientTextModelPolicy,
+  videoPolicy: ManagedClientVideoModelPolicy,
 ): Promise<void> {
   if (!isUclawManagedDistribution()) return;
 
@@ -1332,6 +1342,7 @@ export async function reconcileManagedProviderRuntimeForStartup(
         previous.managedRuntime,
         managedProviderIds,
         policy,
+        videoPolicy,
       );
     } catch (cause) {
       try {
@@ -1360,7 +1371,7 @@ async function commitAuthenticatedSession(
   if (!relay.token.trim()) throw new ManagedAuthServiceError('relay_missing', 'UClaw did not return a usable runtime credential');
   const responseUser = authUserFromPayload(auth);
   // Cache server-owned model options before quiescing Gateway or taking the Provider lock.
-  const modelPolicy = await cacheManagedClientTextModelPolicyFromPayload(auth);
+  const { text: modelPolicy, video: videoPolicy } = await cacheManagedClientModelPoliciesFromPayload(auth);
   let rollbackFailed = false;
   let snapshotCompleted = false;
   let committedStatus: ManagedAuthStatus;
@@ -1430,6 +1441,7 @@ async function commitAuthenticatedSession(
           previous.managedRuntime,
           managedProviderIds,
           modelPolicy,
+          videoPolicy,
         );
         const appliedVerificationCache = buildVerificationCache(user, bootstrap);
         previous.appliedVerificationCache = appliedVerificationCache;

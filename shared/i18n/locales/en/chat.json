@@ -299,6 +299,10 @@
         "pickAgent": "Choose agent",
         "pickModel": "Choose model",
         "pickThinking": "Choose reasoning level",
+        "settingsSummary": "Model: {{model}}, reasoning: {{thinking}}",
+        "resetSettings": "Reset to defaults",
+        "modelSetting": "Model",
+        "thinkingSetting": "Reasoning level",
         "thinkingInherit": "Inherit ({{level}})",
         "thinkingSwitchFailed": "Failed to switch reasoning level: {{error}}",
         "thinkingLevels": {

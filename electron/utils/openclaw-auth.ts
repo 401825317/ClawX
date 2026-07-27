@@ -40,6 +40,7 @@ import { inferCustomModelContextWindow, inferCustomModelInputModalities } from '
 import {
   UCLAW_COMPATIBILITY_PROVIDER_ID,
   UCLAW_MANAGED_PROVIDER_ID,
+  UCLAW_VIDEO_PROVIDER_ID,
 } from '../../shared/junfeiai-endpoints';
 import { isUclawManagedRuntimeProviderEntry } from '../services/providers/managed-runtime-config';
 import { isOpenAiProviderIdentity } from '../services/providers/provider-mutation-lock';
@@ -586,6 +587,7 @@ function managedOpenAiProviderIds(additionalProviderIds: Iterable<string>): Set<
   return new Set([
     UCLAW_MANAGED_PROVIDER_ID,
     UCLAW_COMPATIBILITY_PROVIDER_ID,
+    UCLAW_VIDEO_PROVIDER_ID,
     ...additionalProviderIds,
   ]);
 }
@@ -698,6 +700,7 @@ function buildStrictManagedProviderStore(
 
   const primaryProfileId = `${UCLAW_MANAGED_PROVIDER_ID}:default`;
   const compatibilityProfileId = `${UCLAW_COMPATIBILITY_PROVIDER_ID}:default`;
+  const videoProfileId = `${UCLAW_VIDEO_PROVIDER_ID}:default`;
   store.profiles[primaryProfileId] = {
     type: 'api_key',
     provider: UCLAW_MANAGED_PROVIDER_ID,
@@ -708,12 +711,19 @@ function buildStrictManagedProviderStore(
     provider: UCLAW_COMPATIBILITY_PROVIDER_ID,
     key: apiKey,
   };
+  store.profiles[videoProfileId] = {
+    type: 'api_key',
+    provider: UCLAW_VIDEO_PROVIDER_ID,
+    key: apiKey,
+  };
   if (!store.order) store.order = {};
   if (!store.lastGood) store.lastGood = {};
   store.order[UCLAW_MANAGED_PROVIDER_ID] = [primaryProfileId];
   store.order[UCLAW_COMPATIBILITY_PROVIDER_ID] = [compatibilityProfileId];
+  store.order[UCLAW_VIDEO_PROVIDER_ID] = [videoProfileId];
   store.lastGood[UCLAW_MANAGED_PROVIDER_ID] = primaryProfileId;
   store.lastGood[UCLAW_COMPATIBILITY_PROVIDER_ID] = compatibilityProfileId;
+  store.lastGood[UCLAW_VIDEO_PROVIDER_ID] = videoProfileId;
   return store;
 }
 

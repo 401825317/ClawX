@@ -5,7 +5,11 @@ import { describe, expect, it } from 'vitest';
 
 describe('openclaw bundle config', () => {
   it('includes Electron runtime-only packages needed in packaged builds', async () => {
-    const { ELECTRON_MAIN_RUNTIME_PACKAGES, EXTRA_BUNDLED_PACKAGES } = await import('../../scripts/openclaw-bundle-config.mjs');
+    const {
+      ELECTRON_MAIN_RUNTIME_PACKAGES,
+      EXTRA_BUNDLED_PACKAGES,
+      LOCAL_OPENCLAW_PLUGIN_IDS,
+    } = await import('../../scripts/openclaw-bundle-config.mjs');
 
     expect(ELECTRON_MAIN_RUNTIME_PACKAGES).toEqual([
       '@whiskeysockets/baileys',
@@ -28,6 +32,10 @@ describe('openclaw bundle config', () => {
       'playwright-core',
       'qrcode-terminal',
     ]));
+    expect(LOCAL_OPENCLAW_PLUGIN_IDS).toEqual([
+      'clawx-openai-image',
+      'uclaw-video',
+    ]);
     const packageJson = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf8')) as {
       dependencies?: Record<string, string>;
       devDependencies?: Record<string, string>;

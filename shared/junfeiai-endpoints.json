@@ -84,11 +84,42 @@
       "defaultSize": "1024x1024"
     },
     "video": {
+      "providerId": "uclaw-video",
+      "apiProtocol": "openai-completions",
       "timeoutMs": 1800000,
       "pollIntervalMs": 5000,
       "maxDownloadBytes": 1073741824,
-      "preferredResolution": "480p",
-      "preferredShortEdge": 480
+      "defaultModel": "grok-image-video",
+      "defaultResolution": "480P",
+      "defaultDurationSeconds": 6,
+      "resolutionSizes": {
+        "480P": "854x480",
+        "720P": "1280x720"
+      },
+      "models": [
+        {
+          "id": "grok-image-video",
+          "label": "Grok Video",
+          "description": "Supports text-to-video and image-to-video.",
+          "modes": ["text-to-video", "image-to-video"],
+          "resolutions": ["480P", "720P"],
+          "durations": [6, 10, 15],
+          "defaultResolution": "480P",
+          "defaultDurationSeconds": 6,
+          "requiresImage": false
+        },
+        {
+          "id": "grok-video-1.5",
+          "label": "Grok Video 1.5",
+          "description": "Image-to-video model that requires one reference image.",
+          "modes": ["image-to-video"],
+          "resolutions": ["480P", "720P"],
+          "durations": [6, 10, 15],
+          "defaultResolution": "480P",
+          "defaultDurationSeconds": 6,
+          "requiresImage": true
+        }
+      ]
     },
     "testTimeoutMs": 1800000,
     "clientTimeoutBufferMs": 10000

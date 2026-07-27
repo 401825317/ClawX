@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildPrelaunchMaintenanceCacheKey,
+  directoryChildrenSignature,
   runCachedPrelaunchMaintenanceTask,
 } from '@electron/gateway/prelaunch-maintenance-cache';
 
@@ -119,6 +120,18 @@ describe('prelaunch maintenance cache', () => {
 
     expect(result).toEqual({ executed: true, reason: 'cache-miss' });
     expect(task).toHaveBeenCalledTimes(2);
+  });
+
+  it('changes a directory signature when a plugin entry file changes', () => {
+    const pluginDir = join(tempDir, 'uclaw-video');
+    mkdirSync(pluginDir);
+    const entry = join(pluginDir, 'index.mjs');
+    writeFileSync(entry, 'export default 1;\n', 'utf-8');
+    const initial = directoryChildrenSignature(pluginDir);
+
+    writeFileSync(entry, 'export default 100;\n', 'utf-8');
+
+    expect(directoryChildrenSignature(pluginDir)).not.toBe(initial);
   });
 
   it('treats cache schema changes as misses', () => {

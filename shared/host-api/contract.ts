@@ -27,6 +27,8 @@ import type {
 import type {
   ManagedClientTextModelPolicy,
   ManagedClientTextModelRequest,
+  ManagedClientVideoModelPolicy,
+  ManagedClientVideoModelRequest,
 } from '../managed-client-config';
 import type {
   BillingCheckout,
@@ -1041,6 +1043,7 @@ export type HostApiContract = {
   };
   managedClientConfig: {
     textModels: (payload?: ManagedClientTextModelRequest) => ManagedClientTextModelPolicy;
+    videoModels: (payload?: ManagedClientVideoModelRequest) => ManagedClientVideoModelPolicy;
   };
   billing: {
     overview: () => BillingResult<BillingOverview>;

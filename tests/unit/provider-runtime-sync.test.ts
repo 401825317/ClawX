@@ -31,6 +31,7 @@ const mocks = vi.hoisted(() => ({
   assertManagedRuntimeStartAllowed: vi.fn(),
   isUclawManagedDistribution: vi.fn(),
   getManagedClientTextModelPolicy: vi.fn(),
+  getManagedClientVideoModelPolicy: vi.fn(),
   reconcileManagedProviderRuntimeForStartup: vi.fn(),
 }));
 
@@ -98,6 +99,7 @@ vi.mock('@electron/utils/junfeiai-distribution', async (importOriginal) => {
 
 vi.mock('@electron/services/managed-client-config-service', () => ({
   getManagedClientTextModelPolicy: mocks.getManagedClientTextModelPolicy,
+  getManagedClientVideoModelPolicy: mocks.getManagedClientVideoModelPolicy,
 }));
 
 vi.mock('@electron/services/managed-auth-service', () => ({
@@ -178,6 +180,12 @@ describe('provider-runtime-sync refresh strategy', () => {
       defaultModel: 'smart-latest',
       models: [{ id: 'smart-latest' }, { id: 'reasoning-pro' }],
     });
+    mocks.getManagedClientVideoModelPolicy.mockResolvedValue({
+      defaultModel: 'grok-image-video',
+      defaultResolution: '480P',
+      defaultDurationSeconds: 6,
+      models: [],
+    });
     mocks.reconcileManagedProviderRuntimeForStartup.mockResolvedValue(undefined);
     mocks.snapshotManagedAgentAuthProfiles.mockResolvedValue({});
     mocks.installManagedAgentOpenAiApiKey.mockResolvedValue(undefined);
@@ -202,10 +210,19 @@ describe('provider-runtime-sync refresh strategy', () => {
     });
 
     expect(mocks.getManagedClientTextModelPolicy).toHaveBeenCalledWith({ refresh: true });
-    expect(mocks.reconcileManagedProviderRuntimeForStartup).toHaveBeenCalledWith({
-      defaultModel: 'smart-latest',
-      models: [{ id: 'smart-latest' }, { id: 'reasoning-pro' }],
-    });
+    expect(mocks.getManagedClientVideoModelPolicy).toHaveBeenCalledWith({ refresh: true });
+    expect(mocks.reconcileManagedProviderRuntimeForStartup).toHaveBeenCalledWith(
+      {
+        defaultModel: 'smart-latest',
+        models: [{ id: 'smart-latest' }, { id: 'reasoning-pro' }],
+      },
+      {
+        defaultModel: 'grok-image-video',
+        defaultResolution: '480P',
+        defaultDurationSeconds: 6,
+        models: [],
+      },
+    );
   });
 
   it('uses cached policy for non-startup synchronization and takes the lock only after policy lookup', async () => {
@@ -222,6 +239,7 @@ describe('provider-runtime-sync refresh strategy', () => {
     await syncAllProviderAuthToRuntime({ reconcileManagedRuntime: true });
 
     expect(mocks.getManagedClientTextModelPolicy).toHaveBeenCalledWith({ refresh: false });
+    expect(mocks.getManagedClientVideoModelPolicy).toHaveBeenCalledWith({ refresh: false });
     expect(policyLockHeld).toBe(false);
     expect(reconcileLockHeld).toBe(true);
   });
@@ -264,6 +282,7 @@ describe('provider-runtime-sync refresh strategy', () => {
     await syncAllProviderAuthToRuntime();
 
     expect(mocks.getManagedClientTextModelPolicy).not.toHaveBeenCalled();
+    expect(mocks.getManagedClientVideoModelPolicy).not.toHaveBeenCalled();
     expect(mocks.reconcileManagedProviderRuntimeForStartup).not.toHaveBeenCalled();
     expect(mocks.saveProviderKeyToOpenClaw).toHaveBeenCalledWith('moonshot', 'moonshot-key');
     expect(mocks.saveProviderKeyToOpenClaw).toHaveBeenCalledTimes(1);
@@ -289,6 +308,7 @@ describe('provider-runtime-sync refresh strategy', () => {
     });
 
     expect(mocks.getManagedClientTextModelPolicy).not.toHaveBeenCalled();
+    expect(mocks.getManagedClientVideoModelPolicy).not.toHaveBeenCalled();
     expect(mocks.reconcileManagedProviderRuntimeForStartup).not.toHaveBeenCalled();
   });
 

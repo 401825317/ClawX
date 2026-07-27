@@ -616,17 +616,15 @@ test.describe('ClawX ACP inline timeline', () => {
       await page.getByTestId('chat-composer-mode-image').click();
       await expect(page.getByTestId('chat-image-aspect-trigger')).toHaveText('1:1');
       await expect(page.getByTestId('chat-image-quality')).toHaveValue('medium');
-      const [modelPickerBox, thinkingPickerBox, imageModeButtonBox, aspectTriggerBox, qualityBox, sendBoxAfterImageMode] = await Promise.all([
-        page.getByTestId('chat-model-picker-button').boundingBox(),
-        page.getByTestId('chat-thinking-picker-button').boundingBox(),
+      const [settingsPickerBox, imageModeButtonBox, aspectTriggerBox, qualityBox, sendBoxAfterImageMode] = await Promise.all([
+        page.getByTestId('chat-settings-picker-button').boundingBox(),
         page.getByTestId('chat-composer-mode-image').boundingBox(),
         page.getByTestId('chat-image-aspect-trigger').boundingBox(),
         page.getByTestId('chat-image-quality').boundingBox(),
         sendButton.boundingBox(),
       ]);
       expect(sendBoxBeforeImageMode).not.toBeNull();
-      expect(modelPickerBox).not.toBeNull();
-      expect(thinkingPickerBox).not.toBeNull();
+      expect(settingsPickerBox).not.toBeNull();
       expect(imageModeButtonBox).not.toBeNull();
       expect(aspectTriggerBox).not.toBeNull();
       expect(qualityBox).not.toBeNull();
@@ -640,8 +638,7 @@ test.describe('ClawX ACP inline timeline', () => {
         return firstCenterY < secondCenterY - 1
           || (Math.abs(firstCenterY - secondCenterY) <= 1 && first.x + first.width <= second.x);
       };
-      expect(appearsBefore(modelPickerBox!, thinkingPickerBox!)).toBe(true);
-      expect(appearsBefore(thinkingPickerBox!, imageModeButtonBox!)).toBe(true);
+      expect(appearsBefore(settingsPickerBox!, imageModeButtonBox!)).toBe(true);
       expect(appearsBefore(imageModeButtonBox!, aspectTriggerBox!)).toBe(true);
       expect(appearsBefore(aspectTriggerBox!, qualityBox!)).toBe(true);
       expect(Math.abs(sendBoxAfterImageMode!.x - sendBoxBeforeImageMode!.x)).toBeLessThanOrEqual(1);

@@ -723,6 +723,7 @@ async function validatePackagedContents(installerRoot, sourcePackage, sourceComm
     ]),
     'resources/openclaw-plugins/clawx-openai-image/index.mjs',
     'resources/openclaw-plugins/clawx-openai-image/node_modules/undici/package.json',
+    'resources/openclaw-plugins/uclaw-video/index.mjs',
   ];
   const missing = [];
   for (const relativePath of requiredFiles) {

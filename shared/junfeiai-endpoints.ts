@@ -6,6 +6,20 @@ export type UclawExecSecurity = 'deny' | 'allowlist' | 'full';
 export type UclawExecAsk = 'off' | 'on-miss' | 'always';
 export type UclawCompactionMode = 'default' | 'safeguard';
 export type UclawMarketplaceProvider = 'skillhub' | 'clawhub';
+export type UclawVideoMode = 'text-to-video' | 'image-to-video';
+export type UclawVideoResolution = '480P' | '720P';
+
+export type UclawVideoModelConfig = {
+  id: string;
+  label: string;
+  description: string;
+  modes: UclawVideoMode[];
+  resolutions: UclawVideoResolution[];
+  durations: number[];
+  defaultResolution: UclawVideoResolution;
+  defaultDurationSeconds: number;
+  requiresImage: boolean;
+};
 
 export type UclawEndpointsConfig = {
   provider: {
@@ -93,11 +107,16 @@ export type UclawEndpointsConfig = {
       defaultSize: string;
     };
     video: {
+      providerId: string;
+      apiProtocol: string;
       timeoutMs: number;
       pollIntervalMs: number;
       maxDownloadBytes: number;
-      preferredResolution: string;
-      preferredShortEdge: number;
+      defaultModel: string;
+      defaultResolution: UclawVideoResolution;
+      defaultDurationSeconds: number;
+      resolutionSizes: Record<UclawVideoResolution, string>;
+      models: UclawVideoModelConfig[];
     };
     testTimeoutMs: number;
     clientTimeoutBufferMs: number;
@@ -130,6 +149,13 @@ function readNonEmptyStringArray(value: unknown, key: string): string[] {
 function readPositiveInteger(value: unknown, key: string): number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
     throw new Error(`${key} in shared/junfeiai-endpoints.json must be a positive integer`);
+  }
+  return value;
+}
+
+function readBoolean(value: unknown, key: string): boolean {
+  if (typeof value !== 'boolean') {
+    throw new Error(`${key} in shared/junfeiai-endpoints.json must be a boolean`);
   }
   return value;
 }
@@ -214,12 +240,69 @@ function readPixelSize(value: unknown, key: string): string {
   return normalized;
 }
 
-function readResolution(value: unknown, key: string): string {
-  const normalized = readNonEmptyString(value, key).toLowerCase();
-  if (!/^\d+p$/.test(normalized)) {
-    throw new Error(`${key} in shared/junfeiai-endpoints.json must use a value such as 480p`);
+function readVideoResolution(value: unknown, key: string): UclawVideoResolution {
+  return readEnum(value, key, ['480P', '720P']);
+}
+
+function readVideoModeArray(value: unknown, key: string): UclawVideoMode[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${key} in shared/junfeiai-endpoints.json must be a non-empty array`);
   }
-  return normalized;
+  return [...new Set(value.map((entry, index) => (
+    readEnum(entry, `${key}[${index}]`, ['text-to-video', 'image-to-video'] as const)
+  )))];
+}
+
+function readVideoResolutionArray(value: unknown, key: string): UclawVideoResolution[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${key} in shared/junfeiai-endpoints.json must be a non-empty array`);
+  }
+  return [...new Set(value.map((entry, index) => readVideoResolution(entry, `${key}[${index}]`)))];
+}
+
+function readPositiveIntegerArray(value: unknown, key: string): number[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${key} in shared/junfeiai-endpoints.json must be a non-empty array`);
+  }
+  return [...new Set(value.map((entry, index) => readPositiveInteger(entry, `${key}[${index}]`)))];
+}
+
+function readVideoModels(value: unknown, key: string): UclawVideoModelConfig[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${key} in shared/junfeiai-endpoints.json must be a non-empty array`);
+  }
+  const seen = new Set<string>();
+  return value.map((entry, index) => {
+    const itemKey = `${key}[${index}]`;
+    const model = readRecord(entry, itemKey);
+    const id = readNonEmptyString(model.id, `${itemKey}.id`);
+    if (seen.has(id)) {
+      throw new Error(`${itemKey}.id in shared/junfeiai-endpoints.json must be unique`);
+    }
+    seen.add(id);
+    const modes = readVideoModeArray(model.modes, `${itemKey}.modes`);
+    const resolutions = readVideoResolutionArray(model.resolutions, `${itemKey}.resolutions`);
+    const durations = readPositiveIntegerArray(model.durations, `${itemKey}.durations`);
+    const defaultResolution = readVideoResolution(model.defaultResolution, `${itemKey}.defaultResolution`);
+    const defaultDurationSeconds = readPositiveInteger(
+      model.defaultDurationSeconds,
+      `${itemKey}.defaultDurationSeconds`,
+    );
+    if (!resolutions.includes(defaultResolution) || !durations.includes(defaultDurationSeconds)) {
+      throw new Error(`${itemKey} in shared/junfeiai-endpoints.json has unsupported defaults`);
+    }
+    return {
+      id,
+      label: readNonEmptyString(model.label, `${itemKey}.label`),
+      description: readNonEmptyString(model.description, `${itemKey}.description`),
+      modes,
+      resolutions,
+      durations,
+      defaultResolution,
+      defaultDurationSeconds,
+      requiresImage: readBoolean(model.requiresImage, `${itemKey}.requiresImage`),
+    };
+  });
 }
 
 function readApiPath(value: unknown, key: string): string {
@@ -249,6 +332,25 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
   const media = readRecord(root.media, 'media');
   const image = readRecord(media.image, 'media.image');
   const video = readRecord(media.video, 'media.video');
+  const videoResolutionSizes = readRecord(video.resolutionSizes, 'media.video.resolutionSizes');
+  const videoModels = readVideoModels(video.models, 'media.video.models');
+  const videoDefaultModel = readNonEmptyString(video.defaultModel, 'media.video.defaultModel');
+  const videoDefaultResolution = readVideoResolution(
+    video.defaultResolution,
+    'media.video.defaultResolution',
+  );
+  const videoDefaultDurationSeconds = readPositiveInteger(
+    video.defaultDurationSeconds,
+    'media.video.defaultDurationSeconds',
+  );
+  const defaultVideoModel = videoModels.find((model) => model.id === videoDefaultModel);
+  if (
+    !defaultVideoModel
+    || !defaultVideoModel.resolutions.includes(videoDefaultResolution)
+    || !defaultVideoModel.durations.includes(videoDefaultDurationSeconds)
+  ) {
+    throw new Error('media.video in shared/junfeiai-endpoints.json has unsupported defaults');
+  }
 
   return {
     provider: {
@@ -425,11 +527,19 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
         defaultSize: readPixelSize(image.defaultSize, 'media.image.defaultSize'),
       },
       video: {
+        providerId: readNonEmptyString(video.providerId, 'media.video.providerId'),
+        apiProtocol: readNonEmptyString(video.apiProtocol, 'media.video.apiProtocol'),
         timeoutMs: readPositiveInteger(video.timeoutMs, 'media.video.timeoutMs'),
         pollIntervalMs: readPositiveInteger(video.pollIntervalMs, 'media.video.pollIntervalMs'),
         maxDownloadBytes: readPositiveInteger(video.maxDownloadBytes, 'media.video.maxDownloadBytes'),
-        preferredResolution: readResolution(video.preferredResolution, 'media.video.preferredResolution'),
-        preferredShortEdge: readPositiveInteger(video.preferredShortEdge, 'media.video.preferredShortEdge'),
+        defaultModel: videoDefaultModel,
+        defaultResolution: videoDefaultResolution,
+        defaultDurationSeconds: videoDefaultDurationSeconds,
+        resolutionSizes: {
+          '480P': readPixelSize(videoResolutionSizes['480P'], 'media.video.resolutionSizes.480P'),
+          '720P': readPixelSize(videoResolutionSizes['720P'], 'media.video.resolutionSizes.720P'),
+        },
+        models: videoModels,
       },
       testTimeoutMs: readPositiveInteger(media.testTimeoutMs, 'media.testTimeoutMs'),
       clientTimeoutBufferMs: readPositiveInteger(
@@ -494,7 +604,12 @@ export const UCLAW_IMAGE_GENERATION_DEFAULT_SIZE = UCLAW_ENDPOINTS_CONFIG.media.
 export const UCLAW_VIDEO_GENERATION_TIMEOUT_MS = UCLAW_ENDPOINTS_CONFIG.media.video.timeoutMs;
 export const UCLAW_VIDEO_GENERATION_MAX_DOWNLOAD_BYTES = UCLAW_ENDPOINTS_CONFIG.media.video.maxDownloadBytes;
 export const UCLAW_VIDEO_GENERATION_POLL_INTERVAL_MS = UCLAW_ENDPOINTS_CONFIG.media.video.pollIntervalMs;
-export const UCLAW_VIDEO_GENERATION_PREFERRED_RESOLUTION = UCLAW_ENDPOINTS_CONFIG.media.video.preferredResolution;
-export const UCLAW_VIDEO_GENERATION_PREFERRED_SHORT_EDGE = UCLAW_ENDPOINTS_CONFIG.media.video.preferredShortEdge;
+export const UCLAW_VIDEO_PROVIDER_ID = UCLAW_ENDPOINTS_CONFIG.media.video.providerId;
+export const UCLAW_VIDEO_API_PROTOCOL = UCLAW_ENDPOINTS_CONFIG.media.video.apiProtocol;
+export const UCLAW_VIDEO_DEFAULT_MODEL = UCLAW_ENDPOINTS_CONFIG.media.video.defaultModel;
+export const UCLAW_VIDEO_DEFAULT_RESOLUTION = UCLAW_ENDPOINTS_CONFIG.media.video.defaultResolution;
+export const UCLAW_VIDEO_DEFAULT_DURATION_SECONDS = UCLAW_ENDPOINTS_CONFIG.media.video.defaultDurationSeconds;
+export const UCLAW_VIDEO_RESOLUTION_SIZES = UCLAW_ENDPOINTS_CONFIG.media.video.resolutionSizes;
+export const UCLAW_VIDEO_MODELS = UCLAW_ENDPOINTS_CONFIG.media.video.models;
 export const UCLAW_MEDIA_GENERATION_TEST_TIMEOUT_MS = UCLAW_ENDPOINTS_CONFIG.media.testTimeoutMs;
 export const UCLAW_MEDIA_GENERATION_CLIENT_TIMEOUT_BUFFER_MS = UCLAW_ENDPOINTS_CONFIG.media.clientTimeoutBufferMs;

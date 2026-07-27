@@ -48,6 +48,7 @@ const REQUIRED_FILES = [
   ]),
   'resources/openclaw-plugins/clawx-openai-image/index.mjs',
   'resources/openclaw-plugins/clawx-openai-image/node_modules/undici/package.json',
+  'resources/openclaw-plugins/uclaw-video/index.mjs',
   'resources/resources/updater/win32-x64/uclaw-portable-updater.exe',
   PACKAGED_IDENTITY_FILE,
   USB_IDENTITY_FILE,

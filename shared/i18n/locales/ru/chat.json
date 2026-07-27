@@ -299,6 +299,10 @@
         "pickAgent": "Выбрать агента",
         "pickModel": "Выбрать модель",
         "pickThinking": "Выбрать уровень рассуждения",
+        "settingsSummary": "Модель: {{model}}, уровень рассуждения: {{thinking}}",
+        "resetSettings": "Сбросить настройки",
+        "modelSetting": "Модель",
+        "thinkingSetting": "Уровень рассуждения",
         "thinkingInherit": "Наследовать ({{level}})",
         "thinkingSwitchFailed": "Не удалось изменить уровень рассуждения: {{error}}",
         "thinkingLevels": {

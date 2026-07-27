@@ -299,6 +299,10 @@
         "pickAgent": "选择 Agent",
         "pickModel": "选择模型",
         "pickThinking": "选择推理等级",
+        "settingsSummary": "模型：{{model}}，推理强度：{{thinking}}",
+        "resetSettings": "重置为默认设置",
+        "modelSetting": "模型",
+        "thinkingSetting": "推理强度",
         "thinkingInherit": "继承（{{level}}）",
         "thinkingSwitchFailed": "推理等级切换失败：{{error}}",
         "thinkingLevels": {

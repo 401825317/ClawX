@@ -85,6 +85,10 @@ async function createService(
     enqueue: ReturnType<typeof vi.fn>;
     discard: ReturnType<typeof vi.fn>;
   },
+  turnVideoPreferenceStore?: {
+    enqueue: ReturnType<typeof vi.fn>;
+    discard: ReturnType<typeof vi.fn>;
+  },
 ) {
   const send = vi.fn();
   const { AcpChatService } = await import('../../electron/services/acp-chat-service');
@@ -94,6 +98,7 @@ async function createService(
     connection as never,
     undefined,
     turnImagePreferenceStore as never,
+    turnVideoPreferenceStore as never,
   );
   return { service, connection, send, accessRegistry };
 }
@@ -303,6 +308,73 @@ describe('AcpChatService', () => {
     })).resolves.toEqual({ success: false, error: 'ACP unavailable' });
 
     expect(turnImagePreferenceStore.discard).toHaveBeenCalledWith('image-pref-2');
+  });
+
+  it('queues video composer options without changing the ACP prompt text', async () => {
+    const turnVideoPreferenceStore = {
+      enqueue: vi.fn().mockResolvedValue({ id: 'video-pref-1' }),
+      discard: vi.fn().mockResolvedValue(undefined),
+    };
+    const { service, connection } = await createService(
+      createConnection(),
+      createPassthroughAccessRegistry(),
+      undefined,
+      turnVideoPreferenceStore,
+    );
+
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    await expect(service.sendPrompt({
+      sessionKey: 'agent:pi:s1',
+      cwd: '/repo',
+      message: 'Create a six-second product video.',
+      videoOptions: {
+        model: 'grok-image-video',
+        resolution: '480P',
+        durationSeconds: 6,
+      },
+    })).resolves.toEqual({ success: true, generation: 1 });
+
+    expect(turnVideoPreferenceStore.enqueue).toHaveBeenCalledWith({
+      sessionKey: 'agent:pi:s1',
+      message: 'Create a six-second product video.',
+      videoOptions: {
+        model: 'grok-image-video',
+        resolution: '480P',
+        durationSeconds: 6,
+      },
+    });
+    expect(connection.prompt).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: [{ type: 'text', text: 'Create a six-second product video.' }],
+    }));
+  });
+
+  it('discards an unclaimed video preference when ACP rejects the prompt', async () => {
+    const connection = createConnection();
+    connection.prompt.mockRejectedValueOnce(new Error('ACP unavailable'));
+    const turnVideoPreferenceStore = {
+      enqueue: vi.fn().mockResolvedValue({ id: 'video-pref-2' }),
+      discard: vi.fn().mockResolvedValue(undefined),
+    };
+    const { service } = await createService(
+      connection,
+      createPassthroughAccessRegistry(),
+      undefined,
+      turnVideoPreferenceStore,
+    );
+
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    await expect(service.sendPrompt({
+      sessionKey: 'agent:pi:s1',
+      cwd: '/repo',
+      message: 'Create a video.',
+      videoOptions: {
+        model: 'grok-image-video',
+        resolution: '720P',
+        durationSeconds: 10,
+      },
+    })).resolves.toEqual({ success: false, error: 'ACP unavailable' });
+
+    expect(turnVideoPreferenceStore.discard).toHaveBeenCalledWith('video-pref-2');
   });
 
   it('rewrites fresh-session ACP updates to the ClawX session key for the renderer', async () => {

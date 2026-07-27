@@ -1,0 +1,49 @@
+{
+  "id": "uclaw-video",
+  "name": "UClaw Video",
+  "description": "OpenAI-compatible video generation provider managed by UClaw.",
+  "version": "0.1.0",
+  "entry": "index.mjs",
+  "enabledByDefault": false,
+  "contracts": {
+    "videoGenerationProviders": [
+      "uclaw-video"
+    ]
+  },
+  "videoGenerationProviderMetadata": {
+    "uclaw-video": {
+      "authSignals": [
+        {
+          "provider": "uclaw-video"
+        }
+      ]
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "defaultModel": { "type": "string" },
+      "defaultResolution": { "type": "string", "enum": ["480P", "720P"] },
+      "defaultDurationSeconds": { "type": "integer", "minimum": 1 },
+      "pollIntervalMs": { "type": "integer", "minimum": 1 },
+      "timeoutMs": { "type": "integer", "minimum": 1 },
+      "maxDownloadBytes": { "type": "integer", "minimum": 1 },
+      "resolutionSizes": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "480P": { "type": "string" },
+          "720P": { "type": "string" }
+        }
+      },
+      "models": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    }
+  }
+}

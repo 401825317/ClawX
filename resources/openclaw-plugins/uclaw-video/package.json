@@ -1,0 +1,16 @@
+{
+  "name": "uclaw-video-plugin",
+  "version": "0.1.0",
+  "description": "UClaw OpenAI-compatible video generation provider for OpenClaw",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "openclaw": {
+    "extensions": [
+      "./index.mjs"
+    ]
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  }
+}

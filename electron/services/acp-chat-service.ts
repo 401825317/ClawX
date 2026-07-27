@@ -34,6 +34,10 @@ import {
   acpTurnImagePreferenceStore,
   type AcpTurnImagePreferenceStore,
 } from './acp-turn-image-preference-store';
+import {
+  acpTurnVideoPreferenceStore,
+  type AcpTurnVideoPreferenceStore,
+} from './acp-turn-video-preference-store';
 import { expandPath } from '../utils/paths';
 
 type AcpConnection = Pick<ClientSideConnection, 'initialize' | 'newSession' | 'loadSession' | 'prompt' | 'cancel'>;
@@ -157,6 +161,7 @@ export class AcpChatService {
     injectedConnection?: AcpConnection,
     private readonly gateway?: GatewayPairingRpcClient,
     private readonly turnImagePreferenceStore: AcpTurnImagePreferenceStore = acpTurnImagePreferenceStore,
+    private readonly turnVideoPreferenceStore: AcpTurnVideoPreferenceStore = acpTurnVideoPreferenceStore,
   ) {
     this.connection = injectedConnection ?? null;
     this.client = {
@@ -378,6 +383,7 @@ export class AcpChatService {
     };
     this.livePrompts.set(payload.sessionKey, promptContext);
     let imagePreferenceId: string | undefined;
+    let videoPreferenceId: string | undefined;
     try {
       const promptCwd = payload.cwd === accessGrant.executionCwd
         ? payload.cwd
@@ -407,6 +413,18 @@ export class AcpChatService {
         });
         imagePreferenceId = preference?.id;
       }
+      if (payload.videoOptions && message) {
+        const preference = await this.turnVideoPreferenceStore.enqueue({
+          sessionKey: payload.sessionKey,
+          message,
+          videoOptions: payload.videoOptions,
+        }).catch((error) => {
+          // Composer preferences must never prevent a normal ACP prompt from running.
+          logger.warn(`[acp-chat] Could not queue video generation preferences: ${String(error)}`);
+          return null;
+        });
+        videoPreferenceId = preference?.id;
+      }
       if (this.historicalSessionKey === payload.sessionKey) {
         this.historicalSessionKey = null;
         this.historicalGeneration = null;
@@ -428,6 +446,11 @@ export class AcpChatService {
       if (imagePreferenceId) {
         await this.turnImagePreferenceStore.discard(imagePreferenceId).catch((discardError) => {
           logger.warn(`[acp-chat] Could not discard image generation preferences: ${String(discardError)}`);
+        });
+      }
+      if (videoPreferenceId) {
+        await this.turnVideoPreferenceStore.discard(videoPreferenceId).catch((discardError) => {
+          logger.warn(`[acp-chat] Could not discard video generation preferences: ${String(discardError)}`);
         });
       }
       logger.error(`[acp-chat] prompt failed: ${String(error)}`);

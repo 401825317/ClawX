@@ -30,6 +30,13 @@ export type AcpImageGenerationOptions = {
   quality: 'low' | 'medium' | 'high';
 };
 
+/** Per-turn video constraints selected in the composer. */
+export type AcpVideoGenerationOptions = {
+  model: 'grok-image-video' | 'grok-video-1.5';
+  resolution: '480P' | '720P';
+  durationSeconds: 6 | 10 | 15;
+};
+
 export type AcpChatPromptPayload = AcpSessionKeyPayload & {
   cwd: string;
   message?: string;
@@ -37,6 +44,8 @@ export type AcpChatPromptPayload = AcpSessionKeyPayload & {
   messageId?: string;
   /** Applied only if the model elects to call OpenClaw's image_generate tool. */
   imageOptions?: AcpImageGenerationOptions;
+  /** Applied only if the model elects to call OpenClaw's video_generate tool. */
+  videoOptions?: AcpVideoGenerationOptions;
 };
 
 export type AcpChatCancelPayload = AcpSessionKeyPayload;

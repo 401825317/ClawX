@@ -41,6 +41,7 @@ import {
   repairTrustedOfficialPluginInstallRecords,
 } from '../utils/plugin-install';
 import { CLAWX_OPENAI_IMAGE_PROVIDER_KEY } from '../utils/openclaw-image-relay-constants';
+import { UCLAW_VIDEO_PROVIDER_ID } from '../../shared/junfeiai-endpoints';
 import {
   isUclawManagedDistribution,
   UCLAW_AUTH_ACCOUNT_ID,
@@ -102,6 +103,7 @@ const CHANNEL_PLUGIN_MAP: Record<string, { dirName: string; npmName: string }> =
 
   'openclaw-weixin': { dirName: 'openclaw-weixin', npmName: '@tencent-weixin/openclaw-weixin' },
   [CLAWX_OPENAI_IMAGE_PROVIDER_KEY]: { dirName: CLAWX_OPENAI_IMAGE_PROVIDER_KEY, npmName: 'clawx-openai-image-plugin' },
+  [UCLAW_VIDEO_PROVIDER_ID]: { dirName: UCLAW_VIDEO_PROVIDER_ID, npmName: 'uclaw-video-plugin' },
 };
 
 /**
@@ -245,12 +247,40 @@ function resolveImageGenerationPrimary(config: unknown): string | null {
   return null;
 }
 
-function withConfiguredImageGenerationPlugins(configuredChannels: string[], rawConfig: unknown): string[] {
+function resolveVideoGenerationPrimary(config: unknown): string | null {
+  if (!config || typeof config !== 'object') return null;
+  const agents = (config as { agents?: unknown }).agents;
+  if (!agents || typeof agents !== 'object') return null;
+  const defaults = (agents as { defaults?: unknown }).defaults;
+  if (!defaults || typeof defaults !== 'object') return null;
+  const videoGenerationModel = (defaults as { videoGenerationModel?: unknown }).videoGenerationModel;
+  if (typeof videoGenerationModel === 'string') return videoGenerationModel.trim() || null;
+  if (videoGenerationModel && typeof videoGenerationModel === 'object') {
+    const primary = (videoGenerationModel as { primary?: unknown }).primary;
+    return typeof primary === 'string' && primary.trim() ? primary.trim() : null;
+  }
+  return null;
+}
+
+export function withConfiguredMediaGenerationPlugins(
+  configuredChannels: string[],
+  rawConfig: unknown,
+): string[] {
   const next = [...configuredChannels];
-  const primary = resolveImageGenerationPrimary(rawConfig);
-  const provider = primary?.includes('/') ? primary.slice(0, primary.indexOf('/')).trim() : primary;
-  if (provider === CLAWX_OPENAI_IMAGE_PROVIDER_KEY && !next.includes(CLAWX_OPENAI_IMAGE_PROVIDER_KEY)) {
+  const imagePrimary = resolveImageGenerationPrimary(rawConfig);
+  const imageProvider = imagePrimary?.includes('/')
+    ? imagePrimary.slice(0, imagePrimary.indexOf('/')).trim()
+    : imagePrimary;
+  if (imageProvider === CLAWX_OPENAI_IMAGE_PROVIDER_KEY && !next.includes(CLAWX_OPENAI_IMAGE_PROVIDER_KEY)) {
     next.push(CLAWX_OPENAI_IMAGE_PROVIDER_KEY);
+  }
+
+  const videoPrimary = resolveVideoGenerationPrimary(rawConfig);
+  const videoProvider = videoPrimary?.includes('/')
+    ? videoPrimary.slice(0, videoPrimary.indexOf('/')).trim()
+    : videoPrimary;
+  if (videoProvider === UCLAW_VIDEO_PROVIDER_ID && !next.includes(UCLAW_VIDEO_PROVIDER_ID)) {
+    next.push(UCLAW_VIDEO_PROVIDER_ID);
   }
   return next;
 }
@@ -269,6 +299,7 @@ function buildPluginSourceSignatures(configuredChannels: string[]): Record<strin
         sourceDir,
         manifest: pathSignature(join(sourceDir, 'openclaw.plugin.json')),
         packageJson: pathSignature(join(sourceDir, 'package.json')),
+        sourceDirectory: directoryChildrenSignature(sourceDir),
         installedMissingRuntimeDependencies: findMissingPluginRuntimeDependencies(targetDir),
       }
       : 'missing';
@@ -478,7 +509,7 @@ export async function syncGatewayConfigBeforeLaunch(
   try {
     configuredChannels = await measureAsync(timingsMs, 'configuredChannelsMs', async () => {
       const rawCfg = await readOpenClawConfig();
-      return withConfiguredImageGenerationPlugins(
+      return withConfiguredMediaGenerationPlugins(
         await listConfiguredChannelsFromConfig(rawCfg),
         rawCfg,
       );

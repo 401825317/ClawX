@@ -97,6 +97,103 @@ describe('managed client-config service', () => {
     });
   });
 
+  it('normalizes the managed video policy to OpenClaw resolutions and supported durations', async () => {
+    mocks.fetch.mockResolvedValueOnce(jsonResponse({
+      data: {
+        modelOptions: {
+          video: {
+            defaultModel: 'grok-image-video',
+            defaultResolution: '480P',
+            defaultDurationSeconds: 6,
+            models: [
+              {
+                id: 'grok-image-video',
+                label: 'Grok Video',
+                modes: ['text-to-video', 'image-to-video'],
+                resolutions: ['480P', '720P', '1080P'],
+                durations: [6, 10, 15, 30],
+                defaultResolution: '480P',
+                defaultDurationSeconds: 6,
+                enabled: true,
+              },
+              {
+                id: 'grok-video-1.5',
+                modes: ['image-to-video'],
+                resolutions: ['480P', '720P'],
+                durations: [6, 10, 15],
+                defaultResolution: '720P',
+                defaultDurationSeconds: 10,
+                requiresImage: true,
+                enabled: true,
+              },
+            ],
+          },
+        },
+      },
+    }));
+    const { getManagedClientVideoModelPolicy } = await loadService();
+
+    await expect(getManagedClientVideoModelPolicy({ refresh: true })).resolves.toEqual({
+      defaultModel: 'grok-image-video',
+      defaultResolution: '480P',
+      defaultDurationSeconds: 6,
+      models: [
+        {
+          id: 'grok-image-video',
+          label: 'Grok Video',
+          modes: ['text-to-video', 'image-to-video'],
+          resolutions: ['480P', '720P'],
+          durations: [6, 10, 15],
+          defaultResolution: '480P',
+          defaultDurationSeconds: 6,
+          requiresImage: false,
+        },
+        {
+          id: 'grok-video-1.5',
+          modes: ['image-to-video'],
+          resolutions: ['480P', '720P'],
+          durations: [6, 10, 15],
+          defaultResolution: '720P',
+          defaultDurationSeconds: 10,
+          requiresImage: true,
+        },
+      ],
+    });
+  });
+
+  it('accepts legacy video sizes but does not let legacy defaultSize override the 480P default', async () => {
+    mocks.fetch.mockResolvedValueOnce(jsonResponse({
+      data: {
+        modelOptions: {
+          video: {
+            defaultModel: 'grok-image-video',
+            defaultSize: '1280x720',
+            defaultDurationSeconds: 6,
+            models: [{
+              id: 'grok-image-video',
+              modes: ['text-to-video', 'image-to-video'],
+              sizes: ['854x480', '1280x720', '720x1280'],
+              durations: [6, 10, 15],
+              defaultSize: '1280x720',
+              defaultDurationSeconds: 6,
+            }],
+          },
+        },
+      },
+    }));
+    const { getManagedClientVideoModelPolicy } = await loadService();
+
+    await expect(getManagedClientVideoModelPolicy({ refresh: true })).resolves.toMatchObject({
+      defaultModel: 'grok-image-video',
+      defaultResolution: '480P',
+      models: [{
+        id: 'grok-image-video',
+        resolutions: ['480P', '720P'],
+        defaultResolution: '480P',
+      }],
+    });
+  });
+
   it('accepts code 200 when HTTP and success do not report a failure', async () => {
     mocks.fetch.mockResolvedValueOnce(jsonResponse({
       code: 200,

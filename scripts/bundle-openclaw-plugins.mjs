@@ -13,6 +13,7 @@
  *   - @openclaw/whatsapp -> build/openclaw-plugins/whatsapp
  *   - @tencent-weixin/openclaw-weixin -> build/openclaw-plugins/openclaw-weixin
  *   - clawx-openai-image (local) -> build/openclaw-plugins/clawx-openai-image
+ *   - uclaw-video (local) -> build/openclaw-plugins/uclaw-video
  *
  * The output plugin directory contains:
  *   - plugin source files (index.ts, openclaw.plugin.json, package.json, ...)

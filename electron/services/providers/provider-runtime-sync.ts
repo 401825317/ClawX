@@ -35,7 +35,10 @@ import {
   isOpenAiProviderIdentity,
   withProviderMutationLock,
 } from './provider-mutation-lock';
-import { getManagedClientTextModelPolicy } from '../managed-client-config-service';
+import {
+  getManagedClientTextModelPolicy,
+  getManagedClientVideoModelPolicy,
+} from '../managed-client-config-service';
 import { reconcileManagedProviderRuntimeForStartup } from '../managed-auth-service';
 
 /** OpenClaw Codex OAuth hooks only apply to the canonical `openai` provider id. */
@@ -234,13 +237,19 @@ export async function syncAllProviderAuthToRuntime(
   } = {},
 ): Promise<void> {
   const managed = isUclawManagedDistribution();
-  let managedPolicy: Awaited<ReturnType<typeof getManagedClientTextModelPolicy>> | null = null;
+  let managedPolicies: {
+    text: Awaited<ReturnType<typeof getManagedClientTextModelPolicy>>;
+    video: Awaited<ReturnType<typeof getManagedClientVideoModelPolicy>>;
+  } | null = null;
   if (managed && options.reconcileManagedRuntime === true) {
     // Never perform remote client-config I/O while holding the Provider mutation lock.
     await assertManagedRuntimeStartAllowed();
-    managedPolicy = await getManagedClientTextModelPolicy({
-      refresh: options.refreshManagedPolicy === true,
-    });
+    const request = { refresh: options.refreshManagedPolicy === true };
+    const [text, video] = await Promise.all([
+      getManagedClientTextModelPolicy(request),
+      getManagedClientVideoModelPolicy(request),
+    ]);
+    managedPolicies = { text, video };
   }
 
   await withProviderMutationLock(async () => {
@@ -248,8 +257,8 @@ export async function syncAllProviderAuthToRuntime(
     // rewrite the exact runtime generations preserved for managed recovery.
     await assertManagedRuntimeStartAllowed();
     await migrateAllAgentAuthProfilesToSqlite();
-    if (managedPolicy) {
-      await reconcileManagedProviderRuntimeForStartup(managedPolicy);
+    if (managedPolicies) {
+      await reconcileManagedProviderRuntimeForStartup(managedPolicies.text, managedPolicies.video);
     }
     const accounts = await listProviderAccounts();
     for (const account of accounts) {

@@ -40,9 +40,37 @@ const { agentsState, chatState, gatewayState, providersState, managedClientConfi
         { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
       ],
     },
+    videoModelPolicy: {
+      defaultModel: 'grok-image-video',
+      defaultResolution: '480P',
+      defaultDurationSeconds: 6,
+      models: [
+        {
+          id: 'grok-image-video',
+          label: 'Grok Video',
+          modes: ['text-to-video', 'image-to-video'],
+          resolutions: ['480P', '720P'],
+          durations: [6, 10, 15],
+          defaultResolution: '480P',
+          defaultDurationSeconds: 6,
+          requiresImage: false,
+        },
+        {
+          id: 'grok-video-1.5',
+          label: 'Grok Video 1.5',
+          modes: ['image-to-video'],
+          resolutions: ['480P', '720P'],
+          durations: [6, 10, 15],
+          defaultResolution: '480P',
+          defaultDurationSeconds: 6,
+          requiresImage: true,
+        },
+      ],
+    },
     initialized: true,
     loading: false,
     loadTextModels: vi.fn(),
+    loadVideoModels: vi.fn(),
   },
   artifactPanelMocks: {
     openPreview: vi.fn(),
@@ -126,6 +154,14 @@ function translate(key: string, vars?: Record<string, unknown>): string {
       return 'Choose agent';
     case 'composer.pickThinking':
       return 'Choose reasoning level';
+    case 'composer.settingsSummary':
+      return `Model: ${String(vars?.model ?? '')}, reasoning: ${String(vars?.thinking ?? '')}`;
+    case 'composer.resetSettings':
+      return 'Reset to defaults';
+    case 'composer.modelSetting':
+      return 'Model';
+    case 'composer.thinkingSetting':
+      return 'Reasoning level';
     case 'composer.thinkingInherit':
       return `Inherit (${String(vars?.level ?? '')})`;
     case 'composer.thinkingSwitchFailed':
@@ -144,6 +180,16 @@ function translate(key: string, vars?: Record<string, unknown>): string {
       return 'Extra high';
     case 'composer.imageMode':
       return 'Image mode';
+    case 'composer.videoMode':
+      return 'Video mode';
+    case 'composer.videoModelLabel':
+      return 'Video model';
+    case 'composer.videoResolutionLabel':
+      return 'Video resolution';
+    case 'composer.videoDurationLabel':
+      return 'Video duration';
+    case 'composer.videoRequiresImage':
+      return 'Requires one reference image';
     case 'composer.imageSizeLabel':
       return 'Image size';
     case 'composer.imageAspectTall':
@@ -296,6 +342,23 @@ function configureAgentAndModelPickers() {
   vi.mocked(hostApiFetchMock).mockResolvedValue({ success: true, skills: [] });
 }
 
+function openSettingsPicker() {
+  fireEvent.pointerDown(screen.getByTestId('chat-settings-picker-button'), {
+    button: 0,
+    ctrlKey: false,
+  });
+}
+
+function openModelSettingsPicker() {
+  openSettingsPicker();
+  fireEvent.click(screen.getByTestId('chat-settings-model-row'));
+}
+
+function openThinkingSettingsPicker() {
+  openSettingsPicker();
+  fireEvent.click(screen.getByTestId('chat-settings-thinking-row'));
+}
+
 describe('ChatInput agent targeting', () => {
   beforeEach(() => {
     agentsState.agents = [];
@@ -330,6 +393,8 @@ describe('ChatInput agent targeting', () => {
     managedClientConfigState.initialized = true;
     managedClientConfigState.loadTextModels.mockReset();
     managedClientConfigState.loadTextModels.mockResolvedValue(managedClientConfigState.textModelPolicy);
+    managedClientConfigState.loadVideoModels.mockReset();
+    managedClientConfigState.loadVideoModels.mockResolvedValue(managedClientConfigState.videoModelPolicy);
     vi.mocked(hostApiFetchMock).mockReset();
     vi.mocked(hostApiDialogOpenMock).mockReset();
     toastErrorMock.mockReset();
@@ -426,29 +491,103 @@ describe('ChatInput agent targeting', () => {
     fireEvent.click(screen.getByTestId('chat-composer-mode-image'));
 
     const leadingActions = screen.getByTestId('chat-composer-leading-actions');
-    const modelPicker = screen.getByTestId('chat-model-picker-button');
+    const settingsPicker = screen.getByTestId('chat-settings-picker-button');
     const imageMode = screen.getByTestId('chat-composer-mode-image');
     const imageOptions = screen.getByTestId('chat-image-options');
 
-    expect(leadingActions).toContainElement(modelPicker);
+    expect(leadingActions).toContainElement(settingsPicker);
     expect(leadingActions).toContainElement(imageMode);
     expect(leadingActions).toContainElement(imageOptions);
-    expect(modelPicker.compareDocumentPosition(imageMode) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(settingsPicker.compareDocumentPosition(imageMode) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(imageMode.compareDocumentPosition(imageOptions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it('places the thinking selector between the model selector and image mode', () => {
+  it('keeps image and video modes mutually exclusive and sends one-turn video options', async () => {
+    const onSend = vi.fn();
+    renderChatInput(onSend);
+
+    fireEvent.click(screen.getByTestId('chat-composer-mode-image'));
+    expect(screen.getByTestId('chat-image-options')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('chat-composer-mode-video'));
+    expect(screen.queryByTestId('chat-image-options')).not.toBeInTheDocument();
+    expect(screen.getByTestId('chat-video-options')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-video-model')).toHaveValue('grok-image-video');
+    expect(screen.getByTestId('chat-video-resolution')).toHaveValue('480P');
+    expect(screen.getByTestId('chat-video-duration')).toHaveValue('6');
+
+    const imageOnlyModel = screen.getByRole('option', { name: 'Grok Video 1.5' });
+    expect(imageOnlyModel).toBeDisabled();
+
+    fireEvent.change(screen.getByTestId('chat-video-resolution'), { target: { value: '720P' } });
+    fireEvent.change(screen.getByTestId('chat-video-duration'), { target: { value: '10' } });
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Create a product video.' } });
+    fireEvent.click(screen.getByTestId('chat-composer-send'));
+
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith(
+        'Create a product video.',
+        undefined,
+        null,
+        undefined,
+        { model: 'grok-image-video', resolution: '720P', durationSeconds: 10 },
+      );
+    });
+  });
+
+  it('combines model and reasoning into one selector before image mode', () => {
     configureAgentAndModelPickers();
     renderChatInput();
 
     const leadingActions = screen.getByTestId('chat-composer-leading-actions');
-    const modelPicker = screen.getByTestId('chat-model-picker-button');
-    const thinkingPicker = screen.getByTestId('chat-thinking-picker-button');
+    const settingsPicker = screen.getByTestId('chat-settings-picker-button');
     const imageMode = screen.getByTestId('chat-composer-mode-image');
 
-    expect(leadingActions).toContainElement(thinkingPicker);
-    expect(modelPicker.compareDocumentPosition(thinkingPicker) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(thinkingPicker.compareDocumentPosition(imageMode) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(leadingActions).toContainElement(settingsPicker);
+    expect(settingsPicker).toHaveTextContent('Smart');
+    expect(settingsPicker).toHaveTextContent('Medium');
+    expect(settingsPicker.compareDocumentPosition(imageMode) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('opens model or reasoning choices when their settings row is hovered', async () => {
+    configureAgentAndModelPickers();
+    renderChatInput();
+
+    openSettingsPicker();
+    expect(screen.getByTestId('chat-settings-picker-menu')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-settings-model-row')).toHaveTextContent('Model');
+    expect(screen.getByTestId('chat-settings-model-row')).not.toHaveTextContent('Smart');
+    expect(screen.getByTestId('chat-settings-thinking-row')).toHaveTextContent('Reasoning level');
+    expect(screen.getByTestId('chat-settings-thinking-row')).not.toHaveTextContent('Medium');
+
+    fireEvent.pointerMove(screen.getByTestId('chat-settings-model-row'), { pointerType: 'mouse' });
+    expect(await screen.findByTestId('chat-model-picker-menu')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-settings-picker-menu')).toBeInTheDocument();
+
+    fireEvent.pointerMove(screen.getByTestId('chat-settings-thinking-row'), { pointerType: 'mouse' });
+    expect(await screen.findByTestId('chat-thinking-picker-menu')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-model-picker-menu')).not.toBeInTheDocument();
+  });
+
+  it('resets the current session model and reasoning overrides together', async () => {
+    configureAgentAndModelPickers();
+    chatState.sessions = [{
+      key: chatState.currentSessionKey,
+      model: 'openai/deepseek-v4-pro',
+      thinkingLevel: 'high',
+      thinkingDefault: 'medium',
+      thinkingLevels: ['low', 'medium', 'high'].map((id) => ({ id })),
+    }];
+    renderChatInput();
+
+    openSettingsPicker();
+    fireEvent.click(screen.getByTestId('chat-settings-reset'));
+
+    await waitFor(() => {
+      expect(chatState.updateSessionModel).toHaveBeenCalledWith('agent:main:main', null);
+      expect(chatState.updateSessionThinking).toHaveBeenCalledWith('agent:main:main', null);
+    });
+    expect(screen.queryByTestId('chat-settings-picker-menu')).not.toBeInTheDocument();
   });
 
   it('persists a thinking-level selection only for the current session', async () => {
@@ -462,7 +601,7 @@ describe('ChatInput agent targeting', () => {
     }];
 
     renderChatInput();
-    fireEvent.click(screen.getByTestId('chat-thinking-picker-button'));
+    openThinkingSettingsPicker();
     fireEvent.click(screen.getByTestId('chat-thinking-option-high'));
 
     await waitFor(() => {
@@ -502,7 +641,7 @@ describe('ChatInput agent targeting', () => {
     configureAgentAndModelPickers();
 
     renderChatInput();
-    fireEvent.click(screen.getByTestId('chat-model-picker-button'));
+    openModelSettingsPicker();
 
     expect(screen.getByTestId('chat-model-picker-menu')).toHaveTextContent('Smart');
     expect(screen.getByTestId('chat-model-picker-menu')).toHaveTextContent('DeepSeek V4 Pro');
@@ -514,8 +653,8 @@ describe('ChatInput agent targeting', () => {
     configureAgentAndModelPickers();
 
     renderChatInput();
-    fireEvent.click(screen.getByTestId('chat-model-picker-button'));
-    fireEvent.click(screen.getByRole('button', { name: 'DeepSeek V4 Pro' }));
+    openModelSettingsPicker();
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'DeepSeek V4 Pro' }));
 
     await waitFor(() => {
       expect(chatState.updateSessionModel).toHaveBeenCalledWith(
@@ -523,7 +662,7 @@ describe('ChatInput agent targeting', () => {
         'openai/deepseek-v4-pro',
       );
     });
-    expect(screen.getByTestId('chat-model-picker-button')).toHaveTextContent('DeepSeek V4 Pro');
+    expect(screen.getByTestId('chat-settings-picker-button')).toHaveTextContent('DeepSeek V4 Pro');
   });
 
   it('blocks sending until the selected model is persisted', async () => {
@@ -543,8 +682,8 @@ describe('ChatInput agent targeting', () => {
     fireEvent.change(screen.getByTestId('chat-composer-input'), {
       target: { value: 'Use the newly selected model' },
     });
-    fireEvent.click(screen.getByTestId('chat-model-picker-button'));
-    fireEvent.click(screen.getByRole('button', { name: 'DeepSeek V4 Pro' }));
+    openModelSettingsPicker();
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'DeepSeek V4 Pro' }));
 
     await waitFor(() => {
       expect(chatState.updateSessionModel).toHaveBeenCalledWith(
@@ -590,8 +729,8 @@ describe('ChatInput agent targeting', () => {
     const view = renderChatInput(onSend);
     const input = screen.getByTestId('chat-composer-input');
     fireEvent.change(input, { target: { value: 'Keep this draft in the original session' } });
-    fireEvent.click(screen.getByTestId('chat-model-picker-button'));
-    fireEvent.click(screen.getByRole('button', { name: 'DeepSeek V4 Pro' }));
+    openModelSettingsPicker();
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'DeepSeek V4 Pro' }));
     fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
 
     chatState.currentSessionKey = 'agent:main:other';
@@ -708,12 +847,12 @@ describe('ChatInput agent targeting', () => {
       .mockReturnValueOnce(finalUpdate.promise);
 
     renderChatInput();
-    fireEvent.click(screen.getByTestId('chat-model-picker-button'));
-    fireEvent.click(screen.getByRole('button', { name: 'DeepSeek V4 Pro' }));
-    fireEvent.click(screen.getByTestId('chat-model-picker-button'));
-    fireEvent.click(screen.getByRole('button', { name: 'GLM 5' }));
+    openModelSettingsPicker();
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'DeepSeek V4 Pro' }));
+    openModelSettingsPicker();
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'GLM 5' }));
 
-    expect(screen.getByTestId('chat-model-picker-button')).toHaveTextContent('GLM 5');
+    expect(screen.getByTestId('chat-settings-picker-button')).toHaveTextContent('GLM 5');
 
     await act(async () => {
       finalUpdate.resolve();
@@ -725,7 +864,7 @@ describe('ChatInput agent targeting', () => {
     await waitFor(() => {
       expect(toastErrorMock).toHaveBeenCalled();
     });
-    expect(screen.getByTestId('chat-model-picker-button')).toHaveTextContent('GLM 5');
+    expect(screen.getByTestId('chat-settings-picker-button')).toHaveTextContent('GLM 5');
   });
 
   it('clears the current session override when selecting the managed default model', async () => {
@@ -736,8 +875,8 @@ describe('ChatInput agent targeting', () => {
     }];
 
     renderChatInput();
-    fireEvent.click(screen.getByTestId('chat-model-picker-button'));
-    fireEvent.click(screen.getByRole('button', { name: 'Smart' }));
+    openModelSettingsPicker();
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Smart' }));
 
     await waitFor(() => {
       expect(chatState.updateSessionModel).toHaveBeenCalledWith('agent:main:main', null);
@@ -1145,7 +1284,7 @@ describe('ChatInput agent targeting', () => {
 
     renderChatInput();
 
-    fireEvent.click(screen.getByTestId('chat-model-picker-button'));
+    openModelSettingsPicker();
     expect(screen.getByTestId('chat-model-picker-menu')).toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId('chat-composer-agent'));
@@ -1159,7 +1298,7 @@ describe('ChatInput agent targeting', () => {
 
     renderChatInput();
 
-    fireEvent.click(screen.getByTestId('chat-model-picker-button'));
+    openModelSettingsPicker();
     expect(screen.getByTestId('chat-model-picker-menu')).toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId('chat-composer-skill'));
@@ -1447,7 +1586,7 @@ describe('ChatInput agent targeting', () => {
     const input = screen.getByTestId('chat-composer-input');
     expect(input).not.toBeDisabled();
     expect(screen.getByTestId('chat-composer-skill')).not.toBeDisabled();
-    expect(screen.getByTestId('chat-model-picker-button')).not.toBeDisabled();
+    expect(screen.getByTestId('chat-settings-picker-button')).not.toBeDisabled();
 
     fireEvent.change(input, { target: { value: 'Send through ACP' } });
     fireEvent.click(screen.getByTitle('Send'));
