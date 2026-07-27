@@ -7,6 +7,7 @@ export type UclawExecAsk = 'off' | 'on-miss' | 'always';
 export type UclawCompactionMode = 'default' | 'safeguard';
 export type UclawMarketplaceProvider = 'skillhub' | 'clawhub';
 export type UclawVideoMode = 'text-to-video' | 'image-to-video';
+export type UclawVideoAspectRatio = '2:3' | '3:2' | '1:1' | '9:16' | '16:9';
 export type UclawVideoResolution = '480P' | '720P';
 
 export type UclawVideoModelConfig = {
@@ -14,8 +15,10 @@ export type UclawVideoModelConfig = {
   label: string;
   description: string;
   modes: UclawVideoMode[];
+  aspectRatios: UclawVideoAspectRatio[];
   resolutions: UclawVideoResolution[];
   durations: number[];
+  defaultAspectRatio: UclawVideoAspectRatio;
   defaultResolution: UclawVideoResolution;
   defaultDurationSeconds: number;
   requiresImage: boolean;
@@ -113,6 +116,7 @@ export type UclawEndpointsConfig = {
       pollIntervalMs: number;
       maxDownloadBytes: number;
       defaultModel: string;
+      defaultAspectRatio: UclawVideoAspectRatio;
       defaultResolution: UclawVideoResolution;
       defaultDurationSeconds: number;
       resolutionSizes: Record<UclawVideoResolution, string>;
@@ -244,6 +248,10 @@ function readVideoResolution(value: unknown, key: string): UclawVideoResolution 
   return readEnum(value, key, ['480P', '720P']);
 }
 
+function readVideoAspectRatio(value: unknown, key: string): UclawVideoAspectRatio {
+  return readEnum(value, key, ['2:3', '3:2', '1:1', '9:16', '16:9']);
+}
+
 function readVideoModeArray(value: unknown, key: string): UclawVideoMode[] {
   if (!Array.isArray(value) || value.length === 0) {
     throw new Error(`${key} in shared/junfeiai-endpoints.json must be a non-empty array`);
@@ -258,6 +266,13 @@ function readVideoResolutionArray(value: unknown, key: string): UclawVideoResolu
     throw new Error(`${key} in shared/junfeiai-endpoints.json must be a non-empty array`);
   }
   return [...new Set(value.map((entry, index) => readVideoResolution(entry, `${key}[${index}]`)))];
+}
+
+function readVideoAspectRatioArray(value: unknown, key: string): UclawVideoAspectRatio[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${key} in shared/junfeiai-endpoints.json must be a non-empty array`);
+  }
+  return [...new Set(value.map((entry, index) => readVideoAspectRatio(entry, `${key}[${index}]`)))];
 }
 
 function readPositiveIntegerArray(value: unknown, key: string): number[] {
@@ -281,14 +296,23 @@ function readVideoModels(value: unknown, key: string): UclawVideoModelConfig[] {
     }
     seen.add(id);
     const modes = readVideoModeArray(model.modes, `${itemKey}.modes`);
+    const aspectRatios = readVideoAspectRatioArray(model.aspectRatios, `${itemKey}.aspectRatios`);
     const resolutions = readVideoResolutionArray(model.resolutions, `${itemKey}.resolutions`);
     const durations = readPositiveIntegerArray(model.durations, `${itemKey}.durations`);
+    const defaultAspectRatio = readVideoAspectRatio(
+      model.defaultAspectRatio,
+      `${itemKey}.defaultAspectRatio`,
+    );
     const defaultResolution = readVideoResolution(model.defaultResolution, `${itemKey}.defaultResolution`);
     const defaultDurationSeconds = readPositiveInteger(
       model.defaultDurationSeconds,
       `${itemKey}.defaultDurationSeconds`,
     );
-    if (!resolutions.includes(defaultResolution) || !durations.includes(defaultDurationSeconds)) {
+    if (
+      !aspectRatios.includes(defaultAspectRatio)
+      || !resolutions.includes(defaultResolution)
+      || !durations.includes(defaultDurationSeconds)
+    ) {
       throw new Error(`${itemKey} in shared/junfeiai-endpoints.json has unsupported defaults`);
     }
     return {
@@ -296,8 +320,10 @@ function readVideoModels(value: unknown, key: string): UclawVideoModelConfig[] {
       label: readNonEmptyString(model.label, `${itemKey}.label`),
       description: readNonEmptyString(model.description, `${itemKey}.description`),
       modes,
+      aspectRatios,
       resolutions,
       durations,
+      defaultAspectRatio,
       defaultResolution,
       defaultDurationSeconds,
       requiresImage: readBoolean(model.requiresImage, `${itemKey}.requiresImage`),
@@ -335,6 +361,10 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
   const videoResolutionSizes = readRecord(video.resolutionSizes, 'media.video.resolutionSizes');
   const videoModels = readVideoModels(video.models, 'media.video.models');
   const videoDefaultModel = readNonEmptyString(video.defaultModel, 'media.video.defaultModel');
+  const videoDefaultAspectRatio = readVideoAspectRatio(
+    video.defaultAspectRatio,
+    'media.video.defaultAspectRatio',
+  );
   const videoDefaultResolution = readVideoResolution(
     video.defaultResolution,
     'media.video.defaultResolution',
@@ -346,6 +376,7 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
   const defaultVideoModel = videoModels.find((model) => model.id === videoDefaultModel);
   if (
     !defaultVideoModel
+    || !defaultVideoModel.aspectRatios.includes(videoDefaultAspectRatio)
     || !defaultVideoModel.resolutions.includes(videoDefaultResolution)
     || !defaultVideoModel.durations.includes(videoDefaultDurationSeconds)
   ) {
@@ -533,6 +564,7 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
         pollIntervalMs: readPositiveInteger(video.pollIntervalMs, 'media.video.pollIntervalMs'),
         maxDownloadBytes: readPositiveInteger(video.maxDownloadBytes, 'media.video.maxDownloadBytes'),
         defaultModel: videoDefaultModel,
+        defaultAspectRatio: videoDefaultAspectRatio,
         defaultResolution: videoDefaultResolution,
         defaultDurationSeconds: videoDefaultDurationSeconds,
         resolutionSizes: {
@@ -607,6 +639,7 @@ export const UCLAW_VIDEO_GENERATION_POLL_INTERVAL_MS = UCLAW_ENDPOINTS_CONFIG.me
 export const UCLAW_VIDEO_PROVIDER_ID = UCLAW_ENDPOINTS_CONFIG.media.video.providerId;
 export const UCLAW_VIDEO_API_PROTOCOL = UCLAW_ENDPOINTS_CONFIG.media.video.apiProtocol;
 export const UCLAW_VIDEO_DEFAULT_MODEL = UCLAW_ENDPOINTS_CONFIG.media.video.defaultModel;
+export const UCLAW_VIDEO_DEFAULT_ASPECT_RATIO = UCLAW_ENDPOINTS_CONFIG.media.video.defaultAspectRatio;
 export const UCLAW_VIDEO_DEFAULT_RESOLUTION = UCLAW_ENDPOINTS_CONFIG.media.video.defaultResolution;
 export const UCLAW_VIDEO_DEFAULT_DURATION_SECONDS = UCLAW_ENDPOINTS_CONFIG.media.video.defaultDurationSeconds;
 export const UCLAW_VIDEO_RESOLUTION_SIZES = UCLAW_ENDPOINTS_CONFIG.media.video.resolutionSizes;

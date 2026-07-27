@@ -23,6 +23,7 @@ describe('ACP turn video preference store', () => {
       message,
       videoOptions: {
         model: 'grok-image-video',
+        aspectRatio: '16:9',
         resolution: '480P',
         durationSeconds: 6,
       },
@@ -40,6 +41,7 @@ describe('ACP turn video preference store', () => {
       messageDigest: createHash('sha256').update(message, 'utf8').digest('hex'),
       videoOptions: {
         model: 'grok-image-video',
+        aspectRatio: '16:9',
         resolution: '480P',
         durationSeconds: 6,
       },

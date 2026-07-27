@@ -429,6 +429,7 @@ function removeManagedRuntimeModelDefaults(
 function managedVideoPluginConfig(policy: ManagedClientVideoModelPolicy): JsonRecord {
   return {
     defaultModel: policy.defaultModel,
+    defaultAspectRatio: policy.defaultAspectRatio,
     defaultResolution: policy.defaultResolution,
     defaultDurationSeconds: policy.defaultDurationSeconds,
     pollIntervalMs: UCLAW_VIDEO_GENERATION_POLL_INTERVAL_MS,
@@ -438,6 +439,7 @@ function managedVideoPluginConfig(policy: ManagedClientVideoModelPolicy): JsonRe
     models: policy.models.map((model) => ({
       ...model,
       modes: [...model.modes],
+      aspectRatios: [...model.aspectRatios],
       resolutions: [...model.resolutions],
       durations: [...model.durations],
     })),

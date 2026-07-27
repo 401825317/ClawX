@@ -33,6 +33,7 @@ export type AcpImageGenerationOptions = {
 /** Per-turn video constraints selected in the composer. */
 export type AcpVideoGenerationOptions = {
   model: 'grok-image-video' | 'grok-video-1.5';
+  aspectRatio: '2:3' | '3:2' | '1:1' | '9:16' | '16:9';
   resolution: '480P' | '720P';
   durationSeconds: 6 | 10 | 15;
 };

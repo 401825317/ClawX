@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 
 const VIDEO_PLUGIN_CONFIG = {
   defaultModel: 'grok-image-video',
+  defaultAspectRatio: '16:9',
   defaultResolution: '480P',
   defaultDurationSeconds: 6,
   pollIntervalMs: 1,
@@ -17,8 +18,10 @@ const VIDEO_PLUGIN_CONFIG = {
     {
       id: 'grok-image-video',
       modes: ['text-to-video', 'image-to-video'],
+      aspectRatios: ['2:3', '3:2', '1:1', '9:16', '16:9'],
       resolutions: ['480P', '720P'],
       durations: [6, 10, 15],
+      defaultAspectRatio: '16:9',
       defaultResolution: '480P',
       defaultDurationSeconds: 6,
       requiresImage: false,
@@ -26,8 +29,10 @@ const VIDEO_PLUGIN_CONFIG = {
     {
       id: 'grok-video-1.5',
       modes: ['image-to-video'],
+      aspectRatios: ['2:3', '3:2', '1:1', '9:16', '16:9'],
       resolutions: ['480P', '720P'],
       durations: [6, 10, 15],
+      defaultAspectRatio: '16:9',
       defaultResolution: '480P',
       defaultDurationSeconds: 6,
       requiresImage: true,
@@ -113,6 +118,7 @@ describe('UClaw video plugin', () => {
         provider: 'uclaw-video',
         model: 'grok-image-video',
         prompt: 'A blue cup rotating on a white table.',
+        aspectRatio: '9:16',
         resolution: '480P',
         durationSeconds: 6,
         timeoutMs: 10_000,
@@ -122,6 +128,16 @@ describe('UClaw video plugin', () => {
       });
 
       expect(provider?.models).toEqual(['grok-image-video', 'grok-video-1.5']);
+      expect(provider?.capabilities).toMatchObject({
+        generate: {
+          aspectRatios: ['2:3', '3:2', '1:1', '9:16', '16:9'],
+          resolutions: ['480P', '720P'],
+          sizes: [
+            '480x720', '720x480', '480x480', '480x854', '854x480',
+            '720x1080', '1080x720', '720x720', '720x1280', '1280x720',
+          ],
+        },
+      });
       expect(requests).toEqual([
         {
           method: 'POST',
@@ -131,7 +147,9 @@ describe('UClaw video plugin', () => {
             model: 'grok-image-video',
             prompt: 'A blue cup rotating on a white table.',
             seconds: '6',
-            size: '854x480',
+            size: '480x854',
+            aspect_ratio: '9:16',
+            resolution: '480p',
           },
         },
         {
@@ -163,6 +181,7 @@ describe('UClaw video plugin', () => {
       provider: 'uclaw-video',
       model: 'grok-video-1.5',
       prompt: 'Animate this image.',
+      aspectRatio: '16:9',
       resolution: '480P',
       durationSeconds: 6,
       cfg: {},
@@ -185,6 +204,7 @@ describe('UClaw video plugin', () => {
         messageDigest: createHash('sha256').update(prompt, 'utf8').digest('hex'),
         videoOptions: {
           model: 'grok-video-1.5',
+          aspectRatio: '9:16',
           resolution: '720P',
           durationSeconds: 10,
         },
@@ -219,11 +239,12 @@ describe('UClaw video plugin', () => {
 
       expect(await hooks.get('before_tool_call')?.({
         toolName: 'video_generate',
-        params: { prompt, model: 'model-selected-by-agent', resolution: '480P', durationSeconds: 6 },
+        params: { prompt, model: 'model-selected-by-agent', aspectRatio: '16:9', resolution: '480P', durationSeconds: 6 },
       }, context)).toEqual({
         params: {
           prompt,
           model: 'uclaw-video/grok-video-1.5',
+          aspectRatio: '9:16',
           resolution: '720P',
           durationSeconds: 10,
         },

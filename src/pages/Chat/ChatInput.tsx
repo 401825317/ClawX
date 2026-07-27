@@ -32,7 +32,7 @@ import { rendererExtensionRegistry } from '@/extensions/registry';
 import { collectDroppedFiles } from '@/lib/collect-dropped-files';
 import { fetchQuickAccessSkills } from '@/lib/quick-access-skills';
 import { DEFAULT_WORKSPACE_CWD, isDefaultWorkspacePath, normalizeWorkspacePath } from '@/lib/workspace-context';
-import type { AcpImageGenerationOptions } from '@shared/acp-chat/types';
+import type { AcpImageGenerationOptions, AcpVideoGenerationOptions } from '@shared/acp-chat/types';
 import { UCLAW_DEFAULT_THINKING_LEVEL } from '@shared/junfeiai-endpoints';
 
 // ── Types ────────────────────────────────────────────────────────
@@ -59,6 +59,7 @@ interface ChatInputProps {
     attachments?: FileAttachment[],
     targetAgentId?: string | null,
     imageOptions?: AcpImageGenerationOptions,
+    videoOptions?: AcpVideoGenerationOptions,
   ) => void;
   onStop?: () => void;
   disabled?: boolean;
@@ -78,6 +79,19 @@ const DEFAULT_IMAGE_OPTIONS: AcpImageGenerationOptions = {
   size: '1024x1024',
   quality: 'medium',
 };
+const DEFAULT_VIDEO_OPTIONS: AcpVideoGenerationOptions = {
+  model: 'grok-image-video',
+  aspectRatio: '16:9',
+  resolution: '480P',
+  durationSeconds: 6,
+};
+const ASPECT_RATIO_OPTIONS = [
+  { ratio: '2:3', labelKey: 'composer.imageAspectTall', previewClassName: 'h-5 w-[13px]' },
+  { ratio: '3:2', labelKey: 'composer.imageAspectWide', previewClassName: 'h-[13px] w-5' },
+  { ratio: '1:1', labelKey: 'composer.imageAspectSquare', previewClassName: 'h-4 w-4' },
+  { ratio: '9:16', labelKey: 'composer.imageAspectVertical', previewClassName: 'h-5 w-[11px]' },
+  { ratio: '16:9', labelKey: 'composer.imageAspectWidescreen', previewClassName: 'h-[11px] w-5' },
+] as const;
 const IMAGE_ASPECT_OPTIONS: ReadonlyArray<{
   ratio: string;
   size: AcpImageGenerationOptions['size'];
@@ -85,15 +99,19 @@ const IMAGE_ASPECT_OPTIONS: ReadonlyArray<{
   previewClassName: string;
   testId: string;
 }> = [
-  { ratio: '2:3', size: '1024x1536', labelKey: 'composer.imageAspectTall', previewClassName: 'h-6 w-4', testId: 'chat-image-aspect-2-3' },
-  { ratio: '3:2', size: '1536x1024', labelKey: 'composer.imageAspectWide', previewClassName: 'h-4 w-6', testId: 'chat-image-aspect-3-2' },
-  { ratio: '1:1', size: '1024x1024', labelKey: 'composer.imageAspectSquare', previewClassName: 'h-5 w-5', testId: 'chat-image-aspect-1-1' },
-  { ratio: '9:16', size: '2160x3840', labelKey: 'composer.imageAspectVertical', previewClassName: 'h-6 w-3.5', testId: 'chat-image-aspect-9-16' },
-  { ratio: '16:9', size: '3840x2160', labelKey: 'composer.imageAspectWidescreen', previewClassName: 'h-3.5 w-6', testId: 'chat-image-aspect-16-9' },
+  { ...ASPECT_RATIO_OPTIONS[0], size: '1024x1536', testId: 'chat-image-aspect-2-3' },
+  { ...ASPECT_RATIO_OPTIONS[1], size: '1536x1024', testId: 'chat-image-aspect-3-2' },
+  { ...ASPECT_RATIO_OPTIONS[2], size: '1024x1024', testId: 'chat-image-aspect-1-1' },
+  { ...ASPECT_RATIO_OPTIONS[3], size: '2160x3840', testId: 'chat-image-aspect-9-16' },
+  { ...ASPECT_RATIO_OPTIONS[4], size: '3840x2160', testId: 'chat-image-aspect-16-9' },
 ];
 const IMAGE_QUALITY_OPTIONS: AcpImageGenerationOptions['quality'][] = ['low', 'medium', 'high'];
 const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
 const INHERIT_THINKING_VALUE = '__inherit__';
+
+function isVideoDurationSeconds(value: number): value is AcpVideoGenerationOptions['durationSeconds'] {
+  return value === 6 || value === 10 || value === 15;
+}
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -260,6 +278,7 @@ export function ChatInput({
   const [skillPickerOpen, setSkillPickerOpen] = useState(false);
   const [settingsPickerOpen, setSettingsPickerOpen] = useState(false);
   const [imageAspectPickerOpen, setImageAspectPickerOpen] = useState(false);
+  const [videoAspectPickerOpen, setVideoAspectPickerOpen] = useState(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [skillQuery, setSkillQuery] = useState('');
   const [quickSkills, setQuickSkills] = useState<QuickAccessSkill[]>([]);
@@ -269,10 +288,13 @@ export function ChatInput({
   const [optimisticModelRef, setOptimisticModelRef] = useState<string | null>(null);
   const [sessionImageModes, setSessionImageModes] = useState<Record<string, boolean>>({});
   const [sessionImageOptions, setSessionImageOptions] = useState<Record<string, AcpImageGenerationOptions>>({});
+  const [sessionVideoModes, setSessionVideoModes] = useState<Record<string, boolean>>({});
+  const [sessionVideoOptions, setSessionVideoOptions] = useState<Record<string, AcpVideoGenerationOptions>>({});
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
   const skillPickerRef = useRef<HTMLDivElement>(null);
   const imageAspectPickerRef = useRef<HTMLDivElement>(null);
+  const videoAspectPickerRef = useRef<HTMLDivElement>(null);
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
   const modelChangeVersionRef = useRef(0);
   const mountedRef = useRef(true);
@@ -293,6 +315,8 @@ export function ChatInput({
   const defaultModelRef = useAgentsStore((s) => s.defaultModelRef);
   const textModelPolicy = useManagedClientConfigStore((s) => s.textModelPolicy);
   const loadManagedTextModels = useManagedClientConfigStore((s) => s.loadTextModels);
+  const videoModelPolicy = useManagedClientConfigStore((s) => s.videoModelPolicy);
+  const loadManagedVideoModels = useManagedClientConfigStore((s) => s.loadVideoModels);
   const currentAgentId = useChatStore((s) => s.currentAgentId);
   const currentSessionKey = useChatStore((s) => s.currentSessionKey);
   const currentSessionKeyRef = useRef(currentSessionKey);
@@ -352,12 +376,58 @@ export function ChatInput({
     );
   }, [inheritedThinkingLabel, selectedThinkingLevel, thinkingLevelLabel, thinkingOptions]);
   const imageModeActive = sessionImageModes[currentSessionKey] === true;
+  const videoModeActive = sessionVideoModes[currentSessionKey] === true;
   const imageOptions = useMemo<AcpImageGenerationOptions>(
     () => ({
       ...DEFAULT_IMAGE_OPTIONS,
       ...sessionImageOptions[currentSessionKey],
     }),
     [currentSessionKey, sessionImageOptions],
+  );
+  const readyImageAttachmentCount = useMemo(
+    () => attachments.filter((attachment) => (
+      attachment.status === 'ready' && attachment.mimeType.startsWith('image/')
+    )).length,
+    [attachments],
+  );
+  const videoOptions = useMemo<AcpVideoGenerationOptions>(() => {
+    const saved = sessionVideoOptions[currentSessionKey];
+    const defaultModel = videoModelPolicy.models.find((model) => model.id === videoModelPolicy.defaultModel)
+      ?? videoModelPolicy.models.find((model) => !model.requiresImage)
+      ?? videoModelPolicy.models[0];
+    const selectedModel = videoModelPolicy.models.find((model) => model.id === saved?.model);
+    const model = selectedModel && (!selectedModel.requiresImage || readyImageAttachmentCount === 1)
+      ? selectedModel
+      : defaultModel;
+    if (!model) return DEFAULT_VIDEO_OPTIONS;
+
+    const aspectRatio = saved?.aspectRatio && model.aspectRatios.includes(saved.aspectRatio)
+      ? saved.aspectRatio
+      : (model.aspectRatios.includes(videoModelPolicy.defaultAspectRatio)
+        ? videoModelPolicy.defaultAspectRatio
+        : model.defaultAspectRatio);
+    const resolution = saved?.resolution && model.resolutions.includes(saved.resolution)
+      ? saved.resolution
+      : (model.resolutions.includes(videoModelPolicy.defaultResolution)
+        ? videoModelPolicy.defaultResolution
+        : model.defaultResolution);
+    const durationSeconds = saved?.durationSeconds && model.durations.includes(saved.durationSeconds)
+      ? saved.durationSeconds
+      : (model.durations.includes(videoModelPolicy.defaultDurationSeconds)
+        ? videoModelPolicy.defaultDurationSeconds
+        : model.defaultDurationSeconds);
+    return {
+      model: model.id as AcpVideoGenerationOptions['model'],
+      aspectRatio,
+      resolution,
+      durationSeconds: isVideoDurationSeconds(durationSeconds)
+        ? durationSeconds
+        : DEFAULT_VIDEO_OPTIONS.durationSeconds,
+    };
+  }, [currentSessionKey, readyImageAttachmentCount, sessionVideoOptions, videoModelPolicy]);
+  const selectedVideoModel = useMemo(
+    () => videoModelPolicy.models.find((model) => model.id === videoOptions.model) ?? null,
+    [videoModelPolicy.models, videoOptions.model],
   );
   const currentAgentName = useMemo(
     () => currentAgent?.name ?? currentAgentId,
@@ -417,6 +487,10 @@ export function ChatInput({
   }, [loadManagedTextModels]);
 
   useEffect(() => {
+    void loadManagedVideoModels(true).catch(() => undefined);
+  }, [loadManagedVideoModels]);
+
+  useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
@@ -466,17 +540,25 @@ export function ChatInput({
   }, [agents, currentAgentId, targetAgentId]);
 
   useEffect(() => {
-    if (!pickerOpen && !skillPickerOpen && !imageAspectPickerOpen && !workspaceMenuOpen) return;
+    if (!pickerOpen && !skillPickerOpen && !imageAspectPickerOpen && !videoAspectPickerOpen && !workspaceMenuOpen) return;
     const handlePointerDown = (event: MouseEvent) => {
       const target = event.target as Node;
       const insideAgentPicker = pickerRef.current?.contains(target);
       const insideSkillPicker = skillPickerRef.current?.contains(target);
       const insideImageAspectPicker = imageAspectPickerRef.current?.contains(target);
+      const insideVideoAspectPicker = videoAspectPickerRef.current?.contains(target);
       const insideWorkspaceMenu = workspaceMenuRef.current?.contains(target);
-      if (!insideAgentPicker && !insideSkillPicker && !insideImageAspectPicker && !insideWorkspaceMenu) {
+      if (
+        !insideAgentPicker
+        && !insideSkillPicker
+        && !insideImageAspectPicker
+        && !insideVideoAspectPicker
+        && !insideWorkspaceMenu
+      ) {
         setPickerOpen(false);
         setSkillPickerOpen(false);
         setImageAspectPickerOpen(false);
+        setVideoAspectPickerOpen(false);
         setWorkspaceMenuOpen(false);
       }
     };
@@ -484,23 +566,24 @@ export function ChatInput({
     return () => {
       document.removeEventListener('mousedown', handlePointerDown);
     };
-  }, [imageAspectPickerOpen, pickerOpen, skillPickerOpen, workspaceMenuOpen]);
+  }, [imageAspectPickerOpen, pickerOpen, skillPickerOpen, videoAspectPickerOpen, workspaceMenuOpen]);
 
   useEffect(() => {
-    if (!pickerOpen && !skillPickerOpen && !settingsPickerOpen && !imageAspectPickerOpen && !workspaceMenuOpen) return;
+    if (!pickerOpen && !skillPickerOpen && !settingsPickerOpen && !imageAspectPickerOpen && !videoAspectPickerOpen && !workspaceMenuOpen) return;
     const handleDocumentKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       setPickerOpen(false);
       setSkillPickerOpen(false);
       closeSettingsPicker();
       setImageAspectPickerOpen(false);
+      setVideoAspectPickerOpen(false);
       setWorkspaceMenuOpen(false);
     };
     document.addEventListener('keydown', handleDocumentKeyDown, true);
     return () => {
       document.removeEventListener('keydown', handleDocumentKeyDown, true);
     };
-  }, [closeSettingsPicker, imageAspectPickerOpen, pickerOpen, settingsPickerOpen, skillPickerOpen, workspaceMenuOpen]);
+  }, [closeSettingsPicker, imageAspectPickerOpen, pickerOpen, settingsPickerOpen, skillPickerOpen, videoAspectPickerOpen, workspaceMenuOpen]);
 
   useEffect(() => {
     setSelectedSkill((prev) => {
@@ -664,10 +747,15 @@ export function ChatInput({
     setSkillPickerOpen(false);
     closeSettingsPicker();
     setImageAspectPickerOpen(false);
+    setVideoAspectPickerOpen(false);
     setWorkspaceMenuOpen(false);
     setSessionImageModes((current) => ({
       ...current,
       [currentSessionKey]: !current[currentSessionKey],
+    }));
+    setSessionVideoModes((current) => ({
+      ...current,
+      [currentSessionKey]: false,
     }));
     textareaRef.current?.focus();
   }, [closeSettingsPicker, currentSessionKey]);
@@ -683,12 +771,42 @@ export function ChatInput({
     }));
   }, [currentSessionKey]);
 
+  const toggleVideoMode = useCallback(() => {
+    setPickerOpen(false);
+    setSkillPickerOpen(false);
+    closeSettingsPicker();
+    setImageAspectPickerOpen(false);
+    setVideoAspectPickerOpen(false);
+    setWorkspaceMenuOpen(false);
+    setSessionVideoModes((current) => ({
+      ...current,
+      [currentSessionKey]: !current[currentSessionKey],
+    }));
+    setSessionImageModes((current) => ({
+      ...current,
+      [currentSessionKey]: false,
+    }));
+    textareaRef.current?.focus();
+  }, [closeSettingsPicker, currentSessionKey]);
+
+  const updateVideoOptions = useCallback((next: Partial<AcpVideoGenerationOptions>) => {
+    setSessionVideoOptions((current) => ({
+      ...current,
+      [currentSessionKey]: {
+        ...DEFAULT_VIDEO_OPTIONS,
+        ...current[currentSessionKey],
+        ...next,
+      },
+    }));
+  }, [currentSessionKey]);
+
   const handleWorkspaceButtonClick = useCallback(() => {
     if (workspaceSelectorDisabled) return;
     setPickerOpen(false);
     setSkillPickerOpen(false);
     closeSettingsPicker();
     setImageAspectPickerOpen(false);
+    setVideoAspectPickerOpen(false);
     setWorkspaceMenuOpen((open) => !open);
   }, [closeSettingsPicker, workspaceSelectorDisabled]);
 
@@ -931,7 +1049,9 @@ export function ChatInput({
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto';
       }
-      if (imageModeActive) {
+      if (videoModeActive) {
+        onSend(textToSend, attachmentsToSend, targetAgentId, undefined, { ...videoOptions });
+      } else if (imageModeActive) {
         onSend(textToSend, attachmentsToSend, targetAgentId, { ...imageOptions });
       } else {
         onSend(textToSend, attachmentsToSend, targetAgentId);
@@ -941,6 +1061,7 @@ export function ChatInput({
       setSkillPickerOpen(false);
       closeSettingsPicker();
       setImageAspectPickerOpen(false);
+      setVideoAspectPickerOpen(false);
       setWorkspaceMenuOpen(false);
     } finally {
       if (sendAttemptInFlightRef.current?.token === token) {
@@ -961,6 +1082,8 @@ export function ChatInput({
     t,
     targetAgentId,
     updateSessionModel,
+    videoModeActive,
+    videoOptions,
     waitForSessionModelUpdate,
     waitForSessionThinkingUpdate,
   ]);
@@ -1029,6 +1152,7 @@ export function ChatInput({
         setSkillPickerOpen(false);
         closeSettingsPicker();
         setImageAspectPickerOpen(false);
+        setVideoAspectPickerOpen(false);
         setWorkspaceMenuOpen(false);
         return;
       }
@@ -1248,6 +1372,7 @@ export function ChatInput({
                     setSkillPickerOpen(false);
                     closeSettingsPicker();
                     setImageAspectPickerOpen(false);
+                    setVideoAspectPickerOpen(false);
                     setWorkspaceMenuOpen(false);
                     setPickerOpen((open) => !open);
                   }}
@@ -1292,6 +1417,7 @@ export function ChatInput({
                   setPickerOpen(false);
                   closeSettingsPicker();
                   setImageAspectPickerOpen(false);
+                  setVideoAspectPickerOpen(false);
                   setWorkspaceMenuOpen(false);
                   setSkillPickerOpen((open) => !open);
                 }}
@@ -1377,6 +1503,7 @@ export function ChatInput({
                     setPickerOpen(false);
                     setSkillPickerOpen(false);
                     setImageAspectPickerOpen(false);
+                    setVideoAspectPickerOpen(false);
                     setWorkspaceMenuOpen(false);
                   }}
                   disabled={inputDisabled || sending || !currentAgent}
@@ -1523,6 +1650,27 @@ export function ChatInput({
               <TooltipContent>{t('composer.imageMode')}</TooltipContent>
             </Tooltip>
 
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  data-testid="chat-composer-mode-video"
+                  aria-pressed={videoModeActive}
+                  className={cn(
+                    'h-8 w-8 shrink-0 rounded-lg text-muted-foreground transition-colors hover:bg-black/5 hover:text-foreground dark:hover:bg-white/10',
+                    videoModeActive && 'bg-black/10 text-foreground hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/10',
+                  )}
+                  onClick={toggleVideoMode}
+                  disabled={inputDisabled || sending}
+                >
+                  <Film className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{t('composer.videoMode')}</TooltipContent>
+            </Tooltip>
+
             {imageModeActive && (
               <div className="flex shrink-0 items-center gap-1" data-testid="chat-image-options">
                 <div ref={imageAspectPickerRef} className="relative shrink-0">
@@ -1538,6 +1686,7 @@ export function ChatInput({
                       setPickerOpen(false);
                       setSkillPickerOpen(false);
                       closeSettingsPicker();
+                      setVideoAspectPickerOpen(false);
                       setWorkspaceMenuOpen(false);
                       setImageAspectPickerOpen((open) => !open);
                     }}
@@ -1552,7 +1701,7 @@ export function ChatInput({
                   </button>
                   {imageAspectPickerOpen && (
                     <div
-                      className="absolute bottom-full left-0 z-30 mb-2 w-[220px] rounded-lg border border-black/10 bg-surface-modal p-1 shadow-xl dark:border-white/10"
+                      className="absolute bottom-full left-0 z-30 mb-2 w-[156px] rounded-lg border border-black/10 bg-surface-modal p-1 shadow-xl dark:border-white/10"
                       data-testid="chat-image-aspect-menu"
                       role="menu"
                     >
@@ -1563,7 +1712,7 @@ export function ChatInput({
                             key={option.size}
                             type="button"
                             className={cn(
-                              'flex h-9 w-full items-center gap-2 rounded-md px-2 text-left transition-colors',
+                              'flex h-8 w-full items-center gap-1.5 rounded-md px-1.5 text-left text-xs transition-colors',
                               selected
                                 ? 'bg-black/5 text-foreground dark:bg-white/10'
                                 : 'text-muted-foreground hover:bg-black/5 hover:text-foreground dark:hover:bg-white/5',
@@ -1577,15 +1726,15 @@ export function ChatInput({
                             role="menuitemradio"
                             aria-checked={selected}
                           >
-                            <span className="flex h-6 w-6 shrink-0 items-center justify-center" aria-hidden="true">
+                            <span className="flex h-5 w-5 shrink-0 items-center justify-center" aria-hidden="true">
                               <span className={cn(
                                 'block rounded-[3px]',
                                 option.previewClassName,
                                 selected ? 'bg-foreground' : 'bg-muted-foreground/40',
                               )} />
                             </span>
-                            <span className="w-8 shrink-0 text-xs font-medium text-foreground">{option.ratio}</span>
-                            <span className="flex-1 whitespace-nowrap text-xs text-muted-foreground">
+                            <span className="w-7 shrink-0 text-xs font-medium text-foreground">{option.ratio}</span>
+                            <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={t(option.labelKey)}>
                               {t(option.labelKey)}
                             </span>
                           </button>
@@ -1609,6 +1758,158 @@ export function ChatInput({
                       <option key={quality} value={quality}>
                         {formatImageQualityLabel(quality, t)}
                       </option>
+                    ))}
+                  </Select>
+                  <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                </div>
+              </div>
+            )}
+
+            {videoModeActive && (
+              <div className="flex min-w-0 shrink-0 items-center gap-1" data-testid="chat-video-options">
+                <div className="relative shrink-0">
+                  <Select
+                    value={videoOptions.model}
+                    onChange={(event) => {
+                      const model = videoModelPolicy.models.find((entry) => entry.id === event.target.value);
+                      if (!model || (model.requiresImage && readyImageAttachmentCount !== 1)) return;
+                      updateVideoOptions({
+                        model: model.id as AcpVideoGenerationOptions['model'],
+                        aspectRatio: model.defaultAspectRatio,
+                        resolution: model.defaultResolution,
+                        durationSeconds: isVideoDurationSeconds(model.defaultDurationSeconds)
+                          ? model.defaultDurationSeconds
+                          : DEFAULT_VIDEO_OPTIONS.durationSeconds,
+                      });
+                    }}
+                    className="h-8 w-[96px] rounded-lg border-0 bg-black/5 px-2 pr-6 text-xs text-foreground [background-image:none] appearance-none hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15"
+                    data-testid="chat-video-model"
+                    aria-label={t('composer.videoModelLabel')}
+                  >
+                    {videoModelPolicy.models.map((model) => (
+                      <option
+                        key={model.id}
+                        value={model.id}
+                        disabled={model.requiresImage && readyImageAttachmentCount !== 1}
+                      >
+                        {model.label || model.id}
+                      </option>
+                    ))}
+                  </Select>
+                  <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                </div>
+
+                <div ref={videoAspectPickerRef} className="relative shrink-0">
+                  <button
+                    type="button"
+                    className={cn(
+                      'inline-flex h-8 min-w-[58px] items-center justify-center gap-1 rounded-lg bg-black/5 px-2 text-xs font-medium text-foreground transition-colors dark:bg-white/10',
+                      videoAspectPickerOpen
+                        ? 'bg-black/10 dark:bg-white/15'
+                        : 'hover:bg-black/10 dark:hover:bg-white/15',
+                    )}
+                    onClick={() => {
+                      setPickerOpen(false);
+                      setSkillPickerOpen(false);
+                      closeSettingsPicker();
+                      setImageAspectPickerOpen(false);
+                      setWorkspaceMenuOpen(false);
+                      setVideoAspectPickerOpen((open) => !open);
+                    }}
+                    disabled={inputDisabled || sending}
+                    data-testid="chat-video-aspect-trigger"
+                    aria-label={t('composer.videoAspectRatioLabel')}
+                    aria-haspopup="menu"
+                    aria-expanded={videoAspectPickerOpen}
+                  >
+                    <span>{videoOptions.aspectRatio}</span>
+                    <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform', videoAspectPickerOpen && 'rotate-180')} />
+                  </button>
+                  {videoAspectPickerOpen && (
+                    <div
+                      className="absolute bottom-full left-0 z-30 mb-2 w-[156px] rounded-lg border border-black/10 bg-surface-modal p-1 shadow-xl dark:border-white/10"
+                      data-testid="chat-video-aspect-menu"
+                      role="menu"
+                    >
+                      {ASPECT_RATIO_OPTIONS.filter((option) => (
+                        selectedVideoModel?.aspectRatios.includes(option.ratio) ?? false
+                      )).map((option) => {
+                        const selected = option.ratio === videoOptions.aspectRatio;
+                        return (
+                          <button
+                            key={option.ratio}
+                            type="button"
+                            className={cn(
+                              'flex h-8 w-full items-center gap-1.5 rounded-md px-1.5 text-left text-xs transition-colors',
+                              selected
+                                ? 'bg-black/5 text-foreground dark:bg-white/10'
+                                : 'text-muted-foreground hover:bg-black/5 hover:text-foreground dark:hover:bg-white/5',
+                            )}
+                            onClick={() => {
+                              updateVideoOptions({
+                                aspectRatio: option.ratio as AcpVideoGenerationOptions['aspectRatio'],
+                              });
+                              setVideoAspectPickerOpen(false);
+                              requestAnimationFrame(() => textareaRef.current?.focus());
+                            }}
+                            data-testid={`chat-video-aspect-${option.ratio.replace(':', '-')}`}
+                            role="menuitemradio"
+                            aria-checked={selected}
+                          >
+                            <span className="flex h-5 w-5 shrink-0 items-center justify-center" aria-hidden="true">
+                              <span className={cn(
+                                'block rounded-[3px]',
+                                option.previewClassName,
+                                selected ? 'bg-foreground' : 'bg-muted-foreground/40',
+                              )} />
+                            </span>
+                            <span className="w-7 shrink-0 text-xs font-medium text-foreground">{option.ratio}</span>
+                            <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={t(option.labelKey)}>
+                              {t(option.labelKey)}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div className="relative shrink-0">
+                  <Select
+                    value={videoOptions.resolution}
+                    onChange={(event) => {
+                      const resolution = event.target.value as AcpVideoGenerationOptions['resolution'];
+                      if (selectedVideoModel?.resolutions.includes(resolution)) updateVideoOptions({ resolution });
+                    }}
+                    className="h-8 w-[62px] rounded-lg border-0 bg-black/5 px-2 pr-6 text-xs text-foreground [background-image:none] appearance-none hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15"
+                    data-testid="chat-video-resolution"
+                    aria-label={t('composer.videoResolutionLabel')}
+                  >
+                    {selectedVideoModel?.resolutions.map((resolution) => (
+                      <option key={resolution} value={resolution}>{resolution}</option>
+                    ))}
+                  </Select>
+                  <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                </div>
+
+                <div className="relative shrink-0">
+                  <Select
+                    value={String(videoOptions.durationSeconds)}
+                    onChange={(event) => {
+                      const durationSeconds = Number(event.target.value);
+                      if (
+                        isVideoDurationSeconds(durationSeconds)
+                        && selectedVideoModel?.durations.includes(durationSeconds)
+                      ) {
+                        updateVideoOptions({ durationSeconds });
+                      }
+                    }}
+                    className="h-8 w-[60px] rounded-lg border-0 bg-black/5 px-2 pr-6 text-xs text-foreground [background-image:none] appearance-none hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15"
+                    data-testid="chat-video-duration"
+                    aria-label={t('composer.videoDurationLabel')}
+                  >
+                    {selectedVideoModel?.durations.map((durationSeconds) => (
+                      <option key={durationSeconds} value={durationSeconds}>{durationSeconds}s</option>
                     ))}
                   </Select>
                   <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />

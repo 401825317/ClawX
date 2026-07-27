@@ -42,6 +42,7 @@ const { agentsState, chatState, gatewayState, providersState, managedClientConfi
     },
     videoModelPolicy: {
       defaultModel: 'grok-image-video',
+      defaultAspectRatio: '16:9',
       defaultResolution: '480P',
       defaultDurationSeconds: 6,
       models: [
@@ -49,8 +50,10 @@ const { agentsState, chatState, gatewayState, providersState, managedClientConfi
           id: 'grok-image-video',
           label: 'Grok Video',
           modes: ['text-to-video', 'image-to-video'],
+          aspectRatios: ['2:3', '3:2', '1:1', '9:16', '16:9'],
           resolutions: ['480P', '720P'],
           durations: [6, 10, 15],
+          defaultAspectRatio: '16:9',
           defaultResolution: '480P',
           defaultDurationSeconds: 6,
           requiresImage: false,
@@ -59,8 +62,10 @@ const { agentsState, chatState, gatewayState, providersState, managedClientConfi
           id: 'grok-video-1.5',
           label: 'Grok Video 1.5',
           modes: ['image-to-video'],
+          aspectRatios: ['2:3', '3:2', '1:1', '9:16', '16:9'],
           resolutions: ['480P', '720P'],
           durations: [6, 10, 15],
+          defaultAspectRatio: '16:9',
           defaultResolution: '480P',
           defaultDurationSeconds: 6,
           requiresImage: true,
@@ -513,6 +518,7 @@ describe('ChatInput agent targeting', () => {
     expect(screen.queryByTestId('chat-image-options')).not.toBeInTheDocument();
     expect(screen.getByTestId('chat-video-options')).toBeInTheDocument();
     expect(screen.getByTestId('chat-video-model')).toHaveValue('grok-image-video');
+    expect(screen.getByTestId('chat-video-aspect-trigger')).toHaveTextContent('16:9');
     expect(screen.getByTestId('chat-video-resolution')).toHaveValue('480P');
     expect(screen.getByTestId('chat-video-duration')).toHaveValue('6');
 
@@ -521,6 +527,13 @@ describe('ChatInput agent targeting', () => {
 
     fireEvent.change(screen.getByTestId('chat-video-resolution'), { target: { value: '720P' } });
     fireEvent.change(screen.getByTestId('chat-video-duration'), { target: { value: '10' } });
+    fireEvent.click(screen.getByTestId('chat-video-aspect-trigger'));
+    expect(screen.getByTestId('chat-video-aspect-menu')).toHaveTextContent('2:3');
+    expect(screen.getByTestId('chat-video-aspect-menu')).toHaveTextContent('3:2');
+    expect(screen.getByTestId('chat-video-aspect-menu')).toHaveTextContent('1:1');
+    expect(screen.getByTestId('chat-video-aspect-menu')).toHaveTextContent('9:16');
+    expect(screen.getByTestId('chat-video-aspect-menu')).toHaveTextContent('16:9');
+    fireEvent.click(screen.getByTestId('chat-video-aspect-9-16'));
     fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Create a product video.' } });
     fireEvent.click(screen.getByTestId('chat-composer-send'));
 
@@ -530,7 +543,7 @@ describe('ChatInput agent targeting', () => {
         undefined,
         null,
         undefined,
-        { model: 'grok-image-video', resolution: '720P', durationSeconds: 10 },
+        { model: 'grok-image-video', aspectRatio: '9:16', resolution: '720P', durationSeconds: 10 },
       );
     });
   });

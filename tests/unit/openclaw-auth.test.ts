@@ -249,6 +249,7 @@ describe('managed auth profiles transaction', () => {
       'lingzhiwuxian:default',
       'openai-codex:default',
       'openai:default',
+      'uclaw-video:default',
     ]);
     expect(installedProfiles['openai:default']).toEqual({
       type: 'api_key',
@@ -260,6 +261,11 @@ describe('managed auth profiles transaction', () => {
       provider: 'lingzhiwuxian',
       key: 'managed-openai-key',
     });
+    expect(installedProfiles['uclaw-video:default']).toEqual({
+      type: 'api_key',
+      provider: 'uclaw-video',
+      key: 'managed-openai-key',
+    });
     expect(installedProfiles['openai-codex:default']).toEqual(
       originalStore.profiles['openai-codex:default'],
     );
@@ -267,6 +273,7 @@ describe('managed auth profiles transaction', () => {
     expect(installedJson.order).toEqual({
       openai: ['openai:default'],
       lingzhiwuxian: ['lingzhiwuxian:default'],
+      'uclaw-video': ['uclaw-video:default'],
       'openai-codex': ['openai-codex:default'],
       deepseek: ['deepseek:default'],
       routed: ['deepseek:default'],
@@ -274,6 +281,7 @@ describe('managed auth profiles transaction', () => {
     expect(installedJson.lastGood).toEqual({
       openai: 'openai:default',
       lingzhiwuxian: 'lingzhiwuxian:default',
+      'uclaw-video': 'uclaw-video:default',
       'openai-codex': 'openai-codex:default',
       deepseek: 'deepseek:default',
     });
@@ -424,12 +432,14 @@ describe('managed auth profiles transaction', () => {
       'deepseek:default',
       'lingzhiwuxian:default',
       'openai:default',
+      'uclaw-video:default',
     ]);
     expect(jsonProfiles['moonshot:default']).toBeUndefined();
     expect(Object.keys(sqliteProfiles).sort()).toEqual([
       'lingzhiwuxian:default',
       'moonshot:default',
       'openai:default',
+      'uclaw-video:default',
     ]);
     expect(sqliteProfiles['deepseek:default']).toBeUndefined();
   });
@@ -456,9 +466,9 @@ describe('managed auth profiles transaction', () => {
     await installManagedAgentOpenAiApiKey(snapshot, 'managed-key');
 
     expect(Object.keys((await readAuthProfiles('main')).profiles as Record<string, unknown>).sort())
-      .toEqual(['deepseek:default', 'lingzhiwuxian:default', 'openai:default']);
+      .toEqual(['deepseek:default', 'lingzhiwuxian:default', 'openai:default', 'uclaw-video:default']);
     expect(Object.keys(readAuthProfilesFromSqlite('main')?.profiles ?? {}).sort())
-      .toEqual(['deepseek:default', 'lingzhiwuxian:default', 'openai:default']);
+      .toEqual(['deepseek:default', 'lingzhiwuxian:default', 'openai:default', 'uclaw-video:default']);
   });
 
   it('seeds a missing JSON store from SQLite before replacing OpenAI', async () => {
@@ -483,9 +493,9 @@ describe('managed auth profiles transaction', () => {
     await installManagedAgentOpenAiApiKey(snapshot, 'managed-key');
 
     expect(Object.keys((await readAuthProfiles('main')).profiles as Record<string, unknown>).sort())
-      .toEqual(['lingzhiwuxian:default', 'moonshot:default', 'openai:default']);
+      .toEqual(['lingzhiwuxian:default', 'moonshot:default', 'openai:default', 'uclaw-video:default']);
     expect(Object.keys(readAuthProfilesFromSqlite('main')?.profiles ?? {}).sort())
-      .toEqual(['lingzhiwuxian:default', 'moonshot:default', 'openai:default']);
+      .toEqual(['lingzhiwuxian:default', 'moonshot:default', 'openai:default', 'uclaw-video:default']);
   });
 
   it('falls back to main when the frozen discovery result is empty', async () => {
@@ -511,6 +521,11 @@ describe('managed auth profiles transaction', () => {
       'lingzhiwuxian:default': {
         type: 'api_key',
         provider: 'lingzhiwuxian',
+        key: 'managed-main-key',
+      },
+      'uclaw-video:default': {
+        type: 'api_key',
+        provider: 'uclaw-video',
         key: 'managed-main-key',
       },
     });
@@ -637,14 +652,21 @@ describe('managed auth profiles transaction', () => {
           provider: 'lingzhiwuxian',
           key: 'managed-key',
         },
+        'uclaw-video:default': {
+          type: 'api_key',
+          provider: 'uclaw-video',
+          key: 'managed-key',
+        },
       },
       order: {
         openai: ['openai:default'],
         lingzhiwuxian: ['lingzhiwuxian:default'],
+        'uclaw-video': ['uclaw-video:default'],
       },
       lastGood: {
         openai: 'openai:default',
         lingzhiwuxian: 'lingzhiwuxian:default',
+        'uclaw-video': 'uclaw-video:default',
       },
     };
     await writeAgentAuthProfiles('main', managedStore);

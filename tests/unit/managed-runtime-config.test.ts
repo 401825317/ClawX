@@ -209,6 +209,7 @@ describe('managed runtime config transaction', () => {
       enabled: true,
       config: expect.objectContaining({
         defaultModel: 'grok-image-video',
+        defaultAspectRatio: '16:9',
         defaultResolution: '480P',
         defaultDurationSeconds: 6,
       }),

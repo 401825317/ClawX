@@ -15,7 +15,11 @@ import {
   UCLAW_SUPPORT_ROUTES,
   UCLAW_VIDEO_MODELS,
 } from '../../shared/junfeiai-endpoints';
-import type { UclawVideoMode, UclawVideoResolution } from '../../shared/junfeiai-endpoints';
+import type {
+  UclawVideoAspectRatio,
+  UclawVideoMode,
+  UclawVideoResolution,
+} from '../../shared/junfeiai-endpoints';
 import {
   getUclawBackendOrigin,
   isUclawManagedDistribution,
@@ -80,11 +84,13 @@ function clonePolicy(policy: ManagedClientTextModelPolicy): ManagedClientTextMod
 function cloneVideoPolicy(policy: ManagedClientVideoModelPolicy): ManagedClientVideoModelPolicy {
   return {
     defaultModel: policy.defaultModel,
+    defaultAspectRatio: policy.defaultAspectRatio,
     defaultResolution: policy.defaultResolution,
     defaultDurationSeconds: policy.defaultDurationSeconds,
     models: policy.models.map((model) => ({
       ...model,
       modes: [...model.modes],
+      aspectRatios: [...model.aspectRatios],
       resolutions: [...model.resolutions],
       durations: [...model.durations],
     })),
@@ -161,6 +167,13 @@ function normalizeVideoResolution(value: unknown): UclawVideoResolution | null {
   return normalized === '480P' || normalized === '720P' ? normalized : null;
 }
 
+function normalizeVideoAspectRatio(value: unknown): UclawVideoAspectRatio | null {
+  const normalized = stringValue(value);
+  return ['2:3', '3:2', '1:1', '9:16', '16:9'].includes(normalized)
+    ? normalized as UclawVideoAspectRatio
+    : null;
+}
+
 function legacyVideoSizeResolution(value: unknown): UclawVideoResolution | null {
   const match = stringValue(value).match(/^(\d+)x(\d+)$/iu);
   if (!match) return null;
@@ -179,6 +192,17 @@ function normalizeVideoModes(
   return [...new Set(value
     .map((entry) => stringValue(entry) as UclawVideoMode)
     .filter((entry) => allowed.has(entry)))];
+}
+
+function normalizeVideoAspectRatios(
+  value: unknown,
+  supported: readonly UclawVideoAspectRatio[],
+): UclawVideoAspectRatio[] {
+  if (!Array.isArray(value)) return [];
+  const allowed = new Set(supported);
+  return [...new Set(value
+    .map(normalizeVideoAspectRatio)
+    .filter((entry): entry is UclawVideoAspectRatio => entry !== null && allowed.has(entry)))];
 }
 
 function normalizeVideoResolutions(
@@ -209,9 +233,16 @@ function normalizeVideoModel(value: unknown): ManagedClientVideoModel | null {
   const local = UCLAW_VIDEO_MODELS.find((model) => model.id === id);
   if (!local) return null;
   const modes = normalizeVideoModes(value.modes, local.modes);
+  const aspectRatios = Array.isArray(value.aspectRatios)
+    ? normalizeVideoAspectRatios(value.aspectRatios, local.aspectRatios)
+    : [...local.aspectRatios];
   const resolutions = normalizeVideoResolutions(value.resolutions, value.sizes, local.resolutions);
   const durations = normalizeVideoDurations(value.durations, local.durations);
-  if (modes.length === 0 || resolutions.length === 0 || durations.length === 0) return null;
+  if (modes.length === 0 || aspectRatios.length === 0 || resolutions.length === 0 || durations.length === 0) return null;
+  const explicitDefaultAspectRatio = normalizeVideoAspectRatio(value.defaultAspectRatio);
+  const defaultAspectRatio = explicitDefaultAspectRatio && aspectRatios.includes(explicitDefaultAspectRatio)
+    ? explicitDefaultAspectRatio
+    : (aspectRatios.includes(local.defaultAspectRatio) ? local.defaultAspectRatio : aspectRatios[0]);
   const explicitDefaultResolution = normalizeVideoResolution(value.defaultResolution);
   const defaultResolution = explicitDefaultResolution && resolutions.includes(explicitDefaultResolution)
     ? explicitDefaultResolution
@@ -229,8 +260,10 @@ function normalizeVideoModel(value: unknown): ManagedClientVideoModel | null {
     ...(label ? { label } : {}),
     ...(description ? { description } : {}),
     modes,
+    aspectRatios,
     resolutions,
     durations,
+    defaultAspectRatio,
     defaultResolution,
     defaultDurationSeconds,
     requiresImage: local.requiresImage || value.requiresImage === true,
@@ -254,6 +287,12 @@ function normalizeVideoModelOptions(value: unknown): ManagedClientVideoModelPoli
     ? configuredDefaultModel
     : (models.some((model) => model.id === fallback.defaultModel) ? fallback.defaultModel : models[0].id);
   const selectedModel = models.find((model) => model.id === defaultModel)!;
+  const configuredAspectRatio = normalizeVideoAspectRatio(value.defaultAspectRatio);
+  const defaultAspectRatio = configuredAspectRatio && selectedModel.aspectRatios.includes(configuredAspectRatio)
+    ? configuredAspectRatio
+    : (selectedModel.aspectRatios.includes(fallback.defaultAspectRatio)
+      ? fallback.defaultAspectRatio
+      : selectedModel.defaultAspectRatio);
   const configuredResolution = normalizeVideoResolution(value.defaultResolution);
   const defaultResolution = configuredResolution && selectedModel.resolutions.includes(configuredResolution)
     ? configuredResolution
@@ -268,7 +307,7 @@ function normalizeVideoModelOptions(value: unknown): ManagedClientVideoModelPoli
     : (selectedModel.durations.includes(fallback.defaultDurationSeconds)
       ? fallback.defaultDurationSeconds
       : selectedModel.defaultDurationSeconds);
-  return { defaultModel, defaultResolution, defaultDurationSeconds, models };
+  return { defaultModel, defaultAspectRatio, defaultResolution, defaultDurationSeconds, models };
 }
 
 function normalizedCachedPolicies(value: unknown): Record<string, ManagedClientTextModelPolicy> {

@@ -24,6 +24,10 @@
     "additionalProperties": false,
     "properties": {
       "defaultModel": { "type": "string" },
+      "defaultAspectRatio": {
+        "type": "string",
+        "enum": ["2:3", "3:2", "1:1", "9:16", "16:9"]
+      },
       "defaultResolution": { "type": "string", "enum": ["480P", "720P"] },
       "defaultDurationSeconds": { "type": "integer", "minimum": 1 },
       "pollIntervalMs": { "type": "integer", "minimum": 1 },

@@ -103,6 +103,7 @@ describe('managed client-config service', () => {
         modelOptions: {
           video: {
             defaultModel: 'grok-image-video',
+            defaultAspectRatio: '16:9',
             defaultResolution: '480P',
             defaultDurationSeconds: 6,
             models: [
@@ -110,8 +111,10 @@ describe('managed client-config service', () => {
                 id: 'grok-image-video',
                 label: 'Grok Video',
                 modes: ['text-to-video', 'image-to-video'],
+                aspectRatios: ['2:3', '3:2', '1:1', '9:16', '16:9', '4:3'],
                 resolutions: ['480P', '720P', '1080P'],
                 durations: [6, 10, 15, 30],
+                defaultAspectRatio: '16:9',
                 defaultResolution: '480P',
                 defaultDurationSeconds: 6,
                 enabled: true,
@@ -119,8 +122,10 @@ describe('managed client-config service', () => {
               {
                 id: 'grok-video-1.5',
                 modes: ['image-to-video'],
+                aspectRatios: ['9:16', '16:9'],
                 resolutions: ['480P', '720P'],
                 durations: [6, 10, 15],
+                defaultAspectRatio: '9:16',
                 defaultResolution: '720P',
                 defaultDurationSeconds: 10,
                 requiresImage: true,
@@ -135,6 +140,7 @@ describe('managed client-config service', () => {
 
     await expect(getManagedClientVideoModelPolicy({ refresh: true })).resolves.toEqual({
       defaultModel: 'grok-image-video',
+      defaultAspectRatio: '16:9',
       defaultResolution: '480P',
       defaultDurationSeconds: 6,
       models: [
@@ -142,8 +148,10 @@ describe('managed client-config service', () => {
           id: 'grok-image-video',
           label: 'Grok Video',
           modes: ['text-to-video', 'image-to-video'],
+          aspectRatios: ['2:3', '3:2', '1:1', '9:16', '16:9'],
           resolutions: ['480P', '720P'],
           durations: [6, 10, 15],
+          defaultAspectRatio: '16:9',
           defaultResolution: '480P',
           defaultDurationSeconds: 6,
           requiresImage: false,
@@ -151,8 +159,10 @@ describe('managed client-config service', () => {
         {
           id: 'grok-video-1.5',
           modes: ['image-to-video'],
+          aspectRatios: ['9:16', '16:9'],
           resolutions: ['480P', '720P'],
           durations: [6, 10, 15],
+          defaultAspectRatio: '9:16',
           defaultResolution: '720P',
           defaultDurationSeconds: 10,
           requiresImage: true,
@@ -167,6 +177,7 @@ describe('managed client-config service', () => {
         modelOptions: {
           video: {
             defaultModel: 'grok-image-video',
+            defaultAspectRatio: '16:9',
             defaultSize: '1280x720',
             defaultDurationSeconds: 6,
             models: [{

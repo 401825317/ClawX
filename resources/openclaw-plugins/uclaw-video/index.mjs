@@ -8,6 +8,7 @@ import { join } from 'node:path';
 
 const PROVIDER_ID = 'uclaw-video';
 const DEFAULT_MODEL = 'grok-image-video';
+const DEFAULT_ASPECT_RATIO = '16:9';
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_RESOLUTION = '480P';
 const DEFAULT_DURATION_SECONDS = 6;
@@ -19,12 +20,15 @@ const RESOLUTION_SIZES = {
   '480P': '854x480',
   '720P': '1280x720',
 };
+const SUPPORTED_ASPECT_RATIOS = new Set(['2:3', '3:2', '1:1', '9:16', '16:9']);
 const DEFAULT_MODELS = [
   {
     id: 'grok-image-video',
     modes: ['text-to-video', 'image-to-video'],
+    aspectRatios: ['2:3', '3:2', '1:1', '9:16', '16:9'],
     resolutions: ['480P', '720P'],
     durations: [6, 10, 15],
+    defaultAspectRatio: DEFAULT_ASPECT_RATIO,
     defaultResolution: '480P',
     defaultDurationSeconds: 6,
     requiresImage: false,
@@ -32,8 +36,10 @@ const DEFAULT_MODELS = [
   {
     id: 'grok-video-1.5',
     modes: ['image-to-video'],
+    aspectRatios: ['2:3', '3:2', '1:1', '9:16', '16:9'],
     resolutions: ['480P', '720P'],
     durations: [6, 10, 15],
+    defaultAspectRatio: DEFAULT_ASPECT_RATIO,
     defaultResolution: '480P',
     defaultDurationSeconds: 6,
     requiresImage: true,
@@ -48,7 +54,7 @@ const TURN_PREFERENCE_FILE_RE = /^video-turn-([0-9a-f-]{36})\.json$/iu;
 const VIDEO_MODE_PROMPT_CONTEXT = [
   'The user selected video generation mode for this turn.',
   'When the request asks for a video, call video_generate instead of only describing a video.',
-  'Use the managed model, resolution, and duration supplied to the tool call.',
+  'Use the managed model, aspect ratio, resolution, and duration supplied to the tool call.',
 ].join(' ');
 const turnPreferencesByRun = new Map();
 
@@ -73,6 +79,9 @@ function normalizeBaseUrl(value) {
 function normalizeModelConfig(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const id = normalizeOptionalString(value.id);
+  const aspectRatios = Array.isArray(value.aspectRatios)
+    ? [...new Set(value.aspectRatios.filter((entry) => SUPPORTED_ASPECT_RATIOS.has(entry)))]
+    : [];
   const resolutions = Array.isArray(value.resolutions)
     ? [...new Set(value.resolutions.filter((entry) => entry === '480P' || entry === '720P'))]
     : [];
@@ -82,11 +91,14 @@ function normalizeModelConfig(value) {
       .filter((entry) => Number.isFinite(entry) && entry > 0)
       .map((entry) => Math.round(entry)))]
     : [];
-  if (!id || resolutions.length === 0 || durations.length === 0) return undefined;
+  if (!id || aspectRatios.length === 0 || resolutions.length === 0 || durations.length === 0) return undefined;
 
   const modes = Array.isArray(value.modes)
     ? [...new Set(value.modes.filter((entry) => entry === 'text-to-video' || entry === 'image-to-video'))]
     : [];
+  const defaultAspectRatio = aspectRatios.includes(value.defaultAspectRatio)
+    ? value.defaultAspectRatio
+    : aspectRatios[0];
   const defaultResolution = resolutions.includes(value.defaultResolution)
     ? value.defaultResolution
     : resolutions[0];
@@ -95,8 +107,10 @@ function normalizeModelConfig(value) {
   return {
     id,
     modes,
+    aspectRatios,
     resolutions,
     durations,
+    defaultAspectRatio,
     defaultResolution,
     defaultDurationSeconds,
     requiresImage: value.requiresImage === true,
@@ -112,8 +126,12 @@ function resolvePluginConfig(value) {
   const configuredDefaultModel = normalizeOptionalString(value?.defaultModel);
   const defaultModel = models.some((model) => model.id === configuredDefaultModel)
     ? configuredDefaultModel
-    : DEFAULT_MODEL;
+    : (models.find((model) => model.id === DEFAULT_MODEL)?.id ?? models[0].id);
   const defaultModelConfig = models.find((model) => model.id === defaultModel) ?? models[0];
+  const configuredDefaultAspectRatio = normalizeOptionalString(value?.defaultAspectRatio);
+  const defaultAspectRatio = defaultModelConfig.aspectRatios.includes(configuredDefaultAspectRatio)
+    ? configuredDefaultAspectRatio
+    : defaultModelConfig.defaultAspectRatio;
   const configuredDefaultResolution = normalizeOptionalString(value?.defaultResolution);
   const defaultResolution = defaultModelConfig.resolutions.includes(configuredDefaultResolution)
     ? configuredDefaultResolution
@@ -135,6 +153,7 @@ function resolvePluginConfig(value) {
   return {
     models,
     defaultModel,
+    defaultAspectRatio,
     defaultResolution,
     defaultDurationSeconds,
     resolutionSizes,
@@ -368,6 +387,34 @@ function inputImageValue(asset) {
   return `data:${mimeType};base64,${Buffer.from(asset.buffer).toString('base64')}`;
 }
 
+/** Derive the OpenAI-compatible size fallback without contradicting the selected ratio. */
+function sizeForAspectRatio(resolution, aspectRatio, resolutionSizes) {
+  const fallback = resolutionSizes[resolution] ?? RESOLUTION_SIZES[resolution];
+  const [fallbackWidth, fallbackHeight] = String(fallback).split('x').map(Number);
+  const base = Math.min(fallbackWidth, fallbackHeight);
+  const [widthRatio, heightRatio] = aspectRatio.split(':').map(Number);
+  if (!Number.isFinite(base) || !Number.isFinite(widthRatio) || !Number.isFinite(heightRatio)) {
+    return fallback;
+  }
+  if (widthRatio >= heightRatio) {
+    return `${Math.ceil((base * widthRatio) / heightRatio)}x${base}`;
+  }
+  return `${base}x${Math.ceil((base * heightRatio) / widthRatio)}`;
+}
+
+function aspectRatioForSize(size, resolutionSizes) {
+  const [width, height] = String(size ?? '').split('x').map(Number);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return undefined;
+  for (const resolution of Object.keys(resolutionSizes)) {
+    for (const aspectRatio of SUPPORTED_ASPECT_RATIOS) {
+      if (sizeForAspectRatio(resolution, aspectRatio, resolutionSizes) === `${width}x${height}`) {
+        return { aspectRatio, resolution };
+      }
+    }
+  }
+  return undefined;
+}
+
 function resolveModelRequest(req, config) {
   const requestedModel = normalizeOptionalString(req.model) ?? config.defaultModel;
   const model = config.models.find((entry) => entry.id === requestedModel);
@@ -387,9 +434,16 @@ function resolveModelRequest(req, config) {
     throw new Error(`${model.id} requires exactly one reference image`);
   }
 
+  const requestedSize = aspectRatioForSize(req.size, config.resolutionSizes);
+  const requestedAspectRatio = normalizeOptionalString(req.aspectRatio)
+    ?? requestedSize?.aspectRatio
+    ?? model.defaultAspectRatio
+    ?? config.defaultAspectRatio;
+  if (!model.aspectRatios.includes(requestedAspectRatio)) {
+    throw new Error(`${model.id} does not support ${requestedAspectRatio} aspect ratio`);
+  }
   const requestedResolution = normalizeOptionalString(req.resolution)
-    ?? (Object.values(config.resolutionSizes).includes(req.size) ? Object.entries(config.resolutionSizes)
-      .find(([, size]) => size === req.size)?.[0] : undefined)
+    ?? requestedSize?.resolution
     ?? model.defaultResolution
     ?? config.defaultResolution;
   if (!model.resolutions.includes(requestedResolution)) {
@@ -409,8 +463,9 @@ function resolveModelRequest(req, config) {
   }
   return {
     model,
+    aspectRatio: requestedAspectRatio,
     resolution: requestedResolution,
-    size: config.resolutionSizes[requestedResolution],
+    size: sizeForAspectRatio(requestedResolution, requestedAspectRatio, config.resolutionSizes),
     durationSeconds: requestedDuration,
     image,
   };
@@ -422,7 +477,11 @@ function modeCapabilities(model, config) {
     maxDurationSeconds: Math.max(...model.durations),
     supportedDurationSeconds: model.durations,
     supportsSize: true,
-    sizes: model.resolutions.map((resolution) => config.resolutionSizes[resolution]),
+    sizes: model.resolutions.flatMap((resolution) => (
+      model.aspectRatios.map((aspectRatio) => sizeForAspectRatio(resolution, aspectRatio, config.resolutionSizes))
+    )),
+    supportsAspectRatio: true,
+    aspectRatios: model.aspectRatios,
     supportsResolution: true,
     resolutions: model.resolutions,
   };
@@ -462,6 +521,8 @@ function buildProvider(config) {
         prompt: req.prompt,
         seconds: String(request.durationSeconds),
         size: request.size,
+        aspect_ratio: request.aspectRatio,
+        resolution: request.resolution.toLowerCase(),
         ...(request.image ? { image: request.image } : {}),
       };
       const submitted = await fetchJson(
@@ -495,6 +556,7 @@ function buildProvider(config) {
       const metadata = {
         taskId,
         status: extractStatus(completed),
+        aspectRatio: request.aspectRatio,
         resolution: request.resolution,
         size: request.size,
         durationSeconds: request.durationSeconds,
@@ -528,11 +590,17 @@ function digestPrompt(prompt) {
 function normalizeTurnOptions(value, config) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const model = config.models.find((entry) => entry.id === value.model);
-  if (!model || !model.resolutions.includes(value.resolution) || !model.durations.includes(value.durationSeconds)) {
+  if (
+    !model
+    || !model.aspectRatios.includes(value.aspectRatio)
+    || !model.resolutions.includes(value.resolution)
+    || !model.durations.includes(value.durationSeconds)
+  ) {
     return undefined;
   }
   return {
     model: model.id,
+    aspectRatio: value.aspectRatio,
     resolution: value.resolution,
     durationSeconds: value.durationSeconds,
   };
@@ -648,13 +716,14 @@ function registerTurnPreferenceHooks(api, config) {
       params: {
         ...(event?.params ?? {}),
         model: `${PROVIDER_ID}/${videoOptions.model}`,
+        aspectRatio: videoOptions.aspectRatio,
         resolution: videoOptions.resolution,
         durationSeconds: videoOptions.durationSeconds,
       },
     };
   }, {
     name: `${PROVIDER_ID}:turn-video-options`,
-    description: 'Apply composer model, resolution, and duration to a model-selected video_generate call.',
+    description: 'Apply composer model, aspect ratio, resolution, and duration to a model-selected video_generate call.',
     priority: 100,
   });
 }

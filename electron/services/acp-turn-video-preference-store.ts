@@ -37,6 +37,7 @@ function normalizeVideoOptions(value: AcpVideoGenerationOptions): AcpVideoGenera
   const model = UCLAW_VIDEO_MODELS.find((entry) => entry.id === value.model);
   if (
     !model
+    || !(model.aspectRatios as readonly string[]).includes(value.aspectRatio)
     || !(model.resolutions as readonly string[]).includes(value.resolution)
     || !(model.durations as readonly number[]).includes(value.durationSeconds)
   ) {
@@ -44,6 +45,7 @@ function normalizeVideoOptions(value: AcpVideoGenerationOptions): AcpVideoGenera
   }
   return {
     model: value.model,
+    aspectRatio: value.aspectRatio,
     resolution: value.resolution,
     durationSeconds: value.durationSeconds,
   };

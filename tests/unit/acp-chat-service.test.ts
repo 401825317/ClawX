@@ -329,6 +329,7 @@ describe('AcpChatService', () => {
       message: 'Create a six-second product video.',
       videoOptions: {
         model: 'grok-image-video',
+        aspectRatio: '16:9',
         resolution: '480P',
         durationSeconds: 6,
       },
@@ -339,6 +340,7 @@ describe('AcpChatService', () => {
       message: 'Create a six-second product video.',
       videoOptions: {
         model: 'grok-image-video',
+        aspectRatio: '16:9',
         resolution: '480P',
         durationSeconds: 6,
       },
@@ -369,6 +371,7 @@ describe('AcpChatService', () => {
       message: 'Create a video.',
       videoOptions: {
         model: 'grok-image-video',
+        aspectRatio: '16:9',
         resolution: '720P',
         durationSeconds: 10,
       },

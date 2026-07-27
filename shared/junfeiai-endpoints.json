@@ -90,6 +90,7 @@
       "pollIntervalMs": 5000,
       "maxDownloadBytes": 1073741824,
       "defaultModel": "grok-image-video",
+      "defaultAspectRatio": "16:9",
       "defaultResolution": "480P",
       "defaultDurationSeconds": 6,
       "resolutionSizes": {
@@ -102,8 +103,10 @@
           "label": "Grok Video",
           "description": "Supports text-to-video and image-to-video.",
           "modes": ["text-to-video", "image-to-video"],
+          "aspectRatios": ["2:3", "3:2", "1:1", "9:16", "16:9"],
           "resolutions": ["480P", "720P"],
           "durations": [6, 10, 15],
+          "defaultAspectRatio": "16:9",
           "defaultResolution": "480P",
           "defaultDurationSeconds": 6,
           "requiresImage": false
@@ -113,8 +116,10 @@
           "label": "Grok Video 1.5",
           "description": "Image-to-video model that requires one reference image.",
           "modes": ["image-to-video"],
+          "aspectRatios": ["2:3", "3:2", "1:1", "9:16", "16:9"],
           "resolutions": ["480P", "720P"],
           "durations": [6, 10, 15],
+          "defaultAspectRatio": "16:9",
           "defaultResolution": "480P",
           "defaultDurationSeconds": 6,
           "requiresImage": true

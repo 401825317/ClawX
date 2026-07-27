@@ -99,6 +99,7 @@ vi.mock('@electron/utils/plugin-install-index', () => ({
 }));
 
 vi.mock('@electron/utils/paths', () => ({
+  resolveOpenClawConfigPath: () => `${mockHomedir()}/.openclaw/openclaw.json`,
   resolveOpenClawStateDir: () => `${mockHomedir()}/.openclaw`,
 }));
 

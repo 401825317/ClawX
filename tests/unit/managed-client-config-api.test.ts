@@ -33,6 +33,7 @@ describe('managed client-config host API', () => {
   it('exposes the normalized video model policy through the typed Host API', async () => {
     const policy = {
       defaultModel: 'grok-image-video',
+      defaultAspectRatio: '16:9',
       defaultResolution: '480P',
       defaultDurationSeconds: 6,
       models: [],

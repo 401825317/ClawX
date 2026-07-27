@@ -2,11 +2,16 @@ import {
   UCLAW_DEFAULT_MODEL,
   UCLAW_MANAGED_PROVIDER_ID,
   UCLAW_VIDEO_DEFAULT_DURATION_SECONDS,
+  UCLAW_VIDEO_DEFAULT_ASPECT_RATIO,
   UCLAW_VIDEO_DEFAULT_MODEL,
   UCLAW_VIDEO_DEFAULT_RESOLUTION,
   UCLAW_VIDEO_MODELS,
 } from './junfeiai-endpoints';
-import type { UclawVideoMode, UclawVideoResolution } from './junfeiai-endpoints';
+import type {
+  UclawVideoAspectRatio,
+  UclawVideoMode,
+  UclawVideoResolution,
+} from './junfeiai-endpoints';
 
 export type ManagedClientTextModel = {
   id: string;
@@ -28,8 +33,10 @@ export type ManagedClientVideoModel = {
   label?: string;
   description?: string;
   modes: UclawVideoMode[];
+  aspectRatios: UclawVideoAspectRatio[];
   resolutions: UclawVideoResolution[];
   durations: number[];
+  defaultAspectRatio: UclawVideoAspectRatio;
   defaultResolution: UclawVideoResolution;
   defaultDurationSeconds: number;
   requiresImage: boolean;
@@ -37,6 +44,7 @@ export type ManagedClientVideoModel = {
 
 export type ManagedClientVideoModelPolicy = {
   defaultModel: string;
+  defaultAspectRatio: UclawVideoAspectRatio;
   defaultResolution: UclawVideoResolution;
   defaultDurationSeconds: number;
   models: ManagedClientVideoModel[];
@@ -58,11 +66,13 @@ export function createDefaultManagedClientTextModelPolicy(): ManagedClientTextMo
 export function createDefaultManagedClientVideoModelPolicy(): ManagedClientVideoModelPolicy {
   return {
     defaultModel: UCLAW_VIDEO_DEFAULT_MODEL,
+    defaultAspectRatio: UCLAW_VIDEO_DEFAULT_ASPECT_RATIO,
     defaultResolution: UCLAW_VIDEO_DEFAULT_RESOLUTION,
     defaultDurationSeconds: UCLAW_VIDEO_DEFAULT_DURATION_SECONDS,
     models: UCLAW_VIDEO_MODELS.map((model) => ({
       ...model,
       modes: [...model.modes],
+      aspectRatios: [...model.aspectRatios],
       resolutions: [...model.resolutions],
       durations: [...model.durations],
     })),

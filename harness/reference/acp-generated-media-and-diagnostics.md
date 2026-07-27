@@ -56,6 +56,12 @@ Every standard or compatibility attachment reference is resolved through Main's 
 
 Image generation and general attachments share transcript fetch coordination and opaque resolved media identities only. Generated images remain inline; general attachments render as paperclip rows after assistant prose.
 
+## Per-Turn Video Preferences
+
+Video composer mode stores one bounded preference for the current ACP turn: model, aspect ratio, resolution, and duration. It does not call the provider from Renderer and does not force a tool invocation. OpenClaw still owns `video_generate`, and the model still decides whether the request needs that tool. When the model selects it, the `uclaw-video` plugin applies the claimed turn preference before OpenClaw resolves provider capabilities.
+
+The managed Grok policy supports `2:3`, `3:2`, `1:1`, `9:16`, and `16:9`, with `480P` and `720P`. The plugin forwards the semantic `aspect_ratio` and `resolution` fields and derives a compatible `size` fallback from the same pair, so a portrait selection cannot be submitted with a landscape size. Preference files contain a prompt digest rather than prompt text, are consumed once, expire after five minutes, and do not participate in timeline projection, history hydration, or streaming.
+
 ## Historical Evidence
 
 After successful `loadSession` for an existing session, the store may call:

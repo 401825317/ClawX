@@ -7,7 +7,7 @@ import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, ArrowDownToLine, FolderOpen } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import type { AcpImageGenerationOptions } from '@shared/acp-chat/types';
+import type { AcpImageGenerationOptions, AcpVideoGenerationOptions } from '@shared/acp-chat/types';
 import { DEFAULT_SESSION_KEY } from '@shared/chat/types';
 import { Button } from '@/components/ui/button';
 import { useAgentsStore } from '@/stores/agents';
@@ -507,6 +507,7 @@ export function Chat() {
             attachments?: FileAttachment[],
             targetAgentId?: string | null,
             imageOptions?: AcpImageGenerationOptions,
+            videoOptions?: AcpVideoGenerationOptions,
           ) => {
             if (!currentSessionKey || !cwd || !workspaceContextAvailable) return;
             const targetAgent = targetAgentId
@@ -573,6 +574,7 @@ export function Chat() {
                 message: text,
                 media,
                 ...(imageOptions ? { imageOptions } : {}),
+                ...(videoOptions ? { videoOptions } : {}),
               });
               requestAnimationFrame(() => {
                 void scrollToBottom({ animation: 'instant', ignoreEscapes: true });

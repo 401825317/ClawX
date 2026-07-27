@@ -3,11 +3,12 @@ id: managed-video-generation
 title: Managed OpenAI-compatible video generation
 scenario: gateway-backend-communication
 taskType: runtime-bridge
-intent: Add a ClawX-owned OpenClaw video-generation provider, consume the managed server video policy, and let chat users select per-turn model, resolution, and duration preferences while preserving model-owned video_generate tool selection.
+intent: Add a ClawX-owned OpenClaw video-generation provider, consume the managed server video policy, and let chat users select per-turn model, aspect ratio, resolution, and duration preferences while preserving model-owned video_generate tool selection.
 touchedAreas:
   - harness/specs/tasks/managed-video-generation.md
   - harness/reference/acp-generated-media-and-diagnostics.md
   - shared/junfeiai-endpoints.json
+  - shared/junfeiai-endpoints.ts
   - shared/managed-client-config.ts
   - shared/host-api/contract.ts
   - shared/acp-chat/types.ts
@@ -33,6 +34,8 @@ touchedAreas:
   - src/pages/Chat/index.tsx
   - shared/i18n/locales/*/chat.json
   - tests/unit/managed-client-config-service.test.ts
+  - tests/unit/managed-client-config-api.test.ts
+  - tests/unit/managed-runtime-config.test.ts
   - tests/unit/acp-turn-video-preference-store.test.ts
   - tests/unit/acp-chat-service.test.ts
   - tests/unit/uclaw-video-plugin.test.ts
@@ -42,11 +45,11 @@ touchedAreas:
   - tests/unit/chat-input.test.tsx
   - tests/e2e/chat-video-generation-options.spec.ts
 expectedUserBehavior:
-  - The managed account supplies the enabled video models, modes, resolutions, durations, and defaults used by the chat composer.
-  - Video mode is mutually exclusive with image mode and defaults to grok-image-video, 480P, and 6 seconds when those values are allowed by the managed policy.
+  - The managed account supplies the enabled video models, modes, aspect ratios, resolutions, durations, and defaults used by the chat composer.
+  - Video mode is mutually exclusive with image mode and defaults to grok-image-video, 16:9, 480P, and 6 seconds when those values are allowed by the managed policy.
   - grok-video-1.5 is selectable only for image-to-video turns with exactly one compatible reference image.
   - Sending in video mode records only this ACP turn's selected video preferences. The model still decides whether to call OpenClaw's native video_generate tool.
-  - A model-selected video_generate call receives the selected model, resolution, and duration from the current turn without changing chat ordering, streaming, history replay, or subsequent turns.
+  - A model-selected video_generate call receives the selected model, aspect ratio, resolution, and duration from the current turn without changing chat ordering, streaming, history replay, or subsequent turns.
   - Startup and managed-login synchronization install and trust the uclaw-video plugin, configure the managed provider and default video model, and synchronize its API key without modifying OpenClaw core files.
 requiredProfiles:
   - fast
@@ -73,9 +76,9 @@ requiredTests:
   - pnpm run comms:compare
 acceptance:
   - Renderer reads managed video policy through the typed Host API and never calls the Gateway or provider endpoint directly.
-  - The local endpoint manifest owns provider ID, supported models, modes, resolutions, durations, defaults, polling interval, timeout, and download limit; secrets remain in managed auth storage and OpenClaw auth profiles.
+  - The local endpoint manifest owns provider ID, supported models, modes, aspect ratios, resolutions, durations, defaults, polling interval, timeout, and download limit; secrets remain in managed auth storage and OpenClaw auth profiles.
   - The provider uses OpenAI-compatible POST /videos and GET /videos/{taskId} polling, accepts documented task/status/result response variants, and falls back to GET /videos/{taskId}/content when no result URL is returned.
-  - Runtime capabilities expose 480P and 720P plus 6, 10, and 15 seconds, defaulting to 480P and 6 seconds. grok-video-1.5 rejects requests without exactly one reference image.
+  - Runtime capabilities expose 2:3, 3:2, 1:1, 9:16, and 16:9, 480P and 720P, plus 6, 10, and 15 seconds, defaulting to 16:9, 480P, and 6 seconds. grok-video-1.5 rejects requests without exactly one reference image.
   - Startup repairs plugins.allow and plugins.entries.uclaw-video.enabled without removing unrelated trusted plugins, and writes agents.defaults.videoGenerationModel.primary as uclaw-video/grok-image-video.
   - ACP preference files store only session/run correlation and normalized video options, are consumed once, expire, and are cleaned up when prompt delivery fails.
   - Image and video composer modes are mutually exclusive, all visible strings have English, Chinese, Japanese, and Russian translations, and the controls do not add timeline subscriptions.
@@ -103,7 +106,9 @@ tool is called.
 
 ## Compatibility
 
-The managed response uses `resolutions` and `defaultResolution` with the
-canonical values `480P` and `720P`. The client may normalize legacy
+The managed response uses `aspectRatios` / `defaultAspectRatio` and
+`resolutions` / `defaultResolution`. Supported aspect ratios are `2:3`, `3:2`,
+`1:1`, `9:16`, and `16:9`; canonical resolutions are `480P` and `720P`. The
+client may normalize legacy
 `sizes/defaultSize` fields for rollout compatibility, but an invalid legacy
 default must never override the local 480P default.

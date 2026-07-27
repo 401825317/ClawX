@@ -182,6 +182,7 @@ describe('provider-runtime-sync refresh strategy', () => {
     });
     mocks.getManagedClientVideoModelPolicy.mockResolvedValue({
       defaultModel: 'grok-image-video',
+      defaultAspectRatio: '16:9',
       defaultResolution: '480P',
       defaultDurationSeconds: 6,
       models: [],
@@ -218,6 +219,7 @@ describe('provider-runtime-sync refresh strategy', () => {
       },
       {
         defaultModel: 'grok-image-video',
+        defaultAspectRatio: '16:9',
         defaultResolution: '480P',
         defaultDurationSeconds: 6,
         models: [],
