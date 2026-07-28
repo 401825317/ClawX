@@ -498,7 +498,7 @@ test.describe('ACP media attachments', () => {
     }
   });
 
-  test('renders user image thumbnails and actionable file paths', async ({ launchElectronApp }) => {
+  test('renders user image thumbnails and actionable file paths', async ({ launchElectronApp }, testInfo) => {
     const app = await launchElectronApp({ skipSetup: true });
 
     try {
@@ -506,12 +506,12 @@ test.describe('ACP media attachments', () => {
         sessions: [{ key: MAIN_SESSION_KEY, title: 'Main session' }],
       });
       const imageBytes = Uint8Array.from(Buffer.from(
-        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
-        'base64',
+        '<svg xmlns="http://www.w3.org/2000/svg" width="960" height="1440" viewBox="0 0 960 1440"><rect width="960" height="1440" fill="#b91c1c"/></svg>',
+        'utf8',
       ));
-      const imagePath = await fixture.createWorkspaceFile('uploads/photo.png', imageBytes);
+      const imagePath = await fixture.createWorkspaceFile('uploads/photo.svg', imageBytes);
       const notesPath = await fixture.createWorkspaceFile('uploads/notes.txt', 'Preview this user attachment.');
-      const displayImagePath = '/Users/test/Pictures/photo.png';
+      const displayImagePath = '/Users/test/Pictures/photo.svg';
       const displayNotesPath = '/Users/test/Documents/a/very/long/path/notes.txt';
       await fixture.registerStagedAttachment('stage-photo', imagePath, displayImagePath);
       await fixture.registerStagedAttachment('stage-notes', notesPath, displayNotesPath);
@@ -524,8 +524,8 @@ test.describe('ACP media attachments', () => {
             type: 'image',
             uri: imagePath,
             data: Buffer.from(imageBytes).toString('base64'),
-            mimeType: 'image/png',
-            _meta: { clawx: { stagingId: 'stage-photo', fileName: 'photo.png' } },
+            mimeType: 'image/svg+xml',
+            _meta: { clawx: { stagingId: 'stage-photo', fileName: 'photo.svg' } },
           },
           {
             type: 'resource_link',
@@ -543,15 +543,26 @@ test.describe('ACP media attachments', () => {
       await expect(userMessage.getByText('Review these files.')).toBeVisible({ timeout: 30_000 });
       const thumbnail = page.getByTestId('acp-user-image-attachment');
       await expect(thumbnail).toBeVisible();
-      await expect(thumbnail).toHaveAttribute('alt', 'photo.png');
+      await expect(thumbnail).toHaveAttribute('alt', 'photo.svg');
+      const thumbnailContainer = page.getByTestId('acp-user-image-thumbnail');
       const [bubbleBox, thumbnailBox] = await Promise.all([
         userMessage.locator('.bg-brand').first().boundingBox(),
-        thumbnail.locator('..').boundingBox(),
+        thumbnailContainer.boundingBox(),
       ]);
       expect(bubbleBox).not.toBeNull();
       expect(thumbnailBox).not.toBeNull();
+      expect(thumbnailBox!.width).toBeGreaterThanOrEqual(140);
+      expect(thumbnailBox!.width).toBeLessThanOrEqual(146);
+      expect(thumbnailBox!.height).toBeGreaterThanOrEqual(140);
+      expect(thumbnailBox!.height).toBeLessThanOrEqual(146);
       expect(Math.abs((bubbleBox!.x + bubbleBox!.width) - (thumbnailBox!.x + thumbnailBox!.width))).toBeLessThanOrEqual(1);
-      await expect(page.getByTestId('acp-user-image-overlay')).toContainText('photo.png');
+      await expect(page.getByTestId('acp-user-image-overlay')).toContainText('photo.svg');
+      const screenshotPath = testInfo.outputPath('user-image-attachment-thumbnail.png');
+      await thumbnailContainer.screenshot({ path: screenshotPath });
+      await testInfo.attach('user-image-attachment-thumbnail', {
+        path: screenshotPath,
+        contentType: 'image/png',
+      });
 
       const notes = page.getByRole('button', { name: 'Preview notes.txt' });
       await expect(notes).toContainText(displayNotesPath);

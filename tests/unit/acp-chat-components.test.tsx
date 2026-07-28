@@ -1590,6 +1590,7 @@ describe('ACP chat timeline components', () => {
     const thumbnail = await screen.findByTestId('acp-user-image-attachment');
     expect(thumbnail).toHaveAttribute('alt', 'photo.png');
     expect(thumbnail).toHaveAttribute('src', 'data:image/png;base64,iVBORw0KGgo=');
+    expect(screen.getByTestId('acp-user-image-thumbnail')).toHaveClass('aspect-square', 'w-36', 'shrink-0');
     expect(screen.getByTestId('acp-user-image-overlay')).toHaveTextContent('photo.png');
     expect(thumbnail.parentElement?.parentElement).toHaveClass('items-end');
     expect(thumbnailsMock).toHaveBeenCalledWith({

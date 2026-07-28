@@ -73,9 +73,10 @@ function AcpUserImageAttachment({
   return (
     <button
       type="button"
+      data-testid="acp-user-image-thumbnail"
       aria-label={ariaLabel}
       onClick={() => void activate()}
-      className="group/user-image relative h-18 w-auto max-w-full overflow-hidden rounded-xl border border-black/10 bg-surface-modal text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 dark:border-white/10"
+      className="group/user-image relative aspect-square w-36 max-w-full shrink-0 overflow-hidden rounded-xl border border-black/10 bg-surface-modal text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 dark:border-white/10"
     >
       {thumbnailUrl && (
         <img
