@@ -55,6 +55,7 @@
     "test:packaged:win": "node scripts/windows-support/run-packaged-regression.mjs --latest --profile core",
     "test:packaged:win:full": "node scripts/windows-support/run-packaged-regression.mjs --latest --profile full",
     "test:packaged:win:live": "node scripts/windows-support/run-packaged-regression.mjs --latest --profile live",
+    "test:release:pipeline": "node --test scripts/windows-support/refresh-portable-release-metadata.test.mjs",
     "harness": "pnpm --filter @clawx/harness start --",
     "harness:ci": "pnpm harness list && pnpm harness validate --spec harness/specs/scenarios/gateway-backend-communication.md && pnpm harness validate --spec harness/specs/tasks/fix-chat-history-gateway-timeout.example.md --no-diff && pnpm harness run --spec harness/specs/scenarios/gateway-backend-communication.md --dry-run",
     "comms:replay": "node scripts/comms/replay.mjs",
@@ -109,6 +110,8 @@
     "version:prerelease-beta": "pnpm version prerelease --preid=beta",
     "release:validate": "node scripts/assert-tag-matches-package.mjs",
     "release:build": "node scripts/release.mjs --no-publish",
+    "release:portable:refresh": "node scripts/windows-support/refresh-portable-release-metadata.mjs",
+    "release:portable:stage": "node scripts/windows-support/stage-production-release-candidate.mjs",
     "release:refresh:win": "node scripts/windows-support/refresh-nsis-release-metadata.mjs",
     "release:validate:win": "node scripts/windows-support/validate-nsis-release.mjs --require-update-metadata --require-blockmap --require-clean-source",
     "postversion": "node scripts/post-version-push.mjs"
