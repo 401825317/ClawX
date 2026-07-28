@@ -1,5 +1,6 @@
 import type { ElectronApplication } from '@playwright/test';
 import { closeElectronApp, expect, getStableWindow, installIpcMocks, test } from './fixtures/electron';
+import { expandAcpToolCallsGroup } from './fixtures/acp-timeline';
 
 const MAIN_SESSION_KEY = 'agent:main:main';
 const MAIN_WORKSPACE = '/workspace';
@@ -764,6 +765,68 @@ test.describe('ClawX ACP inline timeline', () => {
       await expect(card).toHaveAttribute('data-expanded', 'true');
       await expect(card).toContainText('historical output');
       await expect(page.getByTestId('acp-assistant-turn')).toContainText('Historical answer');
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('collapses multiple replayed tool calls into one group after the turn completes', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installAcpChatMocks(app);
+      await installAcpLoadReplayMock(app, [
+        {
+          sessionUpdate: 'user_message',
+          messageId: 'history-user',
+          content: [{ type: 'text', text: 'Check weather' }],
+        },
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'history-tool-1',
+          title: 'web_search',
+          status: 'completed',
+          content: [{ type: 'content', content: { type: 'text', text: 'search results' } }],
+          locations: [],
+        },
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'history-tool-2',
+          title: 'web_fetch',
+          status: 'completed',
+          content: [{ type: 'content', content: { type: 'text', text: 'fetch results' } }],
+          locations: [],
+        },
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'history-tool-3',
+          title: 'browser',
+          status: 'failed',
+          content: [{ type: 'content', content: { type: 'text', text: 'browser failed' } }],
+          locations: [],
+        },
+        {
+          sessionUpdate: 'agent_message',
+          messageId: 'history-assistant',
+          content: [{ type: 'text', text: 'Hangzhou is cloudy today.' }],
+        },
+      ], [{
+        normalizedUserText: 'Check weather',
+        userOccurrenceFromTail: 0,
+        durationMs: 12_000,
+      }]);
+
+      const page = await openChat(app);
+
+      await expect(page.getByTestId('acp-chat-timeline')).toBeVisible({ timeout: 30_000 });
+      const group = page.getByTestId('acp-tool-calls-group');
+      await expect(group).toBeVisible();
+      await expect(group).toHaveAttribute('data-collapsed', 'true');
+      await expect(page.getByTestId('acp-tool-call-card')).toHaveCount(0);
+
+      await expandAcpToolCallsGroup(page);
+      await expect(page.getByTestId('acp-tool-call-card')).toHaveCount(3);
+      await expect(page.getByTestId('acp-assistant-turn')).toContainText('Hangzhou is cloudy today.');
     } finally {
       await closeElectronApp(app);
     }

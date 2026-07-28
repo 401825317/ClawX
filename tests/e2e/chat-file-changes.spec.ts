@@ -9,6 +9,7 @@ import {
   installIpcMocks,
   test,
 } from './fixtures/electron';
+import { expectVisibleToolCallCards } from './fixtures/acp-timeline';
 
 const MAIN_SESSION_KEY = 'agent:main:main';
 const OTHER_SESSION_KEY = 'agent:main:other';
@@ -419,7 +420,7 @@ test.describe('ClawX chat file changes', () => {
       const page = await openChat(app);
       await sendPrompt(page, 'Run non-file activity');
 
-      await expect(page.getByTestId('acp-tool-call-card')).toHaveCount(2, { timeout: 30_000 });
+      await expectVisibleToolCallCards(page, 2);
       const failedWrite = page.getByTestId('acp-tool-call-card').filter({ hasText: 'Write: failed.ts' });
       const unsupportedRead = page.getByTestId('acp-tool-call-card').filter({ hasText: 'Read: unsupported.ts' });
       await expect(failedWrite).toContainText('Failed');
