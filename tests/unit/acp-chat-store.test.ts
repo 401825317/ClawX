@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { dedupeTurnAttachments } from '@/lib/acp/attachments';
+import { appendSyntheticAssistantMessage } from '@/lib/acp/reducer';
 import type { AttachmentRenderPart, RenderPart } from '@/lib/acp/timeline-types';
 import { UCLAW_VIDEO_GENERATION_TIMEOUT_MS } from '@shared/junfeiai-endpoints';
 
@@ -628,6 +629,320 @@ describe('ACP Chat store', () => {
     prompt.resolve({ success: true, generation: 1 });
     await expect(sendPrompt).resolves.toBe(true);
     expect(useAcpChatSessionStore.getState().sending).toBe(false);
+  });
+
+  it('keeps historical media visible while background generation is pending across navigation', async () => {
+    const pendingTaskId = '59635a84-fcb4-438a-9566-64a8308c9011';
+    const historicalReplay = [
+      {
+        sessionKey: 'agent:pi:s1',
+        generation: 1,
+        historical: true,
+        notification: {
+          sessionId: 'agent:pi:s1',
+          update: {
+            sessionUpdate: 'user_message',
+            messageId: 'history-user',
+            content: [{ type: 'text', text: 'Generate the first image' }],
+          },
+        },
+      },
+      {
+        sessionKey: 'agent:pi:s1',
+        generation: 1,
+        historical: true,
+        notification: {
+          sessionId: 'agent:pi:s1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'history-image-tool',
+            title: 'Generate image',
+            status: 'completed',
+            content: [],
+            locations: [],
+          },
+        },
+      },
+    ];
+    hostApiMock.loadAcpSession
+      .mockResolvedValueOnce({ success: true, generation: 1, sessionUpdates: historicalReplay })
+      .mockResolvedValueOnce({ success: true, generation: 2, sessionUpdates: [] })
+      .mockResolvedValueOnce({
+        success: true,
+        generation: 3,
+        resumedActivePrompt: false,
+        sessionUpdates: [
+          ...historicalReplay.map((event) => ({ ...event, generation: 3 })),
+          {
+            sessionKey: 'agent:pi:s1',
+            generation: 3,
+            historical: true,
+            notification: {
+              sessionId: 'agent:pi:s1',
+              update: {
+                sessionUpdate: 'user_message',
+                messageId: 'pending-user',
+                content: [{ type: 'text', text: 'Modify the image' }],
+              },
+            },
+          },
+          {
+            sessionKey: 'agent:pi:s1',
+            generation: 3,
+            historical: true,
+            notification: {
+              sessionId: 'agent:pi:s1',
+              update: {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'pending-image-tool',
+                title: 'Generate image',
+                status: 'completed',
+                content: [{
+                  type: 'content',
+                  content: {
+                    type: 'text',
+                    text: `Background task started for image generation (${pendingTaskId}).`,
+                  },
+                }],
+                locations: [],
+              },
+            },
+          },
+        ],
+      });
+    const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+    ensureAcpChatSubscriptions();
+
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+    useAcpChatSessionStore.setState((state) => ({
+      timeline: appendSyntheticAssistantMessage(state.timeline, {
+        messageId: 'compat:image-generation:history-image',
+        evidenceId: 'history-image-evidence',
+        afterItemId: 'tool:history-image-tool',
+        parts: [
+          { kind: 'markdown', text: 'Generated image is ready.' },
+          {
+            kind: 'image',
+            source: 'data:image/png;base64,history',
+            mimeType: 'image/png',
+            mediaIdentity: 'history-image-identity',
+            attachmentFileRef: {
+              sessionKey: 'agent:pi:s1',
+              generation: 1,
+              uri: 'file:///repo/history.png',
+            },
+          },
+        ],
+      }),
+    }));
+    hostEventsMock.updateListener?.({
+      sessionKey: 'agent:pi:s1',
+      generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'user_message',
+          messageId: 'pending-user',
+          content: [{ type: 'text', text: 'Modify the image' }],
+        },
+      },
+    });
+    hostEventsMock.updateListener?.({
+      sessionKey: 'agent:pi:s1',
+      generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'pending-image-tool',
+          title: 'Generate image',
+          status: 'completed',
+          content: [{
+            type: 'content',
+            content: {
+              type: 'text',
+              text: `Background task started for image generation (${pendingTaskId}).`,
+            },
+          }],
+          locations: [],
+        },
+      },
+    });
+    expect(useAcpChatSessionStore.getState().pendingImageGenerationTaskIds).toEqual([pendingTaskId]);
+
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s2', workspaceRoot: '/repo-2', cwd: '/repo-2', createIfMissing: true,
+    });
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+
+    const state = useAcpChatSessionStore.getState();
+    const mediaItemId = state.timeline.itemOrder.find((itemId) => (
+      state.timeline.itemsById[itemId]?.kind === 'message-segment'
+      && state.timeline.itemsById[itemId]?.compat?.evidenceId === 'history-image-evidence'
+    ));
+    expect(state.pendingImageGenerationTaskIds).toEqual([pendingTaskId]);
+    expect(mediaItemId).toBeTruthy();
+    expect(state.timeline.itemOrder).toEqual([
+      'history-user:0',
+      'tool:history-image-tool',
+      mediaItemId,
+      'pending-user:0',
+      'tool:pending-image-tool',
+    ]);
+    expect(state.timeline.itemsById[mediaItemId!]).toMatchObject({
+      role: 'assistant',
+      compat: { source: 'image-generation', evidenceId: 'history-image-evidence' },
+      parts: [
+        { kind: 'markdown', text: 'Generated image is ready.' },
+        {
+          kind: 'image',
+          mediaIdentity: 'history-image-identity',
+          attachmentFileRef: {
+            sessionKey: 'agent:pi:s1',
+            generation: 3,
+            uri: 'file:///repo/history.png',
+          },
+        },
+      ],
+    });
+  });
+
+  it('merges a restored historical image into the authoritative replay reply without duplicating text', async () => {
+    const initialReplay = [
+      {
+        sessionKey: 'agent:pi:s1',
+        generation: 1,
+        historical: true,
+        notification: {
+          sessionId: 'agent:pi:s1',
+          update: {
+            sessionUpdate: 'user_message',
+            messageId: 'history-user',
+            content: [{ type: 'text', text: 'Generate an image' }],
+          },
+        },
+      },
+      {
+        sessionKey: 'agent:pi:s1',
+        generation: 1,
+        historical: true,
+        notification: {
+          sessionId: 'agent:pi:s1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'history-image-tool',
+            title: 'Generate image',
+            status: 'completed',
+            content: [],
+            locations: [],
+          },
+        },
+      },
+      {
+        sessionKey: 'agent:pi:s1',
+        generation: 1,
+        historical: true,
+        notification: {
+          sessionId: 'agent:pi:s1',
+          update: {
+            sessionUpdate: 'agent_message',
+            messageId: 'old-caption-reply',
+            content: [{ type: 'text', text: 'Generated image is ready.' }],
+          },
+        },
+      },
+    ];
+    hostApiMock.loadAcpSession
+      .mockResolvedValueOnce({ success: true, generation: 1, sessionUpdates: initialReplay })
+      .mockResolvedValueOnce({ success: true, generation: 2, sessionUpdates: [] })
+      .mockResolvedValueOnce({
+        success: true,
+        generation: 3,
+        resumedActivePrompt: false,
+        sessionUpdates: initialReplay.map((event, index) => ({
+          ...event,
+          generation: 3,
+          ...(index === 2
+            ? {
+              notification: {
+                sessionId: 'agent:pi:s1',
+                update: {
+                  sessionUpdate: 'agent_message',
+                  messageId: 'replayed-caption-reply',
+                  content: [{ type: 'text', text: 'Generated image is ready.' }],
+                },
+              },
+            }
+            : {}),
+        })),
+      });
+    const { useAcpChatSessionStore } = await importStore();
+
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+    useAcpChatSessionStore.setState((state) => {
+      const reply = state.timeline.itemsById['old-caption-reply:0'];
+      if (reply?.kind !== 'message-segment') throw new Error('Expected the historical reply');
+      return {
+        pendingImageGenerationTaskIds: ['pending-image-task'],
+        timeline: {
+          ...state.timeline,
+          itemsById: {
+            ...state.timeline.itemsById,
+            [reply.id]: {
+              ...reply,
+              compat: { source: 'image-generation', evidenceId: 'native-image-evidence' },
+              parts: [
+                ...reply.parts,
+                {
+                  kind: 'image',
+                  source: 'data:image/png;base64,native-history',
+                  mediaIdentity: 'native-history-image',
+                  attachmentFileRef: {
+                    sessionKey: 'agent:pi:s1',
+                    generation: 1,
+                    uri: 'file:///repo/native-history.png',
+                  },
+                },
+              ],
+            },
+          },
+        },
+      };
+    });
+
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s2', workspaceRoot: '/repo-2', cwd: '/repo-2', createIfMissing: true,
+    });
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+
+    const timeline = useAcpChatSessionStore.getState().timeline;
+    const replies = timeline.itemOrder
+      .map((itemId) => timeline.itemsById[itemId])
+      .filter((item): item is Extract<typeof item, { kind: 'message-segment' }> => (
+        item?.kind === 'message-segment' && item.role === 'assistant'
+      ));
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({
+      id: 'replayed-caption-reply:0',
+      compat: { source: 'image-generation', evidenceId: 'native-image-evidence' },
+      parts: [
+        { kind: 'markdown', text: 'Generated image is ready.' },
+        {
+          kind: 'image',
+          mediaIdentity: 'native-history-image',
+          attachmentFileRef: { sessionKey: 'agent:pi:s1', generation: 3 },
+        },
+      ],
+    });
+    expect(timeline.itemsById['old-caption-reply:0']).toBeUndefined();
   });
 
   it('falls back to ACP replay when a prompt settles during live-session reactivation', async () => {

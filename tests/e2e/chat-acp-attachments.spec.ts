@@ -792,6 +792,149 @@ test.describe('ACP media attachments', () => {
     }
   });
 
+  test('keeps historical media visible while background generation is pending', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const historicalPrompt = 'Generate the original city image';
+    const pendingPrompt = 'Modify the city image';
+    const historicalCaption = 'The original city image is ready.';
+    const historicalTaskId = '0acc33f8-f225-4824-b67c-20616c82cd98';
+    const pendingTaskId = '93bc41fe-e5c0-439d-9c46-cc63b30e5b07';
+    const deferredHistoryId = 'background-generation-return-history';
+
+    try {
+      const fixture = await installAttachmentHostFixture(app, {
+        replayInLoadResult: true,
+        sessions: [
+          { key: MAIN_SESSION_KEY, title: 'Main session' },
+          { key: OTHER_SESSION_KEY, title: 'Other session' },
+        ],
+      });
+      const imagePath = await fixture.createOpenClawMediaFile(
+        'tool-image-generation/historical-city.png',
+        Uint8Array.from(Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+          'base64',
+        )),
+      );
+      const historicalStart = `Background task started for image generation (${historicalTaskId}).`;
+      const pendingStart = `Background task started for image generation (${pendingTaskId}).`;
+      const historicalTranscript = [
+        { role: 'user', id: 'historical-city-user', content: historicalPrompt },
+        {
+          role: 'toolresult',
+          toolCallId: 'historical-city-tool',
+          toolName: 'image_generate',
+          content: historicalStart,
+          details: { taskId: historicalTaskId },
+        },
+        {
+          role: 'user',
+          content: `[Inter-session message] sourceSession=image_generate:${historicalTaskId} sourceChannel=webchat sourceTool=image_generate isUser=false\n[Internal task completion event]\nstatus: completed successfully`,
+          provenance: {
+            kind: 'inter_session',
+            sourceSessionKey: `image_generate:${historicalTaskId}`,
+            sourceTool: 'image_generate',
+          },
+        },
+        {
+          role: 'assistant',
+          id: 'historical-city-completion',
+          content: `${historicalCaption}\n\nMEDIA:${imagePath}`,
+        },
+      ];
+      const pendingTranscript = [
+        ...historicalTranscript,
+        { role: 'user', id: 'pending-city-user', content: pendingPrompt },
+        {
+          role: 'toolresult',
+          toolCallId: 'pending-city-tool',
+          toolName: 'image_generate',
+          content: pendingStart,
+          details: { taskId: pendingTaskId },
+        },
+      ];
+      const replay = [
+        userUpdate('historical-city-user', historicalPrompt),
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'historical-city-tool',
+          title: 'Generate image',
+          status: 'completed',
+          content: [{ type: 'content', content: { type: 'text', text: historicalStart } }],
+          locations: [],
+        },
+      ];
+      await fixture.setSessionReplay(MAIN_SESSION_KEY, replay);
+      await fixture.setPromptUpdates(pendingPrompt, [{
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'pending-city-tool',
+        title: 'Generate image',
+        status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: pendingStart } }],
+        locations: [],
+      }]);
+      await fixture.setTranscriptResponses(MAIN_SESSION_KEY, [historicalTranscript, pendingTranscript]);
+
+      const page = await openChat(app);
+      const timeline = page.getByTestId('acp-chat-timeline');
+      await expect(timeline.getByText(historicalCaption, { exact: true })).toHaveCount(1, { timeout: 30_000 });
+      await expect(timeline.getByTestId('acp-image-part')).toHaveCount(1);
+
+      await page.getByTestId('chat-composer-input').fill(pendingPrompt);
+      await page.getByTestId('chat-composer-send').click();
+      await fixture.waitForHistoryRequestCount(MAIN_SESSION_KEY, 2);
+      await expect(page.getByLabel('Generating image, please wait…')).toBeVisible();
+
+      await fixture.setSessionReplay(MAIN_SESSION_KEY, [
+        ...replay,
+        userUpdate('pending-city-user', pendingPrompt),
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'pending-city-tool',
+          title: 'Generate image',
+          status: 'completed',
+          content: [{ type: 'content', content: { type: 'text', text: pendingStart } }],
+          locations: [],
+        },
+      ]);
+      await page.getByTestId(`sidebar-session-${OTHER_SESSION_KEY}`).click();
+      await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible();
+      await fixture.setTranscriptResponses(MAIN_SESSION_KEY, [{
+        messages: pendingTranscript,
+        deferId: deferredHistoryId,
+      }]);
+      await page.getByTestId(`sidebar-session-${MAIN_SESSION_KEY}`).click();
+      await fixture.waitForDeferredTranscriptReady(deferredHistoryId);
+
+      await expect(timeline.getByText(historicalCaption, { exact: true })).toHaveCount(1);
+      await expect(timeline.getByTestId('acp-image-part')).toHaveCount(1);
+      await expect(page.getByLabel('Generating image, please wait…')).toBeVisible();
+
+      const image = timeline.getByTestId('acp-image-part').locator('img');
+      await image.evaluate((element) => {
+        element.style.width = '128px';
+        element.style.height = '128px';
+      });
+      await image.dblclick({ position: { x: 12, y: 12 } });
+      await expect(page.getByTestId('acp-image-preview-dialog')).toBeVisible();
+      await expect.poll(async () => (await fixture.getHostInvocations()).some((call) => (
+        call.module === 'files'
+        && call.action === 'readAttachmentBinary'
+        && call.payload?.ref
+        && (call.payload.ref as Record<string, unknown>).uri === imagePath
+        && (call.payload.ref as Record<string, unknown>).generation === 3
+      ))).toBe(true);
+      await page.getByTestId('acp-image-preview-close').click();
+
+      await fixture.releaseTranscriptResponse(deferredHistoryId);
+      await fixture.waitForDeferredTranscriptCompleted(deferredHistoryId);
+      await expect(timeline.getByText(historicalCaption, { exact: true })).toHaveCount(1);
+      await expect(timeline.getByTestId('acp-image-part')).toHaveCount(1);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
   test('renders native ACP resources without transcript evidence and prefers them over duplicate MEDIA evidence', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 

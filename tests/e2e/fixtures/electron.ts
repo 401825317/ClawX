@@ -620,7 +620,7 @@ function stableStringify(value: unknown): string {
 
 export async function installAttachmentHostFixture(
   app: ElectronApplication,
-  options: { sessions: AttachmentFixtureSession[] },
+  options: { sessions: AttachmentFixtureSession[]; replayInLoadResult?: boolean },
 ): Promise<AttachmentHostFixture> {
   if (options.sessions.length === 0) throw new Error('Attachment fixture requires at least one session');
   const homeDir = await app.evaluate(async () => process.env.HOME || process.env.USERPROFILE || '');
@@ -855,6 +855,19 @@ export async function installAttachmentHostFixture(
         });
         productionSessionAccess.commitGrant(grant);
         const replay = state.replays[sessionKey] ?? [];
+        if (payload.replayInLoadResult) {
+          state.replayReady[sessionKey] = Promise.resolve();
+          return respond(request.id, {
+            success: true,
+            generation,
+            sessionUpdates: replay.map((update) => ({
+              sessionKey,
+              generation,
+              historical: true,
+              notification: { sessionId: sessionKey, update },
+            })),
+          });
+        }
         state.replayReady[sessionKey] = new Promise((resolveReplay) => {
           setTimeout(() => {
             emitUpdates(sessionKey, generation, true, replay);
@@ -950,7 +963,7 @@ export async function installAttachmentHostFixture(
 
       return originalHostInvoke?.(event, request) ?? respond(request.id, {});
     });
-  }, { workspaceDir, productionAttachmentBundlePath });
+  }, { workspaceDir, productionAttachmentBundlePath, replayInLoadResult: options.replayInLoadResult === true });
 
   const writeFixtureFile = async (root: string, relativePath: string, data: string | Uint8Array) => {
     const filePath = resolve(root, relativePath);

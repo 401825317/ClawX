@@ -35,6 +35,7 @@ import {
   attachmentRequestFingerprint,
   collectPendingAttachments,
   createPendingAttachment,
+  dedupeTimelineAttachments,
   type PendingAttachmentLocation,
 } from '@/lib/acp/attachments';
 import {
@@ -49,7 +50,13 @@ import { fetchOpenClawTranscriptSupplement } from '@/lib/acp/transcript-suppleme
 import { alignHistoricalTurnTimings, type AcpTurnTiming } from '@/lib/acp/turn-timings';
 import { hostApi } from '@/lib/host-api';
 import { hostEvents } from '@/lib/host-events';
-import type { AcpTimelineSnapshot, MessageSegmentItem, PermissionItem, RenderPart } from '@/lib/acp/timeline-types';
+import type {
+  AcpTimelineSnapshot,
+  MessageSegmentItem,
+  PermissionItem,
+  RenderPart,
+  TimelineItem,
+} from '@/lib/acp/timeline-types';
 
 const EMPTY_SESSION_ID = '';
 const CANCEL_PERMISSION_OPTION_ID = '__cancelled__';
@@ -868,6 +875,237 @@ function reconcileLateAcpImageCompletions(
   return nextTimeline;
 }
 
+function timelineItemParts(item: TimelineItem): RenderPart[] {
+  if (item.kind === 'message-segment' || item.kind === 'thought') return item.parts;
+  if (item.kind === 'tool-call') return item.outputParts;
+  return [];
+}
+
+function projectionMediaIdentity(part: RenderPart): string | undefined {
+  if (part.kind === 'image') {
+    return part.mediaIdentity ?? `${part.mimeType ?? ''}:${part.source}`;
+  }
+  if (part.kind === 'attachment' && part.access.status === 'available') {
+    return part.access.identity;
+  }
+  return undefined;
+}
+
+function timelineMediaIdentities(timeline: AcpTimelineSnapshot): Set<string> {
+  const identities = new Set<string>();
+  for (const itemId of timeline.itemOrder) {
+    const item = timeline.itemsById[itemId];
+    if (!item) continue;
+    for (const part of timelineItemParts(item)) {
+      const identity = projectionMediaIdentity(part);
+      if (identity) identities.add(identity);
+    }
+  }
+  return identities;
+}
+
+function rebindProjectionPart(
+  part: RenderPart,
+  sessionKey: string,
+  generation: number,
+): RenderPart {
+  if (part.kind === 'image' && part.attachmentFileRef) {
+    return {
+      ...part,
+      attachmentFileRef: { ...part.attachmentFileRef, sessionKey, generation },
+    };
+  }
+  if (part.kind !== 'attachment' || part.access.status !== 'available') return part;
+  return {
+    ...part,
+    access: {
+      ...part.access,
+      target: {
+        ...part.access.target,
+        ref: { ...part.access.target.ref, sessionKey, generation },
+      },
+    },
+  };
+}
+
+type RendererMediaProjectionItem = MessageSegmentItem & {
+  compat: { source: 'image-generation' | 'openclaw-media'; evidenceId: string };
+};
+
+function rendererMediaProjection(item: TimelineItem | undefined): item is RendererMediaProjectionItem {
+  return item?.kind === 'message-segment'
+    && (item.compat?.source === 'image-generation' || item.compat?.source === 'openclaw-media');
+}
+
+function projectionEvidenceItemId(
+  timeline: AcpTimelineSnapshot,
+  item: MessageSegmentItem,
+): string | undefined {
+  return timeline.itemOrder.find((itemId) => {
+    const candidate = timeline.itemsById[itemId];
+    return rendererMediaProjection(candidate)
+      && candidate.compat?.source === item.compat?.source
+      && candidate.compat.evidenceId === item.compat?.evidenceId;
+  });
+}
+
+type ProjectionAnchor = { itemId: string; placement: 'before' | 'after' };
+
+function projectionAnchor(
+  previous: AcpTimelineSnapshot,
+  projectionIndex: number,
+  timeline: AcpTimelineSnapshot,
+): ProjectionAnchor | null {
+  for (let index = projectionIndex - 1; index >= 0; index -= 1) {
+    const itemId = previous.itemOrder[index];
+    if (itemId && timeline.itemsById[itemId]) return { itemId, placement: 'after' };
+  }
+  for (let index = projectionIndex + 1; index < previous.itemOrder.length; index += 1) {
+    const itemId = previous.itemOrder[index];
+    if (itemId && timeline.itemsById[itemId]) return { itemId, placement: 'before' };
+  }
+  return null;
+}
+
+function itemMarkdownText(item: MessageSegmentItem): string {
+  return item.parts
+    .flatMap((part) => part.kind === 'markdown' ? [part.text] : [])
+    .join('\n')
+    .trim();
+}
+
+function matchingReplayCaptionItemId(
+  timeline: AcpTimelineSnapshot,
+  anchor: ProjectionAnchor,
+  caption: string,
+): string | undefined {
+  if (!caption || anchor.placement !== 'after') return undefined;
+  const anchorIndex = timeline.itemOrder.indexOf(anchor.itemId);
+  if (anchorIndex < 0) return undefined;
+  const matches: string[] = [];
+  for (let index = anchorIndex + 1; index < timeline.itemOrder.length; index += 1) {
+    const itemId = timeline.itemOrder[index];
+    const item = itemId ? timeline.itemsById[itemId] : undefined;
+    if (item?.kind === 'message-segment' && item.role === 'user') break;
+    if (
+      item?.kind === 'message-segment'
+      && item.role === 'assistant'
+      && !item.compat
+      && itemMarkdownText(item) === caption
+    ) matches.push(itemId!);
+  }
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function insertRendererMediaProjection(
+  timeline: AcpTimelineSnapshot,
+  item: MessageSegmentItem,
+  anchor: ProjectionAnchor,
+): AcpTimelineSnapshot {
+  const anchorIndex = timeline.itemOrder.indexOf(anchor.itemId);
+  if (anchorIndex < 0 || timeline.itemsById[item.id]) return timeline;
+  const insertionIndex = anchor.placement === 'after' ? anchorIndex + 1 : anchorIndex;
+  return dedupeTimelineAttachments({
+    ...timeline,
+    itemOrder: [
+      ...timeline.itemOrder.slice(0, insertionIndex),
+      item.id,
+      ...timeline.itemOrder.slice(insertionIndex),
+    ],
+    itemsById: { ...timeline.itemsById, [item.id]: item },
+    segmentCounts: {
+      ...timeline.segmentCounts,
+      [item.messageId]: Math.max(timeline.segmentCounts[item.messageId] ?? 0, item.segmentIndex + 1),
+    },
+  });
+}
+
+function releaseUnrestoredImageProjection(sessionKey: string, evidenceId: string): void {
+  const session = imageGenerationCompatSessions.get(sessionKey);
+  if (!session) return;
+  session.delivered.delete(evidenceId);
+  session.reservations.delete(evidenceId);
+  session.syntheticCompletions.delete(evidenceId);
+}
+
+/** Restores only Renderer-owned media omitted by ACP replay; replay remains authoritative for all other items. */
+function restoreBackgroundMediaProjections(
+  timeline: AcpTimelineSnapshot,
+  snapshot: LiveSessionSnapshot,
+  sessionKey: string,
+  generation: number,
+): AcpTimelineSnapshot {
+  let nextTimeline = timeline;
+  for (const [projectionIndex, itemId] of snapshot.timeline.itemOrder.entries()) {
+    const previousItem = snapshot.timeline.itemsById[itemId];
+    if (!rendererMediaProjection(previousItem)) continue;
+    const evidenceId = previousItem.compat.evidenceId;
+    if (projectionEvidenceItemId(nextTimeline, previousItem)) continue;
+
+    const reboundParts = previousItem.parts.map((part) => (
+      rebindProjectionPart(part, sessionKey, generation)
+    ));
+    const existingMedia = timelineMediaIdentities(nextTimeline);
+    const mediaParts = reboundParts.filter((part) => part.kind === 'image' || part.kind === 'attachment');
+    const missingParts = reboundParts.filter((part) => {
+      if (part.kind !== 'image' && part.kind !== 'attachment') return true;
+      const identity = projectionMediaIdentity(part);
+      return !identity || !existingMedia.has(identity);
+    });
+    if (mediaParts.length > 0 && missingParts.every((part) => part.kind !== 'image' && part.kind !== 'attachment')) {
+      continue;
+    }
+
+    const existingItem = nextTimeline.itemsById[previousItem.id];
+    const missingImages = missingParts.filter((part) => part.kind === 'image');
+    if (existingItem?.kind === 'message-segment' && existingItem.role === 'assistant') {
+      if (missingImages.length > 0) {
+        nextTimeline = mergeImageCompletionIntoAcpItem(
+          nextTimeline,
+          existingItem.id,
+          evidenceId,
+          missingImages,
+        );
+      }
+      continue;
+    }
+
+    const anchor = projectionAnchor(snapshot.timeline, projectionIndex, nextTimeline);
+    if (!anchor) {
+      if (previousItem.compat?.source === 'image-generation') {
+        releaseUnrestoredImageProjection(sessionKey, evidenceId);
+      }
+      continue;
+    }
+
+    if (previousItem.compat?.source === 'image-generation') {
+      const replayCaptionItemId = matchingReplayCaptionItemId(
+        nextTimeline,
+        anchor,
+        itemMarkdownText(previousItem),
+      );
+      if (replayCaptionItemId) {
+        if (missingImages.length > 0) {
+          nextTimeline = mergeImageCompletionIntoAcpItem(
+            nextTimeline,
+            replayCaptionItemId,
+            evidenceId,
+            missingImages,
+          );
+        }
+        continue;
+      }
+    }
+
+    nextTimeline = insertRendererMediaProjection(
+      nextTimeline,
+      { ...previousItem, parts: missingParts },
+      anchor,
+    );
+  }
+  return nextTimeline;
+}
+
 function isLiveMessageUpdate(event: AcpSessionUpdateEnvelope): boolean {
   if (event.historical) return false;
   const update = event.notification.update as unknown as { sessionUpdate?: unknown };
@@ -1527,6 +1765,9 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         ? liveSessionSnapshots.get(input.sessionKey)
         : undefined;
       const restorableBackgroundSnapshot = currentBackgroundSnapshot
+        && currentBackgroundSnapshot.sessionKey === input.sessionKey
+        && currentBackgroundSnapshot.workspaceRoot === input.workspaceRoot
+        && currentBackgroundSnapshot.cwd === input.cwd
         && (
           currentBackgroundSnapshot.pendingImageGenerationTaskIds.length > 0
           || currentBackgroundSnapshot.pendingVideoGenerationTaskIds.length > 0
@@ -1541,6 +1782,14 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         : createEmptyAcpTimeline(input.sessionKey, generation);
       for (const event of sessionUpdates) {
         timeline = applyAcpSessionUpdate(timeline, event.notification, { historical: !!event.historical });
+      }
+      if (restorableBackgroundSnapshot) {
+        timeline = restoreBackgroundMediaProjections(
+          timeline,
+          restorableBackgroundSnapshot,
+          input.sessionKey,
+          generation,
+        );
       }
       const pendingAttachments = newPendingAttachments(
         createEmptyAcpTimeline(input.sessionKey, generation),
