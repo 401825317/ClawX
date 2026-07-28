@@ -166,6 +166,7 @@ test.describe('ClawX video generation options', () => {
       const page = await getStableWindow(app);
       await page.reload();
       await expect(page.getByTestId('main-layout')).toBeVisible();
+      await page.setViewportSize({ width: 720, height: 720 });
 
       await app.evaluate(({ BrowserWindow }) => {
         BrowserWindow.getAllWindows()[0]?.webContents.send('gateway:status-changed', {
@@ -192,6 +193,7 @@ test.describe('ClawX video generation options', () => {
       const options = menu.getByRole('menuitemradio');
       await expect(menu).toBeVisible();
       await expect(options).toHaveCount(5);
+      await options.first().hover();
       await expect(options.nth(0)).toHaveText(/2:3\s*高/);
       await expect(options.nth(1)).toHaveText(/3:2\s*宽/);
       await expect(options.nth(2)).toHaveText(/1:1\s*正方形/);
@@ -199,7 +201,8 @@ test.describe('ClawX video generation options', () => {
       await expect(options.nth(4)).toHaveText(/16:9\s*宽屏/);
 
       const [menuBox, optionBox] = await Promise.all([menu.boundingBox(), options.first().boundingBox()]);
-      expect(menuBox?.width).toBeGreaterThanOrEqual(128);
+      await expect(menu).toHaveCSS('min-width', '132px');
+      expect(menuBox?.width).toBeGreaterThanOrEqual(124);
       expect(menuBox?.width).toBeLessThanOrEqual(176);
       expect(optionBox?.height).toBeLessThanOrEqual(34);
       await expect(options.first()).toHaveCSS('font-size', '12px');
@@ -210,9 +213,11 @@ test.describe('ClawX video generation options', () => {
 
       await page.getByTestId('chat-video-aspect-2-3').click();
       await expect(optionsTrigger).toContainText('2:3');
+      await expect(page.getByTestId('chat-video-options-menu')).toBeHidden();
       await optionsTrigger.click();
       await page.getByTestId('chat-video-resolution-row').hover();
       await page.getByTestId('chat-video-resolution-option-720p').click();
+      await expect(page.getByTestId('chat-video-options-menu')).toBeHidden();
       await optionsTrigger.click();
       await page.getByTestId('chat-video-duration-row').hover();
       await page.getByTestId('chat-video-duration-option-15').click();

@@ -616,7 +616,7 @@ test.describe('ClawX ACP inline timeline', () => {
       await page.getByTestId('chat-composer-mode-image').click();
       const imageOptionsTrigger = page.getByTestId('chat-image-options-trigger');
       await expect(imageOptionsTrigger).toContainText('1:1');
-      await expect(imageOptionsTrigger).toContainText('中');
+      await expect(imageOptionsTrigger).toContainText('Medium');
       const [settingsPickerBox, imageModeButtonBox, optionsTriggerBox, sendBoxAfterImageMode] = await Promise.all([
         page.getByTestId('chat-settings-picker-button').boundingBox(),
         page.getByTestId('chat-composer-mode-image').boundingBox(),
@@ -646,12 +646,14 @@ test.describe('ClawX ACP inline timeline', () => {
       await imageOptionsTrigger.click();
       await page.getByTestId('chat-image-aspect-row').hover();
       const aspectMenu = page.getByTestId('chat-image-aspect-menu');
+      await aspectMenu.getByRole('menuitemradio').first().hover();
+      await expect(aspectMenu).toHaveCSS('min-width', '132px');
       const aspectMenuBox = await aspectMenu.boundingBox();
       expect(aspectMenuBox).not.toBeNull();
-      expect(aspectMenuBox!.width).toBeGreaterThanOrEqual(128);
+      expect(aspectMenuBox!.width).toBeGreaterThanOrEqual(124);
       expect(aspectMenuBox!.width).toBeLessThanOrEqual(176);
       const squareDescription = page.getByTestId('chat-image-aspect-1-1-description');
-      await expect(squareDescription).toHaveText('正方形');
+      await expect(squareDescription).toHaveText('Square');
       expect(await squareDescription.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
       const widescreenAspectOption = page.getByTestId('chat-image-aspect-16-9');
       const widescreenAspectHitTest = await widescreenAspectOption.evaluate((element) => {
@@ -668,10 +670,11 @@ test.describe('ClawX ACP inline timeline', () => {
         `Aspect menu must receive pointer events: ${JSON.stringify(widescreenAspectHitTest)}`,
       ).toMatchObject({ interactive: true });
       await widescreenAspectOption.click();
+      await expect(page.getByTestId('chat-image-options-menu')).toBeHidden();
       await imageOptionsTrigger.click();
       await page.getByTestId('chat-image-quality-row').hover();
       await page.getByTestId('chat-image-quality-option-high').click();
-      await expect(imageOptionsTrigger).toContainText('高');
+      await expect(imageOptionsTrigger).toContainText('High');
       await page.getByTestId('chat-composer-input').fill('Create a product image.');
       await page.getByTestId('chat-composer-send').click();
 

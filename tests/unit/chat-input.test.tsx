@@ -359,7 +359,7 @@ function openComposerOptionsSubmenu(triggerTestId: string, rowTestId: string) {
     button: 0,
     ctrlKey: false,
   });
-  fireEvent.pointerMove(screen.getByTestId(rowTestId), { pointerType: 'mouse' });
+  fireEvent.click(screen.getByTestId(rowTestId));
 }
 
 function openModelSettingsPicker() {

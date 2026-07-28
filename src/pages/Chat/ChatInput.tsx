@@ -212,7 +212,13 @@ function ComposerGenerationOptionsMenu({
                 className="z-50 w-max min-w-[132px] max-w-[calc(100vw-24px)] rounded-lg border border-black/10 bg-surface-modal p-1 text-popover-foreground shadow-md outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 dark:border-white/10"
                 data-testid={group.menuTestId}
               >
-                <DropdownMenuPrimitive.RadioGroup value={group.value} onValueChange={group.onValueChange}>
+                <DropdownMenuPrimitive.RadioGroup
+                  value={group.value}
+                  onValueChange={(value) => {
+                    group.onValueChange(value);
+                    onOpenChange(false);
+                  }}
+                >
                   {group.options.map((option) => {
                     const selected = option.value === group.value;
                     return (
@@ -418,8 +424,8 @@ export function ChatInput({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [skillPickerOpen, setSkillPickerOpen] = useState(false);
   const [settingsPickerOpen, setSettingsPickerOpen] = useState(false);
-  const [imageAspectPickerOpen, setImageAspectPickerOpen] = useState(false);
-  const [videoAspectPickerOpen, setVideoAspectPickerOpen] = useState(false);
+  const [imageOptionsPickerOpen, setImageOptionsPickerOpen] = useState(false);
+  const [videoOptionsPickerOpen, setVideoOptionsPickerOpen] = useState(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [skillQuery, setSkillQuery] = useState('');
   const [quickSkills, setQuickSkills] = useState<QuickAccessSkill[]>([]);
@@ -708,21 +714,21 @@ export function ChatInput({
   }, [pickerOpen, skillPickerOpen, workspaceMenuOpen]);
 
   useEffect(() => {
-    if (!pickerOpen && !skillPickerOpen && !settingsPickerOpen && !imageAspectPickerOpen && !videoAspectPickerOpen && !workspaceMenuOpen) return;
+    if (!pickerOpen && !skillPickerOpen && !settingsPickerOpen && !imageOptionsPickerOpen && !videoOptionsPickerOpen && !workspaceMenuOpen) return;
     const handleDocumentKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       setPickerOpen(false);
       setSkillPickerOpen(false);
       closeSettingsPicker();
-      setImageAspectPickerOpen(false);
-      setVideoAspectPickerOpen(false);
+      setImageOptionsPickerOpen(false);
+      setVideoOptionsPickerOpen(false);
       setWorkspaceMenuOpen(false);
     };
     document.addEventListener('keydown', handleDocumentKeyDown, true);
     return () => {
       document.removeEventListener('keydown', handleDocumentKeyDown, true);
     };
-  }, [closeSettingsPicker, imageAspectPickerOpen, pickerOpen, settingsPickerOpen, skillPickerOpen, videoAspectPickerOpen, workspaceMenuOpen]);
+  }, [closeSettingsPicker, imageOptionsPickerOpen, pickerOpen, settingsPickerOpen, skillPickerOpen, videoOptionsPickerOpen, workspaceMenuOpen]);
 
   useEffect(() => {
     setSelectedSkill((prev) => {
@@ -885,8 +891,8 @@ export function ChatInput({
     setPickerOpen(false);
     setSkillPickerOpen(false);
     closeSettingsPicker();
-    setImageAspectPickerOpen(false);
-    setVideoAspectPickerOpen(false);
+    setImageOptionsPickerOpen(false);
+    setVideoOptionsPickerOpen(false);
     setWorkspaceMenuOpen(false);
     setSessionImageModes((current) => ({
       ...current,
@@ -914,8 +920,8 @@ export function ChatInput({
     setPickerOpen(false);
     setSkillPickerOpen(false);
     closeSettingsPicker();
-    setImageAspectPickerOpen(false);
-    setVideoAspectPickerOpen(false);
+    setImageOptionsPickerOpen(false);
+    setVideoOptionsPickerOpen(false);
     setWorkspaceMenuOpen(false);
     setSessionVideoModes((current) => ({
       ...current,
@@ -944,8 +950,8 @@ export function ChatInput({
     setPickerOpen(false);
     setSkillPickerOpen(false);
     closeSettingsPicker();
-    setImageAspectPickerOpen(false);
-    setVideoAspectPickerOpen(false);
+    setImageOptionsPickerOpen(false);
+    setVideoOptionsPickerOpen(false);
     setWorkspaceMenuOpen((open) => !open);
   }, [closeSettingsPicker, workspaceSelectorDisabled]);
 
@@ -1207,8 +1213,8 @@ export function ChatInput({
       setPickerOpen(false);
       setSkillPickerOpen(false);
       closeSettingsPicker();
-      setImageAspectPickerOpen(false);
-      setVideoAspectPickerOpen(false);
+      setImageOptionsPickerOpen(false);
+      setVideoOptionsPickerOpen(false);
       setWorkspaceMenuOpen(false);
     } finally {
       if (sendAttemptInFlightRef.current?.token === token) {
@@ -1298,8 +1304,8 @@ export function ChatInput({
         setPickerOpen(false);
         setSkillPickerOpen(false);
         closeSettingsPicker();
-        setImageAspectPickerOpen(false);
-        setVideoAspectPickerOpen(false);
+        setImageOptionsPickerOpen(false);
+        setVideoOptionsPickerOpen(false);
         setWorkspaceMenuOpen(false);
         return;
       }
@@ -1540,8 +1546,8 @@ export function ChatInput({
                   onClick={() => {
                     setSkillPickerOpen(false);
                     closeSettingsPicker();
-                    setImageAspectPickerOpen(false);
-                    setVideoAspectPickerOpen(false);
+                    setImageOptionsPickerOpen(false);
+                    setVideoOptionsPickerOpen(false);
                     setWorkspaceMenuOpen(false);
                     setPickerOpen((open) => !open);
                   }}
@@ -1585,8 +1591,8 @@ export function ChatInput({
                 onClick={() => {
                   setPickerOpen(false);
                   closeSettingsPicker();
-                  setImageAspectPickerOpen(false);
-                  setVideoAspectPickerOpen(false);
+                  setImageOptionsPickerOpen(false);
+                  setVideoOptionsPickerOpen(false);
                   setWorkspaceMenuOpen(false);
                   setSkillPickerOpen((open) => !open);
                 }}
@@ -1671,8 +1677,8 @@ export function ChatInput({
                   onClick={() => {
                     setPickerOpen(false);
                     setSkillPickerOpen(false);
-                    setImageAspectPickerOpen(false);
-                    setVideoAspectPickerOpen(false);
+                    setImageOptionsPickerOpen(false);
+                    setVideoOptionsPickerOpen(false);
                     setWorkspaceMenuOpen(false);
                   }}
                   disabled={inputDisabled || sending || !currentAgent}
@@ -1682,7 +1688,7 @@ export function ChatInput({
                   {(modelPersisting || thinkingPersisting) && (
                     <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
                   )}
-                  <span className="min-w-0 truncate text-foreground/90" data-testid="chat-settings-model-summary">
+                  <span className="min-w-0 truncate" data-testid="chat-settings-model-summary">
                     {currentModelLabel}
                   </span>
                   <span className="h-3 w-px shrink-0 bg-black/15 dark:bg-white/20" aria-hidden="true" />
@@ -1841,129 +1847,134 @@ export function ChatInput({
             </Tooltip>
 
             {imageModeActive && (
-              <div className="flex shrink-0 items-center gap-1" data-testid="chat-image-options">
-                <ComposerChoiceMenu
-                  value={imageOptions.size}
-                  options={IMAGE_ASPECT_OPTIONS.map((option) => ({
-                    value: option.size,
-                    label: option.ratio,
-                    description: t(option.labelKey),
-                    previewClassName: option.previewClassName,
-                    testId: option.testId,
-                  }))}
-                  onValueChange={(size) => {
-                    const option = IMAGE_ASPECT_OPTIONS.find((entry) => entry.size === size);
-                    if (option) updateImageOptions({ size: option.size });
-                    requestAnimationFrame(() => textareaRef.current?.focus());
-                  }}
-                  triggerLabel={IMAGE_ASPECT_OPTIONS.find((option) => option.size === imageOptions.size)?.ratio ?? '1:1'}
-                  triggerTestId="chat-image-aspect-trigger"
-                  menuTestId="chat-image-aspect-menu"
-                  ariaLabel={t('composer.imageSizeLabel')}
+              <div className="flex shrink-0 items-center" data-testid="chat-image-options">
+                <ComposerGenerationOptionsMenu
+                  triggerLabel={`${IMAGE_ASPECT_OPTIONS.find((option) => option.size === imageOptions.size)?.ratio ?? '1:1'} · ${formatImageQualityLabel(imageOptions.quality, t)}`}
+                  triggerTestId="chat-image-options-trigger"
+                  menuTestId="chat-image-options-menu"
+                  ariaLabel={`${t('composer.imageSizeLabel')}, ${t('composer.imageQualityLabel')}`}
                   disabled={inputDisabled || sending}
-                  triggerClassName="min-w-[58px]"
-                  open={imageAspectPickerOpen}
-                  onOpenChange={setImageAspectPickerOpen}
-                  onOpen={prepareGenerationOptionPicker}
-                />
-                <ComposerChoiceMenu
-                  value={imageOptions.quality}
-                  options={IMAGE_QUALITY_OPTIONS.map((quality) => ({
-                    value: quality,
-                    label: formatImageQualityLabel(quality, t),
-                    testId: `chat-image-quality-option-${quality}`,
-                  }))}
-                  onValueChange={(quality) => {
-                    const nextQuality = quality as AcpImageGenerationOptions['quality'];
-                    if (IMAGE_QUALITY_OPTIONS.includes(nextQuality)) updateImageOptions({ quality: nextQuality });
-                    requestAnimationFrame(() => textareaRef.current?.focus());
-                  }}
-                  triggerLabel={formatImageQualityLabel(imageOptions.quality, t)}
-                  triggerTestId="chat-image-quality"
-                  menuTestId="chat-image-quality-menu"
-                  ariaLabel={t('composer.imageQualityLabel')}
-                  disabled={inputDisabled || sending}
-                  triggerClassName="w-[76px]"
+                  groups={[
+                    {
+                      label: t('composer.imageSizeLabel'),
+                      value: imageOptions.size,
+                      options: IMAGE_ASPECT_OPTIONS.map((option) => ({
+                        value: option.size,
+                        label: option.ratio,
+                        description: t(option.labelKey),
+                        descriptionTestId: `${option.testId}-description`,
+                        previewClassName: option.previewClassName,
+                        testId: option.testId,
+                      })),
+                      onValueChange: (size) => {
+                        const option = IMAGE_ASPECT_OPTIONS.find((entry) => entry.size === size);
+                        if (option) updateImageOptions({ size: option.size });
+                        requestAnimationFrame(() => textareaRef.current?.focus());
+                      },
+                      rowTestId: 'chat-image-aspect-row',
+                      menuTestId: 'chat-image-aspect-menu',
+                    },
+                    {
+                      label: t('composer.imageQualityLabel'),
+                      value: imageOptions.quality,
+                      options: IMAGE_QUALITY_OPTIONS.map((quality) => ({
+                        value: quality,
+                        label: formatImageQualityLabel(quality, t),
+                        testId: `chat-image-quality-option-${quality}`,
+                      })),
+                      onValueChange: (quality) => {
+                        const nextQuality = quality as AcpImageGenerationOptions['quality'];
+                        if (IMAGE_QUALITY_OPTIONS.includes(nextQuality)) updateImageOptions({ quality: nextQuality });
+                        requestAnimationFrame(() => textareaRef.current?.focus());
+                      },
+                      rowTestId: 'chat-image-quality-row',
+                      menuTestId: 'chat-image-quality-menu',
+                    },
+                  ]}
+                  open={imageOptionsPickerOpen}
+                  onOpenChange={setImageOptionsPickerOpen}
                   onOpen={prepareGenerationOptionPicker}
                 />
               </div>
             )}
 
             {videoModeActive && (
-              <div className="flex min-w-0 shrink-0 items-center gap-1" data-testid="chat-video-options">
-                <ComposerChoiceMenu
-                  value={videoOptions.aspectRatio}
-                  options={ASPECT_RATIO_OPTIONS.filter((option) => (
-                    activeVideoModel?.aspectRatios.includes(option.ratio) ?? false
-                  )).map((option) => ({
-                    value: option.ratio,
-                    label: option.ratio,
-                    description: t(option.labelKey),
-                    previewClassName: option.previewClassName,
-                    testId: `chat-video-aspect-${option.ratio.replace(':', '-')}`,
-                  }))}
-                  onValueChange={(aspectRatio) => {
-                    const nextAspectRatio = aspectRatio as AcpVideoGenerationOptions['aspectRatio'];
-                    if (activeVideoModel?.aspectRatios.includes(nextAspectRatio)) {
-                      updateVideoOptions({ aspectRatio: nextAspectRatio });
-                    }
-                    requestAnimationFrame(() => textareaRef.current?.focus());
-                  }}
-                  triggerLabel={videoOptions.aspectRatio}
-                  triggerTestId="chat-video-aspect-trigger"
-                  menuTestId="chat-video-aspect-menu"
-                  ariaLabel={t('composer.videoAspectRatioLabel')}
+              <div className="flex min-w-0 shrink-0 items-center" data-testid="chat-video-options">
+                <ComposerGenerationOptionsMenu
+                  triggerLabel={`${videoOptions.aspectRatio} · ${videoOptions.resolution} · ${videoOptions.durationSeconds}s`}
+                  triggerTestId="chat-video-options-trigger"
+                  menuTestId="chat-video-options-menu"
+                  ariaLabel={`${t('composer.videoAspectRatioLabel')}, ${t('composer.videoResolutionLabel')}, ${t('composer.videoDurationLabel')}`}
                   disabled={inputDisabled || sending}
-                  triggerClassName="min-w-[58px]"
-                  open={videoAspectPickerOpen}
-                  onOpenChange={setVideoAspectPickerOpen}
-                  onOpen={prepareGenerationOptionPicker}
-                />
-                <ComposerChoiceMenu
-                  value={videoOptions.resolution}
-                  options={(activeVideoModel?.resolutions ?? []).map((resolution) => ({
-                    value: resolution,
-                    label: resolution,
-                    testId: `chat-video-resolution-option-${resolution.toLowerCase()}`,
-                  }))}
-                  onValueChange={(resolution) => {
-                    const nextResolution = resolution as AcpVideoGenerationOptions['resolution'];
-                    if (activeVideoModel?.resolutions.includes(nextResolution)) {
-                      updateVideoOptions({ resolution: nextResolution });
-                    }
-                    requestAnimationFrame(() => textareaRef.current?.focus());
-                  }}
-                  triggerLabel={videoOptions.resolution}
-                  triggerTestId="chat-video-resolution"
-                  menuTestId="chat-video-resolution-menu"
-                  ariaLabel={t('composer.videoResolutionLabel')}
-                  disabled={inputDisabled || sending}
-                  triggerClassName="w-[68px]"
-                  onOpen={prepareGenerationOptionPicker}
-                />
-                <ComposerChoiceMenu
-                  value={String(videoOptions.durationSeconds)}
-                  options={(activeVideoModel?.durations ?? []).map((durationSeconds) => ({
-                    value: String(durationSeconds),
-                    label: `${durationSeconds}s`,
-                    testId: `chat-video-duration-option-${durationSeconds}`,
-                  }))}
-                  onValueChange={(duration) => {
-                    const durationSeconds = Number(duration);
-                    if (
-                      isVideoDurationSeconds(durationSeconds)
-                      && activeVideoModel?.durations.includes(durationSeconds)
-                    ) {
-                      updateVideoOptions({ durationSeconds });
-                    }
-                    requestAnimationFrame(() => textareaRef.current?.focus());
-                  }}
-                  triggerLabel={`${videoOptions.durationSeconds}s`}
-                  triggerTestId="chat-video-duration"
-                  menuTestId="chat-video-duration-menu"
-                  ariaLabel={t('composer.videoDurationLabel')}
-                  disabled={inputDisabled || sending}
-                  triggerClassName="w-[58px]"
+                  groups={[
+                    {
+                      label: t('composer.videoAspectRatioLabel'),
+                      value: videoOptions.aspectRatio,
+                      options: ASPECT_RATIO_OPTIONS.filter((option) => (
+                        activeVideoModel?.aspectRatios.includes(option.ratio) ?? false
+                      )).map((option) => {
+                        const testId = `chat-video-aspect-${option.ratio.replace(':', '-')}`;
+                        return {
+                          value: option.ratio,
+                          label: option.ratio,
+                          description: t(option.labelKey),
+                          descriptionTestId: `${testId}-description`,
+                          previewClassName: option.previewClassName,
+                          testId,
+                        };
+                      }),
+                      onValueChange: (aspectRatio) => {
+                        const nextAspectRatio = aspectRatio as AcpVideoGenerationOptions['aspectRatio'];
+                        if (activeVideoModel?.aspectRatios.includes(nextAspectRatio)) {
+                          updateVideoOptions({ aspectRatio: nextAspectRatio });
+                        }
+                        requestAnimationFrame(() => textareaRef.current?.focus());
+                      },
+                      rowTestId: 'chat-video-aspect-row',
+                      menuTestId: 'chat-video-aspect-menu',
+                    },
+                    {
+                      label: t('composer.videoResolutionLabel'),
+                      value: videoOptions.resolution,
+                      options: (activeVideoModel?.resolutions ?? []).map((resolution) => ({
+                        value: resolution,
+                        label: resolution,
+                        testId: `chat-video-resolution-option-${resolution.toLowerCase()}`,
+                      })),
+                      onValueChange: (resolution) => {
+                        const nextResolution = resolution as AcpVideoGenerationOptions['resolution'];
+                        if (activeVideoModel?.resolutions.includes(nextResolution)) {
+                          updateVideoOptions({ resolution: nextResolution });
+                        }
+                        requestAnimationFrame(() => textareaRef.current?.focus());
+                      },
+                      rowTestId: 'chat-video-resolution-row',
+                      menuTestId: 'chat-video-resolution-menu',
+                    },
+                    {
+                      label: t('composer.videoDurationLabel'),
+                      value: String(videoOptions.durationSeconds),
+                      options: (activeVideoModel?.durations ?? []).map((durationSeconds) => ({
+                        value: String(durationSeconds),
+                        label: `${durationSeconds}s`,
+                        testId: `chat-video-duration-option-${durationSeconds}`,
+                      })),
+                      onValueChange: (duration) => {
+                        const durationSeconds = Number(duration);
+                        if (
+                          isVideoDurationSeconds(durationSeconds)
+                          && activeVideoModel?.durations.includes(durationSeconds)
+                        ) {
+                          updateVideoOptions({ durationSeconds });
+                        }
+                        requestAnimationFrame(() => textareaRef.current?.focus());
+                      },
+                      rowTestId: 'chat-video-duration-row',
+                      menuTestId: 'chat-video-duration-menu',
+                    },
+                  ]}
+                  open={videoOptionsPickerOpen}
+                  onOpenChange={setVideoOptionsPickerOpen}
                   onOpen={prepareGenerationOptionPicker}
                 />
               </div>

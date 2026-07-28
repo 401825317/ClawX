@@ -29,6 +29,7 @@ import { toast } from 'sonner';
 import { hostApi } from '@/lib/host-api';
 import { ManagedAccountAuthPanel } from '@/components/auth/ManagedAccountAuthPanel';
 import { useManagedAuthStore } from '@/stores/managed-auth';
+import uclawWelcomeRobot from '@/assets/uclaw-welcome-robot.png';
 
 interface SetupStep {
   id: string;
@@ -78,8 +79,6 @@ const getDefaultSkills = (t: TFunction): DefaultSkill[] => [
   { id: 'file-tools', name: t('defaultSkills.file-tools.name'), description: t('defaultSkills.file-tools.description') },
   { id: 'terminal', name: t('defaultSkills.terminal.name'), description: t('defaultSkills.terminal.description') },
 ];
-
-import clawxIcon from '@/assets/logo.svg';
 
 // NOTE: Channel types moved to Settings > Channels page
 // NOTE: Skill bundles moved to Settings > Skills page - auto-install essential skills during setup
@@ -286,7 +285,7 @@ function WelcomeContent() {
   return (
     <div data-testid="setup-welcome-step" className="text-center space-y-4">
       <div className="mb-4 flex justify-center">
-        <img src={clawxIcon} alt="ClawX" className="h-16 w-16" />
+        <img src={uclawWelcomeRobot} alt="UClaw" className="h-24 w-24 object-contain" />
       </div>
       <h2 className="text-xl font-serif font-normal tracking-tight">{t('welcome.title')}</h2>
       <p className="text-muted-foreground">

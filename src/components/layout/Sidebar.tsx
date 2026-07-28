@@ -50,7 +50,7 @@ import { hostApi } from '@/lib/host-api';
 import { formatSessionRelativeTime } from '@/lib/relative-time';
 import { SIDEBAR_COLLAPSED_WIDTH, MAC_SIDEBAR_CHROME_HEIGHT } from '@shared/sidebar-layout';
 import { useTranslation } from 'react-i18next';
-import logoSvg from '@/assets/logo.svg';
+import logoUclaw from '@/assets/logo-uclaw.png';
 import { useNewChatAction } from './use-new-chat-action';
 import { isDefaultWorkspacePath } from '@/lib/workspace-context';
 import { useWorkspaceAvailability } from '@/hooks/use-workspace-availability';
@@ -524,8 +524,8 @@ export function Sidebar() {
       >
         {!sidebarCollapsed && (
           <div className="flex items-center gap-2 px-2 overflow-hidden">
-            <img src={logoSvg} alt="ClawX" className="h-5 w-auto shrink-0" />
-            <span className="text-sm font-semibold truncate whitespace-nowrap text-foreground/90">ClawX</span>
+            <img src={logoUclaw} alt="UClaw" className="h-5 w-auto shrink-0" />
+            <span className="text-sm font-semibold truncate whitespace-nowrap text-foreground/90">UClaw</span>
           </div>
         )}
         <Button
