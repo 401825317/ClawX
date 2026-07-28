@@ -57,6 +57,13 @@ jobs:
           node-version: '22.19.0'
           cache: 'pnpm'
 
+      - name: Setup Go for portable updaters
+        if: matrix.platform == 'mac' || matrix.platform == 'win'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.12'
+          cache: false
+
       - name: Prefer HTTPS for public GitHub git dependencies
         run: |
           git config --global "url.https://github.com/.insteadOf" "git@github.com:"
@@ -123,11 +130,14 @@ jobs:
           ulimit -n 65536
           echo "File descriptor limit: $(ulimit -n)"
           pnpm run package:mac
+          pnpm run package:mac:usb
 
       # Windows specific steps
       - name: Build Windows
         if: matrix.platform == 'win'
-        run: pnpm run package:win
+        run: |
+          pnpm run package:win
+          pnpm run package:win:usb
 
       # Detect release channel from tag to skip code signing for alpha/beta builds
       - name: Detect Windows release channel
@@ -203,7 +213,127 @@ jobs:
           if ($env:UNSIGNED_EXE_COUNT -and ($finalExeFiles.Count -ne [int]$env:UNSIGNED_EXE_COUNT)) {
             throw "Final release .exe count ($($finalExeFiles.Count)) does not match unsigned count ($env:UNSIGNED_EXE_COUNT)"
           }
+          foreach ($file in $finalExeFiles) {
+            $signature = Get-AuthenticodeSignature -FilePath $file.FullName
+            Write-Host "Authenticode $($file.Name): $($signature.Status)"
+            if ($signature.Status -ne 'Valid') {
+              throw "Invalid Authenticode signature for $($file.Name): $($signature.Status)"
+            }
+          }
           Write-Host "Signed executables copied to release/ ($($finalExeFiles.Count) file(s))"
+
+      # When the repository has a ZIP-specific SignPath configuration, deep-sign
+      # the portable archive and refresh its integrity metadata. The normal
+      # release remains publishable without this optional configuration.
+      - name: Prepare Windows USB ZIP for SignPath
+        if: matrix.platform == 'win' && steps.win-channel.outputs.is_stable == 'true' && vars.SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG != ''
+        shell: pwsh
+        run: |
+          $usbZipFiles = @(Get-ChildItem -Path "release" -Filter "UClaw-*-win-x64-usb.zip" -File)
+          if ($usbZipFiles.Count -ne 1) {
+            throw "Expected exactly one unsigned Windows USB ZIP before SignPath, found $($usbZipFiles.Count)"
+          }
+          $signingInputDir = "release/signpath-input"
+          Remove-Item -Path $signingInputDir -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $signingInputDir -Force | Out-Null
+          $signingInputName = "$([IO.Path]::GetFileNameWithoutExtension($usbZipFiles[0].Name)).signpath-${{ github.run_id }}-${{ github.run_attempt }}.zip"
+          Copy-Item -LiteralPath $usbZipFiles[0].FullName -Destination (Join-Path $signingInputDir $signingInputName) -Force
+          "SIGNED_USB_INPUT_NAME=$signingInputName" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload unsigned Windows USB ZIP for SignPath
+        if: matrix.platform == 'win' && steps.win-channel.outputs.is_stable == 'true' && vars.SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG != ''
+        id: upload-unsigned-windows-usb-artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: unsigned-win-usb-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release/signpath-input/*.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Deep-sign Windows USB ZIP via SignPath
+        if: matrix.platform == 'win' && steps.win-channel.outputs.is_stable == 'true' && vars.SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG != ''
+        id: signpath-sign-windows-usb
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: "78e37079-23df-4800-b41c-33312ad7c1e3"
+          project-slug: "ValueCell"
+          signing-policy-slug: "ValueCell-sign"
+          artifact-configuration-slug: ${{ vars.SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned-windows-usb-artifact.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: release/signed-usb
+          skip-decompress: true
+
+      - name: Replace and verify signed Windows USB ZIP
+        if: matrix.platform == 'win' && steps.win-channel.outputs.is_stable == 'true' && vars.SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG != ''
+        shell: pwsh
+        run: |
+          $signedUsbZipFiles = @(Get-ChildItem -Path "release/signed-usb" -Filter "*.zip" -File -Recurse)
+          $targetUsbZipFiles = @(Get-ChildItem -Path "release" -Filter "UClaw-*-win-x64-usb.zip" -File)
+          if ($signedUsbZipFiles.Count -ne 1 -or $targetUsbZipFiles.Count -ne 1) {
+            throw "Expected one signed and one target Windows USB ZIP; signed=$($signedUsbZipFiles.Count) target=$($targetUsbZipFiles.Count)"
+          }
+          if ($signedUsbZipFiles[0].Name -ne $env:SIGNED_USB_INPUT_NAME) {
+            throw "Signed USB ZIP filename mismatch: expected=$env:SIGNED_USB_INPUT_NAME actual=$($signedUsbZipFiles[0].Name)"
+          }
+          Copy-Item -Path $signedUsbZipFiles[0].FullName -Destination $targetUsbZipFiles[0].FullName -Force
+
+          $extractRoot = Join-Path $env:RUNNER_TEMP "uclaw-signed-usb-${{ github.run_id }}-${{ github.run_attempt }}"
+          Remove-Item -Path $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
+          try {
+            Expand-Archive -LiteralPath $targetUsbZipFiles[0].FullName -DestinationPath $extractRoot -Force
+            $ownedExecutablePaths = @(
+              (Join-Path $extractRoot "UClaw.exe")
+              (Join-Path $extractRoot "resources\resources\updater\win32-x64\uclaw-portable-updater.exe")
+            )
+            foreach ($executablePath in $ownedExecutablePaths) {
+              if (-not (Test-Path -LiteralPath $executablePath -PathType Leaf)) {
+                throw "Signed USB ZIP is missing required executable: $executablePath"
+              }
+              $signature = Get-AuthenticodeSignature -FilePath $executablePath
+              Write-Host "Authenticode signed USB ZIP $executablePath: $($signature.Status)"
+              if ($signature.Status -ne 'Valid') {
+                throw "Invalid Authenticode signature in signed USB ZIP: $executablePath ($($signature.Status))"
+              }
+            }
+          } finally {
+            Remove-Item -Path $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      # Deep signing changes the ZIP bytes. Refresh its integrity record from
+      # the final public archive before artifact upload and OSS staging.
+      - name: Refresh Windows USB metadata after code signing
+        if: matrix.platform == 'win' && steps.win-channel.outputs.is_stable == 'true' && vars.SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG != ''
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import fs from 'node:fs';
+
+          const zipMatches = fs.readdirSync('release').filter((name) => /^UClaw-.+-win-x64-usb\.zip$/u.test(name));
+          if (zipMatches.length !== 1) throw new Error(`Expected exactly one Windows USB ZIP, found ${zipMatches.length}`);
+          const zipName = zipMatches[0];
+          const metadataName = zipName.replace(/\.zip$/u, '.json');
+          const zipPath = `release/${zipName}`;
+          const metadataPath = `release/${metadataName}`;
+          const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+          if (metadata.packageType !== 'portable_zip' || metadata.package_type !== 'portable_zip'
+            || metadata.fileName !== zipName || metadata.file_name !== zipName) {
+            throw new Error(`Unexpected Windows USB metadata shape: ${metadataPath}`);
+          }
+          const bytes = fs.readFileSync(zipPath);
+          metadata.size = bytes.length;
+          metadata.sha512 = createHash('sha512').update(bytes).digest('hex');
+          const temporaryPath = `${metadataPath}.${process.pid}.tmp`;
+          fs.writeFileSync(temporaryPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf8');
+          fs.renameSync(temporaryPath, metadataPath);
+          const verified = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+          if (verified.size !== bytes.length || verified.sha512 !== metadata.sha512) {
+            throw new Error(`Windows USB metadata integrity verification failed: ${metadataPath}`);
+          }
+          NODE
 
       - name: Rebuild NSIS block map and final update metadata
         if: matrix.platform == 'win'
@@ -233,6 +363,7 @@ jobs:
             release/*.deb
             release/*.rpm
             release/*.yml
+            release/*.json
             !release/builder-debug.yml
           retention-days: 7
 
@@ -284,6 +415,7 @@ jobs:
             release-artifacts/**/*.deb
             release-artifacts/**/*.rpm
             release-artifacts/**/*.yml
+            release-artifacts/**/*.json
           draft: false
           prerelease: true
           make_latest: false
@@ -300,9 +432,11 @@ jobs:
             #### macOS
             - **Apple Silicon (M1/M2/M3/M4)**: `UClaw-*-mac-arm64.dmg`
             - **Intel (x64)**: `UClaw-*-mac-x64.dmg`
+            - **USB portable**: `UClaw-*-mac-{x64,arm64}-usb.zip`
             
             #### Windows
             - **Installer (x64)**: `UClaw-*-win-x64.exe`
+            - **USB portable (x64)**: `UClaw-*-win-x64-usb.zip`
             
             #### Linux
             - **AppImage (x64)**: `UClaw-*-linux-x86_64.AppImage` (Universal format, recommended)
@@ -401,6 +535,7 @@ jobs:
       - name: Verify yml files present
         run: |
           set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
           CHANNEL="${{ steps.version.outputs.channel }}"
           echo "=== staging/${CHANNEL}/ (update metadata) ==="
           shopt -s nullglob
@@ -410,6 +545,44 @@ jobs:
             exit 1
           fi
           ls -la "${yml_files[@]}"
+
+          required_portables=(
+            "UClaw-${VERSION}-win-x64-usb.zip"
+            "UClaw-${VERSION}-win-x64-usb.json"
+            "UClaw-${VERSION}-mac-x64-usb.zip"
+            "UClaw-${VERSION}-mac-x64-usb.json"
+            "UClaw-${VERSION}-mac-arm64-usb.zip"
+            "UClaw-${VERSION}-mac-arm64-usb.json"
+          )
+          for file in "${required_portables[@]}"; do
+            test -s "staging/${CHANNEL}/${file}" || {
+              echo "Missing required portable release artifact: ${file}" >&2
+              exit 1
+            }
+          done
+
+          verify_portable_metadata() {
+            local zip_name="$1"
+            local zip_path="staging/${CHANNEL}/${zip_name}"
+            local metadata_path="${zip_path%.zip}.json"
+            local size sha512
+            size="$(stat -c '%s' "${zip_path}")"
+            sha512="$(sha512sum "${zip_path}" | awk '{print $1}')"
+            jq -e \
+              --arg version "${VERSION}" \
+              --arg fileName "${zip_name}" \
+              --arg sha512 "${sha512}" \
+              --argjson size "${size}" \
+              '.version == $version
+                and (.package_type == "portable_zip" or .packageType == "portable_zip")
+                and (.file_name == $fileName or .fileName == $fileName)
+                and .sha512 == $sha512
+                and .size == $size' \
+              "${metadata_path}" >/dev/null
+          }
+          verify_portable_metadata "UClaw-${VERSION}-win-x64-usb.zip"
+          verify_portable_metadata "UClaw-${VERSION}-mac-x64-usb.zip"
+          verify_portable_metadata "UClaw-${VERSION}-mac-arm64-usb.zip"
 
       - name: Generate release-info.json
         run: |
@@ -433,10 +606,13 @@ jobs:
 
           MAC_DOWNLOADS="$(add_downloads \
             x64 "UClaw-${VERSION}-mac-x64.dmg" \
-            arm64 "UClaw-${VERSION}-mac-arm64.dmg")"
+            arm64 "UClaw-${VERSION}-mac-arm64.dmg" \
+            portable_x64 "UClaw-${VERSION}-mac-x64-usb.zip" \
+            portable_arm64 "UClaw-${VERSION}-mac-arm64-usb.zip")"
           WIN_DOWNLOADS="$(add_downloads \
             x64 "UClaw-${VERSION}-win-x64.exe" \
-            arm64 "UClaw-${VERSION}-win-arm64.exe")"
+            arm64 "UClaw-${VERSION}-win-arm64.exe" \
+            portable_x64 "UClaw-${VERSION}-win-x64-usb.zip")"
           LINUX_DOWNLOADS="$(add_downloads \
             deb_amd64 "UClaw-${VERSION}-linux-amd64.deb" \
             deb_arm64 "UClaw-${VERSION}-linux-arm64.deb" \
@@ -480,6 +656,13 @@ jobs:
               exit 1
             }
           done
+          jq -e \
+            --arg base "${BASE_URL}" \
+            --arg version "${{ steps.version.outputs.version }}" \
+            '.downloads.win.portable_x64 == ($base + "/UClaw-" + $version + "-win-x64-usb.zip")
+              and .downloads.mac.portable_x64 == ($base + "/UClaw-" + $version + "-mac-x64-usb.zip")
+              and .downloads.mac.portable_arm64 == ($base + "/UClaw-" + $version + "-mac-arm64-usb.zip")' \
+            staging/${CHANNEL}/release-info.json >/dev/null
           echo "All release-info download targets exist in staging/${CHANNEL}/"
 
       - name: Install and configure ossutil
@@ -543,6 +726,37 @@ jobs:
           echo "=== Verify release-info.json ==="
           ossutil cp oss://valuecell-clawx/${CHANNEL}/release-info.json /tmp/release-info.json -f
           jq . /tmp/release-info.json
+
+          VERSION="${{ steps.version.outputs.version }}"
+          BASE_URL="https://oss.intelli-spectrum.com/${CHANNEL}"
+          jq -e \
+            --arg base "${BASE_URL}" \
+            --arg version "${VERSION}" \
+            '.downloads.win.portable_x64 == ($base + "/UClaw-" + $version + "-win-x64-usb.zip")
+              and .downloads.mac.portable_x64 == ($base + "/UClaw-" + $version + "-mac-x64-usb.zip")
+              and .downloads.mac.portable_arm64 == ($base + "/UClaw-" + $version + "-mac-arm64-usb.zip")' \
+            /tmp/release-info.json >/dev/null
+          verify_uploaded_portable_metadata() {
+            local zip_name="$1"
+            local zip_path="/tmp/${zip_name}"
+            local metadata_path="${zip_path%.zip}.json"
+            ossutil cp "oss://valuecell-clawx/${CHANNEL}/${zip_name}" "${zip_path}" -f
+            ossutil cp "oss://valuecell-clawx/${CHANNEL}/${zip_name%.zip}.json" "${metadata_path}" -f
+            jq -e \
+              --arg version "${VERSION}" \
+              --arg fileName "${zip_name}" \
+              --arg sha512 "$(sha512sum "${zip_path}" | awk '{print $1}')" \
+              --argjson size "$(stat -c '%s' "${zip_path}")" \
+              '.version == $version
+                and (.package_type == "portable_zip" or .packageType == "portable_zip")
+                and (.file_name == $fileName or .fileName == $fileName)
+                and .sha512 == $sha512
+                and .size == $size' \
+              "${metadata_path}" >/dev/null
+          }
+          verify_uploaded_portable_metadata "UClaw-${VERSION}-win-x64-usb.zip"
+          verify_uploaded_portable_metadata "UClaw-${VERSION}-mac-x64-usb.zip"
+          verify_uploaded_portable_metadata "UClaw-${VERSION}-mac-arm64-usb.zip"
 
           echo ""
           echo "=== Verify update yml ==="

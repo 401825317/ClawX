@@ -34,6 +34,7 @@ import { getSetting } from '../utils/store';
 import { applyProxySettings } from './proxy';
 import { syncLaunchAtStartupSettingFromStore } from './launch-at-startup';
 import { applyPortableEnvironment, isPortableMode } from '../utils/portable-mode';
+import { writePortableUpdateReadyMarker } from './portable-update-ready';
 import { PortableRuntimeSnapshotService } from '../utils/portable-runtime-state';
 import {
   clearPendingSecondInstanceFocus,
@@ -349,6 +350,14 @@ function createMainWindow(): BrowserWindow {
     if (mainWindow !== win) {
       return;
     }
+
+    void writePortableUpdateReadyMarker().then((written) => {
+      if (written) {
+        logger.info('Portable update startup marker written after the main window became ready');
+      }
+    }).catch((error) => {
+      logger.error('Failed to write portable update startup marker:', error);
+    });
 
     if (process.platform === 'darwin') {
       void getSetting('sidebarCollapsed').then((sidebarCollapsed) => {

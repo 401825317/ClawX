@@ -13,14 +13,24 @@ const OUTPUT_ROOT = path.join(ROOT, 'resources', 'updater');
 const TARGETS = {
   'win32-x64': { goos: 'windows', goarch: 'amd64', fileName: 'uclaw-portable-updater.exe' },
   'darwin-arm64': { goos: 'darwin', goarch: 'arm64', fileName: 'uclaw-portable-updater' },
+  'darwin-x64': { goos: 'darwin', goarch: 'amd64', fileName: 'uclaw-portable-updater' },
 };
 
-function readArg(name) {
+function readArgs(name) {
+  const values = [];
   const prefixed = `${name}=`;
-  const match = process.argv.find((arg) => arg.startsWith(prefixed));
-  if (match) return match.slice(prefixed.length);
-  const index = process.argv.indexOf(name);
-  return index >= 0 ? process.argv[index + 1] : '';
+  for (let index = 0; index < process.argv.length; index++) {
+    const argument = process.argv[index];
+    if (argument.startsWith(prefixed)) {
+      values.push(argument.slice(prefixed.length));
+      continue;
+    }
+    if (argument === name && process.argv[index + 1]) {
+      values.push(process.argv[index + 1]);
+      index++;
+    }
+  }
+  return values;
 }
 
 function currentTarget() {
@@ -33,11 +43,14 @@ function selectedTargets() {
   if (process.argv.includes('--all')) {
     return Object.keys(TARGETS);
   }
-  const target = readArg('--target') || currentTarget();
-  if (!TARGETS[target]) {
-    throw new Error(`Unsupported portable updater target: ${target}`);
+  const requestedTargets = readArgs('--target');
+  const targets = requestedTargets.length > 0 ? requestedTargets : [currentTarget()];
+  for (const target of targets) {
+    if (!TARGETS[target]) {
+      throw new Error(`Unsupported portable updater target: ${target}`);
+    }
   }
-  return [target];
+  return [...new Set(targets)];
 }
 
 function buildTarget(target) {

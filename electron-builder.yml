@@ -52,8 +52,8 @@ asarUnpack:
 npmRebuild: false
 
 # Auto-update configuration
-# Primary: new-api UClaw update feed, which redirects to the actual release files.
-# Fallback: GitHub Releases (backup, used when feed is unavailable)
+# Primary: managed UClaw release feed. The runtime code keeps the
+# channel-specific generic URL explicit and the service returns only YAML.
 publish:
   - provider: generic
     url: https://zz-cn.lingzhiwuxian.com/api/clawx/updates/feed/latest

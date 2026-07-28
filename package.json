@@ -1,6 +1,6 @@
 {
   "name": "clawx",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "pnpm": {
     "onlyBuiltDependencies": [
       "@google/genai",
@@ -86,13 +86,13 @@
     "prep:win-binaries:all": "pnpm run uv:download:win && pnpm run agent-browser:download:win && pnpm run node:download:win && pnpm run ffmpeg:download:win",
     "prep:linux-binaries": "pnpm run uv:download:linux && pnpm run agent-browser:download:linux && pnpm run ffmpeg:download:linux",
     "updater:build:win": "node scripts/build-portable-updater.mjs --target=win32-x64",
-    "updater:build:mac": "node scripts/build-portable-updater.mjs --target=darwin-arm64",
+    "updater:build:mac": "node scripts/build-portable-updater.mjs --target=darwin-arm64 --target=darwin-x64",
     "updater:build:all": "node scripts/build-portable-updater.mjs --all",
     "icons": "zx scripts/generate-icons.mjs",
     "package": "node scripts/generate-ext-bridge.mjs && pnpm run build:vite && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs",
     "package:mac": "pnpm run prep:mac-binaries && pnpm run package && node scripts/run-electron-builder.mjs --mac --publish never",
     "package:mac:local": "pnpm run prep:mac-binaries && SKIP_PREINSTALLED_SKILLS=1 pnpm run package && node scripts/run-electron-builder.mjs --mac --publish never",
-    "package:mac:usb": "pnpm run prep:mac-binaries && pnpm run updater:build:mac && pnpm run package && node scripts/run-electron-builder.mjs --mac dir --publish never && node scripts/build-usb-release.mjs --mac",
+    "package:mac:usb": "pnpm run prep:mac-binaries && pnpm run updater:build:mac && pnpm run package && node scripts/build-usb-release.mjs --mac --clean-only --clean-unpacked && node scripts/run-electron-builder.mjs --mac dir --x64 --publish never && node scripts/build-usb-release.mjs --mac --arch=x64 && node scripts/run-electron-builder.mjs --mac dir --arm64 --publish never && node scripts/build-usb-release.mjs --mac --arch=arm64",
     "package:win": "pnpm run prep:win-binaries && pnpm run package && node scripts/patch-nsis-win.mjs && node scripts/run-electron-builder.mjs --win --publish never",
     "package:win:verify": "pnpm run package:win && pnpm run release:refresh:win && pnpm run release:validate:win",
     "package:win:portable": "pnpm run prep:win-binaries && pnpm run package && node scripts/run-electron-builder.mjs --skip-nsis-patch --win portable --publish never",

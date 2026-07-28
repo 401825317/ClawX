@@ -160,6 +160,8 @@ ClawX 可以在启动时自动检查新版本。发现更新后会显示应用�
 ### 💾 高性能便携模式
 macOS 可通过 `pnpm package:mac:usb`、Windows 可通过 `pnpm package:win:usb` 生成免安装可直接运行包。该模式会把应用设置、登录状态、Chromium 会话状态、OpenClaw 配置、Agent、会话、技能和通道凭据保存在随包的 `UClawData/` 中，因此插到另一台电脑后仍能看到原来的记录；更新下载、Python、uv、临时文件、日志、崩溃转储、浏览器磁盘缓存和编译缓存会放到当前电脑的本机目录 `UClawRuntime/`，避免 U 盘被频繁读写拖慢或快速占满。高频 OpenClaw 状态会进一步放到按便携身份隔离的 `UClawRuntime/profiles/<portable-id>/openclaw-state`，`UClawData/` 只保留便携身份、用户数据和已验证的 Runtime 快照。新生成的包一定从空白 `UClawData/` 开始，不会带入打包电脑上的账号或运行状态。
 
+便携包更新会先确认旧版完全退出，再事务性替换文件；若替换、回滚或新版窗口就绪校验失败，更新器会保留恢复备份和日志，而不会把半更新状态报成成功。macOS 便携包同时包含 Apple Silicon 与 Intel Mac 的更新辅助程序。
+
 Windows 打包必须从已经提交且 worktree 干净的源码开始，并会先清理旧的解包目录和历史 USB 产物。封装阶段会核对源码版本、Git commit 与 `app.asar`，把随包的 4 个 Windows 可执行文件全部校验为 x64 PE，并检查 12 个 UClaw 内置及渠道/搜索插件和它们的运行依赖，随后生成 `uclaw-usb-build.json` 和配套发布 JSON；任何身份或内容不一致都会直接让构建失败，不再发布看似成功的旧包。
 
 Windows USB ZIP 根目录内置 `UClaw-SelfCheck.cmd`。用户无需安装 Node.js、Python 或 Git，双击即可检查构建身份、包内和已安装插件副本、随包运行时、目录读写与原子 rename、本地端口、zz-cn 连通性和 OpenClaw Doctor 状态。动态检查只扫描最近 24 小时且不早于当前构建的日志。脱敏后的支持报告默认保存在 `UClawData/diagnostics/`；U 盘不可写时会回退到本机临时目录。
