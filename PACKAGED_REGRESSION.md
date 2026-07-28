@@ -120,3 +120,9 @@ release/regression/<version>-<timestamp>/
 - `FAIL`：必测能力执行失败、超时、伪成功、缺少副作用或错误恢复失败。
 - `SKIP`：只允许用于需要真实费用、隐私权限或外部副作用的显式能力，并必须记录原因。
 - 静态自检、`core` 和 `full` 的必测项目不能用 `SKIP` 掩盖包缺陷。
+
+## GitHub Actions 正式发布
+
+Windows USB 正式版本使用 `.github/workflows/uclaw-portable-production.yml`。工作流与本地正式发布顺序一致：在 SignPath 深度签名后重新执行精确 ZIP 的 `full`，然后在受保护的自托管 Windows Runner 上通过 `--live-register-admin-stdin` 完成全新账号注册和 `live`；这些命令成功后再执行 OSS、`claw_x_releases`、版本标签和 GitHub Release 写入，不再叠加额外的聚合门禁脚本。
+
+Runner、Environment、DPAPI 凭证和故障恢复配置见 `.github/UCLAW_PORTABLE_RELEASE.md`。

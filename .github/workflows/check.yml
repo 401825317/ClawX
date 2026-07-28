@@ -1,11 +1,13 @@
 # ClawX CI Workflow
-# Runs on pull requests (main/develop) 
+# Runs on pull requests targeting active development and release branches.
 name: Check and Build
 
 on:
   pull_request:
     branches:
       - main
+      - master
+      - develop
 
 jobs:
   check:
@@ -44,6 +46,9 @@ jobs:
 
       - name: Run tests
         run: pnpm run test
+
+      - name: Run production release pipeline tests
+        run: pnpm run test:release:pipeline
 
       - name: Run harness checks
         run: pnpm run harness:ci
