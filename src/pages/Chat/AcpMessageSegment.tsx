@@ -167,7 +167,9 @@ export function AcpRenderPart({ part, tone = 'assistant' }: { part: RenderPart; 
     return <AcpMarkdownPart text={part.text} tone={tone} />;
   }
 
-  if (part.kind === 'image') return <AcpImagePart part={part} />;
+  if (part.kind === 'image') {
+    return <AcpImagePart part={part} variant={tone === 'user' ? 'thumbnail' : 'preview'} />;
+  }
   if (part.kind === 'attachment') return <AcpAttachmentPart part={part} />;
   return <AcpErrorPart message={part.message} />;
 }

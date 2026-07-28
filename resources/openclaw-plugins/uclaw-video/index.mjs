@@ -1,9 +1,9 @@
 import { definePluginEntry } from 'openclaw/plugin-sdk/core';
 import { isProviderApiKeyConfigured } from 'openclaw/plugin-sdk/provider-auth';
 import { resolveApiKeyForProvider } from 'openclaw/plugin-sdk/provider-auth-runtime';
+import { resolveStateDir } from 'openclaw/plugin-sdk/state-paths';
 import { createHash, randomUUID } from 'node:crypto';
 import { readdir, readFile, rename, rm } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 
 const PROVIDER_ID = 'uclaw-video';
@@ -715,6 +715,14 @@ function modeCapabilities(model, config) {
   };
 }
 
+/** Exposes every configured mode for OpenClaw's provider-level input preflight. */
+function providerCapabilities(config) {
+  return config.models.reduce((capabilities, model) => ({
+    ...capabilities,
+    ...modeCapabilities(model, config),
+  }), {});
+}
+
 /** Builds the provider registered against OpenClaw's native video_generate tool. */
 function buildProvider(config) {
   const defaultModel = config.models.find((model) => model.id === config.defaultModel) ?? config.models[0];
@@ -724,7 +732,7 @@ function buildProvider(config) {
     defaultModel: defaultModel.id,
     defaultTimeoutMs: config.timeoutMs,
     models: config.models.map((model) => model.id),
-    capabilities: modeCapabilities(defaultModel, config),
+    capabilities: providerCapabilities(config),
     isConfigured,
     resolveModelCapabilities({ model }) {
       const configuredModel = config.models.find((entry) => entry.id === model);
@@ -804,24 +812,33 @@ function buildProvider(config) {
 }
 
 function preferenceDirectory() {
-  const stateDirectory = normalizeOptionalString(process.env.OPENCLAW_STATE_DIR) || join(homedir(), '.openclaw');
-  return join(stateDirectory, TURN_PREFERENCES_DIRECTORY);
+  return join(resolveStateDir(), 'media', TURN_PREFERENCES_DIRECTORY);
 }
 
 function digestPrompt(prompt) {
   return createHash('sha256').update(prompt, 'utf8').digest('hex');
 }
 
-/** Matches either a raw composer prompt or OpenClaw's metadata-wrapped prompt suffix. */
+/** Matches composer text inside OpenClaw metadata and ACP attachment descriptions. */
 function matchesStoredPrompt(prompt, record) {
   const storedDigest = normalizeOptionalString(record?.messageDigest);
   if (!storedDigest) return false;
   if (digestPrompt(prompt) === storedDigest) return true;
   const messageLength = Number(record?.messageLength);
-  return Number.isSafeInteger(messageLength)
-    && messageLength > 0
-    && messageLength <= prompt.length
-    && digestPrompt(prompt.slice(-messageLength)) === storedDigest;
+  if (!Number.isSafeInteger(messageLength) || messageLength <= 0 || messageLength > prompt.length) {
+    return false;
+  }
+  if (digestPrompt(prompt.slice(-messageLength)) === storedDigest) return true;
+
+  // ACP appends attachment descriptions after the original user text.
+  for (const separator of prompt.matchAll(/\r?\n/g)) {
+    const end = separator.index;
+    const start = end - messageLength;
+    if (start < 0) continue;
+    if (start > 0 && prompt[start - 1] !== '\n' && prompt[start - 1] !== '\r') continue;
+    if (digestPrompt(prompt.slice(start, end)) === storedDigest) return true;
+  }
+  return false;
 }
 
 function normalizeTurnOptions(value, config) {
@@ -1027,13 +1044,6 @@ function registerTurnPreferenceHooks(api, config) {
   }, {
     name: `${PROVIDER_ID}:release-video-reference`,
     description: 'Release the managed current-turn reference image after video_generate accepts it.',
-  });
-
-  registerLifecycleHook(api, 'agent_end', (event, ctx) => {
-    releaseTurnPreference(event, ctx);
-  }, {
-    name: `${PROVIDER_ID}:release-unused-video-reference`,
-    description: 'Release a managed current-turn reference image when no video tool call consumed it.',
   });
 }
 

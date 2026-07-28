@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { assertLocalMediaAllowed } from 'openclaw/plugin-sdk/media-runtime';
 import { describe, expect, it } from 'vitest';
 
 const VIDEO_PLUGIN_CONFIG = {
@@ -116,6 +117,7 @@ describe('UClaw video plugin', () => {
       let provider: {
         capabilities: unknown;
         models?: string[];
+        resolveModelCapabilities?: (request: { model: string }) => unknown;
         generateVideo: (request: Record<string, unknown>) => Promise<{
           videos: Array<{ buffer?: Buffer; url?: string; mimeType: string }>;
           model?: string;
@@ -188,7 +190,21 @@ describe('UClaw video plugin', () => {
             '720x1080', '1080x720', '720x720', '720x1280', '1280x720',
           ],
         },
+        imageToVideo: {
+          enabled: true,
+          maxInputImages: 1,
+          aspectRatios: ['2:3', '3:2', '1:1', '9:16', '16:9'],
+          resolutions: ['480P', '720P'],
+        },
       });
+      expect(provider?.resolveModelCapabilities?.({ model: 'grok-image-video' })).toMatchObject({
+        generate: expect.any(Object),
+      });
+      expect(provider?.resolveModelCapabilities?.({ model: 'grok-image-video' })).not.toHaveProperty('imageToVideo');
+      expect(provider?.resolveModelCapabilities?.({ model: 'grok-video-1.5' })).toMatchObject({
+        imageToVideo: { enabled: true, maxInputImages: 1 },
+      });
+      expect(provider?.resolveModelCapabilities?.({ model: 'grok-video-1.5' })).not.toHaveProperty('generate');
       expect(requests).toEqual([
         {
           method: 'POST',
@@ -480,7 +496,7 @@ describe('UClaw video plugin', () => {
     const previousStateDirectory = process.env.OPENCLAW_STATE_DIR;
     process.env.OPENCLAW_STATE_DIR = stateDirectory;
     try {
-      const preferenceDirectory = join(stateDirectory, 'uclaw-turn-preferences');
+      const preferenceDirectory = join(stateDirectory, 'media', 'uclaw-turn-preferences');
       await mkdir(preferenceDirectory, { recursive: true });
       const sessionKey = 'agent:main:video-options';
       const prompt = 'Create a short product video.';
@@ -590,7 +606,7 @@ describe('UClaw video plugin', () => {
     const previousStateDirectory = process.env.OPENCLAW_STATE_DIR;
     process.env.OPENCLAW_STATE_DIR = stateDirectory;
     try {
-      const preferenceDirectory = join(stateDirectory, 'uclaw-turn-preferences');
+      const preferenceDirectory = join(stateDirectory, 'media', 'uclaw-turn-preferences');
       await mkdir(preferenceDirectory, { recursive: true });
       const sessionKey = 'agent:main:video-reference';
       const runId = 'run-video-reference';
@@ -599,6 +615,7 @@ describe('UClaw video plugin', () => {
       const referenceFileName = `video-reference-${id}.jpg`;
       const referencePath = join(preferenceDirectory, referenceFileName);
       await writeFile(referencePath, Buffer.from('bounded-reference-image'), { mode: 0o600 });
+      await expect(assertLocalMediaAllowed(referencePath)).resolves.toBeUndefined();
       await writeFile(
         join(preferenceDirectory, `video-turn-${id}.json`),
         JSON.stringify({
@@ -632,9 +649,23 @@ describe('UClaw video plugin', () => {
           hooks.set(name, handler);
         },
       });
+      expect(hooks.has('agent_end')).toBe(false);
 
       const context = { sessionKey, runId };
-      await hooks.get('before_prompt_build')?.({ prompt }, context);
+      const wrappedPrompt = [
+        '[media attached: media://inbound/reference.png (image/png)]',
+        '[Image]',
+        'User text:',
+        '[Working directory: ~/.openclaw/workspace]',
+        '',
+        prompt,
+        'Description:',
+        'A bounded visual description appended by the ACP attachment pipeline.',
+      ].join('\n');
+      const promptResult = await hooks.get('before_prompt_build')?.({ prompt: wrappedPrompt }, context);
+      expect(promptResult).toEqual(expect.objectContaining({
+        appendContext: expect.stringContaining('video generation mode'),
+      }));
       expect(await readdir(preferenceDirectory)).toEqual([referenceFileName]);
 
       expect(await hooks.get('before_tool_call')?.({

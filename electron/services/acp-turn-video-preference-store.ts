@@ -91,7 +91,28 @@ function isManagedReferenceImagePath(directory: string, filePath: unknown): file
 export function createAcpTurnVideoPreferenceStore(
   stateDirectory = resolveOpenClawStateDir(),
 ): AcpTurnVideoPreferenceStore {
-  const directory = path.join(stateDirectory, TURN_PREFERENCE_DIRECTORY_NAME);
+  // OpenClaw accepts local tool media only from its managed media roots.
+  const directory = path.join(stateDirectory, 'media', TURN_PREFERENCE_DIRECTORY_NAME);
+  const cleanupTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  const clearScheduledCleanup = (id: unknown): void => {
+    if (typeof id !== 'string') return;
+    const timer = cleanupTimers.get(id);
+    if (!timer) return;
+    clearTimeout(timer);
+    cleanupTimers.delete(id);
+  };
+
+  /** Atomically takes ownership before deleting a preference and its reference image. */
+  const claimPreferenceFile = async (filePath: string, suffix: string): Promise<string | null> => {
+    const claimedPath = `${filePath}.${process.pid}.${randomUUID()}.${suffix}`;
+    try {
+      await rename(filePath, claimedPath);
+      return claimedPath;
+    } catch {
+      return null;
+    }
+  };
 
   const removeManagedReferenceImage = async (filePath: unknown): Promise<void> => {
     if (!isManagedReferenceImagePath(directory, filePath)) return;
@@ -124,14 +145,32 @@ export function createAcpTurnVideoPreferenceStore(
         const raw = await readFile(filePath, 'utf8');
         const entry = JSON.parse(raw) as Partial<StoredTurnVideoPreference>;
         if (typeof entry.expiresAt === 'number' && entry.expiresAt <= now) {
-          await removeManagedReferenceImage(entry.referenceImage?.filePath);
-          await rm(filePath, { force: true });
+          const claimedPath = await claimPreferenceFile(filePath, 'expired');
+          if (!claimedPath) return;
+          clearScheduledCleanup(entry.id);
+          try {
+            await removeManagedReferenceImage(entry.referenceImage?.filePath);
+          } finally {
+            await rm(claimedPath, { force: true });
+          }
         }
       } catch {
-        await rm(filePath, { force: true }).catch(() => undefined);
+        const claimedPath = await claimPreferenceFile(filePath, 'invalid');
+        if (claimedPath) await rm(claimedPath, { force: true }).catch(() => undefined);
       }
     }));
     await removeOrphanedReferenceImages(entries, now);
+  };
+
+  const scheduleCleanup = (entry: StoredTurnVideoPreference): void => {
+    clearScheduledCleanup(entry.id);
+    const timer = setTimeout(async () => {
+      cleanupTimers.delete(entry.id);
+      await removeExpiredEntries(Date.now()).catch(() => undefined);
+      await removeManagedReferenceImage(entry.referenceImage?.filePath).catch(() => undefined);
+    }, Math.max(0, entry.expiresAt - Date.now()));
+    timer.unref?.();
+    cleanupTimers.set(entry.id, timer);
   };
 
   return {
@@ -180,6 +219,7 @@ export function createAcpTurnVideoPreferenceStore(
         }
         await writeFile(temporaryPath, JSON.stringify(entry), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
         await rename(temporaryPath, filePath);
+        scheduleCleanup(entry);
       } catch (error) {
         await rm(temporaryPath, { force: true }).catch(() => undefined);
         await removeManagedReferenceImage(referenceImagePath).catch(() => undefined);
@@ -193,11 +233,17 @@ export function createAcpTurnVideoPreferenceStore(
     async discard(id) {
       if (!id) return;
       const filePath = path.join(directory, preferenceFileName(id));
-      const entry = await readFile(filePath, 'utf8')
+      const claimedPath = await claimPreferenceFile(filePath, 'discarded');
+      if (!claimedPath) return;
+      clearScheduledCleanup(id);
+      const entry = await readFile(claimedPath, 'utf8')
         .then((raw) => JSON.parse(raw) as Partial<StoredTurnVideoPreference>)
         .catch(() => null);
-      await removeManagedReferenceImage(entry?.referenceImage?.filePath);
-      await rm(filePath, { force: true });
+      try {
+        await removeManagedReferenceImage(entry?.referenceImage?.filePath);
+      } finally {
+        await rm(claimedPath, { force: true });
+      }
     },
   };
 }

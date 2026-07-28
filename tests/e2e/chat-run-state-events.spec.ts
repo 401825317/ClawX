@@ -8,6 +8,7 @@ const IMAGE_GENERATION_TASK_ID = '32aa3a12-a05b-4074-af4e-246cc4a9a303';
 const ONE_PIXEL_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 const ONE_PIXEL_PNG_DATA_URL = `data:image/png;base64,${ONE_PIXEL_PNG_BASE64}`;
 const ONE_PIXEL_SVG_BASE64 = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><rect width="16" height="16" fill="black"/></svg>').toString('base64');
+const PORTRAIT_SVG_BASE64 = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="960" height="1440" viewBox="0 0 960 1440"><rect width="960" height="1440" fill="#b91c1c"/></svg>').toString('base64');
 const WIDESCREEN_SVG_BASE64 = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900"><rect width="1600" height="900" fill="black"/></svg>').toString('base64');
 
 type AcpSessionUpdate = Record<string, unknown> & { sessionUpdate: string };
@@ -229,9 +230,48 @@ test.describe('ClawX chat run state events', () => {
       await expect(page.getByTestId('acp-chat-timeline')).toBeVisible({ timeout: 30_000 });
       await expect(page.getByText('Generated image is ready.')).toBeVisible();
       await expect(page.getByTestId('acp-image-part')).toBeVisible();
+      await expect(page.getByTestId('acp-image-part')).toHaveAttribute('data-variant', 'preview');
       await expect(page.getByTestId('acp-image-part').locator('img')).toBeVisible();
       await expect(page.getByTestId('image-preview-unavailable')).toHaveCount(0);
       await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('renders ACP user image parts as compact thumbnails', async ({ launchElectronApp }, testInfo) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installAcpChatMocks(app);
+      const page = await openChat(app);
+      await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible({ timeout: 30_000 });
+
+      await emitAcpSessionUpdates(app, [{
+        sessionUpdate: 'user_message',
+        messageId: 'user-reference-image',
+        content: [
+          { type: 'text', text: 'Use this reference image.' },
+          { type: 'image', mimeType: 'image/svg+xml', data: PORTRAIT_SVG_BASE64 },
+        ],
+      }]);
+
+      const userMessage = page.getByTestId('acp-user-message');
+      const imagePart = userMessage.getByTestId('acp-image-part');
+      await expect(imagePart).toBeVisible();
+      await expect(imagePart).toHaveAttribute('data-variant', 'thumbnail');
+      const box = await imagePart.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.width).toBeGreaterThanOrEqual(140);
+      expect(box!.width).toBeLessThanOrEqual(146);
+      expect(Math.abs(box!.width - box!.height)).toBeLessThanOrEqual(1);
+
+      const screenshotPath = testInfo.outputPath('user-image-thumbnail.png');
+      await userMessage.screenshot({ path: screenshotPath });
+      await testInfo.attach('user-image-thumbnail', {
+        path: screenshotPath,
+        contentType: 'image/png',
+      });
     } finally {
       await closeElectronApp(app);
     }

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AcpToolCallCard } from '@/pages/Chat/AcpToolCallCard';
 import { AcpAttachmentPart } from '@/pages/Chat/AcpAttachmentPart';
@@ -800,6 +800,50 @@ describe('ACP chat timeline components', () => {
 
     expect(screen.getByTestId('acp-image-part')).toBeInTheDocument();
     expect(screen.getByAltText('Chart preview')).toHaveAttribute('src', 'data:image/png;base64,abc');
+  });
+
+  it('renders user images as thumbnails without shrinking assistant images', () => {
+    const state = snapshot({
+      itemOrder: ['msg-u:0', 'msg-a:0'],
+      itemsById: {
+        'msg-u:0': {
+          kind: 'message-segment',
+          id: 'msg-u:0',
+          role: 'user',
+          messageId: 'msg-u',
+          segmentIndex: 0,
+          optimistic: true,
+          parts: [{ kind: 'image', source: 'data:image/png;base64,user', alt: 'User reference' }],
+        },
+        'msg-a:0': {
+          kind: 'message-segment',
+          id: 'msg-a:0',
+          role: 'assistant',
+          messageId: 'msg-a',
+          segmentIndex: 0,
+          parts: [{ kind: 'image', source: 'data:image/png;base64,assistant', alt: 'Assistant result' }],
+        },
+      },
+    });
+
+    render(<AcpTimeline snapshot={state} />);
+
+    const userImagePart = within(screen.getByTestId('acp-user-message')).getByTestId('acp-image-part');
+    const assistantImagePart = within(screen.getByTestId('acp-assistant-message')).getByTestId('acp-image-part');
+    expect(userImagePart).toHaveAttribute('data-variant', 'thumbnail');
+    const userImage = within(userImagePart).getByAltText('User reference');
+    expect(userImage).toHaveClass('h-full', 'w-full', 'object-cover');
+    expect(userImage).toHaveAttribute('tabindex', '0');
+    expect(assistantImagePart).toHaveAttribute('data-variant', 'preview');
+    const assistantImage = within(assistantImagePart).getByAltText('Assistant result');
+    expect(assistantImage).toHaveClass(
+      'max-h-[420px]',
+      'object-contain',
+    );
+    expect(assistantImage).not.toHaveAttribute('tabindex');
+
+    fireEvent.keyDown(userImage, { key: 'Enter' });
+    expect(screen.getByTestId('acp-image-preview-dialog')).toBeInTheDocument();
   });
 
   it('loads local image bytes only after double-click and reveals the scoped attachment', async () => {

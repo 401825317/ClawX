@@ -54,7 +54,15 @@ export function isSafeAcpImageSource(source: string): boolean {
   return safeImageSource(source) != null;
 }
 
-export function AcpImagePart({ part, className }: { part: ImageRenderPart; className?: string }) {
+export function AcpImagePart({
+  part,
+  className,
+  variant = 'preview',
+}: {
+  part: ImageRenderPart;
+  className?: string;
+  variant?: 'preview' | 'thumbnail';
+}) {
   const { t } = useTranslation('chat');
   const [copied, setCopied] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -92,6 +100,12 @@ export function AcpImagePart({ part, className }: { part: ImageRenderPart; class
     setSaved(true);
     window.setTimeout(() => setSaved(false), 1600);
   }, [src, mimeType, defaultFileName]);
+  const openPreview = useCallback(() => setPreviewOpen(true), []);
+  const handlePreviewKeyDown = useCallback((event: React.KeyboardEvent<HTMLImageElement>) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    openPreview();
+  }, [openPreview]);
   const closePreview = useCallback(() => setPreviewOpen(false), []);
   const handleReveal = useCallback(async () => {
     if (!part.attachmentFileRef) return;
@@ -157,16 +171,29 @@ export function AcpImagePart({ part, className }: { part: ImageRenderPart; class
   return (
     <figure
       data-testid="acp-image-part"
+      data-variant={variant}
       className={cn(
-        'group/acp-image relative inline-flex max-w-full self-start overflow-hidden rounded-xl border border-black/10 bg-black/5 dark:border-white/10 dark:bg-white/10',
+        'group/acp-image relative inline-flex overflow-hidden rounded-xl border border-black/10 bg-black/5 dark:border-white/10 dark:bg-white/10',
+        variant === 'thumbnail'
+          ? 'aspect-square w-36 max-w-full self-end cursor-zoom-in'
+          : 'max-w-full self-start',
         className,
       )}
     >
       <img
         src={src}
         alt={part.alt || t('acp.image')}
-        className="block max-h-[420px] max-w-full object-contain"
-        onDoubleClick={() => setPreviewOpen(true)}
+        className={cn(
+          'block',
+          variant === 'thumbnail'
+            ? 'h-full w-full object-cover'
+            : 'max-h-[420px] max-w-full object-contain',
+        )}
+        role={variant === 'thumbnail' ? 'button' : undefined}
+        tabIndex={variant === 'thumbnail' ? 0 : undefined}
+        aria-haspopup={variant === 'thumbnail' ? 'dialog' : undefined}
+        onDoubleClick={openPreview}
+        onKeyDown={variant === 'thumbnail' ? handlePreviewKeyDown : undefined}
       />
       <div className="absolute bottom-2 right-2 flex gap-1 opacity-0 transition-opacity duration-150 group-hover/acp-image:opacity-100 group-focus-within/acp-image:opacity-100">
         <button
