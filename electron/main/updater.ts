@@ -2,9 +2,8 @@
  * Auto-Updater Module
  * Handles automatic application updates using electron-updater
  *
- * Update providers are configured in electron-builder.yml (OSS primary, GitHub fallback).
- * For prerelease channels (alpha, beta), the feed URL is overridden at runtime
- * to point at the channel-specific OSS directory (e.g. /alpha/, /beta/).
+ * Installed and portable builds both use the managed release service. The
+ * server selects the exact release metadata for the active UClaw channel.
  */
 import { autoUpdater, UpdateInfo, ProgressInfo, UpdateDownloadedEvent } from 'electron-updater';
 import { BrowserWindow, app, ipcMain, shell } from 'electron';
@@ -113,19 +112,54 @@ function isPortableUpdateInfo(value: unknown): value is PortableUpdateInfo {
   );
 }
 
-function compareSemverLike(a: string, b: string): number {
-  const parse = (value: string) => value
-    .replace(/^v/i, '')
-    .split(/[.-]/)
+type ParsedSemverLike = {
+  core: number[];
+  prerelease: string[] | null;
+};
+
+function parseSemverLike(value: string): ParsedSemverLike {
+  const normalized = value.trim().replace(/^v/i, '').split('+', 1)[0];
+  const prereleaseIndex = normalized.indexOf('-');
+  const core = (prereleaseIndex >= 0 ? normalized.slice(0, prereleaseIndex) : normalized)
+    .split('.')
     .map((part) => {
       const parsed = Number.parseInt(part, 10);
-      return Number.isFinite(parsed) ? parsed : 0;
+      return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
     });
-  const left = parse(a);
-  const right = parse(b);
-  const length = Math.max(left.length, right.length);
+  const prerelease = prereleaseIndex >= 0
+    ? normalized.slice(prereleaseIndex + 1).split('.').filter(Boolean)
+    : null;
+  return { core, prerelease };
+}
+
+function compareSemverLike(a: string, b: string): number {
+  const left = parseSemverLike(a);
+  const right = parseSemverLike(b);
+  const length = Math.max(left.core.length, right.core.length);
   for (let index = 0; index < length; index++) {
-    const diff = (left[index] ?? 0) - (right[index] ?? 0);
+    const diff = (left.core[index] ?? 0) - (right.core[index] ?? 0);
+    if (diff !== 0) return diff;
+  }
+
+  if (left.prerelease === null && right.prerelease !== null) return 1;
+  if (left.prerelease !== null && right.prerelease === null) return -1;
+  if (left.prerelease === null || right.prerelease === null) return 0;
+
+  const prereleaseLength = Math.max(left.prerelease.length, right.prerelease.length);
+  for (let index = 0; index < prereleaseLength; index++) {
+    const leftPart = left.prerelease[index];
+    const rightPart = right.prerelease[index];
+    if (leftPart === undefined) return -1;
+    if (rightPart === undefined) return 1;
+    const leftNumeric = /^\d+$/.test(leftPart);
+    const rightNumeric = /^\d+$/.test(rightPart);
+    if (leftNumeric && rightNumeric) {
+      const diff = Number(leftPart) - Number(rightPart);
+      if (diff !== 0) return diff;
+      continue;
+    }
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    const diff = leftPart.localeCompare(rightPart);
     if (diff !== 0) return diff;
   }
   return 0;
@@ -256,8 +290,6 @@ export class AppUpdater extends EventEmitter {
 
   /**
    * Check for updates.
-   * electron-updater automatically tries providers defined in electron-builder.yml in order.
-   *
    * In dev mode (not packed), autoUpdater.checkForUpdates() silently returns
    * null without emitting any events, so we must detect this and force a
    * final status so the UI never gets stuck in 'checking'.

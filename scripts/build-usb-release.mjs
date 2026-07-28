@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
@@ -48,11 +49,7 @@ function readArg(name) {
 
 function resolvePortableRoot() {
   if (platform === 'mac') {
-    const appBundlePath = findAppBundle(releaseDir);
-    if (!appBundlePath) {
-      throw new Error('release/*.app does not exist. Run electron-builder --mac dir first.');
-    }
-    return path.dirname(appBundlePath);
+    return path.dirname(resolveMacAppBundle(releaseDir, arch));
   }
 
   const winUnpackedDir = path.join(releaseDir, 'win-unpacked');
@@ -62,16 +59,62 @@ function resolvePortableRoot() {
   return winUnpackedDir;
 }
 
-function findAppBundle(dir, depth = 0) {
-  if (!fs.existsSync(dir) || depth > 3) return null;
+function findAppBundles(dir, depth = 0) {
+  if (!fs.existsSync(dir) || depth > 4) return [];
+  const bundles = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const entryPath = path.join(dir, entry.name);
-    if (entry.name.endsWith('.app')) return entryPath;
-    const found = findAppBundle(entryPath, depth + 1);
-    if (found) return found;
+    if (entry.name.endsWith('.app')) {
+      bundles.push(entryPath);
+      continue;
+    }
+    bundles.push(...findAppBundles(entryPath, depth + 1));
   }
-  return null;
+  return bundles;
+}
+
+function macMainExecutable(appBundlePath) {
+  const macOSDir = path.join(appBundlePath, 'Contents', 'MacOS');
+  if (!fs.existsSync(macOSDir)) {
+    throw new Error(`macOS app bundle has no Contents/MacOS directory: ${appBundlePath}`);
+  }
+  const candidates = fs.readdirSync(macOSDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() || entry.isSymbolicLink())
+    .map((entry) => path.join(macOSDir, entry.name));
+  const expected = path.join(macOSDir, packageJson.productName);
+  if (fs.existsSync(expected)) return expected;
+  if (candidates.length === 1) return candidates[0];
+  throw new Error(`Cannot determine the macOS app executable in ${macOSDir}`);
+}
+
+function macLipoArch(targetArch) {
+  return targetArch === 'x64' ? 'x86_64' : targetArch;
+}
+
+function macAppArchitectures(appBundlePath) {
+  const executable = macMainExecutable(appBundlePath);
+  try {
+    return execFileSync('/usr/bin/lipo', ['-archs', executable], {
+      encoding: 'utf8',
+      windowsHide: true,
+    }).trim().split(/\s+/).filter(Boolean);
+  } catch (error) {
+    throw new Error(`Cannot inspect macOS app architecture for ${executable}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function resolveMacAppBundle(dir, targetArch) {
+  const expectedArch = macLipoArch(targetArch);
+  const bundles = findAppBundles(dir).filter((bundlePath) => (
+    fs.existsSync(path.join(bundlePath, 'Contents', 'MacOS'))
+  ));
+  const matching = bundles.filter((bundlePath) => macAppArchitectures(bundlePath).includes(expectedArch));
+  if (matching.length === 1) return matching[0];
+  if (matching.length === 0) {
+    throw new Error(`No macOS .app for ${targetArch} was found in release/. Run electron-builder --mac dir --${targetArch} first.`);
+  }
+  throw new Error(`Multiple macOS .app bundles match ${targetArch}; refusing to package an ambiguous input: ${matching.join(', ')}`);
 }
 
 function ensurePortableMarkers(portableRoot) {
@@ -82,7 +125,11 @@ function ensurePortableMarkers(portableRoot) {
   fs.writeFileSync(path.join(dataDir, '.keep'), '', 'utf-8');
 }
 
-function cleanExistingArtifacts({ allWindows = platform === 'win', includeUnpacked = false } = {}) {
+function cleanExistingArtifacts({
+  allWindows = platform === 'win',
+  includeUnpacked = false,
+  includeMacUnpacked = false,
+} = {}) {
   if (!fs.existsSync(releaseDir)) return [];
   const removed = [];
   for (const entry of fs.readdirSync(releaseDir, { withFileTypes: true })) {
@@ -90,7 +137,8 @@ function cleanExistingArtifacts({ allWindows = platform === 'win', includeUnpack
       ? /^UClaw-.+-win-.+-usb\.(?:zip|json)$/i.test(entry.name)
       : entry.name === path.basename(outputPath) || entry.name === path.basename(metadataPath));
     const isWindowsUnpacked = includeUnpacked && entry.isDirectory() && /^win(?:-.+)?-unpacked$/i.test(entry.name);
-    if (!isUsbArtifact && !isWindowsUnpacked) continue;
+    const isMacUnpacked = includeMacUnpacked && entry.isDirectory() && /^mac(?:-.+)?$/i.test(entry.name);
+    if (!isUsbArtifact && !isWindowsUnpacked && !isMacUnpacked) continue;
     fs.rmSync(path.join(releaseDir, entry.name), {
       recursive: entry.isDirectory(),
       force: true,
@@ -388,6 +436,74 @@ function assertWindowsPortableContents(portableRoot) {
   }
 }
 
+function assertExecutable(filePath, label) {
+  const stat = fs.statSync(filePath);
+  if (!stat.isFile() || (stat.mode & 0o111) === 0) {
+    throw new Error(`${label} is not executable: ${filePath}`);
+  }
+}
+
+function collectMacOSExecutables(dir, output = []) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const entryPath = path.join(dir, entry.name);
+    if (entry.isSymbolicLink()) continue;
+    if (entry.isDirectory()) {
+      collectMacOSExecutables(entryPath, output);
+      continue;
+    }
+    if (entry.isFile() && path.basename(path.dirname(entryPath)) === 'MacOS') {
+      output.push(entryPath);
+    }
+  }
+  return output;
+}
+
+function assertMacPortableContents(portableRoot, appBundlePath) {
+  const expectedArch = macLipoArch(arch);
+  if (!macAppArchitectures(appBundlePath).includes(expectedArch)) {
+    throw new Error(`macOS app does not contain the requested ${arch} architecture: ${appBundlePath}`);
+  }
+  const mainExecutable = macMainExecutable(appBundlePath);
+  const appResources = path.join(appBundlePath, 'Contents', 'Resources', 'resources');
+  const requiredExecutables = [
+    mainExecutable,
+    path.join(appResources, 'updater', `darwin-${arch}`, 'uclaw-portable-updater'),
+    ...['uv', 'agent-browser', 'ffmpeg', 'ffprobe'].map((name) => path.join(appResources, 'bin', `darwin-${arch}`, name)),
+  ];
+  for (const executable of requiredExecutables) {
+    assertExecutable(executable, 'macOS portable runtime binary');
+  }
+  for (const executable of collectMacOSExecutables(appBundlePath)) {
+    assertExecutable(executable, 'macOS app helper');
+  }
+  for (const relativePath of ['portable.flag', 'UClawData/.keep']) {
+    if (!fs.existsSync(path.join(portableRoot, relativePath))) {
+      throw new Error(`macOS portable package is missing ${relativePath}`);
+    }
+  }
+}
+
+function verifyMacPortableArchive(archivePath) {
+  const extractDir = fs.mkdtempSync(path.join(os.tmpdir(), 'uclaw-usb-verify-'));
+  try {
+    execFileSync('/usr/bin/ditto', ['-x', '-k', archivePath, extractDir], {
+      stdio: 'pipe',
+      windowsHide: true,
+    });
+    const appBundlePath = resolveMacAppBundle(extractDir, arch);
+    const portableRoot = path.dirname(appBundlePath);
+    assertMacPortableContents(portableRoot, appBundlePath);
+    execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', appBundlePath], {
+      stdio: 'pipe',
+      windowsHide: true,
+    });
+  } catch (error) {
+    throw new Error(`macOS USB archive verification failed: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    fs.rmSync(extractDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
+  }
+}
+
 function shouldSkipEntry(relativePath) {
   const normalized = relativePath.replace(/\\/g, '/');
   return normalized === '' || normalized.endsWith('.download');
@@ -416,24 +532,49 @@ function addDirectoryToZip(zip, sourceDir, prefix = '') {
 }
 
 async function writeZip(portableRoot, outputPath) {
-  const zip = new JSZip();
-  addDirectoryToZip(zip, portableRoot);
+	if (platform === 'mac') {
+		if (process.platform !== 'darwin') {
+			throw new Error('macOS USB packages must be built on a macOS host.');
+		}
+		fs.rmSync(outputPath, { force: true });
+		execFileSync('/usr/bin/ditto', [
+			'-c',
+			'-k',
+			'--sequesterRsrc',
+			'--zlibCompressionLevel',
+			'9',
+			portableRoot,
+			outputPath,
+		], {
+			stdio: 'pipe',
+			windowsHide: true,
+		});
+		verifyMacPortableArchive(outputPath);
+		return;
+	}
+
+	const zip = new JSZip();
+	addDirectoryToZip(zip, portableRoot);
   const buffer = await zip.generateAsync({
     type: 'nodebuffer',
     compression: 'DEFLATE',
     compressionOptions: { level: 9 },
     platform: platform === 'win' ? 'DOS' : 'UNIX',
-  });
-  fs.writeFileSync(outputPath, buffer);
-  return buffer;
+	});
+	fs.writeFileSync(outputPath, buffer);
 }
 
-function sha512(buffer) {
-  return createHash('sha512').update(buffer).digest('hex');
+async function sha512File(filePath) {
+	const hash = createHash('sha512');
+	for await (const chunk of fs.createReadStream(filePath)) {
+		hash.update(chunk);
+	}
+	return hash.digest('hex');
 }
 
-function writeMetadata(fileName, buffer, buildIdentity) {
-  const metadata = {
+async function writeMetadata(fileName, archivePath, buildIdentity) {
+	const archiveStat = fs.statSync(archivePath);
+	const metadata = {
     version: packageJson.version,
     platform,
     arch,
@@ -441,8 +582,8 @@ function writeMetadata(fileName, buffer, buildIdentity) {
     package_type: 'portable_zip',
     fileName,
     file_name: fileName,
-    size: buffer.length,
-    sha512: sha512(buffer),
+		size: archiveStat.size,
+		sha512: await sha512File(archivePath),
     releaseDate: new Date().toISOString(),
     buildId: buildIdentity.buildId,
     gitCommit: buildIdentity.gitCommit,
@@ -465,8 +606,11 @@ if (process.argv.includes('--clean-only')) {
       process.exit(1);
     }
   }
-  const removed = cleanExistingArtifacts({ includeUnpacked: platform === 'win' });
-  console.log(`[build-usb-release] Removed ${removed.length} stale Windows USB artifacts/build directories.`);
+  const removed = cleanExistingArtifacts({
+    includeUnpacked: platform === 'win',
+    includeMacUnpacked: platform === 'mac' && process.argv.includes('--clean-unpacked'),
+  });
+  console.log(`[build-usb-release] Removed ${removed.length} stale ${platform} USB artifacts/build directories.`);
   for (const entry of removed) console.log(`[build-usb-release] Removed release/${entry}`);
   process.exit(0);
 }
@@ -480,6 +624,9 @@ try {
   if (platform === 'win' && process.platform !== 'win32') {
     throw new Error('Windows USB packages must be built on a Windows host. Use the Package Windows (Manual) GitHub Actions workflow.');
   }
+  if (platform === 'mac' && process.platform !== 'darwin') {
+    throw new Error('macOS USB packages must be built on a macOS host.');
+  }
   cleanExistingArtifacts();
   const portableRoot = resolvePortableRoot();
   ensurePortableMarkers(portableRoot);
@@ -491,7 +638,11 @@ try {
     assertPortableDataClean(portableRoot);
     assertWindowsPortableContents(portableRoot);
   }
-  const buffer = await writeZip(portableRoot, outputPath);
+	const appBundlePath = platform === 'mac' ? resolveMacAppBundle(releaseDir, arch) : null;
+	if (appBundlePath) {
+		assertMacPortableContents(portableRoot, appBundlePath);
+	}
+	await writeZip(portableRoot, outputPath);
   const fallbackIdentity = buildIdentity || {
     buildId: null,
     gitCommit: resolveSourceCommit(),
@@ -499,7 +650,7 @@ try {
     appAsarVersion: packageJson.version,
     executableMachine: null,
   };
-  const { metadata, metadataPath } = writeMetadata(fileName, buffer, fallbackIdentity);
+	const { metadata, metadataPath } = await writeMetadata(fileName, outputPath, fallbackIdentity);
 
   console.log(`[build-usb-release] Created ${path.relative(ROOT, outputPath)} (${metadata.size} bytes).`);
   console.log(`[build-usb-release] Metadata: ${path.relative(ROOT, metadataPath)}`);

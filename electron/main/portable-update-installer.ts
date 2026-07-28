@@ -1,5 +1,6 @@
 import { app } from 'electron';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, copyFile, mkdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -27,6 +28,7 @@ export type PortableUpdaterTask = {
   parentPid: number;
   logPath: string;
   stagingDir: string;
+  readyPath: string;
 };
 
 export type PortableUpdateInstallerLaunch = {
@@ -45,7 +47,7 @@ export class PortableUpdaterLaunchError extends Error {
       : undefined;
     const detail = cause instanceof Error ? cause.message : String(cause);
     const message = code === 'EACCES' || code === 'EPERM'
-      ? `Portable updater helper was blocked by Windows or security software: ${helperPath}`
+      ? `Portable updater helper was blocked by the operating system or security software: ${helperPath}`
       : `Portable updater helper failed to start: ${helperPath}${detail ? ` (${detail})` : ''}`;
     super(message);
     this.name = 'PortableUpdaterLaunchError';
@@ -65,6 +67,9 @@ export function portableUpdaterTargetForPlatform(platform = process.platform, ar
   if (platform === 'darwin' && arch === 'arm64') {
     return 'darwin-arm64';
   }
+  if (platform === 'darwin' && arch === 'x64') {
+    return 'darwin-x64';
+  }
   throw new Error(`Portable auto-update is not supported on ${platform}/${arch}`);
 }
 
@@ -83,17 +88,34 @@ function timestampForPath(): string {
   return new Date().toISOString().replace(/[:.]/g, '-');
 }
 
-async function copyHelperToRuntime(sourcePath: string, runtimeUpdatesDir: string, target: string): Promise<string> {
+async function copyHelperToRuntime(
+  sourcePath: string,
+  runtimeUpdatesDir: string,
+  target: string,
+  attemptId: string,
+): Promise<string> {
   if (!existsSync(sourcePath)) {
     throw new Error(`Portable updater helper is missing: ${sourcePath}`);
   }
 
-  const helperDir = join(runtimeUpdatesDir, 'installer', target);
+  // Each update attempt uses an isolated helper copy. A detached helper from a
+  // failed attempt can therefore never lock the next helper on Windows.
+  const helperDir = join(runtimeUpdatesDir, 'installer', target, app.getVersion(), attemptId);
   const helperPath = join(helperDir, portableUpdaterFileName());
   await mkdir(helperDir, { recursive: true });
   await copyFile(sourcePath, helperPath);
   if (process.platform !== 'win32') {
-    await chmod(helperPath, 0o755);
+    try {
+      await chmod(helperPath, 0o755);
+    } catch (error) {
+      // FAT/exFAT volumes can reject chmod even though they expose the helper
+      // as executable through their fixed permission mask.
+      const helperMode = (await stat(helperPath)).mode;
+      if ((helperMode & 0o111) === 0) {
+        throw error;
+      }
+      logger.warn(`[PortableUpdater] chmod was rejected but helper is executable: ${helperPath}`);
+    }
   }
   return helperPath;
 }
@@ -117,14 +139,17 @@ export async function preparePortableUpdateInstaller(
   await verifyPortableUpdatePackage(zipPath, { sha512, size });
 
   const target = portableUpdaterTargetForPlatform();
-  const sourceHelperPath = resolveBundledPortableUpdaterPath(target);
-  const helperPath = await copyHelperToRuntime(sourceHelperPath, portable.runtimeUpdatesDir, target);
   const stamp = timestampForPath();
+  const attemptId = `${stamp}-${randomUUID()}`;
+  const sourceHelperPath = resolveBundledPortableUpdaterPath(target);
+  const helperPath = await copyHelperToRuntime(sourceHelperPath, portable.runtimeUpdatesDir, target, attemptId);
   const logDir = logger.getLogDir() || portable.runtimeLogsDir || portable.runtimeUpdatesDir;
   const taskDir = join(portable.runtimeUpdatesDir, 'tasks');
+  const readyDir = join(portable.runtimeUpdatesDir, 'ready');
   const stagingDir = join(portable.runtimeUpdatesDir, 'staging', stamp);
   const logPath = join(logDir, `portable-updater-${stamp}.log`);
   const taskPath = join(taskDir, `portable-update-${stamp}.json`);
+  const readyPath = join(readyDir, `portable-update-${stamp}.ready.json`);
   const task: PortableUpdaterTask = {
     zipPath,
     rootDir: portable.rootDir,
@@ -136,9 +161,11 @@ export async function preparePortableUpdateInstaller(
     parentPid: process.pid,
     logPath,
     stagingDir,
+    readyPath,
   };
 
   await mkdir(taskDir, { recursive: true });
+  await mkdir(readyDir, { recursive: true });
   await mkdir(dirname(logPath), { recursive: true });
   await writeFile(taskPath, `${JSON.stringify(task, null, 2)}\n`, 'utf-8');
 
