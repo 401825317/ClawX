@@ -633,6 +633,7 @@ describe('ACP Chat store', () => {
 
   it('keeps historical media visible while background generation is pending across navigation', async () => {
     const pendingTaskId = '59635a84-fcb4-438a-9566-64a8308c9011';
+    const prompt = createDeferred<{ success: boolean; generation: number }>();
     const historicalReplay = [
       {
         sessionKey: 'agent:pi:s1',
@@ -710,6 +711,7 @@ describe('ACP Chat store', () => {
           },
         ],
       });
+    hostApiMock.sendAcpPrompt.mockReturnValueOnce(prompt.promise);
     const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
     ensureAcpChatSubscriptions();
 
@@ -737,18 +739,13 @@ describe('ACP Chat store', () => {
         ],
       }),
     }));
-    hostEventsMock.updateListener?.({
+    const sendPrompt = useAcpChatSessionStore.getState().sendPrompt({
       sessionKey: 'agent:pi:s1',
-      generation: 1,
-      notification: {
-        sessionId: 'agent:pi:s1',
-        update: {
-          sessionUpdate: 'user_message',
-          messageId: 'pending-user',
-          content: [{ type: 'text', text: 'Modify the image' }],
-        },
-      },
+      cwd: '/repo',
+      message: 'Modify the image',
+      messageId: 'pending-user',
     });
+    await vi.waitFor(() => expect(hostApiMock.sendAcpPrompt).toHaveBeenCalledTimes(1));
     hostEventsMock.updateListener?.({
       sessionKey: 'agent:pi:s1',
       generation: 1,
@@ -775,6 +772,8 @@ describe('ACP Chat store', () => {
     await useAcpChatSessionStore.getState().loadSession({
       sessionKey: 'agent:pi:s2', workspaceRoot: '/repo-2', cwd: '/repo-2', createIfMissing: true,
     });
+    prompt.resolve({ success: true, generation: 1 });
+    await expect(sendPrompt).resolves.toBe(true);
     await useAcpChatSessionStore.getState().loadSession({
       sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
     });
@@ -785,6 +784,11 @@ describe('ACP Chat store', () => {
       && state.timeline.itemsById[itemId]?.compat?.evidenceId === 'history-image-evidence'
     ));
     expect(state.pendingImageGenerationTaskIds).toEqual([pendingTaskId]);
+    expect(state.sending).toBe(false);
+    expect(state.turnTimingsByUserMessageId['pending-user']).toMatchObject({
+      source: 'live',
+      status: 'complete',
+    });
     expect(mediaItemId).toBeTruthy();
     expect(state.timeline.itemOrder).toEqual([
       'history-user:0',
@@ -809,6 +813,136 @@ describe('ACP Chat store', () => {
         },
       ],
     });
+  });
+
+  it('retains a background snapshot when an image task starts after navigation', async () => {
+    const taskId = 'ef4d45ee-2e9e-4b68-9bf4-3e9049bf8f12';
+    const prompt = createDeferred<{ success: boolean; generation: number }>();
+    hostApiMock.loadAcpSession
+      .mockResolvedValueOnce({ success: true, generation: 1, sessionUpdates: [] })
+      .mockResolvedValueOnce({ success: true, generation: 2, sessionUpdates: [] })
+      .mockResolvedValueOnce({
+        success: true,
+        generation: 3,
+        resumedActivePrompt: false,
+        sessionUpdates: [
+          {
+            sessionKey: 'agent:pi:s1',
+            generation: 3,
+            historical: true,
+            notification: {
+              sessionId: 'agent:pi:s1',
+              update: {
+                sessionUpdate: 'user_message',
+                messageId: 'replayed-user',
+                content: [{ type: 'text', text: 'Generate an image in the background' }],
+              },
+            },
+          },
+          {
+            sessionKey: 'agent:pi:s1',
+            generation: 3,
+            historical: true,
+            notification: {
+              sessionId: 'agent:pi:s1',
+              update: {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'replayed-image-tool',
+                title: 'Generate image',
+                status: 'completed',
+                content: [{
+                  type: 'content',
+                  content: {
+                    type: 'text',
+                    text: `Background task started for image generation (${taskId}).`,
+                  },
+                }],
+                locations: [],
+              },
+            },
+          },
+        ],
+      });
+    hostApiMock.sendAcpPrompt.mockReturnValueOnce(prompt.promise);
+    const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+    ensureAcpChatSubscriptions();
+
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+    const sendPrompt = useAcpChatSessionStore.getState().sendPrompt({
+      sessionKey: 'agent:pi:s1',
+      cwd: '/repo',
+      message: 'Generate an image in the background',
+      messageId: 'live-background-user',
+    });
+    await vi.waitFor(() => expect(hostApiMock.sendAcpPrompt).toHaveBeenCalledTimes(1));
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s2', workspaceRoot: '/repo-2', cwd: '/repo-2', createIfMissing: true,
+    });
+
+    hostEventsMock.updateListener?.({
+      sessionKey: 'agent:pi:s1',
+      generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'live-image-tool',
+          status: 'completed',
+          content: [{
+            type: 'content',
+            content: {
+              type: 'text',
+              text: `Background task started for image generation (${taskId}).`,
+            },
+          }],
+        },
+      },
+    });
+    prompt.resolve({ success: true, generation: 1 });
+    await expect(sendPrompt).resolves.toBe(true);
+    expect(useAcpChatSessionStore.getState()).toMatchObject({
+      activeSessionKey: 'agent:pi:s2',
+      pendingImageGenerationTaskIds: [],
+      error: null,
+    });
+
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+    expect(useAcpChatSessionStore.getState()).toMatchObject({
+      activeSessionKey: 'agent:pi:s1',
+      generation: 3,
+      sending: false,
+      pendingImageGenerationTaskIds: [taskId],
+    });
+    expect(useAcpChatSessionStore.getState().turnTimingsByUserMessageId['live-background-user'])
+      .toMatchObject({ source: 'live', status: 'complete' });
+
+    hostApiMock.mediaThumbnails.mockResolvedValueOnce({
+      '/tmp/background-result.png': {
+        preview: 'data:image/png;base64,background-result',
+        fileSize: 64,
+      },
+    });
+    hostEventsMock.gatewayChatMessageListener?.({
+      message: {
+        sessionKey: 'agent:pi:s1',
+        runId: `image_generate:${taskId}:completion`,
+        message: {
+          role: 'toolresult',
+          toolName: 'message',
+          details: { mediaUrls: ['/tmp/background-result.png'] },
+        },
+      },
+    });
+    await vi.waitFor(() => expect(useAcpChatSessionStore.getState().pendingImageGenerationTaskIds).toEqual([]));
+    expect(Object.values(useAcpChatSessionStore.getState().timeline.itemsById)
+      .flatMap((item) => item.kind === 'message-segment' ? item.parts : [])
+      .filter((part) => part.kind === 'image')).toMatchObject([
+      { source: 'data:image/png;base64,background-result' },
+    ]);
   });
 
   it('merges a restored historical image into the authoritative replay reply without duplicating text', async () => {

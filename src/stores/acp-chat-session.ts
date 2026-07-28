@@ -35,9 +35,9 @@ import {
   attachmentRequestFingerprint,
   collectPendingAttachments,
   createPendingAttachment,
-  dedupeTimelineAttachments,
   type PendingAttachmentLocation,
 } from '@/lib/acp/attachments';
+import { restoreBackgroundMediaProjections } from '@/lib/acp/background-media-projections';
 import {
   appendSyntheticAssistantMessage,
   applyAcpSessionUpdate,
@@ -50,13 +50,7 @@ import { fetchOpenClawTranscriptSupplement } from '@/lib/acp/transcript-suppleme
 import { alignHistoricalTurnTimings, type AcpTurnTiming } from '@/lib/acp/turn-timings';
 import { hostApi } from '@/lib/host-api';
 import { hostEvents } from '@/lib/host-events';
-import type {
-  AcpTimelineSnapshot,
-  MessageSegmentItem,
-  PermissionItem,
-  RenderPart,
-  TimelineItem,
-} from '@/lib/acp/timeline-types';
+import type { AcpTimelineSnapshot, MessageSegmentItem, PermissionItem, RenderPart } from '@/lib/acp/timeline-types';
 
 const EMPTY_SESSION_ID = '';
 const CANCEL_PERMISSION_OPTION_ID = '__cancelled__';
@@ -120,7 +114,12 @@ function deferInactiveImageUpdate(
   const entry = { key, event };
   if (existingIndex >= 0) deferredImageUpdates[existingIndex] = entry;
   else deferredImageUpdates.push(entry);
-  return { ...snapshot, deferredImageUpdates };
+  const pendingImageGenerationTaskIds = start
+    && !event.historical
+    && !snapshot.pendingImageGenerationTaskIds.includes(start.taskId)
+    ? [...snapshot.pendingImageGenerationTaskIds, start.taskId]
+    : snapshot.pendingImageGenerationTaskIds;
+  return { ...snapshot, deferredImageUpdates, pendingImageGenerationTaskIds };
 }
 
 type TranscriptSupplementOperation = {
@@ -875,235 +874,12 @@ function reconcileLateAcpImageCompletions(
   return nextTimeline;
 }
 
-function timelineItemParts(item: TimelineItem): RenderPart[] {
-  if (item.kind === 'message-segment' || item.kind === 'thought') return item.parts;
-  if (item.kind === 'tool-call') return item.outputParts;
-  return [];
-}
-
-function projectionMediaIdentity(part: RenderPart): string | undefined {
-  if (part.kind === 'image') {
-    return part.mediaIdentity ?? `${part.mimeType ?? ''}:${part.source}`;
-  }
-  if (part.kind === 'attachment' && part.access.status === 'available') {
-    return part.access.identity;
-  }
-  return undefined;
-}
-
-function timelineMediaIdentities(timeline: AcpTimelineSnapshot): Set<string> {
-  const identities = new Set<string>();
-  for (const itemId of timeline.itemOrder) {
-    const item = timeline.itemsById[itemId];
-    if (!item) continue;
-    for (const part of timelineItemParts(item)) {
-      const identity = projectionMediaIdentity(part);
-      if (identity) identities.add(identity);
-    }
-  }
-  return identities;
-}
-
-function rebindProjectionPart(
-  part: RenderPart,
-  sessionKey: string,
-  generation: number,
-): RenderPart {
-  if (part.kind === 'image' && part.attachmentFileRef) {
-    return {
-      ...part,
-      attachmentFileRef: { ...part.attachmentFileRef, sessionKey, generation },
-    };
-  }
-  if (part.kind !== 'attachment' || part.access.status !== 'available') return part;
-  return {
-    ...part,
-    access: {
-      ...part.access,
-      target: {
-        ...part.access.target,
-        ref: { ...part.access.target.ref, sessionKey, generation },
-      },
-    },
-  };
-}
-
-type RendererMediaProjectionItem = MessageSegmentItem & {
-  compat: { source: 'image-generation' | 'openclaw-media'; evidenceId: string };
-};
-
-function rendererMediaProjection(item: TimelineItem | undefined): item is RendererMediaProjectionItem {
-  return item?.kind === 'message-segment'
-    && (item.compat?.source === 'image-generation' || item.compat?.source === 'openclaw-media');
-}
-
-function projectionEvidenceItemId(
-  timeline: AcpTimelineSnapshot,
-  item: MessageSegmentItem,
-): string | undefined {
-  return timeline.itemOrder.find((itemId) => {
-    const candidate = timeline.itemsById[itemId];
-    return rendererMediaProjection(candidate)
-      && candidate.compat?.source === item.compat?.source
-      && candidate.compat.evidenceId === item.compat?.evidenceId;
-  });
-}
-
-type ProjectionAnchor = { itemId: string; placement: 'before' | 'after' };
-
-function projectionAnchor(
-  previous: AcpTimelineSnapshot,
-  projectionIndex: number,
-  timeline: AcpTimelineSnapshot,
-): ProjectionAnchor | null {
-  for (let index = projectionIndex - 1; index >= 0; index -= 1) {
-    const itemId = previous.itemOrder[index];
-    if (itemId && timeline.itemsById[itemId]) return { itemId, placement: 'after' };
-  }
-  for (let index = projectionIndex + 1; index < previous.itemOrder.length; index += 1) {
-    const itemId = previous.itemOrder[index];
-    if (itemId && timeline.itemsById[itemId]) return { itemId, placement: 'before' };
-  }
-  return null;
-}
-
-function itemMarkdownText(item: MessageSegmentItem): string {
-  return item.parts
-    .flatMap((part) => part.kind === 'markdown' ? [part.text] : [])
-    .join('\n')
-    .trim();
-}
-
-function matchingReplayCaptionItemId(
-  timeline: AcpTimelineSnapshot,
-  anchor: ProjectionAnchor,
-  caption: string,
-): string | undefined {
-  if (!caption || anchor.placement !== 'after') return undefined;
-  const anchorIndex = timeline.itemOrder.indexOf(anchor.itemId);
-  if (anchorIndex < 0) return undefined;
-  const matches: string[] = [];
-  for (let index = anchorIndex + 1; index < timeline.itemOrder.length; index += 1) {
-    const itemId = timeline.itemOrder[index];
-    const item = itemId ? timeline.itemsById[itemId] : undefined;
-    if (item?.kind === 'message-segment' && item.role === 'user') break;
-    if (
-      item?.kind === 'message-segment'
-      && item.role === 'assistant'
-      && !item.compat
-      && itemMarkdownText(item) === caption
-    ) matches.push(itemId!);
-  }
-  return matches.length === 1 ? matches[0] : undefined;
-}
-
-function insertRendererMediaProjection(
-  timeline: AcpTimelineSnapshot,
-  item: MessageSegmentItem,
-  anchor: ProjectionAnchor,
-): AcpTimelineSnapshot {
-  const anchorIndex = timeline.itemOrder.indexOf(anchor.itemId);
-  if (anchorIndex < 0 || timeline.itemsById[item.id]) return timeline;
-  const insertionIndex = anchor.placement === 'after' ? anchorIndex + 1 : anchorIndex;
-  return dedupeTimelineAttachments({
-    ...timeline,
-    itemOrder: [
-      ...timeline.itemOrder.slice(0, insertionIndex),
-      item.id,
-      ...timeline.itemOrder.slice(insertionIndex),
-    ],
-    itemsById: { ...timeline.itemsById, [item.id]: item },
-    segmentCounts: {
-      ...timeline.segmentCounts,
-      [item.messageId]: Math.max(timeline.segmentCounts[item.messageId] ?? 0, item.segmentIndex + 1),
-    },
-  });
-}
-
 function releaseUnrestoredImageProjection(sessionKey: string, evidenceId: string): void {
   const session = imageGenerationCompatSessions.get(sessionKey);
   if (!session) return;
   session.delivered.delete(evidenceId);
   session.reservations.delete(evidenceId);
   session.syntheticCompletions.delete(evidenceId);
-}
-
-/** Restores only Renderer-owned media omitted by ACP replay; replay remains authoritative for all other items. */
-function restoreBackgroundMediaProjections(
-  timeline: AcpTimelineSnapshot,
-  snapshot: LiveSessionSnapshot,
-  sessionKey: string,
-  generation: number,
-): AcpTimelineSnapshot {
-  let nextTimeline = timeline;
-  for (const [projectionIndex, itemId] of snapshot.timeline.itemOrder.entries()) {
-    const previousItem = snapshot.timeline.itemsById[itemId];
-    if (!rendererMediaProjection(previousItem)) continue;
-    const evidenceId = previousItem.compat.evidenceId;
-    if (projectionEvidenceItemId(nextTimeline, previousItem)) continue;
-
-    const reboundParts = previousItem.parts.map((part) => (
-      rebindProjectionPart(part, sessionKey, generation)
-    ));
-    const existingMedia = timelineMediaIdentities(nextTimeline);
-    const mediaParts = reboundParts.filter((part) => part.kind === 'image' || part.kind === 'attachment');
-    const missingParts = reboundParts.filter((part) => {
-      if (part.kind !== 'image' && part.kind !== 'attachment') return true;
-      const identity = projectionMediaIdentity(part);
-      return !identity || !existingMedia.has(identity);
-    });
-    if (mediaParts.length > 0 && missingParts.every((part) => part.kind !== 'image' && part.kind !== 'attachment')) {
-      continue;
-    }
-
-    const existingItem = nextTimeline.itemsById[previousItem.id];
-    const missingImages = missingParts.filter((part) => part.kind === 'image');
-    if (existingItem?.kind === 'message-segment' && existingItem.role === 'assistant') {
-      if (missingImages.length > 0) {
-        nextTimeline = mergeImageCompletionIntoAcpItem(
-          nextTimeline,
-          existingItem.id,
-          evidenceId,
-          missingImages,
-        );
-      }
-      continue;
-    }
-
-    const anchor = projectionAnchor(snapshot.timeline, projectionIndex, nextTimeline);
-    if (!anchor) {
-      if (previousItem.compat?.source === 'image-generation') {
-        releaseUnrestoredImageProjection(sessionKey, evidenceId);
-      }
-      continue;
-    }
-
-    if (previousItem.compat?.source === 'image-generation') {
-      const replayCaptionItemId = matchingReplayCaptionItemId(
-        nextTimeline,
-        anchor,
-        itemMarkdownText(previousItem),
-      );
-      if (replayCaptionItemId) {
-        if (missingImages.length > 0) {
-          nextTimeline = mergeImageCompletionIntoAcpItem(
-            nextTimeline,
-            replayCaptionItemId,
-            evidenceId,
-            missingImages,
-          );
-        }
-        continue;
-      }
-    }
-
-    nextTimeline = insertRendererMediaProjection(
-      nextTimeline,
-      { ...previousItem, parts: missingParts },
-      anchor,
-    );
-  }
-  return nextTimeline;
 }
 
 function isLiveMessageUpdate(event: AcpSessionUpdateEnvelope): boolean {
@@ -1632,6 +1408,73 @@ function removePendingOptimisticUserSegment(
   };
 }
 
+function settledPromptTurnTimings(
+  timings: Record<string, AcpTurnTiming>,
+  input: {
+    messageId: string;
+    success: boolean;
+    startedAtMs: number;
+    settledAtMs: number;
+  },
+): Record<string, AcpTurnTiming> {
+  if (input.success) {
+    const completed: AcpTurnTiming = {
+      source: 'live',
+      status: 'complete',
+      durationMs: Math.max(0, input.settledAtMs - input.startedAtMs),
+    };
+    return { ...timings, [input.messageId]: completed };
+  }
+  const { [input.messageId]: _removedTiming, ...remaining } = timings;
+  return remaining;
+}
+
+/** Finalizes a prompt that settled after navigation without dropping pending media work. */
+function settleBackgroundPromptSnapshot(input: {
+  sessionKey: string;
+  generation: number;
+  messageId: string;
+  startedAtMs: number;
+  settledAtMs: number;
+  success: boolean;
+  resultGeneration?: number;
+}): void {
+  const snapshot = liveSessionSnapshots.get(input.sessionKey);
+  if (snapshot?.generation !== input.generation) return;
+
+  const hasPendingMedia = snapshot.pendingImageGenerationTaskIds.length > 0
+    || snapshot.pendingVideoGenerationTaskIds.length > 0;
+  if (!hasPendingMedia) {
+    liveSessionSnapshots.delete(input.sessionKey);
+    return;
+  }
+
+  const generation = input.success
+    ? input.resultGeneration ?? snapshot.generation
+    : snapshot.generation;
+  const timeline = input.success
+    ? snapshot.timeline
+    : removePendingOptimisticUserSegment(snapshot.timeline, input.messageId);
+  liveSessionSnapshots.set(input.sessionKey, {
+    ...snapshot,
+    generation,
+    sending: false,
+    timeline: generation === snapshot.generation
+      ? timeline
+      : { ...timeline, loadGeneration: generation },
+    turnTimingsByUserMessageId: settledPromptTurnTimings(
+      snapshot.turnTimingsByUserMessageId,
+      input,
+    ),
+  });
+}
+
+function deleteLiveSessionSnapshot(sessionKey: string, generation: number): void {
+  if (liveSessionSnapshots.get(sessionKey)?.generation === generation) {
+    liveSessionSnapshots.delete(sessionKey);
+  }
+}
+
 function applyOperationGeneration(
   state: AcpChatSessionState,
   result: AcpChatOperationResult,
@@ -1784,12 +1627,16 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         timeline = applyAcpSessionUpdate(timeline, event.notification, { historical: !!event.historical });
       }
       if (restorableBackgroundSnapshot) {
-        timeline = restoreBackgroundMediaProjections(
-          timeline,
-          restorableBackgroundSnapshot,
-          input.sessionKey,
+        const restored = restoreBackgroundMediaProjections({
+          replay: timeline,
+          previous: restorableBackgroundSnapshot.timeline,
+          sessionKey: input.sessionKey,
           generation,
-        );
+        });
+        timeline = restored.timeline;
+        for (const evidenceId of restored.unrestoredImageEvidenceIds) {
+          releaseUnrestoredImageProjection(input.sessionKey, evidenceId);
+        }
       }
       const pendingAttachments = newPendingAttachments(
         createEmptyAcpTimeline(input.sessionKey, generation),
@@ -1810,7 +1657,9 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         generation,
         timeline,
         turnTimingsByUserMessageId:
-          currentResumedSnapshot?.turnTimingsByUserMessageId ?? {},
+          currentResumedSnapshot?.turnTimingsByUserMessageId
+          ?? restorableBackgroundSnapshot?.turnTimingsByUserMessageId
+          ?? {},
       });
       if (currentResumedSnapshot) {
         liveSessionSnapshots.set(input.sessionKey, {
@@ -1825,9 +1674,10 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       resolvePendingAttachments(input.sessionKey, generation, pendingAttachments);
       const restoredSnapshot = currentResumedSnapshot ?? restorableBackgroundSnapshot;
       for (const { event } of restoredSnapshot?.deferredImageUpdates ?? []) {
-        get().recordImageGenerationStart(event);
-        get().recordVideoGenerationUpdate(event);
-        const evidence = extractImageGenerationCompletionFromAcpEnvelope(event);
+        const reboundEvent = event.generation === generation ? event : { ...event, generation };
+        get().recordImageGenerationStart(reboundEvent);
+        get().recordVideoGenerationUpdate(reboundEvent);
+        const evidence = extractImageGenerationCompletionFromAcpEnvelope(reboundEvent);
         if (evidence) void get().projectImageGenerationCompletion(evidence);
       }
       for (const { evidence } of restoredSnapshot?.deferredImageCompletions ?? []) {
@@ -1899,24 +1749,30 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
     try {
       const result = await hostApi.chat.sendAcpPrompt(payload);
       const state = get();
-      liveSessionSnapshots.delete(sessionKey);
-      if (!isCurrentAction(state, sessionKey, generation)) return result.success;
+      const settledAtMs = Date.now();
+      if (!isCurrentAction(state, sessionKey, generation)) {
+        settleBackgroundPromptSnapshot({
+          sessionKey,
+          generation,
+          messageId,
+          startedAtMs,
+          settledAtMs,
+          success: result.success,
+          resultGeneration: result.generation,
+        });
+        if (activeTranscriptSupplement === transcriptOperation) invalidateTranscriptSupplement();
+        return result.success;
+      }
+      deleteLiveSessionSnapshot(sessionKey, generation);
       const failedTimeline = result.success
         ? state.timeline
         : removePendingOptimisticUserSegment(state.timeline, messageId);
-      const { [messageId]: _removedTiming, ...remainingTurnTimings } = state.turnTimingsByUserMessageId;
       set({
         sending: false,
-        turnTimingsByUserMessageId: result.success
-          ? {
-            ...state.turnTimingsByUserMessageId,
-            [messageId]: {
-              source: 'live',
-              status: 'complete',
-              durationMs: Math.max(0, Date.now() - startedAtMs),
-            },
-          }
-          : remainingTurnTimings,
+        turnTimingsByUserMessageId: settledPromptTurnTimings(
+          state.turnTimingsByUserMessageId,
+          { messageId, success: result.success, startedAtMs, settledAtMs },
+        ),
         ...(result.success
           ? applyOperationGeneration(state, result)
           : { error: failedOperationMessage(result, 'ACP prompt failed'), timeline: failedTimeline }),
@@ -1937,17 +1793,32 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       }
       return result.success;
     } catch (error) {
-      liveSessionSnapshots.delete(sessionKey);
+      const state = get();
+      const settledAtMs = Date.now();
+      if (!isCurrentAction(state, sessionKey, generation)) {
+        settleBackgroundPromptSnapshot({
+          sessionKey,
+          generation,
+          messageId,
+          startedAtMs,
+          settledAtMs,
+          success: false,
+        });
+      } else {
+        deleteLiveSessionSnapshot(sessionKey, generation);
+      }
       if (activeTranscriptSupplement === transcriptOperation) invalidateTranscriptSupplement();
-      set((state) => (
-        isCurrentAction(state, sessionKey, generation)
+      set((current) => (
+        isCurrentAction(current, sessionKey, generation)
           ? (() => {
-            const { [messageId]: _removedTiming, ...turnTimingsByUserMessageId } = state.turnTimingsByUserMessageId;
             return {
               sending: false,
               error: errorMessage(error, 'ACP prompt failed'),
-              timeline: removePendingOptimisticUserSegment(state.timeline, messageId),
-              turnTimingsByUserMessageId,
+              timeline: removePendingOptimisticUserSegment(current.timeline, messageId),
+              turnTimingsByUserMessageId: settledPromptTurnTimings(
+                current.turnTimingsByUserMessageId,
+                { messageId, success: false, startedAtMs, settledAtMs },
+              ),
             };
           })()
           : {}

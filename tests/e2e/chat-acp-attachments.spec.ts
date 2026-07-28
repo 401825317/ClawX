@@ -917,19 +917,21 @@ test.describe('ACP media attachments', () => {
       });
       await image.dblclick({ position: { x: 12, y: 12 } });
       await expect(page.getByTestId('acp-image-preview-dialog')).toBeVisible();
-      await expect.poll(async () => (await fixture.getHostInvocations()).some((call) => (
-        call.module === 'files'
-        && call.action === 'readAttachmentBinary'
-        && call.payload?.ref
-        && (call.payload.ref as Record<string, unknown>).uri === imagePath
-        && (call.payload.ref as Record<string, unknown>).generation === 3
-      ))).toBe(true);
+      await expect.poll(async () => (await fixture.getHostInvocations())
+        .filter((call) => (
+          call.module === 'files'
+          && call.action === 'readAttachmentBinary'
+          && call.payload?.ref
+          && (call.payload.ref as Record<string, unknown>).uri === imagePath
+        ))
+        .map((call) => (call.payload!.ref as Record<string, unknown>).generation)).toEqual([3]);
       await page.getByTestId('acp-image-preview-close').click();
 
       await fixture.releaseTranscriptResponse(deferredHistoryId);
       await fixture.waitForDeferredTranscriptCompleted(deferredHistoryId);
       await expect(timeline.getByText(historicalCaption, { exact: true })).toHaveCount(1);
       await expect(timeline.getByTestId('acp-image-part')).toHaveCount(1);
+      await page.screenshot({ path: '/tmp/clawx-background-media-restored.png', fullPage: false });
     } finally {
       await closeElectronApp(app);
     }

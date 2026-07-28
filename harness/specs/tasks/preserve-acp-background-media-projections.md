@@ -8,7 +8,9 @@ touchedAreas:
   - harness/specs/tasks/preserve-acp-background-media-projections.md
   - harness/specs/rules/acp-chat-state-and-history.md
   - harness/reference/acp-chat.md
+  - src/lib/acp/background-media-projections.ts
   - src/stores/acp-chat-session.ts
+  - tests/unit/acp-background-media-projections.test.ts
   - tests/unit/acp-chat-store.test.ts
   - tests/e2e/chat-acp-attachments.spec.ts
   - tests/e2e/fixtures/electron.ts
@@ -32,6 +34,7 @@ requiredRules:
   - comms-regression
   - docs-sync
 requiredTests:
+  - pnpm exec vitest run tests/unit/acp-background-media-projections.test.ts
   - pnpm exec vitest run tests/unit/acp-chat-store.test.ts
   - pnpm run typecheck
   - pnpm run build:vite
@@ -42,7 +45,7 @@ requiredTests:
 acceptance:
   - A background snapshot is eligible only while an image or video task remains pending and its session, workspace root, and cwd match the new load.
   - The new ACP replay remains the timeline authority; only explicitly marked image-generation and OpenClaw MEDIA compatibility projections are restored from memory.
-  - Restored projections retain their previous relative position when a replay anchor still exists and are not appended when no reliable anchor exists.
+  - Restored projections match a unique semantic user Turn by normalized prompt text and occurrence from the tail; synthetic media is inserted at that Turn's end.
   - Image media identities, compatibility evidence ids, and attachment identities prevent duplicate projections.
   - Restored attachment references are rebound to the active session generation before they can be opened or previewed.
   - Ordinary snapshot messages and process items omitted by ACP replay are not restored.
