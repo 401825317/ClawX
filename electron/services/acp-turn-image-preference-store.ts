@@ -31,6 +31,7 @@ type StoredTurnImagePreference = {
   id: string;
   sessionKey: string;
   messageDigest: string;
+  messageLength: number;
   imageOptions: AcpImageGenerationOptions;
   createdAt: number;
   expiresAt: number;
@@ -102,6 +103,7 @@ export function createAcpTurnImagePreferenceStore(
         id,
         sessionKey: input.sessionKey,
         messageDigest: digestMessage(message),
+        messageLength: message.length,
         imageOptions,
         createdAt,
         expiresAt: createdAt + TURN_PREFERENCE_TTL_MS,

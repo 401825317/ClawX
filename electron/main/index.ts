@@ -3,7 +3,7 @@
  * Manages window creation, system tray, and IPC handlers
  */
 import { portableModeInfo } from '../utils/portable-bootstrap';
-import { app, BrowserWindow, nativeImage, session, shell, type Session } from 'electron';
+import { app, BrowserWindow, nativeImage, protocol, session, shell, type Session } from 'electron';
 import { join } from 'path';
 import { GatewayManager } from '../gateway/manager';
 import { hasManagedRuntimeMutationMarker } from '../gateway/managed-runtime-mutation-barrier';
@@ -56,11 +56,22 @@ import { deviceOAuthManager } from '../utils/device-oauth';
 import { browserOAuthManager } from '../utils/browser-oauth';
 import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { syncAllProviderAuthToRuntime } from '../services/providers/provider-runtime-sync';
+import { ATTACHMENT_VIDEO_STREAM_SCHEME } from '../services/attachment-video-stream';
 
 const WINDOWS_APP_USER_MODEL_ID = 'app.clawx.desktop';
 const isE2EMode = process.env.CLAWX_E2E === '1';
 const requestedUserDataDir = process.env.CLAWX_USER_DATA_DIR?.trim();
 const requestedRemoteDebuggingPort = process.env.CLAWX_REMOTE_DEBUGGING_PORT?.trim();
+
+// The Main-owned attachment handler enforces authorization before serving bytes.
+protocol.registerSchemesAsPrivileged([{
+  scheme: ATTACHMENT_VIDEO_STREAM_SCHEME,
+  privileges: {
+    standard: true,
+    secure: true,
+    stream: true,
+  },
+}]);
 
 if (requestedRemoteDebuggingPort) {
   app.commandLine.appendSwitch('remote-debugging-port', requestedRemoteDebuggingPort);

@@ -10,6 +10,7 @@ import { basenameOf, extnameOf } from '@/lib/generated-files';
 import { hostApi } from '@/lib/host-api';
 import { useArtifactPanel } from '@/stores/artifact-panel';
 import { AcpFileCard } from './AcpFileCard';
+import { AcpVideoAttachment } from './AcpVideoAttachment';
 
 type AttachmentTone = 'assistant' | 'user';
 
@@ -144,6 +145,20 @@ export function AcpAttachmentPart({ part, tone = 'assistant' }: { part: Attachme
       toast.error(t('acp.attachment.openFailed'));
     }
   };
+
+  if (
+    part.access.status === 'available'
+    && part.access.target.kind === 'local'
+    && part.access.mimeType.startsWith('video/')
+  ) {
+    return (
+      <AcpVideoAttachment
+        attachmentRef={part.access.target.ref}
+        name={name}
+        size={part.access.size}
+      />
+    );
+  }
 
   if (
     tone === 'user' &&

@@ -115,6 +115,7 @@ function productionAttachmentBundle(): Promise<string> {
       contents: [
         `export { createAttachmentAccess, StagedAttachmentRegistry } from ${JSON.stringify(join(repoRoot, 'electron/services/attachment-access.ts'))};`,
         `export { AcpSessionAccessRegistry } from ${JSON.stringify(join(repoRoot, 'electron/services/acp-session-access-registry.ts'))};`,
+        `export { ATTACHMENT_VIDEO_STREAM_SCHEME, createAttachmentVideoStreamService } from ${JSON.stringify(join(repoRoot, 'electron/services/attachment-video-stream.ts'))};`,
         `export { createMediaApi } from ${JSON.stringify(join(repoRoot, 'electron/services/media-api.ts'))};`,
       ].join('\n'),
       loader: 'ts',
@@ -715,6 +716,7 @@ export async function installAttachmentHostFixture(
       hostInvocations: RecordedHostInvocation[];
       shellInvocations: RecordedHostInvocation[];
       stagedAttachments?: { register: (id: string, canonicalPath: string, displayPath?: string) => void };
+      attachmentPlayback?: { dispose: () => void };
     };
     const globals = globalThis as unknown as { __e2eAttachmentFixture?: FixtureState };
     const state: FixtureState = {
@@ -765,6 +767,8 @@ export async function installAttachmentHostFixture(
           executionCwd: string;
         }) => Promise<unknown>;
         commitGrant: (grant: unknown) => void;
+        get: (sessionKey: string, generation: number) => unknown;
+        subscribe: (listener: (context: unknown) => void) => () => void;
       };
       StagedAttachmentRegistry: new () => {
         register: (id: string, canonicalPath: string, displayPath?: string) => void;
@@ -780,6 +784,17 @@ export async function installAttachmentHostFixture(
         readAttachmentText: (input: unknown) => Promise<unknown>;
         readAttachmentBinary: (input: unknown) => Promise<unknown>;
         openAttachment: (input: unknown) => Promise<unknown>;
+        openVideoReadHandle: (input: unknown) => Promise<unknown>;
+      };
+      ATTACHMENT_VIDEO_STREAM_SCHEME: string;
+      createAttachmentVideoStreamService: (dependencies: {
+        accessRegistry: unknown;
+        openSource: (input: unknown) => Promise<unknown>;
+      }) => {
+        create: (input: unknown) => Promise<unknown>;
+        release: (streamId: string) => boolean;
+        handle: (request: unknown) => Promise<Response>;
+        dispose: () => void;
       };
     };
     const production = process.mainModule!.require(payload.productionAttachmentBundlePath) as ProductionAttachmentModule;
@@ -790,6 +805,18 @@ export async function installAttachmentHostFixture(
       sessionAccessRegistry: productionSessionAccess,
       stagedAttachments: productionStagedAttachments,
     });
+    const productionAttachmentPlayback = production.createAttachmentVideoStreamService({
+      accessRegistry: productionSessionAccess,
+      openSource: (ref) => productionAttachmentAccess.openVideoReadHandle(ref),
+    });
+    state.attachmentPlayback = productionAttachmentPlayback;
+    const attachmentProtocol = BrowserWindow.getAllWindows()[0]?.webContents.session.protocol;
+    if (!attachmentProtocol) throw new Error('Attachment fixture could not resolve the Electron session protocol');
+    attachmentProtocol.unhandle(production.ATTACHMENT_VIDEO_STREAM_SCHEME);
+    attachmentProtocol.handle(
+      production.ATTACHMENT_VIDEO_STREAM_SCHEME,
+      (request) => productionAttachmentPlayback.handle(request),
+    );
     const productionMediaApi = production.createMediaApi({ attachmentAccess: productionAttachmentAccess });
 
     const respond = (id: unknown, data: unknown) => ({
@@ -888,6 +915,14 @@ export async function installAttachmentHostFixture(
       }
       if (request.module === 'files' && request.action === 'readAttachmentBinary') {
         return respond(request.id, await productionAttachmentAccess.readAttachmentBinary(request.payload));
+      }
+      if (request.module === 'files' && request.action === 'createAttachmentPlayback') {
+        return respond(request.id, await productionAttachmentPlayback.create(request.payload));
+      }
+      if (request.module === 'files' && request.action === 'releaseAttachmentPlayback') {
+        return respond(request.id, {
+          success: productionAttachmentPlayback.release(String(request.payload?.streamId ?? '')),
+        });
       }
       if (request.module === 'files' && request.action === 'openAttachment') {
         return respond(request.id, await productionAttachmentAccess.openAttachment(request.payload));

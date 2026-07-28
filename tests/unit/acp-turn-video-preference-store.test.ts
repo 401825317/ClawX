@@ -22,7 +22,6 @@ describe('ACP turn video preference store', () => {
       sessionKey: 'agent:main:session-1',
       message,
       videoOptions: {
-        model: 'grok-image-video',
         aspectRatio: '16:9',
         resolution: '480P',
         durationSeconds: 6,
@@ -39,8 +38,8 @@ describe('ACP turn video preference store', () => {
       version: 1,
       sessionKey: 'agent:main:session-1',
       messageDigest: createHash('sha256').update(message, 'utf8').digest('hex'),
+      messageLength: message.length,
       videoOptions: {
-        model: 'grok-image-video',
         aspectRatio: '16:9',
         resolution: '480P',
         durationSeconds: 6,
@@ -52,7 +51,7 @@ describe('ACP turn video preference store', () => {
     await expect(readdir(preferenceDirectory)).resolves.toEqual([]);
   });
 
-  it('rejects models, resolutions, and durations outside the managed local contract', async () => {
+  it('rejects aspect ratios, resolutions, and durations outside the managed local contract', async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), 'uclaw-turn-video-preference-'));
     temporaryDirectories.push(stateDirectory);
     const store = createAcpTurnVideoPreferenceStore(stateDirectory);
@@ -61,10 +60,50 @@ describe('ACP turn video preference store', () => {
       sessionKey: 'agent:main:session-1',
       message: 'Create a video.',
       videoOptions: {
-        model: 'unsupported-video-model',
+        aspectRatio: '4:3',
         resolution: '1080P',
         durationSeconds: 30,
       } as never,
     })).resolves.toBeNull();
+  });
+
+  it('owns and removes the bounded current-turn reference image', async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), 'uclaw-turn-video-preference-'));
+    temporaryDirectories.push(stateDirectory);
+    const store = createAcpTurnVideoPreferenceStore(stateDirectory);
+    const image = Buffer.from('bounded-reference-image');
+
+    const entry = await store.enqueue({
+      sessionKey: 'agent:main:session-1',
+      message: 'Animate this image.',
+      videoOptions: {
+        aspectRatio: '16:9',
+        resolution: '480P',
+        durationSeconds: 6,
+      },
+      referenceImage: {
+        buffer: image,
+        fileName: 'reference.jpg',
+        mimeType: 'image/jpeg',
+      },
+    });
+
+    const preferenceDirectory = join(stateDirectory, 'uclaw-turn-preferences');
+    const files = (await readdir(preferenceDirectory)).sort();
+    expect(files).toHaveLength(2);
+    const preferenceFile = files.find((fileName) => fileName.startsWith('video-turn-'))!;
+    const referenceFile = files.find((fileName) => fileName.startsWith('video-reference-'))!;
+    const stored = JSON.parse(
+      await readFile(join(preferenceDirectory, preferenceFile), 'utf8'),
+    ) as { referenceImage: { filePath: string; fileName: string; mimeType: string } };
+    expect(stored.referenceImage).toEqual({
+      filePath: join(preferenceDirectory, referenceFile),
+      fileName: 'reference.jpg',
+      mimeType: 'image/jpeg',
+    });
+    await expect(readFile(stored.referenceImage.filePath)).resolves.toEqual(image);
+
+    await store.discard(entry?.id);
+    await expect(readdir(preferenceDirectory)).resolves.toEqual([]);
   });
 });

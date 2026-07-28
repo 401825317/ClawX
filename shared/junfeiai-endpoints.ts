@@ -114,7 +114,9 @@ export type UclawEndpointsConfig = {
       apiProtocol: string;
       timeoutMs: number;
       pollIntervalMs: number;
+      contentDownloadMaxAttempts: number;
       maxDownloadBytes: number;
+      maxInputImageBytes: number;
       defaultModel: string;
       defaultAspectRatio: UclawVideoAspectRatio;
       defaultResolution: UclawVideoResolution;
@@ -562,7 +564,15 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
         apiProtocol: readNonEmptyString(video.apiProtocol, 'media.video.apiProtocol'),
         timeoutMs: readPositiveInteger(video.timeoutMs, 'media.video.timeoutMs'),
         pollIntervalMs: readPositiveInteger(video.pollIntervalMs, 'media.video.pollIntervalMs'),
+        contentDownloadMaxAttempts: readPositiveInteger(
+          video.contentDownloadMaxAttempts,
+          'media.video.contentDownloadMaxAttempts',
+        ),
         maxDownloadBytes: readPositiveInteger(video.maxDownloadBytes, 'media.video.maxDownloadBytes'),
+        maxInputImageBytes: readPositiveInteger(
+          video.maxInputImageBytes,
+          'media.video.maxInputImageBytes',
+        ),
         defaultModel: videoDefaultModel,
         defaultAspectRatio: videoDefaultAspectRatio,
         defaultResolution: videoDefaultResolution,
@@ -634,7 +644,9 @@ export const UCLAW_COMPACTION_RESERVE_TOKENS_FLOOR = UCLAW_ENDPOINTS_CONFIG.runt
 export const UCLAW_IMAGE_GENERATION_TIMEOUT_MS = UCLAW_ENDPOINTS_CONFIG.media.image.timeoutMs;
 export const UCLAW_IMAGE_GENERATION_DEFAULT_SIZE = UCLAW_ENDPOINTS_CONFIG.media.image.defaultSize;
 export const UCLAW_VIDEO_GENERATION_TIMEOUT_MS = UCLAW_ENDPOINTS_CONFIG.media.video.timeoutMs;
+export const UCLAW_VIDEO_CONTENT_DOWNLOAD_MAX_ATTEMPTS = UCLAW_ENDPOINTS_CONFIG.media.video.contentDownloadMaxAttempts;
 export const UCLAW_VIDEO_GENERATION_MAX_DOWNLOAD_BYTES = UCLAW_ENDPOINTS_CONFIG.media.video.maxDownloadBytes;
+export const UCLAW_VIDEO_GENERATION_MAX_INPUT_IMAGE_BYTES = UCLAW_ENDPOINTS_CONFIG.media.video.maxInputImageBytes;
 export const UCLAW_VIDEO_GENERATION_POLL_INTERVAL_MS = UCLAW_ENDPOINTS_CONFIG.media.video.pollIntervalMs;
 export const UCLAW_VIDEO_PROVIDER_ID = UCLAW_ENDPOINTS_CONFIG.media.video.providerId;
 export const UCLAW_VIDEO_API_PROTOCOL = UCLAW_ENDPOINTS_CONFIG.media.video.apiProtocol;

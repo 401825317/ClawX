@@ -49,7 +49,7 @@ const { agentsState, chatState, gatewayState, providersState, managedClientConfi
         {
           id: 'grok-image-video',
           label: 'Grok Video',
-          modes: ['text-to-video', 'image-to-video'],
+          modes: ['text-to-video'],
           aspectRatios: ['2:3', '3:2', '1:1', '9:16', '16:9'],
           resolutions: ['480P', '720P'],
           durations: [6, 10, 15],
@@ -187,14 +187,12 @@ function translate(key: string, vars?: Record<string, unknown>): string {
       return 'Image mode';
     case 'composer.videoMode':
       return 'Video mode';
-    case 'composer.videoModelLabel':
-      return 'Video model';
+    case 'composer.videoReferenceImageLimit':
+      return 'Video generation supports one reference image at a time';
     case 'composer.videoResolutionLabel':
       return 'Video resolution';
     case 'composer.videoDurationLabel':
       return 'Video duration';
-    case 'composer.videoRequiresImage':
-      return 'Requires one reference image';
     case 'composer.imageSizeLabel':
       return 'Image size';
     case 'composer.imageAspectTall':
@@ -255,6 +253,8 @@ function translate(key: string, vars?: Record<string, unknown>): string {
       return 'Preview SKILL.md';
     case 'composer.skillPreviewNotFound':
       return 'Skill not found';
+    case 'videoGeneration.generating':
+      return 'Generating video, please wait…';
     default:
       return key;
   }
@@ -352,6 +352,14 @@ function openSettingsPicker() {
     button: 0,
     ctrlKey: false,
   });
+}
+
+function openComposerOptionsSubmenu(triggerTestId: string, rowTestId: string) {
+  fireEvent.pointerDown(screen.getByTestId(triggerTestId), {
+    button: 0,
+    ctrlKey: false,
+  });
+  fireEvent.pointerMove(screen.getByTestId(rowTestId), { pointerType: 'mouse' });
 }
 
 function openModelSettingsPicker() {
@@ -452,18 +460,50 @@ describe('ChatInput agent targeting', () => {
     expect(screen.queryByTestId('chat-composer-image-generation-indicator')).not.toBeInTheDocument();
   });
 
+  it('shows a video-generation indicator and blocks another send while keeping the draft editable', () => {
+    render(
+      <TooltipProvider>
+        <ChatInput onSend={vi.fn()} videoGenerating />
+      </TooltipProvider>,
+    );
+
+    const indicator = screen.getByRole('status', { name: 'Generating video, please wait…' });
+    expect(indicator).toHaveAttribute('data-testid', 'chat-composer-video-generation-indicator');
+    expect(screen.queryByTestId('chat-composer-working-indicator')).not.toBeInTheDocument();
+    const input = screen.getByTestId('chat-composer-input');
+    expect(input).not.toBeDisabled();
+    fireEvent.change(input, { target: { value: 'Queue this after the video' } });
+    expect(input).toHaveValue('Queue this after the video');
+    expect(screen.getByTestId('chat-composer-send')).toBeDisabled();
+  });
+
+  it('keeps the thinking indicator while the foreground turn and video generation overlap', () => {
+    render(
+      <TooltipProvider>
+        <ChatInput onSend={vi.fn()} sending videoGenerating />
+      </TooltipProvider>,
+    );
+
+    expect(screen.getByRole('status', { name: 'Thinking…' })).toHaveAttribute(
+      'data-testid',
+      'chat-composer-working-indicator',
+    );
+    expect(screen.queryByTestId('chat-composer-video-generation-indicator')).not.toBeInTheDocument();
+  });
+
   it('sends per-session image size and quality preferences only while image mode is active', async () => {
     const onSend = vi.fn();
     const view = renderChatInput(onSend);
 
     expect(screen.queryByTestId('chat-image-options')).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId('chat-composer-mode-image'));
-    expect(screen.getByTestId('chat-image-aspect-trigger')).toHaveTextContent('1:1');
-    expect(screen.getByTestId('chat-image-quality')).toHaveValue('medium');
+    expect(screen.getByTestId('chat-image-options-trigger')).toHaveTextContent('1:1');
+    expect(screen.getByTestId('chat-image-options-trigger')).toHaveTextContent('Medium');
 
-    fireEvent.click(screen.getByTestId('chat-image-aspect-trigger'));
+    openComposerOptionsSubmenu('chat-image-options-trigger', 'chat-image-aspect-row');
     fireEvent.click(screen.getByTestId('chat-image-aspect-16-9'));
-    fireEvent.change(screen.getByTestId('chat-image-quality'), { target: { value: 'high' } });
+    openComposerOptionsSubmenu('chat-image-options-trigger', 'chat-image-quality-row');
+    fireEvent.click(screen.getByTestId('chat-image-quality-option-high'));
     fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Create a product photo.' } });
     fireEvent.click(screen.getByTestId('chat-composer-send'));
 
@@ -485,8 +525,8 @@ describe('ChatInput agent targeting', () => {
     expect(screen.queryByTestId('chat-image-options')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId('chat-composer-mode-image'));
-    expect(screen.getByTestId('chat-image-aspect-trigger')).toHaveTextContent('1:1');
-    expect(screen.getByTestId('chat-image-quality')).toHaveValue('medium');
+    expect(screen.getByTestId('chat-image-options-trigger')).toHaveTextContent('1:1');
+    expect(screen.getByTestId('chat-image-options-trigger')).toHaveTextContent('Medium');
   });
 
   it('keeps image controls in the leading action group after the model selector', () => {
@@ -517,17 +557,16 @@ describe('ChatInput agent targeting', () => {
     fireEvent.click(screen.getByTestId('chat-composer-mode-video'));
     expect(screen.queryByTestId('chat-image-options')).not.toBeInTheDocument();
     expect(screen.getByTestId('chat-video-options')).toBeInTheDocument();
-    expect(screen.getByTestId('chat-video-model')).toHaveValue('grok-image-video');
-    expect(screen.getByTestId('chat-video-aspect-trigger')).toHaveTextContent('16:9');
-    expect(screen.getByTestId('chat-video-resolution')).toHaveValue('480P');
-    expect(screen.getByTestId('chat-video-duration')).toHaveValue('6');
+    expect(screen.queryByTestId('chat-video-model')).not.toBeInTheDocument();
+    expect(screen.getByTestId('chat-video-options-trigger')).toHaveTextContent('16:9');
+    expect(screen.getByTestId('chat-video-options-trigger')).toHaveTextContent('480P');
+    expect(screen.getByTestId('chat-video-options-trigger')).toHaveTextContent('6s');
 
-    const imageOnlyModel = screen.getByRole('option', { name: 'Grok Video 1.5' });
-    expect(imageOnlyModel).toBeDisabled();
-
-    fireEvent.change(screen.getByTestId('chat-video-resolution'), { target: { value: '720P' } });
-    fireEvent.change(screen.getByTestId('chat-video-duration'), { target: { value: '10' } });
-    fireEvent.click(screen.getByTestId('chat-video-aspect-trigger'));
+    openComposerOptionsSubmenu('chat-video-options-trigger', 'chat-video-resolution-row');
+    fireEvent.click(screen.getByTestId('chat-video-resolution-option-720p'));
+    openComposerOptionsSubmenu('chat-video-options-trigger', 'chat-video-duration-row');
+    fireEvent.click(screen.getByTestId('chat-video-duration-option-10'));
+    openComposerOptionsSubmenu('chat-video-options-trigger', 'chat-video-aspect-row');
     expect(screen.getByTestId('chat-video-aspect-menu')).toHaveTextContent('2:3');
     expect(screen.getByTestId('chat-video-aspect-menu')).toHaveTextContent('3:2');
     expect(screen.getByTestId('chat-video-aspect-menu')).toHaveTextContent('1:1');
@@ -543,9 +582,56 @@ describe('ChatInput agent targeting', () => {
         undefined,
         null,
         undefined,
-        { model: 'grok-image-video', aspectRatio: '9:16', resolution: '720P', durationSeconds: 10 },
+        { aspectRatio: '9:16', resolution: '720P', durationSeconds: 10 },
       );
     });
+  });
+
+  it('keeps the draft intact and blocks video mode when more than one image is attached', async () => {
+    const onSend = vi.fn();
+    vi.mocked(hostApiDialogOpenMock).mockResolvedValue({
+      canceled: false,
+      filePaths: ['/tmp/reference-one.png', '/tmp/reference-two.png'],
+    });
+    vi.mocked(hostApiFetchMock).mockImplementation((path: string) => {
+      if (path === '/api/files/stage-paths') {
+        return Promise.resolve([
+          {
+            id: 'reference-one',
+            fileName: 'reference-one.png',
+            mimeType: 'image/png',
+            fileSize: 100,
+            stagedPath: '/tmp/staged-reference-one.png',
+            preview: null,
+          },
+          {
+            id: 'reference-two',
+            fileName: 'reference-two.png',
+            mimeType: 'image/png',
+            fileSize: 100,
+            stagedPath: '/tmp/staged-reference-two.png',
+            preview: null,
+          },
+        ]);
+      }
+      return Promise.resolve({ success: true, skills: [] });
+    });
+    renderChatInput(onSend);
+
+    fireEvent.click(screen.getByTestId('chat-composer-attach'));
+    await waitFor(() => {
+      expect(screen.getByText('reference-one.png')).toBeInTheDocument();
+      expect(screen.getByText('reference-two.png')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByTestId('chat-composer-mode-video'));
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Animate both images.' } });
+    fireEvent.click(screen.getByTestId('chat-composer-send'));
+
+    await waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalledWith('Video generation supports one reference image at a time');
+    });
+    expect(onSend).not.toHaveBeenCalled();
+    expect(screen.getByTestId('chat-composer-input')).toHaveValue('Animate both images.');
   });
 
   it('combines model and reasoning into one selector before image mode', () => {
@@ -559,7 +645,28 @@ describe('ChatInput agent targeting', () => {
     expect(leadingActions).toContainElement(settingsPicker);
     expect(settingsPicker).toHaveTextContent('Smart');
     expect(settingsPicker).toHaveTextContent('Medium');
+    expect(settingsPicker).toHaveAttribute('aria-expanded', 'false');
+    expect(settingsPicker).not.toHaveClass('bg-black/[0.07]');
+    expect(settingsPicker).not.toHaveClass('dark:bg-white/10');
+    expect(settingsPicker).not.toHaveAttribute('aria-pressed');
+    expect(screen.getByTestId('chat-composer-mode-image')).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByTestId('chat-composer-mode-video')).toHaveAttribute('aria-pressed', 'false');
     expect(settingsPicker.compareDocumentPosition(imageMode) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('keeps image and video buttons selected only while their generation mode is active', () => {
+    renderChatInput();
+
+    const imageMode = screen.getByTestId('chat-composer-mode-image');
+    const videoMode = screen.getByTestId('chat-composer-mode-video');
+    fireEvent.click(imageMode);
+    expect(imageMode).toHaveAttribute('aria-pressed', 'true');
+    expect(videoMode).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(videoMode);
+    expect(imageMode).toHaveAttribute('aria-pressed', 'false');
+    expect(videoMode).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('chat-settings-picker-button')).not.toHaveAttribute('aria-pressed');
   });
 
   it('opens model or reasoning choices when their settings row is hovered', async () => {

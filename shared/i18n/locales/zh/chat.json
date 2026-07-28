@@ -73,6 +73,9 @@
         "imageLoading": "正在加载图片",
         "imagePreviewFailed": "无法加载原始尺寸图片",
         "imagePreviewDescription": "生成图片的原始尺寸预览",
+        "video": "视频",
+        "videoLoading": "正在加载本地视频",
+        "videoLoadFailed": "无法加载本地视频",
         "copy": "复制回复",
         "copied": "已复制",
         "turnDuration": "用时 {{duration}}",
@@ -288,6 +291,9 @@
         "generatedReady": "生成的图片已准备好。",
         "generatedReadyWithMissing": "生成的图片已准备好，但有部分图片无法加载。"
     },
+    "videoGeneration": {
+        "generating": "视频生成中，请稍候…"
+    },
     "composer": {
         "attachFiles": "添加文件",
         "pickSkill": "选择技能",
@@ -316,7 +322,7 @@
         "imageMode": "图片模式",
         "imageModeActive": "图片模式已开启",
         "videoMode": "视频模式",
-        "videoModelLabel": "视频模型",
+        "videoReferenceImageLimit": "视频生成一次仅支持一张参考图",
         "videoAspectRatioLabel": "视频比例",
         "videoResolutionLabel": "视频清晰度",
         "videoDurationLabel": "视频时长",

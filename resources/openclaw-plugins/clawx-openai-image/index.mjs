@@ -80,6 +80,18 @@ function digestPrompt(prompt) {
   return createHash('sha256').update(prompt, 'utf8').digest('hex');
 }
 
+/** Matches either a raw composer prompt or OpenClaw's metadata-wrapped prompt suffix. */
+function matchesStoredPrompt(prompt, record) {
+  const storedDigest = normalizeOptionalString(record?.messageDigest);
+  if (!storedDigest) return false;
+  if (digestPrompt(prompt) === storedDigest) return true;
+  const messageLength = Number(record?.messageLength);
+  return Number.isSafeInteger(messageLength)
+    && messageLength > 0
+    && messageLength <= prompt.length
+    && digestPrompt(prompt.slice(-messageLength)) === storedDigest;
+}
+
 function normalizeTurnImageOptions(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const size = normalizeOptionalString(value.size);
@@ -138,7 +150,6 @@ async function consumeTurnImageOptions(event, ctx) {
   }
 
   const now = Date.now();
-  const messageDigest = digestPrompt(prompt);
   const matches = [];
   for (const fileName of fileNames) {
     if (!TURN_IMAGE_PREFERENCE_FILE_RE.test(fileName)) continue;
@@ -151,7 +162,7 @@ async function consumeTurnImageOptions(event, ctx) {
         await rm(filePath, { force: true });
         continue;
       }
-      if (record.sessionKey !== sessionKey || record.messageDigest !== messageDigest) continue;
+      if (record.sessionKey !== sessionKey || !matchesStoredPrompt(prompt, record)) continue;
       matches.push({ filePath, createdAt: Number(record?.createdAt) || 0, imageOptions });
     } catch {
       await rm(filePath, { force: true }).catch(() => undefined);

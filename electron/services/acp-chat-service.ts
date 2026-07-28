@@ -13,6 +13,7 @@ import {
   type SessionNotification,
 } from '@agentclientprotocol/sdk';
 import { HOST_EVENT_CHANNELS } from '@shared/host-events/contract';
+import { UCLAW_VIDEO_GENERATION_MAX_INPUT_IMAGE_BYTES } from '@shared/junfeiai-endpoints';
 import type {
   AcpChatCancelPayload,
   AcpChatLoadPayload,
@@ -39,6 +40,7 @@ import {
   type AcpTurnVideoPreferenceStore,
 } from './acp-turn-video-preference-store';
 import { expandPath } from '../utils/paths';
+import { prepareVideoReferenceImage } from '../utils/video-reference-image';
 
 type AcpConnection = Pick<ClientSideConnection, 'initialize' | 'newSession' | 'loadSession' | 'prompt' | 'cancel'>;
 type MainWindowLike = {
@@ -67,6 +69,14 @@ type AcpChildProcess = ChildProcess & {
   stdin: NonNullable<ChildProcess['stdin']>;
   stdout: NonNullable<ChildProcess['stdout']>;
   stderr: NonNullable<ChildProcess['stderr']>;
+};
+type AcpPromptBuildResult = {
+  blocks: ContentBlock[];
+  videoReferenceImage?: {
+    buffer: Buffer;
+    fileName: string;
+    mimeType: string;
+  };
 };
 
 function ok(generation?: number, sessionUpdates?: AcpSessionUpdateEnvelope[]): AcpChatOperationResult {
@@ -399,7 +409,8 @@ export class AcpChatService {
         details: { messageLength: payload.message?.length ?? 0, mediaCount: payload.media?.length ?? 0 },
       });
       const connection = await this.ensureConnection();
-      const prompt = await this.buildPromptBlocks(payload);
+      const promptBuild = await this.buildPromptBlocks(payload);
+      const prompt = promptBuild.blocks;
       const message = payload.message?.trim();
       if (payload.imageOptions && message) {
         const preference = await this.turnImagePreferenceStore.enqueue({
@@ -418,6 +429,9 @@ export class AcpChatService {
           sessionKey: payload.sessionKey,
           message,
           videoOptions: payload.videoOptions,
+          ...(promptBuild.videoReferenceImage
+            ? { referenceImage: promptBuild.videoReferenceImage }
+            : {}),
         }).catch((error) => {
           // Composer preferences must never prevent a normal ACP prompt from running.
           logger.warn(`[acp-chat] Could not queue video generation preferences: ${String(error)}`);
@@ -759,22 +773,50 @@ export class AcpChatService {
     }
   }
 
-  private async buildPromptBlocks(payload: AcpChatPromptPayload): Promise<ContentBlock[]> {
+  private async buildPromptBlocks(payload: AcpChatPromptPayload): Promise<AcpPromptBuildResult> {
     const blocks: ContentBlock[] = [];
+    let videoReferenceImage: AcpPromptBuildResult['videoReferenceImage'];
     const text = payload.message?.trim();
     if (text) blocks.push({ type: 'text', text });
 
     const media = payload.media ?? [];
     if (media.length > 0) {
+      const imageCount = media.filter((item) => (item.mimeType || '').startsWith('image/')).length;
+      if (payload.videoOptions && imageCount > 1) {
+        throw new Error('Video generation supports at most one reference image.');
+      }
+
       const fsP = await import('node:fs/promises');
       for (const item of media) {
         const mimeType = item.mimeType || 'application/octet-stream';
         if (mimeType.startsWith('image/')) {
-          const data = await fsP.readFile(item.filePath, 'base64');
+          const prepared = payload.videoOptions
+            ? await prepareVideoReferenceImage({
+              filePath: item.filePath,
+              fileName: item.fileName,
+              mimeType,
+              maxBytes: UCLAW_VIDEO_GENERATION_MAX_INPUT_IMAGE_BYTES,
+            })
+            : null;
+          const data = prepared
+            ? prepared.buffer.toString('base64')
+            : await fsP.readFile(item.filePath, 'base64');
+          if (prepared?.compressed) {
+            logger.info(
+              `[acp-chat] Compressed video reference image from ${prepared.inputBytes} to ${prepared.outputBytes} bytes`,
+            );
+          }
+          if (prepared) {
+            videoReferenceImage = {
+              buffer: prepared.buffer,
+              fileName: prepared.fileName,
+              mimeType: prepared.mimeType,
+            };
+          }
           blocks.push({
             type: 'image',
             data,
-            mimeType,
+            mimeType: prepared?.mimeType ?? mimeType,
             uri: item.filePath,
             _meta: {
               clawx: {
@@ -800,7 +842,10 @@ export class AcpChatService {
     }
 
     if (blocks.length === 0) blocks.push({ type: 'text', text: '' });
-    return blocks;
+    return {
+      blocks,
+      ...(videoReferenceImage ? { videoReferenceImage } : {}),
+    };
   }
 }
 

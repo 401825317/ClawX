@@ -58,11 +58,17 @@ const EXT_MIME_MAP: Record<string, string> = {
   '.jpeg': 'image/jpeg',
   '.jpg': 'image/jpeg',
   '.json': 'application/json',
+  '.m4v': 'video/x-m4v',
   '.md': 'text/markdown',
+  '.mov': 'video/quicktime',
+  '.mp4': 'video/mp4',
+  '.mpeg': 'video/mpeg',
+  '.mpg': 'video/mpeg',
   '.pdf': 'application/pdf',
   '.png': 'image/png',
   '.svg': 'image/svg+xml',
   '.txt': 'text/plain',
+  '.webm': 'video/webm',
   '.webp': 'image/webp',
   '.xls': 'application/vnd.ms-excel',
   '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -90,6 +96,13 @@ export type AttachmentAccess = {
   listAttachmentOpenHandlers: (ref: AttachmentFileRef) => Promise<AttachmentOpenHandlersResult>;
   openAttachmentWith: (payload: OpenAttachmentWithPayload) => Promise<OpenAttachmentResult>;
   revealAttachment: (ref: AttachmentFileRef) => Promise<OpenAttachmentResult>;
+  openVideoReadHandle: (ref: AttachmentFileRef) => Promise<AttachmentVideoReadHandle>;
+};
+
+export type AttachmentVideoReadHandle = {
+  handle: FileHandle;
+  mimeType: string;
+  size: number;
 };
 
 type AttachmentAccessDependencies = {
@@ -752,6 +765,30 @@ export function createAttachmentAccess(dependencies: AttachmentAccessDependencie
     }
   };
 
+  /** Opens one authorized local video for Main-owned range streaming. */
+  const openVideoReadHandle = async (ref: AttachmentFileRef): Promise<AttachmentVideoReadHandle> => {
+    let opened: { handle: FileHandle; stat: Stats } | undefined;
+    try {
+      const target = await resolveTarget(ref);
+      if (target.kind !== 'local' || !target.mimeType.startsWith('video/')) {
+        throw new AttachmentFailure('invalidReference');
+      }
+      opened = await openRevalidatedLocal(target, await getFs());
+      if (!dependencies.sessionAccessRegistry.get(ref.sessionKey, ref.generation)) {
+        throw new AttachmentFailure('staleSession');
+      }
+      const result = {
+        handle: opened.handle,
+        mimeType: target.mimeType,
+        size: opened.stat.size,
+      };
+      opened = undefined;
+      return result;
+    } finally {
+      await opened?.handle.close().catch(() => undefined);
+    }
+  };
+
   const openAttachment = async (ref: AttachmentSourceRef): Promise<OpenAttachmentResult> => {
     let identity = opaqueIdentity(typeof ref?.uri === 'string' ? ref.uri : 'invalid');
     let sourceKind: 'local' | 'remote' | 'invalid' = typeof ref?.uri === 'string'
@@ -877,5 +914,6 @@ export function createAttachmentAccess(dependencies: AttachmentAccessDependencie
     listAttachmentOpenHandlers,
     openAttachmentWith,
     revealAttachment,
+    openVideoReadHandle,
   };
 }

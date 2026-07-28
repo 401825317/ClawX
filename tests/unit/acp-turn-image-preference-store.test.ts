@@ -33,6 +33,7 @@ describe('Acp turn image preference store', () => {
       version: 1,
       sessionKey: 'agent:main:session-1',
       messageDigest: createHash('sha256').update(message, 'utf8').digest('hex'),
+      messageLength: message.length,
       imageOptions: { size: '3840x2160', quality: 'medium' },
     });
     expect(JSON.stringify(stored)).not.toContain(message);

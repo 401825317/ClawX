@@ -156,6 +156,7 @@ describe('ClawX OpenAI image plugin request shape', () => {
         id: 'c91ec831-6c3f-43aa-9c77-6aa2f5deeb03',
         sessionKey,
         messageDigest: createHash('sha256').update(prompt, 'utf8').digest('hex'),
+        messageLength: prompt.length,
         imageOptions: { size: '3840x2160', quality: 'medium' },
         createdAt: Date.now(),
         expiresAt: Date.now() + 60_000,
@@ -176,7 +177,17 @@ describe('ClawX OpenAI image plugin request shape', () => {
       });
 
       const context = { sessionKey, runId: 'run-image-options' };
-      const promptResult = await hooks.get('before_prompt_build')?.({ prompt }, context);
+      const wrappedPrompt = [
+        'Sender (untrusted metadata):',
+        '```json',
+        '{"label":"ACP (cli)"}',
+        '```',
+        '',
+        '[Working directory: ~/.openclaw/workspace]',
+        '',
+        prompt,
+      ].join('\n');
+      const promptResult = await hooks.get('before_prompt_build')?.({ prompt: wrappedPrompt }, context);
       expect(promptResult).toEqual(expect.objectContaining({ appendContext: expect.stringContaining('image generation mode') }));
       expect(await readdir(preferenceDirectory)).toEqual([]);
 

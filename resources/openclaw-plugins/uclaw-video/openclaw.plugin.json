@@ -31,8 +31,10 @@
       "defaultResolution": { "type": "string", "enum": ["480P", "720P"] },
       "defaultDurationSeconds": { "type": "integer", "minimum": 1 },
       "pollIntervalMs": { "type": "integer", "minimum": 1 },
+      "contentDownloadMaxAttempts": { "type": "integer", "minimum": 1 },
       "timeoutMs": { "type": "integer", "minimum": 1 },
       "maxDownloadBytes": { "type": "integer", "minimum": 1 },
+      "maxInputImageBytes": { "type": "integer", "minimum": 1 },
       "resolutionSizes": {
         "type": "object",
         "additionalProperties": false,

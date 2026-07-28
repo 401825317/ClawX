@@ -66,6 +66,11 @@ import { createAgentsApi } from '../services/agents-api';
 import { createChatApi } from '../services/chat-api';
 import { AcpSessionAccessRegistry } from '../services/acp-session-access-registry';
 import { createAttachmentAccess, StagedAttachmentRegistry } from '../services/attachment-access';
+import {
+  ATTACHMENT_VIDEO_STREAM_SCHEME,
+  createAttachmentVideoStreamService,
+  type AttachmentVideoStreamRequest,
+} from '../services/attachment-video-stream';
 import { createAttachmentOpenWithService } from '../services/attachment-open-with';
 import { createCronApi } from '../services/cron-api';
 import { createFilesApi } from '../services/files-api';
@@ -208,6 +213,22 @@ function registerTypedHostHandlers(
     stagedAttachments,
     openWith: attachmentOpenWith,
   });
+  const attachmentPlayback = createAttachmentVideoStreamService({
+    accessRegistry: acpSessionAccessRegistry,
+    openSource: (ref) => attachmentAccess.openVideoReadHandle(ref),
+  });
+  const attachmentProtocol = mainWindow.webContents.session.protocol;
+  attachmentProtocol.handle(
+    ATTACHMENT_VIDEO_STREAM_SCHEME,
+    // Electron's Protocol declaration currently exposes a narrower Request type
+    // than the runtime object used by protocol.handle.
+    (request) => attachmentPlayback.handle(request as unknown as AttachmentVideoStreamRequest),
+  );
+  app.once('will-quit', () => {
+    // Stop new reads before revoking tokens and destroying active file streams.
+    attachmentProtocol.unhandle(ATTACHMENT_VIDEO_STREAM_SCHEME);
+    attachmentPlayback.dispose();
+  });
   hostApiRegistry.registerCoreServices({
     app: createAppApi(),
     openclaw: createOpenClawApi(),
@@ -229,6 +250,7 @@ function registerTypedHostHandlers(
     support: createSupportApi(),
     files: createFilesApi({
       attachmentAccess,
+      attachmentPlayback,
       openWith: attachmentOpenWith,
       stagedAttachments,
     }),

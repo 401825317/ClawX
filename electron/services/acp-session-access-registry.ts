@@ -9,6 +9,10 @@ export type AcpSessionAccessContext = {
   executionCwd: string;
 };
 
+export type AcpSessionAccessGrantListener = (
+  context: AcpSessionAccessContext | null,
+) => void;
+
 async function canonicalDirectory(input: string, label: string): Promise<string> {
   const canonicalPath = await realpath(expandPath(input));
   const directoryStat = await stat(canonicalPath);
@@ -22,8 +26,35 @@ function isInside(child: string, parent: string): boolean {
     || (!isAbsolute(relativePath) && relativePath !== '..' && !relativePath.startsWith(`..${sep}`));
 }
 
+function sameContext(
+  left: AcpSessionAccessContext | null,
+  right: AcpSessionAccessContext | null,
+): boolean {
+  if (!left || !right) return left === right;
+  return left?.sessionKey === right?.sessionKey
+    && left?.generation === right?.generation
+    && left?.workspaceRoot === right?.workspaceRoot
+    && left?.executionCwd === right?.executionCwd;
+}
+
 export class AcpSessionAccessRegistry {
   private activeGrant: AcpSessionAccessContext | null = null;
+  private readonly grantListeners = new Set<AcpSessionAccessGrantListener>();
+
+  private replaceGrant(context: AcpSessionAccessContext | null): void {
+    const next = context ? { ...context } : null;
+    if (sameContext(this.activeGrant, next)) return;
+    this.activeGrant = next;
+
+    // Authorization changes must complete even if a revocation observer fails.
+    for (const listener of Array.from(this.grantListeners)) {
+      try {
+        listener(next ? { ...next } : null);
+      } catch {
+        // Observers are cleanup hooks and cannot own the grant lifecycle.
+      }
+    }
+  }
 
   async prepareGrant(input: AcpSessionAccessContext): Promise<AcpSessionAccessContext> {
     const workspaceRoot = await canonicalDirectory(input.workspaceRoot, 'ACP workspace root');
@@ -39,15 +70,23 @@ export class AcpSessionAccessRegistry {
   }
 
   commitGrant(context: AcpSessionAccessContext): void {
-    this.activeGrant = { ...context };
+    this.replaceGrant(context);
   }
 
   restore(snapshot: AcpSessionAccessContext | null): void {
-    this.activeGrant = snapshot ? { ...snapshot } : null;
+    this.replaceGrant(snapshot);
   }
 
   get(sessionKey: string, generation: number): AcpSessionAccessContext | null {
     if (this.activeGrant?.sessionKey !== sessionKey || this.activeGrant.generation !== generation) return null;
     return { ...this.activeGrant };
+  }
+
+  /** Observe committed grant changes for revocable Main-owned resources. */
+  subscribe(listener: AcpSessionAccessGrantListener): () => void {
+    this.grantListeners.add(listener);
+    return () => {
+      this.grantListeners.delete(listener);
+    };
   }
 }

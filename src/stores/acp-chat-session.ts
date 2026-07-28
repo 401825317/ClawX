@@ -12,6 +12,7 @@ import type {
   ResolveAttachmentPayload,
   ResolveAttachmentResult,
 } from '@shared/host-api/contract';
+import { UCLAW_VIDEO_GENERATION_TIMEOUT_MS } from '@shared/junfeiai-endpoints';
 import i18n from '@/i18n';
 import {
   extractImageGenerationCompletionFromAcpEnvelope,
@@ -23,6 +24,12 @@ import {
   type ImageGenerationMediaCandidate,
   type ImageGenerationTaskStart,
 } from '@/lib/acp/image-generation-compat';
+import {
+  extractVideoGenerationStartFromAcpEnvelope,
+  extractVideoGenerationTerminalTaskIdFromAcpEnvelope,
+  extractVideoGenerationTerminalTaskIdFromGatewayChatMessage,
+  extractVideoGenerationTerminalTaskIdFromRuntimeEvent,
+} from '@/lib/acp/video-generation-status';
 import {
   applyAttachmentResolution,
   attachmentRequestFingerprint,
@@ -48,6 +55,8 @@ const EMPTY_SESSION_ID = '';
 const CANCEL_PERMISSION_OPTION_ID = '__cancelled__';
 const IMAGE_GENERATION_COMPAT_WINDOW_MS = 195_000;
 const IMAGE_GENERATION_TRANSCRIPT_RETRY_DELAYS_MS = [1500, 3000, 5000, 8000, 13_000, 21_000, 30_000, 30_000, 30_000, 30_000];
+const VIDEO_GENERATION_PENDING_TIMEOUT_MS = UCLAW_VIDEO_GENERATION_TIMEOUT_MS + 15_000;
+const VIDEO_GENERATION_TRANSCRIPT_RETRY_DELAYS_MS = [500, 1500, 3000, 5000, 8000];
 
 type ImageGenerationCompatSession = {
   taskStartedAt: number;
@@ -63,6 +72,7 @@ type ImageGenerationCompatSession = {
   delivered: Set<string>;
   reservations: Map<string, string>;
   authoritativeCaptions: Map<string, { text: string; priority: number }>;
+  syntheticCompletions: Map<string, { taskId: string; afterItemId: string; createdAt: number }>;
 };
 
 const imageGenerationCompatSessions = new Map<string, ImageGenerationCompatSession>();
@@ -74,6 +84,7 @@ type LiveSessionSnapshot = {
   generation: number;
   sending: boolean;
   pendingImageGenerationTaskIds: string[];
+  pendingVideoGenerationTaskIds: string[];
   timeline: AcpTimelineSnapshot;
   turnTimingsByUserMessageId: Record<string, AcpTurnTiming>;
   deferredImageUpdates: Array<{ key: string; event: AcpSessionUpdateEnvelope }>;
@@ -83,6 +94,7 @@ type LiveSessionSnapshot = {
   }>;
 };
 const liveSessionSnapshots = new Map<string, LiveSessionSnapshot>();
+const videoGenerationTaskTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let loadRequestSeq = 0;
 const attachmentResolutionsInFlight = new Set<string>();
 
@@ -112,10 +124,15 @@ type TranscriptSupplementOperation = {
   retryIndex: number;
   imageTaskIds: Set<string>;
   completedTaskIds: Set<string>;
+  videoTaskIds: Set<string>;
+  completedVideoTaskIds: Set<string>;
+  videoRetryIndex: number;
+  videoRetryEpoch: number;
   started: boolean;
   terminal: boolean;
   liveUserMessageId?: string;
   retryTimer?: ReturnType<typeof setTimeout>;
+  videoRetryTimer?: ReturnType<typeof setTimeout>;
 };
 
 let transcriptSupplementSeq = 0;
@@ -139,6 +156,7 @@ export type AcpChatSessionState = {
   loading: boolean;
   sending: boolean;
   pendingImageGenerationTaskIds: string[];
+  pendingVideoGenerationTaskIds: string[];
   cancelling: boolean;
   error: string | null;
   timeline: AcpTimelineSnapshot;
@@ -151,6 +169,8 @@ export type AcpChatSessionState = {
   applyUpdateEnvelope: (event: AcpSessionUpdateEnvelope) => void;
   applyPermissionRequest: (event: AcpPermissionRequestEnvelope) => void;
   recordImageGenerationStart: (event: AcpSessionUpdateEnvelope) => void;
+  recordVideoGenerationUpdate: (event: AcpSessionUpdateEnvelope) => void;
+  settleVideoGenerationTask: (taskId: string) => void;
   projectImageGenerationCompletion: (event: ImageGenerationCompletionEvidence, options?: ImageGenerationProjectionOptions) => Promise<void>;
   clearError: () => void;
 };
@@ -204,7 +224,11 @@ function applyPermissionRequestToTimeline(
 
 function captureLiveSession(state: AcpChatSessionState): void {
   if (
-    (!state.sending && state.pendingImageGenerationTaskIds.length === 0)
+    (
+      !state.sending
+      && state.pendingImageGenerationTaskIds.length === 0
+      && state.pendingVideoGenerationTaskIds.length === 0
+    )
     || !state.activeSessionKey
   ) return;
   const existing = liveSessionSnapshots.get(state.activeSessionKey);
@@ -215,11 +239,49 @@ function captureLiveSession(state: AcpChatSessionState): void {
     generation: state.generation,
     sending: state.sending,
     pendingImageGenerationTaskIds: state.pendingImageGenerationTaskIds,
+    pendingVideoGenerationTaskIds: state.pendingVideoGenerationTaskIds,
     timeline: state.timeline,
     turnTimingsByUserMessageId: state.turnTimingsByUserMessageId,
     deferredImageUpdates: existing?.deferredImageUpdates ?? [],
     deferredImageCompletions: existing?.deferredImageCompletions ?? [],
   });
+}
+
+function applyVideoGenerationUpdateToSnapshot(
+  snapshot: LiveSessionSnapshot,
+  event: AcpSessionUpdateEnvelope,
+): LiveSessionSnapshot {
+  if (event.historical) return snapshot;
+  const terminalTaskId = extractVideoGenerationTerminalTaskIdFromAcpEnvelope(event);
+  const start = extractVideoGenerationStartFromAcpEnvelope(event);
+  let pendingVideoGenerationTaskIds = snapshot.pendingVideoGenerationTaskIds;
+  if (terminalTaskId) {
+    clearVideoGenerationTaskTimeout(terminalTaskId);
+    pendingVideoGenerationTaskIds = pendingVideoGenerationTaskIds.filter((taskId) => taskId !== terminalTaskId);
+  }
+  if (start && !pendingVideoGenerationTaskIds.includes(start.taskId)) {
+    scheduleVideoGenerationTaskTimeout(start.taskId);
+    pendingVideoGenerationTaskIds = [...pendingVideoGenerationTaskIds, start.taskId];
+  }
+  return pendingVideoGenerationTaskIds === snapshot.pendingVideoGenerationTaskIds
+    ? snapshot
+    : { ...snapshot, pendingVideoGenerationTaskIds };
+}
+
+function scheduleVideoGenerationTaskTimeout(taskId: string): void {
+  const existing = videoGenerationTaskTimers.get(taskId);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    videoGenerationTaskTimers.delete(taskId);
+    useAcpChatSessionStore.getState().settleVideoGenerationTask(taskId);
+  }, VIDEO_GENERATION_PENDING_TIMEOUT_MS);
+  videoGenerationTaskTimers.set(taskId, timer);
+}
+
+function clearVideoGenerationTaskTimeout(taskId: string): void {
+  const timer = videoGenerationTaskTimers.get(taskId);
+  if (timer) clearTimeout(timer);
+  videoGenerationTaskTimers.delete(taskId);
 }
 
 function compatSession(sessionKey: string): ImageGenerationCompatSession {
@@ -236,6 +298,7 @@ function compatSession(sessionKey: string): ImageGenerationCompatSession {
     delivered: new Set<string>(),
     reservations: new Map<string, string>(),
     authoritativeCaptions: new Map<string, { text: string; priority: number }>(),
+    syntheticCompletions: new Map<string, { taskId: string; afterItemId: string; createdAt: number }>(),
   };
   imageGenerationCompatSessions.set(sessionKey, created);
   return created;
@@ -248,6 +311,7 @@ function resetImageGenerationCompatSession(sessionKey: string): void {
 function invalidateTranscriptSupplement(): void {
   transcriptSupplementSeq += 1;
   if (activeTranscriptSupplement?.retryTimer) clearTimeout(activeTranscriptSupplement.retryTimer);
+  if (activeTranscriptSupplement?.videoRetryTimer) clearTimeout(activeTranscriptSupplement.videoRetryTimer);
   activeTranscriptSupplement = null;
 }
 
@@ -281,6 +345,10 @@ function beginTranscriptSupplement(
     retryIndex: 0,
     imageTaskIds: new Set<string>(),
     completedTaskIds: new Set<string>(),
+    videoTaskIds: new Set<string>(),
+    completedVideoTaskIds: new Set<string>(),
+    videoRetryIndex: 0,
+    videoRetryEpoch: 0,
     started: false,
     terminal: false,
     ...(liveUserMessageId ? { liveUserMessageId } : {}),
@@ -546,6 +614,269 @@ function matchingSyntheticImageItemId(
   });
 }
 
+type AcpImageCompletionMatch = {
+  itemId?: string;
+  closedReason?: 'missing-anchor' | 'task-anchor-mismatch' | 'competing-image-task' | 'user-turn-closed' | 'ambiguous-match';
+};
+
+/** Finds the native ACP reply owned by the same image task, never across task or user-turn boundaries. */
+function findAcpImageCompletionMatch(
+  timeline: AcpTimelineSnapshot,
+  afterItemId: string | undefined,
+  caption: string,
+  sessionKey: string,
+  taskId: string | undefined,
+  evidenceId: string,
+): AcpImageCompletionMatch {
+  if (!afterItemId) return {};
+  const normalizedCaption = caption.trim();
+  const anchorIndex = timeline.itemOrder.indexOf(afterItemId);
+  if (anchorIndex < 0) return { closedReason: 'missing-anchor' };
+
+  const session = imageGenerationCompatSessions.get(sessionKey);
+  const ownedAnchorItemIds = new Set<string>();
+  const competingAnchorItemIds = new Set<string>();
+  for (const taskAnchors of [session?.taskToolCallIds, session?.replayTaskToolCallIds]) {
+    for (const [recordedTaskId, toolCallId] of taskAnchors ?? []) {
+      const itemId = `tool:${toolCallId}`;
+      if (taskId && recordedTaskId === taskId) ownedAnchorItemIds.add(itemId);
+      else competingAnchorItemIds.add(itemId);
+    }
+  }
+  if (ownedAnchorItemIds.size > 0 && !ownedAnchorItemIds.has(afterItemId)) {
+    return { closedReason: 'task-anchor-mismatch' };
+  }
+
+  let matchingItemId: string | undefined;
+
+  for (let index = anchorIndex + 1; index < timeline.itemOrder.length; index += 1) {
+    const itemId = timeline.itemOrder[index];
+    const item = itemId ? timeline.itemsById[itemId] : undefined;
+    if (item?.kind === 'message-segment' && item.role === 'user') {
+      return matchingItemId ? { itemId: matchingItemId } : { closedReason: 'user-turn-closed' };
+    }
+    if (itemId !== afterItemId && competingAnchorItemIds.has(itemId)) {
+      return matchingItemId ? { itemId: matchingItemId } : { closedReason: 'competing-image-task' };
+    }
+    if (item?.kind !== 'message-segment' || item.role !== 'assistant') continue;
+    if (item.messageId.startsWith('compat:image-generation:')) continue;
+    if (item.compat && (
+      item.compat.source !== 'image-generation'
+      || item.compat.evidenceId !== evidenceId
+    )) continue;
+    if (!normalizedCaption) continue;
+    const text = item.parts
+      .flatMap((part) => part.kind === 'markdown' ? [part.text] : [])
+      .join('\n')
+      .trim();
+    if (text !== normalizedCaption) continue;
+    if (matchingItemId) return { closedReason: 'ambiguous-match' };
+    matchingItemId = itemId;
+  }
+  return matchingItemId ? { itemId: matchingItemId } : {};
+}
+
+function matchingAcpImageCompletionItemId(
+  timeline: AcpTimelineSnapshot,
+  afterItemId: string | undefined,
+  caption: string,
+  sessionKey: string,
+  taskId: string | undefined,
+  evidenceId: string,
+): string | undefined {
+  return findAcpImageCompletionMatch(
+    timeline,
+    afterItemId,
+    caption,
+    sessionKey,
+    taskId,
+    evidenceId,
+  ).itemId;
+}
+
+/** Adds compatibility-resolved images to an existing ACP reply without creating another message. */
+function mergeImageCompletionIntoAcpItem(
+  timeline: AcpTimelineSnapshot,
+  itemId: string,
+  evidenceId: string,
+  imageParts: RenderPart[],
+): AcpTimelineSnapshot {
+  const item = timeline.itemsById[itemId];
+  if (item?.kind !== 'message-segment' || item.role !== 'assistant') return timeline;
+  const existingImages = new Set(item.parts.flatMap((part) => (
+    part.kind === 'image' ? [part.mediaIdentity ?? `${part.mimeType ?? ''}:${part.source}`] : []
+  )));
+  const missingImages = imageParts.filter((part) => {
+    if (part.kind !== 'image') return false;
+    const identity = part.mediaIdentity ?? `${part.mimeType ?? ''}:${part.source}`;
+    if (existingImages.has(identity)) return false;
+    existingImages.add(identity);
+    return true;
+  });
+  return {
+    ...timeline,
+    itemsById: {
+      ...timeline.itemsById,
+      [itemId]: {
+        ...item,
+        parts: [...item.parts, ...missingImages],
+        compat: { source: 'image-generation', evidenceId },
+      },
+    },
+  };
+}
+
+function removeSyntheticImageCompletionItem(
+  timeline: AcpTimelineSnapshot,
+  itemId: string,
+): AcpTimelineSnapshot {
+  const item = timeline.itemsById[itemId];
+  if (item?.kind !== 'message-segment' || item.compat?.source !== 'image-generation') return timeline;
+  const itemsById = { ...timeline.itemsById };
+  const segmentCounts = { ...timeline.segmentCounts };
+  const openMessageSegments = { ...timeline.openMessageSegments };
+  delete itemsById[itemId];
+  delete segmentCounts[item.messageId];
+  if (openMessageSegments[item.messageId] === itemId) delete openMessageSegments[item.messageId];
+  return {
+    ...timeline,
+    itemOrder: timeline.itemOrder.filter((candidateId) => candidateId !== itemId),
+    itemsById,
+    segmentCounts,
+    openMessageSegments,
+  };
+}
+
+/** Tracks one task-scoped synthetic projection until its authoritative ACP reply can be identified. */
+function trackSyntheticImageCompletion(
+  timeline: AcpTimelineSnapshot,
+  sessionKey: string,
+  key: string,
+  taskId: string | undefined,
+  afterItemId: string | undefined,
+): boolean {
+  if (!taskId || !afterItemId) return false;
+  const syntheticItemId = `${messageIdFromEvidence(key)}:0`;
+  const syntheticItem = timeline.itemsById[syntheticItemId];
+  if (
+    syntheticItem?.kind !== 'message-segment'
+    || syntheticItem.compat?.source !== 'image-generation'
+    || syntheticItem.compat.evidenceId !== key
+  ) return false;
+  const session = compatSession(sessionKey);
+  const existing = session.syntheticCompletions.get(key);
+  session.syntheticCompletions.set(key, {
+    taskId: existing?.taskId ?? taskId,
+    afterItemId: existing?.afterItemId ?? afterItemId,
+    createdAt: existing?.createdAt ?? Date.now(),
+  });
+  return true;
+}
+
+/** Reconciles the inverse event order: compatibility media first, native ACP text later. */
+function reconcileLateAcpImageCompletions(
+  timeline: AcpTimelineSnapshot,
+  sessionKey: string,
+  generation: number,
+): AcpTimelineSnapshot {
+  const session = imageGenerationCompatSessions.get(sessionKey);
+  if (!session || session.syntheticCompletions.size === 0) return timeline;
+
+  const matches: Array<{
+    key: string;
+    taskId: string;
+    syntheticItemId: string;
+    nativeItemId: string;
+  }> = [];
+  const now = Date.now();
+  for (const [key, projection] of session.syntheticCompletions) {
+    if (now - projection.createdAt > IMAGE_GENERATION_COMPAT_WINDOW_MS) {
+      session.syntheticCompletions.delete(key);
+      continue;
+    }
+    const syntheticItemId = `${messageIdFromEvidence(key)}:0`;
+    const syntheticItem = timeline.itemsById[syntheticItemId];
+    if (
+      syntheticItem?.kind !== 'message-segment'
+      || syntheticItem.compat?.source !== 'image-generation'
+      || syntheticItem.compat.evidenceId !== key
+    ) {
+      session.syntheticCompletions.delete(key);
+      continue;
+    }
+    const caption = session.authoritativeCaptions.get(key)?.text ?? '';
+    const match = findAcpImageCompletionMatch(
+      timeline,
+      projection.afterItemId,
+      caption,
+      sessionKey,
+      projection.taskId,
+      key,
+    );
+    if (match.closedReason) {
+      session.syntheticCompletions.delete(key);
+      recordProjectionTrace({
+        event: 'image-generation:projection-reconciliation-stopped',
+        sessionKey,
+        generation,
+        details: {
+          taskId: projection.taskId,
+          reason: match.closedReason,
+        },
+      });
+      continue;
+    }
+    if (match.itemId) {
+      matches.push({ key, taskId: projection.taskId, syntheticItemId, nativeItemId: match.itemId });
+    }
+  }
+
+  const nativeMatchCounts = new Map<string, number>();
+  for (const match of matches) {
+    nativeMatchCounts.set(match.nativeItemId, (nativeMatchCounts.get(match.nativeItemId) ?? 0) + 1);
+  }
+
+  let nextTimeline = timeline;
+  for (const match of matches) {
+    if (nativeMatchCounts.get(match.nativeItemId) !== 1) {
+      session.syntheticCompletions.delete(match.key);
+      continue;
+    }
+    const syntheticItem = nextTimeline.itemsById[match.syntheticItemId];
+    if (syntheticItem?.kind !== 'message-segment' || syntheticItem.compat?.evidenceId !== match.key) continue;
+    const imageParts = syntheticItem.parts.filter((part) => part.kind === 'image');
+    nextTimeline = mergeImageCompletionIntoAcpItem(
+      nextTimeline,
+      match.nativeItemId,
+      match.key,
+      imageParts,
+    );
+    nextTimeline = removeSyntheticImageCompletionItem(nextTimeline, match.syntheticItemId);
+    session.syntheticCompletions.delete(match.key);
+    recordProjectionTrace({
+      event: 'image-generation:projection-merged',
+      sessionKey,
+      generation,
+      details: {
+        source: 'acp-session-update',
+        taskId: match.taskId,
+        reason: 'late-matching-acp-reply',
+        candidateCount: imageParts.length,
+      },
+    });
+  }
+  return nextTimeline;
+}
+
+function isLiveMessageUpdate(event: AcpSessionUpdateEnvelope): boolean {
+  if (event.historical) return false;
+  const update = event.notification.update as unknown as { sessionUpdate?: unknown };
+  return update.sessionUpdate === 'agent_message'
+    || update.sessionUpdate === 'agent_message_chunk'
+    || update.sessionUpdate === 'user_message'
+    || update.sessionUpdate === 'user_message_chunk';
+}
+
 function isCurrentAction(
   state: AcpChatSessionState,
   sessionKey: string,
@@ -599,10 +930,10 @@ async function resolveOpenClawMediaCandidate(
   attempt: number,
   turnId: string,
   candidate: OpenClawMediaCandidate,
-): Promise<void> {
+): Promise<string | null> {
   const isCurrent = () => operation.attempt === attempt
     && isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation);
-  if (!isCurrent()) return;
+  if (!isCurrent()) return null;
 
   let result: ResolveAttachmentResult;
   try {
@@ -625,7 +956,7 @@ async function resolveOpenClawMediaCandidate(
       reason: 'attachment-resolution-stale',
       evidenceHash,
     });
-    return;
+    return null;
   }
 
   recordOpenClawMediaTrace(
@@ -675,14 +1006,19 @@ async function resolveOpenClawMediaCandidate(
     projected ? 'openclaw-media:projection-appended' : 'openclaw-media:projection-deduped',
     { reason: projected ? 'projected' : 'identity-priority', evidenceHash, attachmentCount: projected ? 1 : 0 },
   );
+  return result.ok
+    && result.target.kind === 'local'
+    && result.mimeType.startsWith('video/')
+    ? result.identity
+    : null;
 }
 
-async function runTranscriptSupplement(operation: TranscriptSupplementOperation): Promise<void> {
+async function runTranscriptSupplement(operation: TranscriptSupplementOperation): Promise<number> {
   const attempt = operation.attempt + 1;
   operation.attempt = attempt;
   const isCurrent = () => operation.attempt === attempt
     && isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation);
-  if (!isCurrent()) return;
+  if (!isCurrent()) return 0;
   const state = useAcpChatSessionStore.getState();
   const result = await fetchOpenClawTranscriptSupplement({
     sessionKey: operation.sessionKey,
@@ -692,7 +1028,7 @@ async function runTranscriptSupplement(operation: TranscriptSupplementOperation)
     ...(operation.liveUserMessageId ? { liveUserMessageId: operation.liveUserMessageId } : {}),
     isCurrent,
   });
-  if (!result || !isCurrent()) return;
+  if (!result || !isCurrent()) return 0;
 
   if (!operation.liveUserMessageId && result.turnTimings.length > 0) {
     useAcpChatSessionStore.setState((current) => (
@@ -703,11 +1039,11 @@ async function runTranscriptSupplement(operation: TranscriptSupplementOperation)
   }
 
   for (const start of result.imageGeneration.starts) {
-    if (!isCurrent()) return;
+    if (!isCurrent()) return 0;
     recordHistoricalImageGenerationStart(start, operation.generation);
   }
   for (const completion of result.imageGeneration.completions) {
-    if (!isCurrent()) return;
+    if (!isCurrent()) return 0;
     await useAcpChatSessionStore.getState().projectImageGenerationCompletion(completion, {
       isCurrent,
       staleReason: 'stale-transcript-supplement',
@@ -715,12 +1051,20 @@ async function runTranscriptSupplement(operation: TranscriptSupplementOperation)
       ...(completion.transcriptMessageId ? { transcriptMessageId: completion.transcriptMessageId } : {}),
     });
   }
+  const localVideoIdentities = new Set<string>();
   for (const supplement of result.media) {
     for (const candidate of supplement.candidates) {
-      if (!isCurrent()) return;
-      await resolveOpenClawMediaCandidate(operation, attempt, supplement.acpTurnId, candidate);
+      if (!isCurrent()) return 0;
+      const localVideoIdentity = await resolveOpenClawMediaCandidate(
+        operation,
+        attempt,
+        supplement.acpTurnId,
+        candidate,
+      );
+      if (localVideoIdentity) localVideoIdentities.add(localVideoIdentity);
     }
   }
+  return localVideoIdentities.size;
 }
 
 function startHistoricalTranscriptSupplement(sessionKey: string, generation: number): void {
@@ -756,9 +1100,112 @@ async function runLiveTranscriptSupplement(operation: TranscriptSupplementOperat
 
 function startLiveTranscriptSupplement(operation: TranscriptSupplementOperation): void {
   operation.started = true;
-  if (operation.terminal) return;
-  void runLiveTranscriptSupplement(operation);
-  scheduleLiveTranscriptSupplement(operation);
+  const hasCompletedVideoTask = operation.completedVideoTaskIds.size > 0;
+  if (hasCompletedVideoTask) {
+    if (!operation.terminal && operation.imageTaskIds.size > 0) {
+      scheduleLiveTranscriptSupplement(operation);
+    }
+    startVideoCompletionTranscriptSupplement(operation);
+    return;
+  }
+  if (!operation.terminal) {
+    void runLiveTranscriptSupplement(operation);
+    scheduleLiveTranscriptSupplement(operation);
+  }
+}
+
+function scheduleVideoCompletionTranscriptRetry(
+  operation: TranscriptSupplementOperation,
+  epoch: number,
+  localVideoCount: number,
+): void {
+  if (
+    operation.videoRetryTimer
+    || operation.videoRetryEpoch !== epoch
+    || !isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation)
+  ) return;
+  const delay = VIDEO_GENERATION_TRANSCRIPT_RETRY_DELAYS_MS[operation.videoRetryIndex];
+  if (delay === undefined) {
+    recordProjectionTrace({
+      event: 'video-generation:completion-transcript-exhausted',
+      sessionKey: operation.sessionKey,
+      generation: operation.generation,
+      details: {
+        completedTaskCount: operation.completedVideoTaskIds.size,
+        localVideoCount,
+      },
+    });
+    return;
+  }
+  operation.videoRetryIndex += 1;
+  operation.videoRetryTimer = setTimeout(() => {
+    operation.videoRetryTimer = undefined;
+    void runVideoCompletionTranscriptSupplement(operation, epoch);
+  }, delay);
+}
+
+/** Re-reads only the original live Turn until its completed video is locally resolvable. */
+async function runVideoCompletionTranscriptSupplement(
+  operation: TranscriptSupplementOperation,
+  epoch: number,
+): Promise<void> {
+  if (
+    operation.videoRetryEpoch !== epoch
+    || !isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation)
+  ) return;
+  const localVideoCount = await runTranscriptSupplement(operation);
+  if (
+    operation.videoRetryEpoch !== epoch
+    || !isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation)
+  ) return;
+  if (localVideoCount >= operation.completedVideoTaskIds.size) {
+    recordProjectionTrace({
+      event: 'video-generation:completion-transcript-projected',
+      sessionKey: operation.sessionKey,
+      generation: operation.generation,
+      details: {
+        completedTaskCount: operation.completedVideoTaskIds.size,
+        localVideoCount,
+      },
+    });
+    return;
+  }
+  scheduleVideoCompletionTranscriptRetry(operation, epoch, localVideoCount);
+}
+
+function startVideoCompletionTranscriptSupplement(operation: TranscriptSupplementOperation): void {
+  if (operation.imageTaskIds.size === 0 && operation.retryTimer) {
+    clearTimeout(operation.retryTimer);
+    operation.retryTimer = undefined;
+  }
+  operation.videoRetryEpoch += 1;
+  operation.videoRetryIndex = 0;
+  if (operation.videoRetryTimer) clearTimeout(operation.videoRetryTimer);
+  operation.videoRetryTimer = undefined;
+  void runVideoCompletionTranscriptSupplement(operation, operation.videoRetryEpoch);
+}
+
+function refreshCompletedVideoTranscript(taskId: string): void {
+  const operation = activeTranscriptSupplement;
+  if (
+    !operation?.liveUserMessageId
+    || !operation.videoTaskIds.has(taskId)
+    || operation.completedVideoTaskIds.has(taskId)
+    || !isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation)
+  ) return;
+  operation.completedVideoTaskIds.add(taskId);
+  recordProjectionTrace({
+    event: 'video-generation:completion-transcript-started',
+    sessionKey: operation.sessionKey,
+    generation: operation.generation,
+    details: { taskId },
+  });
+  if (operation.started) startVideoCompletionTranscriptSupplement(operation);
+}
+
+function completeVideoGenerationTask(taskId: string): void {
+  useAcpChatSessionStore.getState().settleVideoGenerationTask(taskId);
+  refreshCompletedVideoTranscript(taskId);
 }
 
 function newPendingAttachments(
@@ -966,6 +1413,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
   loading: false,
   sending: false,
   pendingImageGenerationTaskIds: [],
+  pendingVideoGenerationTaskIds: [],
   cancelling: false,
   error: null,
   timeline: createEmptyAcpTimeline(EMPTY_SESSION_ID, 0),
@@ -986,6 +1434,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       loading: false,
       sending: false,
       pendingImageGenerationTaskIds: [],
+      pendingVideoGenerationTaskIds: [],
       cancelling: false,
       error: null,
       timeline: createEmptyAcpTimeline(input.sessionKey, generation),
@@ -1012,6 +1461,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       loading: true,
       sending: liveSnapshot?.sending ?? false,
       pendingImageGenerationTaskIds: liveSnapshot?.pendingImageGenerationTaskIds ?? [],
+      pendingVideoGenerationTaskIds: liveSnapshot?.pendingVideoGenerationTaskIds ?? [],
       cancelling: false,
       error: null,
       timeline: liveSnapshot?.timeline ?? createEmptyAcpTimeline(input.sessionKey, generation),
@@ -1077,7 +1527,10 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         ? liveSessionSnapshots.get(input.sessionKey)
         : undefined;
       const restorableBackgroundSnapshot = currentBackgroundSnapshot
-        && currentBackgroundSnapshot.pendingImageGenerationTaskIds.length > 0
+        && (
+          currentBackgroundSnapshot.pendingImageGenerationTaskIds.length > 0
+          || currentBackgroundSnapshot.pendingVideoGenerationTaskIds.length > 0
+        )
         ? currentBackgroundSnapshot
         : undefined;
       if (currentBackgroundSnapshot && !restorableBackgroundSnapshot) {
@@ -1100,6 +1553,10 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
           currentResumedSnapshot?.pendingImageGenerationTaskIds
           ?? restorableBackgroundSnapshot?.pendingImageGenerationTaskIds
           ?? [],
+        pendingVideoGenerationTaskIds:
+          currentResumedSnapshot?.pendingVideoGenerationTaskIds
+          ?? restorableBackgroundSnapshot?.pendingVideoGenerationTaskIds
+          ?? [],
         error: null,
         generation,
         timeline,
@@ -1120,6 +1577,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       const restoredSnapshot = currentResumedSnapshot ?? restorableBackgroundSnapshot;
       for (const { event } of restoredSnapshot?.deferredImageUpdates ?? []) {
         get().recordImageGenerationStart(event);
+        get().recordVideoGenerationUpdate(event);
         const evidence = extractImageGenerationCompletionFromAcpEnvelope(event);
         if (evidence) void get().projectImageGenerationCompletion(evidence);
       }
@@ -1128,6 +1586,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       }
       for (const event of sessionUpdates) {
         get().recordImageGenerationStart(event);
+        get().recordVideoGenerationUpdate(event);
         const evidence = extractImageGenerationCompletionFromAcpEnvelope(event);
         if (evidence) void get().projectImageGenerationCompletion(evidence);
       }
@@ -1378,6 +1837,73 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
     }
   },
 
+  recordVideoGenerationUpdate(event) {
+    if (event.historical) return;
+    const terminalTaskId = extractVideoGenerationTerminalTaskIdFromAcpEnvelope(event);
+    if (terminalTaskId) {
+      completeVideoGenerationTask(terminalTaskId);
+      return;
+    }
+
+    const state = get();
+    if (event.sessionKey !== state.activeSessionKey || event.generation !== state.generation) return;
+    const start = extractVideoGenerationStartFromAcpEnvelope(event);
+    if (!start) return;
+    const operation = activeTranscriptSupplement;
+    if (
+      operation?.liveUserMessageId
+      && operation.sessionKey === event.sessionKey
+      && operation.generation === event.generation
+    ) {
+      operation.videoTaskIds.add(start.taskId);
+    }
+    scheduleVideoGenerationTaskTimeout(start.taskId);
+    set((current) => (
+      current.activeSessionKey === event.sessionKey
+      && current.generation === event.generation
+      && !current.pendingVideoGenerationTaskIds.includes(start.taskId)
+        ? {
+          pendingVideoGenerationTaskIds: [
+            ...current.pendingVideoGenerationTaskIds,
+            start.taskId,
+          ],
+        }
+        : {}
+    ));
+    recordProjectionTrace({
+      event: 'video-generation:start-detected',
+      sessionKey: event.sessionKey,
+      generation: event.generation,
+      details: {
+        taskId: start.taskId,
+        ...(start.toolCallId ? { toolCallId: start.toolCallId } : {}),
+      },
+    });
+  },
+
+  settleVideoGenerationTask(taskId) {
+    if (!taskId) return;
+    clearVideoGenerationTaskTimeout(taskId);
+    set((current) => (
+      current.pendingVideoGenerationTaskIds.includes(taskId)
+        ? {
+          pendingVideoGenerationTaskIds: current.pendingVideoGenerationTaskIds.filter(
+            (pendingTaskId) => pendingTaskId !== taskId,
+          ),
+        }
+        : {}
+    ));
+    for (const [sessionKey, snapshot] of liveSessionSnapshots) {
+      if (!snapshot.pendingVideoGenerationTaskIds.includes(taskId)) continue;
+      liveSessionSnapshots.set(sessionKey, {
+        ...snapshot,
+        pendingVideoGenerationTaskIds: snapshot.pendingVideoGenerationTaskIds.filter(
+          (pendingTaskId) => pendingTaskId !== taskId,
+        ),
+      });
+    }
+  },
+
   async projectImageGenerationCompletion(evidence, options) {
     const state = get();
     if (options?.isCurrent && !options.isCurrent()) {
@@ -1449,6 +1975,24 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       sessionKey,
       ...(correlatedTaskId ? { taskId: correlatedTaskId } : {}),
     });
+    const reconcileSyntheticCompletion = (trackingKey: string): void => {
+      const current = get();
+      if (!isCurrentAction(current, sessionKey, generation)) return;
+      const afterItemId = imageGenerationAnchorItemId(current, sessionKey, evidence);
+      if (!trackSyntheticImageCompletion(
+        current.timeline,
+        sessionKey,
+        trackingKey,
+        correlatedTaskId,
+        afterItemId,
+      )) return;
+      if (!compat.authoritativeCaptions.has(trackingKey)) return;
+      set((latest) => (
+        isCurrentAction(latest, sessionKey, generation)
+          ? { timeline: reconcileLateAcpImageCompletions(latest.timeline, sessionKey, generation) }
+          : {}
+      ));
+    };
     if (evidence.authoritativeCaption) {
       const captions = compat.authoritativeCaptions;
       const next = { text: evidence.caption, priority: imageGenerationCaptionPriority(evidence.source) };
@@ -1462,6 +2006,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         set((current) => ({
           timeline: replaceSyntheticImageCaption(current.timeline, key, preferredCaption),
         }));
+        reconcileSyntheticCompletion(key);
       }
       recordProjectionTrace({
         event: 'image-generation:projection-deduped',
@@ -1613,6 +2158,33 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         : missingCount > 0
           ? i18n.t('chat:imageGeneration.generatedReadyWithMissing')
           : i18n.t('chat:imageGeneration.generatedReady');
+    const afterItemId = imageGenerationAnchorItemId(latest, sessionKey, evidence);
+    const matchingAcpItemId = authoritativeCaption
+      ? matchingAcpImageCompletionItemId(
+          latest.timeline,
+          afterItemId,
+          caption,
+          sessionKey,
+          correlatedTaskId,
+          key,
+        )
+      : undefined;
+    if (matchingAcpItemId) {
+      set((current) => ({
+        timeline: mergeImageCompletionIntoAcpItem(current.timeline, matchingAcpItemId, key, imageParts),
+        pendingImageGenerationTaskIds: settlePendingTask(current),
+      }));
+      if (missingCount === 0) commitDelivery(sessionKey, key, reservationOwner);
+      else releaseDelivery(sessionKey, key, reservationOwner);
+      recordProjectionTrace({
+        event: 'image-generation:projection-merged',
+        sessionKey,
+        generation,
+        details: projectionTraceDetails(evidence, { reason: 'matching-acp-reply' }),
+      });
+      stopLiveTranscriptSupplementRetry(sessionKey, generation, correlatedTaskId);
+      return;
+    }
     const duplicateItemId = matchingSyntheticImageItemId(latest.timeline, imageParts);
     if (duplicateItemId) {
       const existingItem = latest.timeline.itemsById[duplicateItemId];
@@ -1626,6 +2198,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
           timeline: replaceSyntheticImageCaptionAtItem(current.timeline, duplicateItemId, currentCaption.text),
           pendingImageGenerationTaskIds: settlePendingTask(current),
         }));
+        reconcileSyntheticCompletion(existingKey);
       }
       set((current) => ({
         pendingImageGenerationTaskIds: settlePendingTask(current),
@@ -1642,7 +2215,6 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       return;
     }
     const parts: RenderPart[] = [{ kind: 'markdown', text: caption }, ...imageParts];
-    const afterItemId = imageGenerationAnchorItemId(latest, sessionKey, evidence);
 
     set((current) => {
       if (current.activeSessionKey !== sessionKey || current.generation !== generation) return {};
@@ -1656,6 +2228,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         pendingImageGenerationTaskIds: settlePendingTask(current),
       };
     });
+    reconcileSyntheticCompletion(key);
     if (missingCount === 0) commitDelivery(sessionKey, key, reservationOwner);
     recordProjectionTrace({
       event: 'image-generation:projection-appended',
@@ -1675,14 +2248,14 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       } else {
         const liveSnapshot = liveSessionSnapshots.get(event.sessionKey);
         if (liveSnapshot?.generation === event.generation) {
-          liveSessionSnapshots.set(event.sessionKey, deferInactiveImageUpdate({
+          liveSessionSnapshots.set(event.sessionKey, applyVideoGenerationUpdateToSnapshot(deferInactiveImageUpdate({
             ...liveSnapshot,
             timeline: applyAcpSessionUpdate(
               liveSnapshot.timeline,
               event.notification,
               { historical: !!event.historical },
             ),
-          }, event));
+          }, event), event));
         }
       }
       return;
@@ -1690,18 +2263,21 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
     if (event.sessionKey !== state.activeSessionKey || event.generation !== state.generation) {
       const liveSnapshot = liveSessionSnapshots.get(event.sessionKey);
       if (liveSnapshot?.generation === event.generation) {
-        liveSessionSnapshots.set(event.sessionKey, deferInactiveImageUpdate({
+        liveSessionSnapshots.set(event.sessionKey, applyVideoGenerationUpdateToSnapshot(deferInactiveImageUpdate({
           ...liveSnapshot,
           timeline: applyAcpSessionUpdate(
             liveSnapshot.timeline,
             event.notification,
             { historical: !!event.historical },
           ),
-        }, event));
+        }, event), event));
       }
       return;
     }
-    const timeline = applyAcpSessionUpdate(state.timeline, event.notification, { historical: !!event.historical });
+    const updatedTimeline = applyAcpSessionUpdate(state.timeline, event.notification, { historical: !!event.historical });
+    const timeline = isLiveMessageUpdate(event)
+      ? reconcileLateAcpImageCompletions(updatedTimeline, event.sessionKey, event.generation)
+      : updatedTimeline;
     const pending = newPendingAttachments(state.timeline, timeline);
     set({ timeline });
     if (state.sending) {
@@ -1712,6 +2288,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
     }
     resolvePendingAttachments(event.sessionKey, event.generation, pending);
     get().recordImageGenerationStart(event);
+    get().recordVideoGenerationUpdate(event);
     const evidence = extractImageGenerationCompletionFromAcpEnvelope(event);
     if (evidence) void get().projectImageGenerationCompletion(evidence);
   },
@@ -1756,16 +2333,20 @@ export function ensureAcpChatSubscriptions(): void {
     useAcpChatSessionStore.getState().applyPermissionRequest(event);
   });
   hostEvents.onGatewayChatMessage((event) => {
+    const videoTaskId = extractVideoGenerationTerminalTaskIdFromGatewayChatMessage(event);
     const evidence = extractImageGenerationCompletionFromGatewayChatMessage(event);
     const state = useAcpChatSessionStore.getState();
+    if (videoTaskId) completeVideoGenerationTask(videoTaskId);
     if (
       evidence
       && !deferInactiveImageGenerationCompletion(state.activeSessionKey, evidence)
     ) void state.projectImageGenerationCompletion(evidence);
   });
   hostEvents.onChatRuntimeEvent((event) => {
+    const videoTaskId = extractVideoGenerationTerminalTaskIdFromRuntimeEvent(event);
     const evidence = extractImageGenerationCompletionFromRuntimeEvent(event);
     const state = useAcpChatSessionStore.getState();
+    if (videoTaskId) completeVideoGenerationTask(videoTaskId);
     if (
       evidence
       && !deferInactiveImageGenerationCompletion(state.activeSessionKey, evidence)

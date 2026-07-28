@@ -245,6 +245,9 @@ export function Chat() {
   const imageGenerationPending = useAcpChatSessionStore(
     (s) => Boolean(s.pendingImageGenerationTaskIds?.length),
   );
+  const videoGenerationPending = useAcpChatSessionStore(
+    (s) => Boolean(s.pendingVideoGenerationTaskIds?.length),
+  );
   const acpCancelling = useAcpChatSessionStore((s) => s.cancelling);
   const acpError = useAcpChatSessionStore((s) => s.error);
   const acpActiveSessionKey = useAcpChatSessionStore((s) => s.activeSessionKey);
@@ -586,6 +589,7 @@ export function Chat() {
           disabled={acpLoading || acpCancelling || !cwd || !workspaceContextAvailable}
           sending={composerBusy}
           imageGenerating={imageGenerationPending}
+          videoGenerating={videoGenerationPending}
           workspaceLabel={workspaceLabel}
           workspacePath={cwd}
           workspaceOptions={workspaceOptions}

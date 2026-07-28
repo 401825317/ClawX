@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AcpSessionAccessRegistry } from '../../electron/services/acp-session-access-registry';
 
 const temporaryDirectories: string[] = [];
@@ -115,5 +115,53 @@ describe('AcpSessionAccessRegistry', () => {
     const registry = new AcpSessionAccessRegistry();
 
     expect(registry.get.length).toBe(2);
+  });
+
+  it('notifies subscribers only when the committed grant changes and supports unsubscribe', async () => {
+    const registry = new AcpSessionAccessRegistry();
+    const { workspaceRoot, executionCwd } = createDirectories();
+    const first = await registry.prepareGrant({
+      sessionKey: 'agent:main:session-1', generation: 1, workspaceRoot, executionCwd,
+    });
+    const second = await registry.prepareGrant({
+      sessionKey: 'agent:main:session-1', generation: 2, workspaceRoot, executionCwd,
+    });
+    const listener = vi.fn();
+    const unsubscribe = registry.subscribe(listener);
+
+    registry.commitGrant(first);
+    registry.commitGrant({ ...first });
+    registry.commitGrant(second);
+
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(listener).toHaveBeenNthCalledWith(1, first);
+    expect(listener).toHaveBeenNthCalledWith(2, second);
+
+    unsubscribe();
+    registry.restore(first);
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it('notifies restoration to null with defensive copies and isolates listener failures', async () => {
+    const registry = new AcpSessionAccessRegistry();
+    const { workspaceRoot, executionCwd } = createDirectories();
+    const prepared = await registry.prepareGrant({
+      sessionKey: 'agent:main:session-1', generation: 3, workspaceRoot, executionCwd,
+    });
+    const observed: Array<typeof prepared | null> = [];
+    registry.subscribe(() => {
+      throw new Error('observer failed');
+    });
+    registry.subscribe((context) => {
+      observed.push(context);
+      if (context) context.generation = 99;
+    });
+
+    expect(() => registry.commitGrant(prepared)).not.toThrow();
+    expect(registry.get(prepared.sessionKey, prepared.generation)).toEqual(prepared);
+
+    registry.restore(null);
+    expect(observed).toEqual([{ ...prepared, generation: 99 }, null]);
+    expect(registry.snapshot()).toBeNull();
   });
 });

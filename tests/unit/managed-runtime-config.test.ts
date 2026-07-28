@@ -6,6 +6,8 @@ import {
   UCLAW_COMPATIBILITY_PROVIDER_ID,
   UCLAW_MANAGED_PROVIDER_BASE_URL,
   UCLAW_PROVIDER_REQUEST_TIMEOUT_SECONDS,
+  UCLAW_VIDEO_CONTENT_DOWNLOAD_MAX_ATTEMPTS,
+  UCLAW_VIDEO_GENERATION_MAX_INPUT_IMAGE_BYTES,
   UCLAW_VIDEO_GENERATION_TIMEOUT_MS,
   UCLAW_VIDEO_PROVIDER_ID,
 } from '@shared/junfeiai-endpoints';
@@ -188,6 +190,7 @@ describe('managed runtime config transaction', () => {
         fallbacks: [],
         timeoutMs: UCLAW_VIDEO_GENERATION_TIMEOUT_MS,
       },
+      mediaMaxMb: 128,
     }));
     expect(installed.models.mode).toBe('merge');
     expect(installed.models.providers.openai).toEqual(providerEntry);
@@ -212,6 +215,8 @@ describe('managed runtime config transaction', () => {
         defaultAspectRatio: '16:9',
         defaultResolution: '480P',
         defaultDurationSeconds: 6,
+        contentDownloadMaxAttempts: UCLAW_VIDEO_CONTENT_DOWNLOAD_MAX_ATTEMPTS,
+        maxInputImageBytes: UCLAW_VIDEO_GENERATION_MAX_INPUT_IMAGE_BYTES,
       }),
     });
 

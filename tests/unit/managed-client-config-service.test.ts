@@ -147,7 +147,7 @@ describe('managed client-config service', () => {
         {
           id: 'grok-image-video',
           label: 'Grok Video',
-          modes: ['text-to-video', 'image-to-video'],
+          modes: ['text-to-video'],
           aspectRatios: ['2:3', '3:2', '1:1', '9:16', '16:9'],
           resolutions: ['480P', '720P'],
           durations: [6, 10, 15],

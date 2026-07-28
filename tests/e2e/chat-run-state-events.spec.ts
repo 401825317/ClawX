@@ -380,6 +380,69 @@ test.describe('ClawX chat run state events', () => {
     }
   });
 
+  test('keeps one image completion reply when Gateway media arrives before streamed ACP text', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const generatedPath = '/tmp/openclaw-generated-rabbit.png';
+    const caption = 'The generated rabbit street photo is ready.';
+
+    try {
+      await installAcpChatMocks(
+        app,
+        { success: true, generation: 1 },
+        generatedImageHostApiMocks(generatedPath, 'e2e-late-acp-generated-image'),
+      );
+      const page = await openChat(app);
+      await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible({ timeout: 30_000 });
+
+      await emitAcpSessionUpdates(app, [{
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'image-tool',
+        status: 'completed',
+        content: [{
+          type: 'content',
+          content: {
+            type: 'text',
+            text: `Background task started for image generation (${IMAGE_GENERATION_TASK_ID}).`,
+          },
+        }],
+        locations: [],
+      }]);
+      await emitGatewayChatMessage(app, {
+        message: {
+          runId: `image_generate:${IMAGE_GENERATION_TASK_ID}:ok`,
+          sessionKey: MAIN_SESSION_KEY,
+          state: 'final',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: `${caption}\n\nMEDIA:${generatedPath}` }],
+          },
+        },
+      });
+
+      const timeline = page.getByTestId('acp-chat-timeline');
+      await expect(timeline.getByText(caption, { exact: true })).toHaveCount(1);
+      await expect(timeline.getByTestId('acp-image-part')).toHaveCount(1);
+
+      const splitIndex = Math.floor(caption.length / 2);
+      await emitAcpSessionUpdates(app, [
+        {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: caption.slice(0, splitIndex) },
+        },
+        {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: caption.slice(splitIndex) },
+        },
+      ]);
+
+      await expect(timeline.getByText(caption, { exact: true })).toHaveCount(1);
+      await expect(timeline.getByTestId('acp-image-part')).toHaveCount(1);
+      await expect(timeline.getByRole('img', { name: 'Image' })).toHaveAttribute('src', ONE_PIXEL_PNG_DATA_URL);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
   test('projects OpenClaw image-generation failures as ACP Chat replies', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 

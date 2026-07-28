@@ -14,6 +14,8 @@ const listAttachmentOpenHandlersMock = vi.hoisted(() => vi.fn());
 const openAttachmentWithMock = vi.hoisted(() => vi.fn());
 const revealAttachmentMock = vi.hoisted(() => vi.fn());
 const readAttachmentBinaryMock = vi.hoisted(() => vi.fn());
+const createAttachmentPlaybackMock = vi.hoisted(() => vi.fn());
+const releaseAttachmentPlaybackMock = vi.hoisted(() => vi.fn());
 const listWorkspaceOpenHandlersMock = vi.hoisted(() => vi.fn());
 const openWorkspaceWithMock = vi.hoisted(() => vi.fn());
 const revealWorkspaceFileMock = vi.hoisted(() => vi.fn());
@@ -29,6 +31,8 @@ vi.mock('@/lib/host-api', () => ({
       openAttachmentWith: openAttachmentWithMock,
       revealAttachment: revealAttachmentMock,
       readAttachmentBinary: readAttachmentBinaryMock,
+      createAttachmentPlayback: createAttachmentPlaybackMock,
+      releaseAttachmentPlayback: releaseAttachmentPlaybackMock,
       listWorkspaceOpenHandlers: listWorkspaceOpenHandlersMock,
       openWorkspaceWith: openWorkspaceWithMock,
       revealWorkspaceFile: revealWorkspaceFileMock,
@@ -69,6 +73,8 @@ vi.mock('react-i18next', () => ({
         'acp.imageLoading': 'Loading image',
         'acp.imagePreviewFailed': 'Unable to load the full-size image',
         'acp.imagePreviewDescription': 'Full-size preview of the generated image',
+        'acp.videoLoading': 'Loading local video',
+        'acp.videoLoadFailed': 'Unable to load the local video',
         'acp.turnDuration': 'Took {{duration}}',
         'acp.turnElapsed': '{{duration}} elapsed',
         'acp.dismiss': 'Dismiss',
@@ -186,6 +192,14 @@ describe('ACP chat timeline components', () => {
       data: new Uint8Array([1, 2, 3]),
       mimeType: 'image/png',
     });
+    createAttachmentPlaybackMock.mockResolvedValue({
+      ok: true,
+      streamId: 'video-stream-1',
+      url: 'uclaw-media://attachment/video-stream-1',
+      mimeType: 'video/mp4',
+      size: 11,
+    });
+    releaseAttachmentPlaybackMock.mockResolvedValue({ success: true });
     listWorkspaceOpenHandlersMock.mockResolvedValue({ ok: true, platform: 'darwin', handlers: [] });
     openWorkspaceWithMock.mockResolvedValue({ ok: true });
     revealWorkspaceFileMock.mockResolvedValue({ ok: true });
@@ -874,6 +888,50 @@ describe('ACP chat timeline components', () => {
     await waitFor(() => {
       expect(toastErrorMock).toHaveBeenCalledWith('Could not show file in its folder');
     });
+  });
+
+  it('streams an authorized local video without copying it through the binary preview API', async () => {
+    const videoRef = { ...attachmentRef, uri: 'file:///workspace/generated.mp4' };
+    const { unmount } = render(<AcpAttachmentPart part={availableAttachment({
+      name: 'generated.mp4',
+      mimeType: 'video/mp4',
+      size: 11,
+      ref: videoRef,
+    })} />);
+
+    const player = await screen.findByTestId('acp-video-player');
+    expect(player).toHaveAttribute('src', 'uclaw-media://attachment/video-stream-1');
+    expect(player).toHaveAttribute('controls');
+    expect(player).toHaveAttribute('playsinline');
+    expect(player).toHaveAttribute('preload', 'metadata');
+    expect(createAttachmentPlaybackMock).toHaveBeenCalledWith(videoRef);
+    expect(readAttachmentBinaryMock).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId('acp-video-reveal'));
+    await waitFor(() => expect(revealAttachmentMock).toHaveBeenCalledWith(videoRef));
+    fireEvent.click(screen.getByTestId('acp-video-open'));
+    await waitFor(() => expect(openAttachmentMock).toHaveBeenCalledWith(videoRef));
+
+    unmount();
+    await waitFor(() => {
+      expect(releaseAttachmentPlaybackMock).toHaveBeenCalledWith({ streamId: 'video-stream-1' });
+    });
+  });
+
+  it('keeps a remote video as a validated link instead of a direct player source', () => {
+    render(<AcpAttachmentPart part={availableAttachment({
+      name: 'remote.mp4',
+      mimeType: 'video/mp4',
+      target: {
+        kind: 'remote',
+        ref: { ...attachmentRef, uri: 'https://media.example.test/remote.mp4' },
+        url: 'https://media.example.test/remote.mp4',
+      },
+    })} />);
+
+    expect(screen.queryByTestId('acp-video-player')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open remote.mp4' })).toBeEnabled();
+    expect(createAttachmentPlaybackMock).not.toHaveBeenCalled();
   });
 
   it('embeds the open-with control inside an eligible assistant preview card', () => {

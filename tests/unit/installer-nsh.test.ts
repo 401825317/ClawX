@@ -23,4 +23,20 @@ describe('installer.nsh running-app guard', () => {
     expect(guard).toContain('ClawX is still running and cannot be replaced safely');
     expect(guard).not.toContain('${nsProcess::FindProcess}');
   });
+
+  it('handles the legacy ClawX.exe process during upgrade and uninstall cleanup', () => {
+    const uninstallStart = installerNsh.indexOf('_cu_removeData:');
+    const uninstallEnd = installerNsh.indexOf('${nsProcess::Unload}', uninstallStart);
+    const uninstallCleanup = installerNsh.slice(uninstallStart, uninstallEnd);
+
+    expect(installerNsh).toContain('!define LEGACY_APP_EXECUTABLE_FILENAME "ClawX.exe"');
+    expect(installerNsh).toContain('${nsProcess::FindProcess} "${LEGACY_APP_EXECUTABLE_FILENAME}" $R0');
+    expect(installerNsh).toContain('taskkill /F /T /IM "${LEGACY_APP_EXECUTABLE_FILENAME}"');
+    expect(installerNsh).toContain("wmic process where \"name='${LEGACY_APP_EXECUTABLE_FILENAME}'\" call terminate");
+    expect(installerNsh).toContain("$_.Name -ieq '${LEGACY_APP_EXECUTABLE_FILENAME}'");
+    expect(uninstallStart).toBeGreaterThan(-1);
+    expect(uninstallEnd).toBeGreaterThan(uninstallStart);
+    expect(uninstallCleanup).toContain('${nsProcess::FindProcess} "${LEGACY_APP_EXECUTABLE_FILENAME}" $R0');
+    expect(uninstallCleanup).toContain('taskkill /F /T /IM "${LEGACY_APP_EXECUTABLE_FILENAME}"');
+  });
 });

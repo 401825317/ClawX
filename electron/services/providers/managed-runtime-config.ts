@@ -15,7 +15,9 @@ import {
   UCLAW_MANAGED_PROVIDER_ID,
   UCLAW_PROVIDER_REQUEST_TIMEOUT_SECONDS,
   UCLAW_VIDEO_API_PROTOCOL,
+  UCLAW_VIDEO_CONTENT_DOWNLOAD_MAX_ATTEMPTS,
   UCLAW_VIDEO_GENERATION_MAX_DOWNLOAD_BYTES,
+  UCLAW_VIDEO_GENERATION_MAX_INPUT_IMAGE_BYTES,
   UCLAW_VIDEO_GENERATION_POLL_INTERVAL_MS,
   UCLAW_VIDEO_GENERATION_TIMEOUT_MS,
   UCLAW_VIDEO_PROVIDER_ID,
@@ -433,8 +435,10 @@ function managedVideoPluginConfig(policy: ManagedClientVideoModelPolicy): JsonRe
     defaultResolution: policy.defaultResolution,
     defaultDurationSeconds: policy.defaultDurationSeconds,
     pollIntervalMs: UCLAW_VIDEO_GENERATION_POLL_INTERVAL_MS,
+    contentDownloadMaxAttempts: UCLAW_VIDEO_CONTENT_DOWNLOAD_MAX_ATTEMPTS,
     timeoutMs: UCLAW_VIDEO_GENERATION_TIMEOUT_MS,
     maxDownloadBytes: UCLAW_VIDEO_GENERATION_MAX_DOWNLOAD_BYTES,
+    maxInputImageBytes: UCLAW_VIDEO_GENERATION_MAX_INPUT_IMAGE_BYTES,
     resolutionSizes: { ...UCLAW_VIDEO_RESOLUTION_SIZES },
     models: policy.models.map((model) => ({
       ...model,
@@ -512,6 +516,12 @@ export async function installManagedRuntimeProviderState(
       fallbacks: [],
       timeoutMs: UCLAW_VIDEO_GENERATION_TIMEOUT_MS,
     };
+    // OpenClaw applies this shared cap when persisting generated video buffers.
+    const managedVideoMediaMaxMb = Math.ceil(UCLAW_VIDEO_GENERATION_MAX_DOWNLOAD_BYTES / (1024 * 1024));
+    const existingMediaMaxMb = typeof defaults.mediaMaxMb === 'number' && Number.isFinite(defaults.mediaMaxMb)
+      ? defaults.mediaMaxMb
+      : 0;
+    defaults.mediaMaxMb = Math.max(existingMediaMaxMb, managedVideoMediaMaxMb);
     agents.defaults = defaults;
     config.agents = agents;
 

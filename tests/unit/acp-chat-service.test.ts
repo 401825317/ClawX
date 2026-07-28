@@ -1,10 +1,13 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
+import sharp from 'sharp';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { HOST_EVENT_CHANNELS } from '@shared/host-events/contract';
+import { UCLAW_VIDEO_GENERATION_MAX_INPUT_IMAGE_BYTES } from '@shared/junfeiai-endpoints';
 
 const acpSdkMock = vi.hoisted(() => {
   const state = { connectionForSpawn: undefined as unknown };
@@ -328,7 +331,6 @@ describe('AcpChatService', () => {
       cwd: '/repo',
       message: 'Create a six-second product video.',
       videoOptions: {
-        model: 'grok-image-video',
         aspectRatio: '16:9',
         resolution: '480P',
         durationSeconds: 6,
@@ -339,7 +341,6 @@ describe('AcpChatService', () => {
       sessionKey: 'agent:pi:s1',
       message: 'Create a six-second product video.',
       videoOptions: {
-        model: 'grok-image-video',
         aspectRatio: '16:9',
         resolution: '480P',
         durationSeconds: 6,
@@ -349,6 +350,67 @@ describe('AcpChatService', () => {
       prompt: [{ type: 'text', text: 'Create a six-second product video.' }],
     }));
   });
+
+  it('sends and stores the same bounded video reference bytes while retaining the original attachment identity', async () => {
+    const imagePath = join(tmpdir(), `clawx-video-reference-${Date.now()}.png`);
+    const pixels = randomBytes(700 * 700 * 3);
+    await sharp(pixels, { raw: { width: 700, height: 700, channels: 3 } }).png().toFile(imagePath);
+    const turnVideoPreferenceStore = {
+      enqueue: vi.fn().mockResolvedValue({ id: 'video-pref-reference' }),
+      discard: vi.fn().mockResolvedValue(undefined),
+    };
+
+    try {
+      const { service, connection } = await createService(
+        createConnection(),
+        createPassthroughAccessRegistry(),
+        undefined,
+        turnVideoPreferenceStore,
+      );
+      await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+
+      await expect(service.sendPrompt({
+        sessionKey: 'agent:pi:s1',
+        cwd: '/repo',
+        message: 'Animate this product image.',
+        videoOptions: { aspectRatio: '16:9', resolution: '480P', durationSeconds: 6 },
+        media: [{
+          filePath: imagePath,
+          stagingId: 'staged-video-reference',
+          fileName: 'product.png',
+          mimeType: 'image/png',
+        }],
+      })).resolves.toEqual({ success: true, generation: 1 });
+
+      const enqueueInput = turnVideoPreferenceStore.enqueue.mock.calls[0]?.[0] as {
+        referenceImage: { buffer: Buffer; fileName: string; mimeType: string };
+      };
+      const promptInput = connection.prompt.mock.calls[0]?.[0] as {
+        prompt: Array<Record<string, unknown>>;
+      };
+      const imageBlock = promptInput.prompt[1] as {
+        data: string;
+        mimeType: string;
+        uri: string;
+        _meta: unknown;
+      };
+      const deliveredBytes = Buffer.from(imageBlock.data, 'base64');
+
+      expect(deliveredBytes.byteLength).toBeLessThanOrEqual(UCLAW_VIDEO_GENERATION_MAX_INPUT_IMAGE_BYTES);
+      expect(enqueueInput.referenceImage).toMatchObject({
+        fileName: 'product.jpg',
+        mimeType: 'image/jpeg',
+      });
+      expect(enqueueInput.referenceImage.buffer).toEqual(deliveredBytes);
+      expect(imageBlock).toMatchObject({
+        mimeType: 'image/jpeg',
+        uri: imagePath,
+        _meta: { clawx: { stagingId: 'staged-video-reference', fileName: 'product.png' } },
+      });
+    } finally {
+      rmSync(imagePath, { force: true });
+    }
+  }, 15_000);
 
   it('discards an unclaimed video preference when ACP rejects the prompt', async () => {
     const connection = createConnection();
@@ -370,7 +432,6 @@ describe('AcpChatService', () => {
       cwd: '/repo',
       message: 'Create a video.',
       videoOptions: {
-        model: 'grok-image-video',
         aspectRatio: '16:9',
         resolution: '720P',
         durationSeconds: 10,
@@ -378,6 +439,37 @@ describe('AcpChatService', () => {
     })).resolves.toEqual({ success: false, error: 'ACP unavailable' });
 
     expect(turnVideoPreferenceStore.discard).toHaveBeenCalledWith('video-pref-2');
+  });
+
+  it('rejects video mode with more than one image before delivering an ACP prompt', async () => {
+    const firstImagePath = join(tmpdir(), `clawx-video-reference-${Date.now()}-one.png`);
+    const secondImagePath = join(tmpdir(), `clawx-video-reference-${Date.now()}-two.png`);
+    writeFileSync(firstImagePath, 'first image');
+    writeFileSync(secondImagePath, 'second image');
+
+    try {
+      const { service, connection } = await createService();
+      await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+
+      await expect(service.sendPrompt({
+        sessionKey: 'agent:pi:s1',
+        cwd: '/repo',
+        message: 'Animate these images.',
+        videoOptions: { aspectRatio: '16:9', resolution: '480P', durationSeconds: 6 },
+        media: [
+          { filePath: firstImagePath, stagingId: 'staged-one', mimeType: 'image/png' },
+          { filePath: secondImagePath, stagingId: 'staged-two', mimeType: 'image/png' },
+        ],
+      })).resolves.toEqual({
+        success: false,
+        error: 'Video generation supports at most one reference image.',
+      });
+
+      expect(connection.prompt).not.toHaveBeenCalled();
+    } finally {
+      rmSync(firstImagePath, { force: true });
+      rmSync(secondImagePath, { force: true });
+    }
   });
 
   it('rewrites fresh-session ACP updates to the ClawX session key for the renderer', async () => {

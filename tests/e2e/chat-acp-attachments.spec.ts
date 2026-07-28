@@ -27,6 +27,10 @@ function workbookBytes(): Uint8Array {
   return XLSX.write(workbook, { bookType: 'xlsx', type: 'buffer' });
 }
 
+function playableVideoBytes(): Uint8Array {
+  return Buffer.from('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', 'base64');
+}
+
 function reportedFlowUpdates(): AcpSessionUpdate[] {
   return [{
     sessionUpdate: 'agent_message',
@@ -184,11 +188,11 @@ test.describe('ACP media attachments', () => {
         ));
         return resolveCall?.payload?.ref ?? null;
       }).not.toBeNull();
-      const resolveCall = (await fixture.getHostInvocations()).find((call) => (
+      const resolveCall = (await fixture.getHostInvocations()).filter((call) => (
         call.module === 'files'
         && call.action === 'resolveAttachment'
         && (call.payload?.ref as Record<string, unknown> | undefined)?.uri === spreadsheetPath
-      ));
+      )).at(-1);
       const resolvedRef = resolveCall?.payload?.ref as Record<string, unknown>;
       await fixture.clearInvocations();
 
@@ -398,6 +402,102 @@ test.describe('ACP media attachments', () => {
     }
   });
 
+  test('plays authorized local videos through a revocable stream and keeps remote videos as links', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const remoteUrl = 'https://example.test/generated/remote-video.mp4';
+
+    try {
+      const fixture = await installAttachmentHostFixture(app, {
+        sessions: [
+          { key: MAIN_SESSION_KEY, title: 'Main session' },
+          { key: OTHER_SESSION_KEY, title: 'Other session' },
+        ],
+      });
+      const localVideoPath = await fixture.createOpenClawMediaFile(
+        'tool-video-generation/local-playback.m4v',
+        playableVideoBytes(),
+      );
+      await fixture.setSessionReplay(MAIN_SESSION_KEY, [
+        userUpdate('video-user', 'Show both generated videos'),
+        {
+          sessionUpdate: 'agent_message',
+          messageId: 'video-reply',
+          content: [
+            { type: 'text', text: 'The generated videos are ready.' },
+            {
+              type: 'resource_link',
+              uri: localVideoPath,
+              name: 'Local playback.m4v',
+              mimeType: 'video/x-m4v',
+            },
+            {
+              type: 'resource_link',
+              uri: remoteUrl,
+              name: 'Remote video.mp4',
+              mimeType: 'video/mp4',
+            },
+          ],
+        },
+      ]);
+      await fixture.setTranscriptResponses(MAIN_SESSION_KEY, [[]]);
+
+      const page = await openChat(app);
+      const player = page.getByTestId('acp-video-player');
+      await expect(player).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByTestId('acp-video-attachment')).toHaveCount(1);
+      const firstStreamUrl = await player.getAttribute('src');
+      expect(firstStreamUrl).toMatch(/^uclaw-media:\/\/attachment\/[A-Za-z0-9_-]+$/);
+      expect(firstStreamUrl).not.toContain(localVideoPath);
+      await expect(page.getByRole('button', { name: 'Open Remote video.mp4', exact: true })).toBeEnabled();
+
+      const playbackState = await player.evaluate(async (node) => {
+        const video = node as HTMLVideoElement;
+        if (video.readyState < HTMLMediaElement.HAVE_METADATA) {
+          await new Promise<void>((resolveMetadata, rejectMetadata) => {
+            video.addEventListener('loadedmetadata', () => resolveMetadata(), { once: true });
+            video.addEventListener('error', () => rejectMetadata(new Error('Video metadata failed to load')), { once: true });
+          });
+        }
+        if (!Number.isFinite(video.duration) || video.duration <= 0) {
+          throw new Error(`Expected a finite video duration, received ${video.duration}`);
+        }
+        const targetTime = Math.min(video.duration / 2, 0.08);
+        video.currentTime = targetTime;
+        await new Promise<void>((resolveSeek, rejectSeek) => {
+          video.addEventListener('seeked', () => resolveSeek(), { once: true });
+          video.addEventListener('error', () => rejectSeek(new Error('Video seek failed')), { once: true });
+        });
+        return {
+          currentTime: video.currentTime,
+          duration: video.duration,
+          readyState: video.readyState,
+        };
+      });
+      expect(playbackState.duration).toBeGreaterThan(0);
+      expect(playbackState.currentTime).toBeGreaterThan(0);
+      expect(playbackState.readyState).toBeGreaterThanOrEqual(1);
+
+      await page.getByTestId(`sidebar-session-${OTHER_SESSION_KEY}`).click();
+      await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible();
+      const firstStreamId = firstStreamUrl?.split('/').at(-1);
+      await expect.poll(async () => (await fixture.getHostInvocations()).some((call) => (
+        call.module === 'files'
+        && call.action === 'releaseAttachmentPlayback'
+        && call.payload?.streamId === firstStreamId
+      ))).toBe(true);
+
+      await page.getByTestId(`sidebar-session-${MAIN_SESSION_KEY}`).click();
+      await expect(player).toBeVisible({ timeout: 30_000 });
+      const secondStreamUrl = await player.getAttribute('src');
+      expect(secondStreamUrl).toMatch(/^uclaw-media:\/\/attachment\/[A-Za-z0-9_-]+$/);
+      expect(secondStreamUrl).not.toBe(firstStreamUrl);
+      await expect(page.getByTestId('acp-video-attachment')).toHaveCount(1);
+      expect(await getRecordedLegacyIpcInvocations(app)).toEqual([]);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
   test('renders user image thumbnails and actionable file paths', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 
@@ -597,6 +697,84 @@ test.describe('ACP media attachments', () => {
       await page.getByTestId(`sidebar-session-${MAIN_SESSION_KEY}`).click();
 
       await expect(page.getByRole('button').filter({ hasText: 'budget_sample.xlsx' })).toHaveCount(1, { timeout: 30_000 });
+      await expect(page.getByText(/MEDIA:/)).toHaveCount(0);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('keeps one live image reply when transcript media arrives before streamed ACP text', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const prompt = 'Generate a rabbit walking through a shopping street';
+    const caption = 'The generated rabbit street photo is ready.';
+    const taskId = '76ee7e56-e49f-4f9c-bf50-680008e3e747';
+
+    try {
+      const fixture = await installAttachmentHostFixture(app, {
+        sessions: [{ key: MAIN_SESSION_KEY, title: 'Main session' }],
+      });
+      const imagePath = await fixture.createOpenClawMediaFile(
+        'tool-image-generation/live-rabbit.png',
+        Uint8Array.from(Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+          'base64',
+        )),
+      );
+      const taskStartedText = `Background task started for image generation (${taskId}).`;
+      await fixture.setPromptUpdates(prompt, [{
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'image-tool-live-history',
+        status: 'completed',
+        content: [{
+          type: 'content',
+          content: { type: 'text', text: taskStartedText },
+        }],
+      }]);
+      await fixture.setTranscriptResponses(MAIN_SESSION_KEY, [[], [
+        { role: 'user', id: 'rabbit-live-user', content: prompt },
+        {
+          role: 'toolresult',
+          toolCallId: 'image-tool-live-history',
+          toolName: 'image_generate',
+          content: taskStartedText,
+          details: { taskId },
+        },
+        {
+          role: 'user',
+          content: `[Inter-session message] sourceSession=image_generate:${taskId} sourceChannel=webchat sourceTool=image_generate isUser=false\n[Internal task completion event]\nstatus: completed successfully`,
+          provenance: {
+            kind: 'inter_session',
+            sourceSessionKey: `image_generate:${taskId}`,
+            sourceTool: 'image_generate',
+          },
+        },
+        {
+          role: 'assistant',
+          id: 'rabbit-live-transcript-completion',
+          content: `${caption}\n\nMEDIA:${imagePath}`,
+        },
+      ]]);
+
+      const page = await openChat(app);
+      await fixture.waitForHistoryRequestCount(MAIN_SESSION_KEY, 1);
+      await page.getByTestId('chat-composer-input').fill(prompt);
+      await page.getByTestId('chat-composer-send').click();
+      await fixture.waitForHistoryRequestCount(MAIN_SESSION_KEY, 2);
+
+      const timeline = page.getByTestId('acp-chat-timeline');
+      await expect(timeline.getByText(caption, { exact: true })).toHaveCount(1, { timeout: 30_000 });
+      await expect(timeline.getByTestId('acp-image-part')).toHaveCount(1);
+
+      await fixture.emitAcpSessionUpdates({
+        sessionKey: MAIN_SESSION_KEY,
+        updates: [{
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: caption },
+        }],
+      });
+
+      await expect(timeline.getByText(caption, { exact: true })).toHaveCount(1);
+      await expect(timeline.getByTestId('acp-image-part')).toHaveCount(1);
       await expect(page.getByText(/MEDIA:/)).toHaveCount(0);
     } finally {
       await closeElectronApp(app);

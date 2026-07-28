@@ -1829,12 +1829,27 @@ describe('host services', () => {
       revealAttachment: vi.fn().mockResolvedValue({ ok: false, error: 'unavailable' }),
     };
     const { createFilesApi } = await import('@electron/services/files-api');
-    const filesApi = createFilesApi({ attachmentAccess: attachmentAccess as never });
+    const attachmentPlayback = {
+      create: vi.fn().mockResolvedValue({
+        ok: true,
+        streamId: 'stream-1',
+        url: 'uclaw-media://attachment/stream-1',
+        mimeType: 'video/mp4',
+        size: 10,
+      }),
+      release: vi.fn().mockReturnValue(true),
+    };
+    const filesApi = createFilesApi({
+      attachmentAccess: attachmentAccess as never,
+      attachmentPlayback,
+    });
     const ref = { sessionKey: 'agent:main:s1', generation: 1, uri: 'file:///tmp/a.txt' };
 
     await filesApi.resolveAttachment({ ref });
     await filesApi.readAttachmentText(ref);
     await filesApi.readAttachmentBinary({ ref, maxBytes: 5 });
+    await filesApi.createAttachmentPlayback(ref);
+    await filesApi.releaseAttachmentPlayback({ streamId: 'stream-1' });
     await filesApi.openAttachment(ref);
     await filesApi.listAttachmentOpenHandlers(ref);
     await filesApi.openAttachmentWith({ ref, handlerId: 'com.apple.Preview' });
@@ -1843,6 +1858,8 @@ describe('host services', () => {
     expect(attachmentAccess.resolveAttachment).toHaveBeenCalledWith({ ref });
     expect(attachmentAccess.readAttachmentText).toHaveBeenCalledWith(ref);
     expect(attachmentAccess.readAttachmentBinary).toHaveBeenCalledWith({ ref, maxBytes: 5 });
+    expect(attachmentPlayback.create).toHaveBeenCalledWith(ref);
+    expect(attachmentPlayback.release).toHaveBeenCalledWith('stream-1');
     expect(attachmentAccess.openAttachment).toHaveBeenCalledWith(ref);
     expect(attachmentAccess.listAttachmentOpenHandlers).toHaveBeenCalledWith(ref);
     expect(attachmentAccess.openAttachmentWith).toHaveBeenCalledWith({ ref, handlerId: 'com.apple.Preview' });

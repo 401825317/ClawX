@@ -4,17 +4,21 @@ import { resolveApiKeyForProvider } from 'openclaw/plugin-sdk/provider-auth-runt
 import { createHash, randomUUID } from 'node:crypto';
 import { readdir, readFile, rename, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 const PROVIDER_ID = 'uclaw-video';
-const DEFAULT_MODEL = 'grok-image-video';
+const TEXT_TO_VIDEO_MODEL = 'grok-image-video';
+const IMAGE_TO_VIDEO_MODEL = 'grok-video-1.5';
+const DEFAULT_MODEL = TEXT_TO_VIDEO_MODEL;
 const DEFAULT_ASPECT_RATIO = '16:9';
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_RESOLUTION = '480P';
 const DEFAULT_DURATION_SECONDS = 6;
 const DEFAULT_POLL_INTERVAL_MS = 5000;
+const DEFAULT_CONTENT_DOWNLOAD_MAX_ATTEMPTS = 4;
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
-const DEFAULT_MAX_DOWNLOAD_BYTES = 1024 * 1024 * 1024;
+const DEFAULT_MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024;
+const DEFAULT_MAX_INPUT_IMAGE_BYTES = 1024 * 1024;
 const DEFAULT_MIME_TYPE = 'video/mp4';
 const RESOLUTION_SIZES = {
   '480P': '854x480',
@@ -24,7 +28,7 @@ const SUPPORTED_ASPECT_RATIOS = new Set(['2:3', '3:2', '1:1', '9:16', '16:9']);
 const DEFAULT_MODELS = [
   {
     id: 'grok-image-video',
-    modes: ['text-to-video', 'image-to-video'],
+    modes: ['text-to-video'],
     aspectRatios: ['2:3', '3:2', '1:1', '9:16', '16:9'],
     resolutions: ['480P', '720P'],
     durations: [6, 10, 15],
@@ -54,7 +58,9 @@ const TURN_PREFERENCE_FILE_RE = /^video-turn-([0-9a-f-]{36})\.json$/iu;
 const VIDEO_MODE_PROMPT_CONTEXT = [
   'The user selected video generation mode for this turn.',
   'When the request asks for a video, call video_generate instead of only describing a video.',
-  'Use the managed model, aspect ratio, resolution, and duration supplied to the tool call.',
+  'Use the managed aspect ratio, resolution, and duration supplied to the tool call.',
+  'The runtime selects the video model and binds the current turn reference image automatically.',
+  'Do not invent a reference-image file path.',
 ].join(' ');
 const turnPreferencesByRun = new Map();
 
@@ -158,8 +164,13 @@ function resolvePluginConfig(value) {
     defaultDurationSeconds,
     resolutionSizes,
     pollIntervalMs: normalizePositiveInteger(value?.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS),
+    contentDownloadMaxAttempts: normalizePositiveInteger(
+      value?.contentDownloadMaxAttempts,
+      DEFAULT_CONTENT_DOWNLOAD_MAX_ATTEMPTS,
+    ),
     timeoutMs: normalizePositiveInteger(value?.timeoutMs, DEFAULT_TIMEOUT_MS),
     maxDownloadBytes: normalizePositiveInteger(value?.maxDownloadBytes, DEFAULT_MAX_DOWNLOAD_BYTES),
+    maxInputImageBytes: normalizePositiveInteger(value?.maxInputImageBytes, DEFAULT_MAX_INPUT_IMAGE_BYTES),
   };
 }
 
@@ -267,7 +278,8 @@ function extractFailureMessage(payload) {
 
 function isComplete(payload) {
   const status = extractStatus(payload)?.toLowerCase();
-  return Boolean(extractVideoUrl(payload)) || Boolean(status && COMPLETE_STATUSES.has(status));
+  if (status) return COMPLETE_STATUSES.has(status);
+  return Boolean(extractVideoUrl(payload));
 }
 
 function readResponseError(payload, fallback) {
@@ -286,6 +298,124 @@ function readResponseError(payload, fallback) {
 
 function remainingTimeout(deadline) {
   return Math.max(1, deadline - Date.now());
+}
+
+class IncompleteVideoContentError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'IncompleteVideoContentError';
+  }
+}
+
+class GeneratedVideoTooLargeError extends Error {
+  constructor(maxDownloadBytes) {
+    super(`Generated video exceeds ${maxDownloadBytes} bytes`);
+    this.name = 'GeneratedVideoTooLargeError';
+  }
+}
+
+/** Reads a response incrementally so an absent Content-Length cannot bypass the managed limit. */
+async function readResponseBuffer(response, maxDownloadBytes, expectedBytes) {
+  if (!response.body) throw new IncompleteVideoContentError('Video content response has no body');
+  const reader = response.body.getReader();
+  const target = Number.isSafeInteger(expectedBytes) ? Buffer.allocUnsafe(expectedBytes) : undefined;
+  const chunks = target ? undefined : [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value?.byteLength) continue;
+      const nextTotalBytes = totalBytes + value.byteLength;
+      if (nextTotalBytes > maxDownloadBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new GeneratedVideoTooLargeError(maxDownloadBytes);
+      }
+      if (target && nextTotalBytes > target.length) {
+        await reader.cancel().catch(() => undefined);
+        throw new IncompleteVideoContentError(
+          `Video content declared ${target.length} bytes but returned more data`,
+        );
+      }
+      const chunk = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+      if (target) chunk.copy(target, totalBytes);
+      else chunks.push(chunk);
+      totalBytes = nextTotalBytes;
+    }
+  } catch (error) {
+    if (
+      error instanceof GeneratedVideoTooLargeError
+      || error instanceof IncompleteVideoContentError
+      || (error instanceof Error && error.name === 'AbortError')
+    ) {
+      throw error;
+    }
+    throw new IncompleteVideoContentError('Video content response ended before the body was complete');
+  } finally {
+    reader.releaseLock();
+  }
+  if (totalBytes === 0) throw new IncompleteVideoContentError('Video content response is empty');
+  if (target && totalBytes !== target.length) {
+    throw new IncompleteVideoContentError(
+      `Video content declared ${target.length} bytes but returned ${totalBytes}`,
+    );
+  }
+  return target ?? Buffer.concat(chunks, totalBytes);
+}
+
+/** Validates enough of ISO-BMFF to reject a file whose declared top-level box is truncated. */
+function assertCompleteMp4(buffer) {
+  const requiredBoxes = new Set(['ftyp', 'moov', 'mdat']);
+  let offset = 0;
+  while (offset < buffer.length) {
+    const remainingBytes = buffer.length - offset;
+    if (remainingBytes < 8) {
+      throw new IncompleteVideoContentError(`MP4 has ${remainingBytes} trailing bytes without a box header`);
+    }
+
+    const compactSize = buffer.readUInt32BE(offset);
+    const type = buffer.toString('ascii', offset + 4, offset + 8);
+    let headerSize = 8;
+    let boxSize;
+    if (compactSize === 1) {
+      if (remainingBytes < 16) {
+        throw new IncompleteVideoContentError(`MP4 ${type} box has an incomplete extended-size header`);
+      }
+      headerSize = 16;
+      const extendedSize = buffer.readBigUInt64BE(offset + 8);
+      if (extendedSize > BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw new IncompleteVideoContentError(`MP4 ${type} box declares an unsupported size`);
+      }
+      boxSize = Number(extendedSize);
+    } else {
+      boxSize = compactSize === 0 ? remainingBytes : compactSize;
+    }
+
+    if (boxSize < headerSize) {
+      throw new IncompleteVideoContentError(`MP4 ${type} box is smaller than its header`);
+    }
+    const boxEnd = offset + boxSize;
+    if (boxEnd > buffer.length) {
+      throw new IncompleteVideoContentError(
+        `MP4 ${type} box declares ${boxSize} bytes but only ${remainingBytes} remain`,
+      );
+    }
+    const payloadBytes = boxSize - headerSize;
+    if ((type === 'moov' || type === 'mdat') && payloadBytes === 0) {
+      throw new IncompleteVideoContentError(`MP4 ${type} box has no payload`);
+    }
+    if (type === 'ftyp' && payloadBytes < 8) {
+      throw new IncompleteVideoContentError('MP4 ftyp box is missing its brand payload');
+    }
+    requiredBoxes.delete(type);
+    offset = boxEnd;
+  }
+
+  if (requiredBoxes.size > 0) {
+    throw new IncompleteVideoContentError(
+      `MP4 is missing required top-level box${requiredBoxes.size === 1 ? '' : 'es'}: ${[...requiredBoxes].join(', ')}`,
+    );
+  }
 }
 
 /** Performs one authenticated JSON request within the shared generation deadline. */
@@ -343,30 +473,43 @@ async function pollVideoTask({ baseUrl, apiKey, taskId, deadline, pollIntervalMs
     : `Video generation task ${taskId} did not finish in time`);
 }
 
-/** Downloads a provider result that is available only through the authenticated content route. */
-async function downloadVideoContent({ baseUrl, apiKey, taskId, deadline, maxDownloadBytes }) {
+/** Performs one authenticated download and accepts only a structurally complete MP4. */
+async function downloadVideoContentAttempt({ baseUrl, apiKey, taskId, deadline, maxDownloadBytes }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), remainingTimeout(deadline));
   try {
     const response = await fetch(`${baseUrl}/videos/${encodeURIComponent(taskId)}/content`, {
       method: 'GET',
-      headers: { Accept: 'video/*,application/octet-stream', Authorization: `Bearer ${apiKey}` },
+      headers: {
+        Accept: 'video/*,application/octet-stream',
+        'Accept-Encoding': 'identity',
+        Authorization: `Bearer ${apiKey}`,
+      },
       signal: controller.signal,
     });
-    if (!response.ok) {
+    if (response.status !== 200) {
+      await response.body?.cancel().catch(() => undefined);
       throw new Error(`Video content download failed with HTTP ${response.status}`);
     }
-    const contentLength = Number(response.headers.get('content-length'));
-    if (Number.isFinite(contentLength) && contentLength > maxDownloadBytes) {
-      throw new Error(`Generated video exceeds ${maxDownloadBytes} bytes`);
+    const contentLengthHeader = normalizeOptionalString(response.headers.get('content-length'));
+    const contentLength = contentLengthHeader && /^\d+$/u.test(contentLengthHeader)
+      ? Number(contentLengthHeader)
+      : undefined;
+    if (Number.isSafeInteger(contentLength) && contentLength > maxDownloadBytes) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new GeneratedVideoTooLargeError(maxDownloadBytes);
     }
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.length > maxDownloadBytes) {
-      throw new Error(`Generated video exceeds ${maxDownloadBytes} bytes`);
-    }
+    const contentEncoding = normalizeOptionalString(response.headers.get('content-encoding'))?.toLowerCase();
+    const expectedBytes = Number.isSafeInteger(contentLength)
+      && (!contentEncoding || contentEncoding === 'identity')
+      ? contentLength
+      : undefined;
+    const buffer = await readResponseBuffer(response, maxDownloadBytes, expectedBytes);
+    assertCompleteMp4(buffer);
     return {
       buffer,
-      mimeType: normalizeOptionalString(response.headers.get('content-type')) ?? DEFAULT_MIME_TYPE,
+      mimeType: normalizeOptionalString(response.headers.get('content-type'))?.split(';', 1)[0]
+        ?? DEFAULT_MIME_TYPE,
       fileName: `${taskId}.mp4`,
     };
   } catch (error) {
@@ -377,6 +520,38 @@ async function downloadVideoContent({ baseUrl, apiKey, taskId, deadline, maxDown
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Retries only a completed task whose content object has not finished materializing. */
+async function downloadVideoContent({
+  baseUrl,
+  apiKey,
+  taskId,
+  deadline,
+  maxDownloadBytes,
+  pollIntervalMs,
+  contentDownloadMaxAttempts,
+}) {
+  let attempts = 0;
+  let lastError;
+  while (attempts < contentDownloadMaxAttempts && Date.now() < deadline) {
+    attempts += 1;
+    try {
+      return await downloadVideoContentAttempt({ baseUrl, apiKey, taskId, deadline, maxDownloadBytes });
+    } catch (error) {
+      if (!(error instanceof IncompleteVideoContentError)) throw error;
+      lastError = error;
+    }
+    if (attempts >= contentDownloadMaxAttempts) break;
+    const delayMs = Math.min(pollIntervalMs, remainingTimeout(deadline));
+    if (Date.now() + delayMs >= deadline) break;
+    await sleep(delayMs);
+  }
+  const detail = lastError instanceof Error ? `: ${lastError.message}` : '';
+  throw new Error(
+    `Video content remained incomplete after ${attempts} download attempt${attempts === 1 ? '' : 's'}${detail}`,
+    { cause: lastError },
+  );
 }
 
 function inputImageValue(asset) {
@@ -415,23 +590,70 @@ function aspectRatioForSize(size, resolutionSizes) {
   return undefined;
 }
 
-function resolveModelRequest(req, config) {
-  const requestedModel = normalizeOptionalString(req.model) ?? config.defaultModel;
-  const model = config.models.find((entry) => entry.id === requestedModel);
-  if (!model) throw new Error(`Unsupported UClaw video model: ${requestedModel}`);
+function normalizeToolReferenceImages(params) {
+  const inputs = [];
+  const add = (value) => {
+    if (typeof value !== 'string' || !value.trim()) return;
+    const input = value.trim();
+    const dedupe = input.startsWith('@') ? input.slice(1).trim() : input;
+    if (!dedupe || inputs.some((entry) => entry.dedupe === dedupe)) return;
+    inputs.push({ input, dedupe });
+  };
+  add(params?.image);
+  if (Array.isArray(params?.images)) {
+    for (const image of params.images) add(image);
+  }
+  return inputs;
+}
 
+/** Routes strictly from the normalized reference-image count, never from a user-facing model setting. */
+function automaticModelForInputImages(config, inputImageCount) {
+  if (inputImageCount > 1) {
+    throw new Error('UClaw video generation supports at most one reference image');
+  }
+  const requiredMode = inputImageCount === 1 ? 'image-to-video' : 'text-to-video';
+  const requiredModelId = inputImageCount === 1 ? IMAGE_TO_VIDEO_MODEL : TEXT_TO_VIDEO_MODEL;
+  const model = config.models.find((entry) => (
+    entry.id === requiredModelId && entry.modes.includes(requiredMode)
+  ));
+  if (!model) {
+    throw new Error(`Managed video policy is missing ${requiredModelId} for ${requiredMode}`);
+  }
+  return model;
+}
+
+function applyOptionsForModel(videoOptions, model) {
+  if (!videoOptions) return undefined;
+  return {
+    aspectRatio: model.aspectRatios.includes(videoOptions.aspectRatio)
+      ? videoOptions.aspectRatio
+      : model.defaultAspectRatio,
+    resolution: model.resolutions.includes(videoOptions.resolution)
+      ? videoOptions.resolution
+      : model.defaultResolution,
+    durationSeconds: model.durations.includes(videoOptions.durationSeconds)
+      ? videoOptions.durationSeconds
+      : model.defaultDurationSeconds,
+  };
+}
+
+function inputImageByteLength(asset) {
+  if (!asset?.buffer) return undefined;
+  return Buffer.from(asset.buffer).byteLength;
+}
+
+function referenceImageLimitLabel(maxBytes) {
+  return `${maxBytes} ${maxBytes === 1 ? 'byte' : 'bytes'}`;
+}
+
+function resolveModelRequest(req, config) {
   const inputImages = Array.isArray(req.inputImages) ? req.inputImages : [];
-  if (model.requiresImage && inputImages.length !== 1) {
-    throw new Error(`${model.id} requires exactly one reference image`);
-  }
-  if (inputImages.length > 1) {
-    throw new Error(`${model.id} supports at most one reference image`);
-  }
-  if (inputImages.length > 0 && !model.modes.includes('image-to-video')) {
-    throw new Error(`${model.id} does not support image-to-video generation`);
-  }
-  if (inputImages.length === 0 && !model.modes.includes('text-to-video')) {
-    throw new Error(`${model.id} requires exactly one reference image`);
+  const model = automaticModelForInputImages(config, inputImages.length);
+  const inputBytes = inputImages.length === 1 ? inputImageByteLength(inputImages[0]) : undefined;
+  if (inputBytes !== undefined && inputBytes > config.maxInputImageBytes) {
+    throw new Error(
+      `Reference image exceeds the ${referenceImageLimitLabel(config.maxInputImageBytes)} reference-image limit after client compression`,
+    );
   }
 
   const requestedSize = aspectRatioForSize(req.size, config.resolutionSizes);
@@ -561,18 +783,21 @@ function buildProvider(config) {
         size: request.size,
         durationSeconds: request.durationSeconds,
       };
-      const video = resultUrl
-        ? { url: resultUrl, mimeType: DEFAULT_MIME_TYPE, fileName: `${taskId}.mp4`, metadata }
-        : {
-          ...await downloadVideoContent({
-            baseUrl,
-            apiKey,
-            taskId,
-            deadline,
-            maxDownloadBytes: config.maxDownloadBytes,
-          }),
-          metadata,
-        };
+      // Always materialize the completed asset. OpenClaw persists provider buffers
+      // in its managed media store and keeps resultUrl only as an oversize fallback.
+      const video = {
+        ...await downloadVideoContent({
+          baseUrl,
+          apiKey,
+          taskId,
+          deadline,
+          maxDownloadBytes: config.maxDownloadBytes,
+          pollIntervalMs: config.pollIntervalMs,
+          contentDownloadMaxAttempts: config.contentDownloadMaxAttempts,
+        }),
+        ...(resultUrl ? { url: resultUrl } : {}),
+        metadata,
+      };
       return { videos: [video], model: request.model.id, metadata };
     },
   };
@@ -587,19 +812,29 @@ function digestPrompt(prompt) {
   return createHash('sha256').update(prompt, 'utf8').digest('hex');
 }
 
+/** Matches either a raw composer prompt or OpenClaw's metadata-wrapped prompt suffix. */
+function matchesStoredPrompt(prompt, record) {
+  const storedDigest = normalizeOptionalString(record?.messageDigest);
+  if (!storedDigest) return false;
+  if (digestPrompt(prompt) === storedDigest) return true;
+  const messageLength = Number(record?.messageLength);
+  return Number.isSafeInteger(messageLength)
+    && messageLength > 0
+    && messageLength <= prompt.length
+    && digestPrompt(prompt.slice(-messageLength)) === storedDigest;
+}
+
 function normalizeTurnOptions(value, config) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const model = config.models.find((entry) => entry.id === value.model);
-  if (
-    !model
-    || !model.aspectRatios.includes(value.aspectRatio)
-    || !model.resolutions.includes(value.resolution)
-    || !model.durations.includes(value.durationSeconds)
-  ) {
+  const supported = config.models.some((model) => (
+    model.aspectRatios.includes(value.aspectRatio)
+    && model.resolutions.includes(value.resolution)
+    && model.durations.includes(value.durationSeconds)
+  ));
+  if (!supported) {
     return undefined;
   }
   return {
-    model: model.id,
     aspectRatio: value.aspectRatio,
     resolution: value.resolution,
     durationSeconds: value.durationSeconds,
@@ -613,29 +848,63 @@ function turnCacheKey(event, ctx) {
     || normalizeOptionalString(ctx?.sessionKey);
 }
 
+function normalizeManagedReferenceImage(value, directory = preferenceDirectory()) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const filePath = normalizeOptionalString(value.filePath);
+  const fileName = normalizeOptionalString(value.fileName);
+  const mimeType = normalizeOptionalString(value.mimeType);
+  if (!filePath || !fileName || !mimeType?.startsWith('image/')) return undefined;
+  const resolvedDirectory = resolve(directory);
+  const resolvedFilePath = resolve(filePath);
+  if (
+    dirname(resolvedFilePath) !== resolvedDirectory
+    || !basename(resolvedFilePath).startsWith('video-reference-')
+  ) {
+    return undefined;
+  }
+  return { filePath: resolvedFilePath, fileName, mimeType };
+}
+
+function removeManagedReferenceImage(referenceImage) {
+  if (!referenceImage) return;
+  void rm(referenceImage.filePath, { force: true }).catch(() => undefined);
+}
+
+function releaseTurnPreference(event, ctx) {
+  const key = turnCacheKey(event, ctx);
+  if (!key) return;
+  const entry = turnPreferencesByRun.get(key);
+  if (!entry) return;
+  turnPreferencesByRun.delete(key);
+  removeManagedReferenceImage(entry.preference.referenceImage);
+}
+
 function prunePreferenceCache(now = Date.now()) {
   for (const [key, entry] of turnPreferencesByRun) {
-    if (entry.expiresAt <= now) turnPreferencesByRun.delete(key);
+    if (entry.expiresAt > now) continue;
+    turnPreferencesByRun.delete(key);
+    removeManagedReferenceImage(entry.preference.referenceImage);
   }
   while (turnPreferencesByRun.size > TURN_PREFERENCE_CACHE_MAX_ENTRIES) {
     const oldestKey = turnPreferencesByRun.keys().next().value;
     if (!oldestKey) return;
+    removeManagedReferenceImage(turnPreferencesByRun.get(oldestKey)?.preference.referenceImage);
     turnPreferencesByRun.delete(oldestKey);
   }
 }
 
-function cacheTurnOptions(event, ctx, videoOptions) {
+function cacheTurnPreference(event, ctx, preference) {
   const key = turnCacheKey(event, ctx);
-  if (!key || !videoOptions) return;
+  if (!key || !preference) return;
   const now = Date.now();
   prunePreferenceCache(now);
-  turnPreferencesByRun.set(key, { videoOptions, expiresAt: now + TURN_PREFERENCE_TTL_MS });
+  turnPreferencesByRun.set(key, { preference, expiresAt: now + TURN_PREFERENCE_TTL_MS });
 }
 
-function getTurnOptions(event, ctx) {
+function getTurnPreference(event, ctx) {
   prunePreferenceCache();
   const key = turnCacheKey(event, ctx);
-  return key ? turnPreferencesByRun.get(key)?.videoOptions : undefined;
+  return key ? turnPreferencesByRun.get(key)?.preference : undefined;
 }
 
 /** Atomically claims one ACP composer's preference without retaining its prompt. */
@@ -652,7 +921,6 @@ async function consumeTurnOptions(event, ctx, config) {
     return undefined;
   }
   const now = Date.now();
-  const messageDigest = digestPrompt(prompt);
   const matches = [];
   for (const fileName of fileNames) {
     if (!TURN_PREFERENCE_FILE_RE.test(fileName)) continue;
@@ -660,13 +928,22 @@ async function consumeTurnOptions(event, ctx, config) {
     try {
       const record = JSON.parse(await readFile(filePath, 'utf8'));
       const videoOptions = normalizeTurnOptions(record?.videoOptions, config);
+      const referenceImage = normalizeManagedReferenceImage(record?.referenceImage, directory);
       const expiresAt = Number(record?.expiresAt);
       if (!videoOptions || !Number.isFinite(expiresAt) || expiresAt <= now) {
+        removeManagedReferenceImage(referenceImage);
         await rm(filePath, { force: true });
         continue;
       }
-      if (record.sessionKey !== sessionKey || record.messageDigest !== messageDigest) continue;
-      matches.push({ filePath, createdAt: Number(record.createdAt) || 0, videoOptions });
+      if (record.sessionKey !== sessionKey || !matchesStoredPrompt(prompt, record)) continue;
+      matches.push({
+        filePath,
+        createdAt: Number(record.createdAt) || 0,
+        preference: {
+          videoOptions,
+          ...(referenceImage ? { referenceImage } : {}),
+        },
+      });
     } catch {
       await rm(filePath, { force: true }).catch(() => undefined);
     }
@@ -681,7 +958,7 @@ async function consumeTurnOptions(event, ctx, config) {
       continue;
     }
     await rm(claimedPath, { force: true }).catch(() => undefined);
-    return match.videoOptions;
+    return match.preference;
   }
   return undefined;
 }
@@ -694,12 +971,12 @@ function registerLifecycleHook(api, name, handler, options) {
   if (typeof api.registerHook === 'function') api.registerHook(name, handler, options);
 }
 
-/** Keeps model-owned tool selection while applying this turn's composer constraints. */
+/** Keeps tool invocation model-owned while routing its managed Provider model from real image inputs. */
 function registerTurnPreferenceHooks(api, config) {
   registerLifecycleHook(api, 'before_prompt_build', async (event, ctx) => {
-    const videoOptions = await consumeTurnOptions(event, ctx, config);
-    if (!videoOptions) return undefined;
-    cacheTurnOptions(event, ctx, videoOptions);
+    const preference = await consumeTurnOptions(event, ctx, config);
+    if (!preference) return undefined;
+    cacheTurnPreference(event, ctx, preference);
     return { appendContext: VIDEO_MODE_PROMPT_CONTEXT };
   }, {
     name: `${PROVIDER_ID}:turn-video-preferences`,
@@ -710,21 +987,53 @@ function registerTurnPreferenceHooks(api, config) {
   registerLifecycleHook(api, 'before_tool_call', (event, ctx) => {
     const toolName = normalizeOptionalString(event?.toolName)?.split(':').at(-1)?.toLowerCase();
     if (toolName !== 'video_generate') return undefined;
-    const videoOptions = getTurnOptions(event, ctx);
-    if (!videoOptions) return undefined;
+    const params = event?.params && typeof event.params === 'object' && !Array.isArray(event.params)
+      ? event.params
+      : {};
+    const action = normalizeOptionalString(params.action)?.toLowerCase();
+    if (action && action !== 'generate') return undefined;
+    const preference = getTurnPreference(event, ctx);
+    const effectiveParams = preference?.referenceImage
+      ? (() => {
+        const { image: _image, images: _images, imageRoles: _imageRoles, ...rest } = params;
+        return { ...rest, image: preference.referenceImage.filePath };
+      })()
+      : params;
+    const model = automaticModelForInputImages(config, normalizeToolReferenceImages(effectiveParams).length);
+    const options = applyOptionsForModel(preference?.videoOptions, model);
     return {
       params: {
-        ...(event?.params ?? {}),
-        model: `${PROVIDER_ID}/${videoOptions.model}`,
-        aspectRatio: videoOptions.aspectRatio,
-        resolution: videoOptions.resolution,
-        durationSeconds: videoOptions.durationSeconds,
+        ...effectiveParams,
+        model: `${PROVIDER_ID}/${model.id}`,
+        ...(options
+          ? {
+            ...options,
+            size: sizeForAspectRatio(options.resolution, options.aspectRatio, config.resolutionSizes),
+          }
+          : {}),
+        timeoutMs: config.timeoutMs,
       },
     };
   }, {
     name: `${PROVIDER_ID}:turn-video-options`,
-    description: 'Apply composer model, aspect ratio, resolution, and duration to a model-selected video_generate call.',
+    description: 'Route the managed video model from tool image inputs and apply current-turn video constraints.',
     priority: 100,
+  });
+
+  registerLifecycleHook(api, 'after_tool_call', (event, ctx) => {
+    const toolName = normalizeOptionalString(event?.toolName)?.split(':').at(-1)?.toLowerCase();
+    if (toolName !== 'video_generate' || event?.error) return;
+    releaseTurnPreference(event, ctx);
+  }, {
+    name: `${PROVIDER_ID}:release-video-reference`,
+    description: 'Release the managed current-turn reference image after video_generate accepts it.',
+  });
+
+  registerLifecycleHook(api, 'agent_end', (event, ctx) => {
+    releaseTurnPreference(event, ctx);
+  }, {
+    name: `${PROVIDER_ID}:release-unused-video-reference`,
+    description: 'Release a managed current-turn reference image when no video tool call consumed it.',
   });
 }
 

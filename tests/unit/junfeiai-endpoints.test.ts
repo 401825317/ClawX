@@ -25,8 +25,9 @@ import {
   UCLAW_SUPPORT_REFRESH_INTERVAL_MS,
   UCLAW_SUPPORT_REQUEST_TIMEOUT_MS,
   UCLAW_SUPPORT_ROUTES,
-  UCLAW_VIDEO_GENERATION_PREFERRED_RESOLUTION,
-  UCLAW_VIDEO_GENERATION_PREFERRED_SHORT_EDGE,
+  UCLAW_VIDEO_CONTENT_DOWNLOAD_MAX_ATTEMPTS,
+  UCLAW_VIDEO_GENERATION_MAX_DOWNLOAD_BYTES,
+  UCLAW_VIDEO_GENERATION_MAX_INPUT_IMAGE_BYTES,
   validateUclawEndpointsConfig,
 } from '@shared/junfeiai-endpoints';
 import {
@@ -57,7 +58,11 @@ type MutableTestConfig = {
   };
   media: {
     image: { defaultSize: string };
-    video: { preferredResolution: string };
+    video: {
+      contentDownloadMaxAttempts: number;
+      maxInputImageBytes: number;
+      resolutionSizes: { '480P': string };
+    };
   };
   marketplace: {
     skillHubApiOrigin: string;
@@ -103,13 +108,15 @@ describe('UClaw managed endpoint configuration', () => {
       'provider',
       'runtimeDefaults',
       'support',
+      'updates',
     ]);
     expect(UCLAW_EXEC_SECURITY).toBe('full');
     expect(UCLAW_EXEC_ASK).toBe('off');
     expect(UCLAW_COMPACTION_MODE).toBe('safeguard');
     expect(UCLAW_COMPACTION_RESERVE_TOKENS_FLOOR).toBe(50_000);
-    expect(UCLAW_VIDEO_GENERATION_PREFERRED_RESOLUTION).toBe('480p');
-    expect(UCLAW_VIDEO_GENERATION_PREFERRED_SHORT_EDGE).toBe(480);
+    expect(UCLAW_VIDEO_CONTENT_DOWNLOAD_MAX_ATTEMPTS).toBe(4);
+    expect(UCLAW_VIDEO_GENERATION_MAX_DOWNLOAD_BYTES).toBe(128 * 1024 * 1024);
+    expect(UCLAW_VIDEO_GENERATION_MAX_INPUT_IMAGE_BYTES).toBe(1024 * 1024);
     expect(UCLAW_MARKETPLACE_DEFAULT_PROVIDER).toBe('skillhub');
     expect(UCLAW_MARKETPLACE_CONFIG.skillHubApiOrigin).toBe('https://api.skillhub.cn');
     expect(UCLAW_BILLING_ORDER_STATUS_POLL_INTERVAL_MS).toBe(2_000);
@@ -134,7 +141,9 @@ describe('UClaw managed endpoint configuration', () => {
     ['non-positive support refresh interval', (config: MutableTestConfig) => { config.support.refreshIntervalMs = 0; }],
     ['invalid support route', (config: MutableTestConfig) => { config.support.routes.clientConfig = 'https://example.com/support'; }],
     ['invalid image size', (config: MutableTestConfig) => { config.media.image.defaultSize = 'large'; }],
-    ['invalid video resolution', (config: MutableTestConfig) => { config.media.video.preferredResolution = '480'; }],
+    ['non-positive video content download attempts', (config: MutableTestConfig) => { config.media.video.contentDownloadMaxAttempts = 0; }],
+    ['non-positive video reference image limit', (config: MutableTestConfig) => { config.media.video.maxInputImageBytes = 0; }],
+    ['invalid video resolution', (config: MutableTestConfig) => { config.media.video.resolutionSizes['480P'] = '480'; }],
     ['insecure marketplace origin', (config: MutableTestConfig) => { config.marketplace.skillHubApiOrigin = 'http://example.com'; }],
     ['non-positive marketplace timeout', (config: MutableTestConfig) => { config.marketplace.requestTimeoutMs = 0; }],
   ])('rejects %s', (_name, mutate) => {

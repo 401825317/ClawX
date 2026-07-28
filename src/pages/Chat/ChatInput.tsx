@@ -11,7 +11,6 @@ import * as DropdownMenuPrimitive from '@radix-ui/react-dropdown-menu';
 import { SendHorizontal, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, FolderOpen, Loader2, AtSign, Search, ChevronDown, ChevronRight, Check, Image as ImageIcon, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
-import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { hostApi } from '@/lib/host-api';
@@ -65,6 +64,7 @@ interface ChatInputProps {
   disabled?: boolean;
   sending?: boolean;
   imageGenerating?: boolean;
+  videoGenerating?: boolean;
   workspaceLabel?: string;
   workspacePath?: string;
   workspaceOptions?: ChatWorkspaceOption[];
@@ -80,7 +80,6 @@ const DEFAULT_IMAGE_OPTIONS: AcpImageGenerationOptions = {
   quality: 'medium',
 };
 const DEFAULT_VIDEO_OPTIONS: AcpVideoGenerationOptions = {
-  model: 'grok-image-video',
   aspectRatio: '16:9',
   resolution: '480P',
   durationSeconds: 6,
@@ -124,6 +123,147 @@ function formatImageQualityLabel(value: AcpImageGenerationOptions['quality'], t:
   if (value === 'low') return t('composer.imageQualityLow');
   if (value === 'high') return t('composer.imageQualityHigh');
   return t('composer.imageQualityMedium');
+}
+
+type ComposerChoiceOption = {
+  value: string;
+  label: string;
+  description?: string;
+  descriptionTestId?: string;
+  previewClassName?: string;
+  testId: string;
+};
+
+type ComposerChoiceGroup = {
+  label: string;
+  value: string;
+  options: readonly ComposerChoiceOption[];
+  onValueChange: (value: string) => void;
+  rowTestId: string;
+  menuTestId: string;
+};
+
+/** Groups generation parameters behind one compact trigger with hover submenus. */
+function ComposerGenerationOptionsMenu({
+  triggerLabel,
+  triggerTestId,
+  menuTestId,
+  ariaLabel,
+  disabled,
+  groups,
+  open,
+  onOpenChange,
+  onOpen,
+}: {
+  triggerLabel: string;
+  triggerTestId: string;
+  menuTestId: string;
+  ariaLabel: string;
+  disabled: boolean;
+  groups: readonly ComposerChoiceGroup[];
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onOpen?: () => void;
+}) {
+  const handleOpenChange = (nextOpen: boolean) => {
+    onOpenChange(nextOpen);
+    if (nextOpen) onOpen?.();
+  };
+
+  return (
+    <DropdownMenu open={open} onOpenChange={handleOpenChange}>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className={cn(
+            'inline-flex h-8 shrink-0 items-center justify-center gap-1 rounded-lg px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-black/[0.07] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 dark:hover:bg-white/10',
+            open && 'bg-black/[0.07] text-foreground dark:bg-white/10',
+          )}
+          disabled={disabled}
+          data-testid={triggerTestId}
+          aria-label={ariaLabel}
+          title={triggerLabel}
+        >
+          <span className="whitespace-nowrap">{triggerLabel}</span>
+          <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform', open && 'rotate-180')} />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="start"
+        side="top"
+        sideOffset={4}
+        collisionPadding={12}
+        className="min-w-0 w-[min(144px,calc(100vw-24px))] rounded-lg border-black/10 p-1 shadow-md dark:border-white/10"
+        data-testid={menuTestId}
+      >
+        {groups.map((group) => (
+          <DropdownMenuPrimitive.Sub key={group.rowTestId}>
+            <DropdownMenuPrimitive.SubTrigger
+              data-testid={group.rowTestId}
+              className="flex h-8 w-full cursor-default select-none items-center gap-1.5 rounded-md px-2 text-left text-xs outline-none transition-colors data-[highlighted]:bg-black/5 data-[state=open]:bg-black/5 dark:data-[highlighted]:bg-white/[0.06] dark:data-[state=open]:bg-white/[0.06]"
+            >
+              <span className="min-w-0 flex-1 truncate font-medium text-foreground">{group.label}</span>
+              <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden="true" />
+            </DropdownMenuPrimitive.SubTrigger>
+            <DropdownMenuPrimitive.Portal>
+              <DropdownMenuPrimitive.SubContent
+                sideOffset={4}
+                collisionPadding={12}
+                className="z-50 w-max min-w-[132px] max-w-[calc(100vw-24px)] rounded-lg border border-black/10 bg-surface-modal p-1 text-popover-foreground shadow-md outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 dark:border-white/10"
+                data-testid={group.menuTestId}
+              >
+                <DropdownMenuPrimitive.RadioGroup value={group.value} onValueChange={group.onValueChange}>
+                  {group.options.map((option) => {
+                    const selected = option.value === group.value;
+                    return (
+                      <DropdownMenuPrimitive.RadioItem
+                        key={option.value}
+                        value={option.value}
+                        className={cn(
+                          'min-h-8 w-full cursor-default select-none rounded-md px-1.5 py-1 text-left text-xs text-foreground outline-none transition-colors data-[highlighted]:bg-black/5 data-[state=checked]:bg-black/5 dark:data-[highlighted]:bg-white/[0.06] dark:data-[state=checked]:bg-white/10',
+                          option.previewClassName
+                            ? 'grid grid-cols-[20px_28px_max-content] items-center gap-1.5'
+                            : 'flex min-w-[112px] items-center justify-between gap-2',
+                        )}
+                        data-testid={option.testId}
+                        title={option.description ? `${option.label} ${option.description}` : option.label}
+                      >
+                        {option.previewClassName && (
+                          <span className="flex h-5 w-5 items-center justify-center" aria-hidden="true">
+                            <span className={cn(
+                              'block rounded-[3px]',
+                              option.previewClassName,
+                              selected ? 'bg-foreground' : 'bg-muted-foreground/40',
+                            )} />
+                          </span>
+                        )}
+                        <span className={cn('whitespace-nowrap', option.previewClassName && 'font-medium')}>
+                          {option.label}
+                        </span>
+                        {option.description && (
+                          <span
+                            className="whitespace-nowrap text-muted-foreground"
+                            data-testid={option.descriptionTestId}
+                          >
+                            {option.description}
+                          </span>
+                        )}
+                        {!option.previewClassName && (
+                          <DropdownMenuPrimitive.ItemIndicator className="ml-auto flex shrink-0 items-center">
+                            <Check className="h-3 w-3 text-primary" aria-hidden="true" />
+                          </DropdownMenuPrimitive.ItemIndicator>
+                        )}
+                      </DropdownMenuPrimitive.RadioItem>
+                    );
+                  })}
+                </DropdownMenuPrimitive.RadioGroup>
+              </DropdownMenuPrimitive.SubContent>
+            </DropdownMenuPrimitive.Portal>
+          </DropdownMenuPrimitive.Sub>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
 }
 
 function getSkillPrefix(skillName: string): string {
@@ -264,6 +404,7 @@ export function ChatInput({
   disabled = false,
   sending = false,
   imageGenerating = false,
+  videoGenerating = false,
   workspaceLabel,
   workspacePath,
   workspaceOptions = [],
@@ -293,8 +434,6 @@ export function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
   const skillPickerRef = useRef<HTMLDivElement>(null);
-  const imageAspectPickerRef = useRef<HTMLDivElement>(null);
-  const videoAspectPickerRef = useRef<HTMLDivElement>(null);
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
   const modelChangeVersionRef = useRef(0);
   const mountedRef = useRef(true);
@@ -310,6 +449,12 @@ export function ChatInput({
   const handleSettingsPickerOpenChange = useCallback((open: boolean) => {
     setSettingsPickerOpen(open);
   }, []);
+  const prepareGenerationOptionPicker = useCallback(() => {
+    setPickerOpen(false);
+    setSkillPickerOpen(false);
+    closeSettingsPicker();
+    setWorkspaceMenuOpen(false);
+  }, [closeSettingsPicker]);
   const gatewayStatus = useGatewayStore((s) => s.status);
   const agents = useAgentsStore((s) => s.agents);
   const defaultModelRef = useAgentsStore((s) => s.defaultModelRef);
@@ -390,45 +535,45 @@ export function ChatInput({
     )).length,
     [attachments],
   );
+  const activeVideoModel = useMemo(() => {
+    const requiredMode = readyImageAttachmentCount === 1 ? 'image-to-video' : 'text-to-video';
+    const preferredModelId = readyImageAttachmentCount === 1 ? 'grok-video-1.5' : 'grok-image-video';
+    return videoModelPolicy.models.find((model) => (
+      model.id === preferredModelId && model.modes.includes(requiredMode)
+    ))
+      ?? videoModelPolicy.models.find((model) => (
+        model.id === videoModelPolicy.defaultModel && model.modes.includes(requiredMode)
+      ))
+      ?? videoModelPolicy.models.find((model) => model.modes.includes(requiredMode))
+      ?? null;
+  }, [readyImageAttachmentCount, videoModelPolicy.defaultModel, videoModelPolicy.models]);
   const videoOptions = useMemo<AcpVideoGenerationOptions>(() => {
     const saved = sessionVideoOptions[currentSessionKey];
-    const defaultModel = videoModelPolicy.models.find((model) => model.id === videoModelPolicy.defaultModel)
-      ?? videoModelPolicy.models.find((model) => !model.requiresImage)
-      ?? videoModelPolicy.models[0];
-    const selectedModel = videoModelPolicy.models.find((model) => model.id === saved?.model);
-    const model = selectedModel && (!selectedModel.requiresImage || readyImageAttachmentCount === 1)
-      ? selectedModel
-      : defaultModel;
-    if (!model) return DEFAULT_VIDEO_OPTIONS;
+    if (!activeVideoModel) return DEFAULT_VIDEO_OPTIONS;
 
-    const aspectRatio = saved?.aspectRatio && model.aspectRatios.includes(saved.aspectRatio)
+    const aspectRatio = saved?.aspectRatio && activeVideoModel.aspectRatios.includes(saved.aspectRatio)
       ? saved.aspectRatio
-      : (model.aspectRatios.includes(videoModelPolicy.defaultAspectRatio)
+      : (activeVideoModel.aspectRatios.includes(videoModelPolicy.defaultAspectRatio)
         ? videoModelPolicy.defaultAspectRatio
-        : model.defaultAspectRatio);
-    const resolution = saved?.resolution && model.resolutions.includes(saved.resolution)
+        : activeVideoModel.defaultAspectRatio);
+    const resolution = saved?.resolution && activeVideoModel.resolutions.includes(saved.resolution)
       ? saved.resolution
-      : (model.resolutions.includes(videoModelPolicy.defaultResolution)
+      : (activeVideoModel.resolutions.includes(videoModelPolicy.defaultResolution)
         ? videoModelPolicy.defaultResolution
-        : model.defaultResolution);
-    const durationSeconds = saved?.durationSeconds && model.durations.includes(saved.durationSeconds)
+        : activeVideoModel.defaultResolution);
+    const durationSeconds = saved?.durationSeconds && activeVideoModel.durations.includes(saved.durationSeconds)
       ? saved.durationSeconds
-      : (model.durations.includes(videoModelPolicy.defaultDurationSeconds)
+      : (activeVideoModel.durations.includes(videoModelPolicy.defaultDurationSeconds)
         ? videoModelPolicy.defaultDurationSeconds
-        : model.defaultDurationSeconds);
+        : activeVideoModel.defaultDurationSeconds);
     return {
-      model: model.id as AcpVideoGenerationOptions['model'],
       aspectRatio,
       resolution,
       durationSeconds: isVideoDurationSeconds(durationSeconds)
         ? durationSeconds
         : DEFAULT_VIDEO_OPTIONS.durationSeconds,
     };
-  }, [currentSessionKey, readyImageAttachmentCount, sessionVideoOptions, videoModelPolicy]);
-  const selectedVideoModel = useMemo(
-    () => videoModelPolicy.models.find((model) => model.id === videoOptions.model) ?? null,
-    [videoModelPolicy.models, videoOptions.model],
-  );
+  }, [activeVideoModel, currentSessionKey, sessionVideoOptions, videoModelPolicy]);
   const currentAgentName = useMemo(
     () => currentAgent?.name ?? currentAgentId,
     [currentAgent, currentAgentId],
@@ -540,25 +685,19 @@ export function ChatInput({
   }, [agents, currentAgentId, targetAgentId]);
 
   useEffect(() => {
-    if (!pickerOpen && !skillPickerOpen && !imageAspectPickerOpen && !videoAspectPickerOpen && !workspaceMenuOpen) return;
+    if (!pickerOpen && !skillPickerOpen && !workspaceMenuOpen) return;
     const handlePointerDown = (event: MouseEvent) => {
       const target = event.target as Node;
       const insideAgentPicker = pickerRef.current?.contains(target);
       const insideSkillPicker = skillPickerRef.current?.contains(target);
-      const insideImageAspectPicker = imageAspectPickerRef.current?.contains(target);
-      const insideVideoAspectPicker = videoAspectPickerRef.current?.contains(target);
       const insideWorkspaceMenu = workspaceMenuRef.current?.contains(target);
       if (
         !insideAgentPicker
         && !insideSkillPicker
-        && !insideImageAspectPicker
-        && !insideVideoAspectPicker
         && !insideWorkspaceMenu
       ) {
         setPickerOpen(false);
         setSkillPickerOpen(false);
-        setImageAspectPickerOpen(false);
-        setVideoAspectPickerOpen(false);
         setWorkspaceMenuOpen(false);
       }
     };
@@ -566,7 +705,7 @@ export function ChatInput({
     return () => {
       document.removeEventListener('mousedown', handlePointerDown);
     };
-  }, [imageAspectPickerOpen, pickerOpen, skillPickerOpen, videoAspectPickerOpen, workspaceMenuOpen]);
+  }, [pickerOpen, skillPickerOpen, workspaceMenuOpen]);
 
   useEffect(() => {
     if (!pickerOpen && !skillPickerOpen && !settingsPickerOpen && !imageAspectPickerOpen && !videoAspectPickerOpen && !workspaceMenuOpen) return;
@@ -967,7 +1106,8 @@ export function ChatInput({
     && allReady
     && !inputDisabled
     && !sending
-    && !imageGenerating;
+    && !imageGenerating
+    && !videoGenerating;
   const canSend = canSendWithoutModelPersistence && !modelPersisting && !thinkingPersisting;
   const canStop = sending && !inputDisabled && !!onStop;
 
@@ -1003,6 +1143,13 @@ export function ChatInput({
       const readyAttachments = attachments.filter(a => a.status === 'ready');
       const textToSend = input.trim();
       const attachmentsToSend = readyAttachments.length > 0 ? readyAttachments : undefined;
+      if (
+        videoModeActive
+        && readyAttachments.filter((attachment) => attachment.mimeType.startsWith('image/')).length > 1
+      ) {
+        toast.error(t('composer.videoReferenceImageLimit'));
+        return;
+      }
 
       if (rendererExtensionRegistry.hasChatBeforeSendHooks()) {
         const guard = await rendererExtensionRegistry.runChatBeforeSend({
@@ -1274,6 +1421,27 @@ export function ChatInput({
           </div>
         )}
 
+        {!sending && !imageGenerating && videoGenerating && (
+          <div
+            data-testid="chat-composer-video-generation-indicator"
+            role="status"
+            aria-live="polite"
+            aria-label={t('videoGeneration.generating')}
+            className="mb-2 flex h-5 items-center gap-2 text-sm text-muted-foreground"
+          >
+            <span
+              data-testid="chat-composer-video-generation-dot-pulse"
+              aria-hidden="true"
+              className="clawx-chat-thinking-dot-pulse"
+            >
+              <span className="clawx-chat-thinking-dot-pulse-inner">
+                <span className="clawx-chat-thinking-dot-pulse-dot" />
+              </span>
+            </span>
+            <span>{t('videoGeneration.generating')}</span>
+          </div>
+        )}
+
         {/* Attachment Previews */}
         {attachments.length > 0 && (
           <div className="flex gap-2 mb-3 flex-wrap">
@@ -1354,6 +1522,7 @@ export function ChatInput({
               onClick={pickFiles}
               disabled={inputDisabled || sending}
               title={t('composer.attachFiles')}
+              data-testid="chat-composer-attach"
             >
               <Paperclip className="h-3.5 w-3.5" />
             </Button>
@@ -1496,7 +1665,7 @@ export function ChatInput({
                   type="button"
                   data-testid="chat-settings-picker-button"
                   className={cn(
-                    'inline-flex h-8 min-w-0 max-w-[176px] shrink items-center gap-1.5 rounded-lg bg-black/[0.04] px-2.5 text-meta font-medium text-muted-foreground transition-colors hover:bg-black/[0.07] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 disabled:pointer-events-none disabled:opacity-50 dark:bg-white/[0.07] dark:hover:bg-white/10 sm:max-w-[280px]',
+                    'inline-flex h-8 min-w-0 max-w-[176px] shrink items-center gap-1.5 rounded-lg px-2.5 text-meta font-medium text-muted-foreground transition-colors hover:bg-black/[0.07] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 disabled:pointer-events-none disabled:opacity-50 dark:hover:bg-white/10 sm:max-w-[280px]',
                     settingsPickerOpen && 'bg-black/[0.07] text-foreground dark:bg-white/10',
                   )}
                   onClick={() => {
@@ -1673,247 +1842,130 @@ export function ChatInput({
 
             {imageModeActive && (
               <div className="flex shrink-0 items-center gap-1" data-testid="chat-image-options">
-                <div ref={imageAspectPickerRef} className="relative shrink-0">
-                  <button
-                    type="button"
-                    className={cn(
-                      'inline-flex h-8 min-w-[58px] items-center justify-center gap-1 rounded-lg bg-black/5 px-2 text-xs font-medium text-foreground transition-colors dark:bg-white/10',
-                      imageAspectPickerOpen
-                        ? 'bg-black/10 dark:bg-white/15'
-                        : 'hover:bg-black/10 dark:hover:bg-white/15',
-                    )}
-                    onClick={() => {
-                      setPickerOpen(false);
-                      setSkillPickerOpen(false);
-                      closeSettingsPicker();
-                      setVideoAspectPickerOpen(false);
-                      setWorkspaceMenuOpen(false);
-                      setImageAspectPickerOpen((open) => !open);
-                    }}
-                    disabled={inputDisabled || sending}
-                    data-testid="chat-image-aspect-trigger"
-                    aria-label={t('composer.imageSizeLabel')}
-                    aria-haspopup="menu"
-                    aria-expanded={imageAspectPickerOpen}
-                  >
-                    <span>{IMAGE_ASPECT_OPTIONS.find((option) => option.size === imageOptions.size)?.ratio ?? '1:1'}</span>
-                    <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform', imageAspectPickerOpen && 'rotate-180')} />
-                  </button>
-                  {imageAspectPickerOpen && (
-                    <div
-                      className="absolute bottom-full left-0 z-30 mb-2 w-[156px] rounded-lg border border-black/10 bg-surface-modal p-1 shadow-xl dark:border-white/10"
-                      data-testid="chat-image-aspect-menu"
-                      role="menu"
-                    >
-                      {IMAGE_ASPECT_OPTIONS.map((option) => {
-                        const selected = option.size === imageOptions.size;
-                        return (
-                          <button
-                            key={option.size}
-                            type="button"
-                            className={cn(
-                              'flex h-8 w-full items-center gap-1.5 rounded-md px-1.5 text-left text-xs transition-colors',
-                              selected
-                                ? 'bg-black/5 text-foreground dark:bg-white/10'
-                                : 'text-muted-foreground hover:bg-black/5 hover:text-foreground dark:hover:bg-white/5',
-                            )}
-                            onClick={() => {
-                              updateImageOptions({ size: option.size });
-                              setImageAspectPickerOpen(false);
-                              requestAnimationFrame(() => textareaRef.current?.focus());
-                            }}
-                            data-testid={option.testId}
-                            role="menuitemradio"
-                            aria-checked={selected}
-                          >
-                            <span className="flex h-5 w-5 shrink-0 items-center justify-center" aria-hidden="true">
-                              <span className={cn(
-                                'block rounded-[3px]',
-                                option.previewClassName,
-                                selected ? 'bg-foreground' : 'bg-muted-foreground/40',
-                              )} />
-                            </span>
-                            <span className="w-7 shrink-0 text-xs font-medium text-foreground">{option.ratio}</span>
-                            <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={t(option.labelKey)}>
-                              {t(option.labelKey)}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-                <div className="relative shrink-0">
-                  <Select
-                    value={imageOptions.quality}
-                    onChange={(event) => {
-                      const quality = event.target.value as AcpImageGenerationOptions['quality'];
-                      if (IMAGE_QUALITY_OPTIONS.includes(quality)) updateImageOptions({ quality });
-                    }}
-                    className="h-8 w-[88px] rounded-lg border-0 bg-black/5 px-2 pr-6 text-xs text-foreground [background-image:none] appearance-none hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15"
-                    data-testid="chat-image-quality"
-                    aria-label={t('composer.imageQualityLabel')}
-                  >
-                    {IMAGE_QUALITY_OPTIONS.map((quality) => (
-                      <option key={quality} value={quality}>
-                        {formatImageQualityLabel(quality, t)}
-                      </option>
-                    ))}
-                  </Select>
-                  <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                </div>
+                <ComposerChoiceMenu
+                  value={imageOptions.size}
+                  options={IMAGE_ASPECT_OPTIONS.map((option) => ({
+                    value: option.size,
+                    label: option.ratio,
+                    description: t(option.labelKey),
+                    previewClassName: option.previewClassName,
+                    testId: option.testId,
+                  }))}
+                  onValueChange={(size) => {
+                    const option = IMAGE_ASPECT_OPTIONS.find((entry) => entry.size === size);
+                    if (option) updateImageOptions({ size: option.size });
+                    requestAnimationFrame(() => textareaRef.current?.focus());
+                  }}
+                  triggerLabel={IMAGE_ASPECT_OPTIONS.find((option) => option.size === imageOptions.size)?.ratio ?? '1:1'}
+                  triggerTestId="chat-image-aspect-trigger"
+                  menuTestId="chat-image-aspect-menu"
+                  ariaLabel={t('composer.imageSizeLabel')}
+                  disabled={inputDisabled || sending}
+                  triggerClassName="min-w-[58px]"
+                  open={imageAspectPickerOpen}
+                  onOpenChange={setImageAspectPickerOpen}
+                  onOpen={prepareGenerationOptionPicker}
+                />
+                <ComposerChoiceMenu
+                  value={imageOptions.quality}
+                  options={IMAGE_QUALITY_OPTIONS.map((quality) => ({
+                    value: quality,
+                    label: formatImageQualityLabel(quality, t),
+                    testId: `chat-image-quality-option-${quality}`,
+                  }))}
+                  onValueChange={(quality) => {
+                    const nextQuality = quality as AcpImageGenerationOptions['quality'];
+                    if (IMAGE_QUALITY_OPTIONS.includes(nextQuality)) updateImageOptions({ quality: nextQuality });
+                    requestAnimationFrame(() => textareaRef.current?.focus());
+                  }}
+                  triggerLabel={formatImageQualityLabel(imageOptions.quality, t)}
+                  triggerTestId="chat-image-quality"
+                  menuTestId="chat-image-quality-menu"
+                  ariaLabel={t('composer.imageQualityLabel')}
+                  disabled={inputDisabled || sending}
+                  triggerClassName="w-[76px]"
+                  onOpen={prepareGenerationOptionPicker}
+                />
               </div>
             )}
 
             {videoModeActive && (
               <div className="flex min-w-0 shrink-0 items-center gap-1" data-testid="chat-video-options">
-                <div className="relative shrink-0">
-                  <Select
-                    value={videoOptions.model}
-                    onChange={(event) => {
-                      const model = videoModelPolicy.models.find((entry) => entry.id === event.target.value);
-                      if (!model || (model.requiresImage && readyImageAttachmentCount !== 1)) return;
-                      updateVideoOptions({
-                        model: model.id as AcpVideoGenerationOptions['model'],
-                        aspectRatio: model.defaultAspectRatio,
-                        resolution: model.defaultResolution,
-                        durationSeconds: isVideoDurationSeconds(model.defaultDurationSeconds)
-                          ? model.defaultDurationSeconds
-                          : DEFAULT_VIDEO_OPTIONS.durationSeconds,
-                      });
-                    }}
-                    className="h-8 w-[96px] rounded-lg border-0 bg-black/5 px-2 pr-6 text-xs text-foreground [background-image:none] appearance-none hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15"
-                    data-testid="chat-video-model"
-                    aria-label={t('composer.videoModelLabel')}
-                  >
-                    {videoModelPolicy.models.map((model) => (
-                      <option
-                        key={model.id}
-                        value={model.id}
-                        disabled={model.requiresImage && readyImageAttachmentCount !== 1}
-                      >
-                        {model.label || model.id}
-                      </option>
-                    ))}
-                  </Select>
-                  <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                </div>
-
-                <div ref={videoAspectPickerRef} className="relative shrink-0">
-                  <button
-                    type="button"
-                    className={cn(
-                      'inline-flex h-8 min-w-[58px] items-center justify-center gap-1 rounded-lg bg-black/5 px-2 text-xs font-medium text-foreground transition-colors dark:bg-white/10',
-                      videoAspectPickerOpen
-                        ? 'bg-black/10 dark:bg-white/15'
-                        : 'hover:bg-black/10 dark:hover:bg-white/15',
-                    )}
-                    onClick={() => {
-                      setPickerOpen(false);
-                      setSkillPickerOpen(false);
-                      closeSettingsPicker();
-                      setImageAspectPickerOpen(false);
-                      setWorkspaceMenuOpen(false);
-                      setVideoAspectPickerOpen((open) => !open);
-                    }}
-                    disabled={inputDisabled || sending}
-                    data-testid="chat-video-aspect-trigger"
-                    aria-label={t('composer.videoAspectRatioLabel')}
-                    aria-haspopup="menu"
-                    aria-expanded={videoAspectPickerOpen}
-                  >
-                    <span>{videoOptions.aspectRatio}</span>
-                    <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform', videoAspectPickerOpen && 'rotate-180')} />
-                  </button>
-                  {videoAspectPickerOpen && (
-                    <div
-                      className="absolute bottom-full left-0 z-30 mb-2 w-[156px] rounded-lg border border-black/10 bg-surface-modal p-1 shadow-xl dark:border-white/10"
-                      data-testid="chat-video-aspect-menu"
-                      role="menu"
-                    >
-                      {ASPECT_RATIO_OPTIONS.filter((option) => (
-                        selectedVideoModel?.aspectRatios.includes(option.ratio) ?? false
-                      )).map((option) => {
-                        const selected = option.ratio === videoOptions.aspectRatio;
-                        return (
-                          <button
-                            key={option.ratio}
-                            type="button"
-                            className={cn(
-                              'flex h-8 w-full items-center gap-1.5 rounded-md px-1.5 text-left text-xs transition-colors',
-                              selected
-                                ? 'bg-black/5 text-foreground dark:bg-white/10'
-                                : 'text-muted-foreground hover:bg-black/5 hover:text-foreground dark:hover:bg-white/5',
-                            )}
-                            onClick={() => {
-                              updateVideoOptions({
-                                aspectRatio: option.ratio as AcpVideoGenerationOptions['aspectRatio'],
-                              });
-                              setVideoAspectPickerOpen(false);
-                              requestAnimationFrame(() => textareaRef.current?.focus());
-                            }}
-                            data-testid={`chat-video-aspect-${option.ratio.replace(':', '-')}`}
-                            role="menuitemradio"
-                            aria-checked={selected}
-                          >
-                            <span className="flex h-5 w-5 shrink-0 items-center justify-center" aria-hidden="true">
-                              <span className={cn(
-                                'block rounded-[3px]',
-                                option.previewClassName,
-                                selected ? 'bg-foreground' : 'bg-muted-foreground/40',
-                              )} />
-                            </span>
-                            <span className="w-7 shrink-0 text-xs font-medium text-foreground">{option.ratio}</span>
-                            <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={t(option.labelKey)}>
-                              {t(option.labelKey)}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-
-                <div className="relative shrink-0">
-                  <Select
-                    value={videoOptions.resolution}
-                    onChange={(event) => {
-                      const resolution = event.target.value as AcpVideoGenerationOptions['resolution'];
-                      if (selectedVideoModel?.resolutions.includes(resolution)) updateVideoOptions({ resolution });
-                    }}
-                    className="h-8 w-[62px] rounded-lg border-0 bg-black/5 px-2 pr-6 text-xs text-foreground [background-image:none] appearance-none hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15"
-                    data-testid="chat-video-resolution"
-                    aria-label={t('composer.videoResolutionLabel')}
-                  >
-                    {selectedVideoModel?.resolutions.map((resolution) => (
-                      <option key={resolution} value={resolution}>{resolution}</option>
-                    ))}
-                  </Select>
-                  <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                </div>
-
-                <div className="relative shrink-0">
-                  <Select
-                    value={String(videoOptions.durationSeconds)}
-                    onChange={(event) => {
-                      const durationSeconds = Number(event.target.value);
-                      if (
-                        isVideoDurationSeconds(durationSeconds)
-                        && selectedVideoModel?.durations.includes(durationSeconds)
-                      ) {
-                        updateVideoOptions({ durationSeconds });
-                      }
-                    }}
-                    className="h-8 w-[60px] rounded-lg border-0 bg-black/5 px-2 pr-6 text-xs text-foreground [background-image:none] appearance-none hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15"
-                    data-testid="chat-video-duration"
-                    aria-label={t('composer.videoDurationLabel')}
-                  >
-                    {selectedVideoModel?.durations.map((durationSeconds) => (
-                      <option key={durationSeconds} value={durationSeconds}>{durationSeconds}s</option>
-                    ))}
-                  </Select>
-                  <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                </div>
+                <ComposerChoiceMenu
+                  value={videoOptions.aspectRatio}
+                  options={ASPECT_RATIO_OPTIONS.filter((option) => (
+                    activeVideoModel?.aspectRatios.includes(option.ratio) ?? false
+                  )).map((option) => ({
+                    value: option.ratio,
+                    label: option.ratio,
+                    description: t(option.labelKey),
+                    previewClassName: option.previewClassName,
+                    testId: `chat-video-aspect-${option.ratio.replace(':', '-')}`,
+                  }))}
+                  onValueChange={(aspectRatio) => {
+                    const nextAspectRatio = aspectRatio as AcpVideoGenerationOptions['aspectRatio'];
+                    if (activeVideoModel?.aspectRatios.includes(nextAspectRatio)) {
+                      updateVideoOptions({ aspectRatio: nextAspectRatio });
+                    }
+                    requestAnimationFrame(() => textareaRef.current?.focus());
+                  }}
+                  triggerLabel={videoOptions.aspectRatio}
+                  triggerTestId="chat-video-aspect-trigger"
+                  menuTestId="chat-video-aspect-menu"
+                  ariaLabel={t('composer.videoAspectRatioLabel')}
+                  disabled={inputDisabled || sending}
+                  triggerClassName="min-w-[58px]"
+                  open={videoAspectPickerOpen}
+                  onOpenChange={setVideoAspectPickerOpen}
+                  onOpen={prepareGenerationOptionPicker}
+                />
+                <ComposerChoiceMenu
+                  value={videoOptions.resolution}
+                  options={(activeVideoModel?.resolutions ?? []).map((resolution) => ({
+                    value: resolution,
+                    label: resolution,
+                    testId: `chat-video-resolution-option-${resolution.toLowerCase()}`,
+                  }))}
+                  onValueChange={(resolution) => {
+                    const nextResolution = resolution as AcpVideoGenerationOptions['resolution'];
+                    if (activeVideoModel?.resolutions.includes(nextResolution)) {
+                      updateVideoOptions({ resolution: nextResolution });
+                    }
+                    requestAnimationFrame(() => textareaRef.current?.focus());
+                  }}
+                  triggerLabel={videoOptions.resolution}
+                  triggerTestId="chat-video-resolution"
+                  menuTestId="chat-video-resolution-menu"
+                  ariaLabel={t('composer.videoResolutionLabel')}
+                  disabled={inputDisabled || sending}
+                  triggerClassName="w-[68px]"
+                  onOpen={prepareGenerationOptionPicker}
+                />
+                <ComposerChoiceMenu
+                  value={String(videoOptions.durationSeconds)}
+                  options={(activeVideoModel?.durations ?? []).map((durationSeconds) => ({
+                    value: String(durationSeconds),
+                    label: `${durationSeconds}s`,
+                    testId: `chat-video-duration-option-${durationSeconds}`,
+                  }))}
+                  onValueChange={(duration) => {
+                    const durationSeconds = Number(duration);
+                    if (
+                      isVideoDurationSeconds(durationSeconds)
+                      && activeVideoModel?.durations.includes(durationSeconds)
+                    ) {
+                      updateVideoOptions({ durationSeconds });
+                    }
+                    requestAnimationFrame(() => textareaRef.current?.focus());
+                  }}
+                  triggerLabel={`${videoOptions.durationSeconds}s`}
+                  triggerTestId="chat-video-duration"
+                  menuTestId="chat-video-duration-menu"
+                  ariaLabel={t('composer.videoDurationLabel')}
+                  disabled={inputDisabled || sending}
+                  triggerClassName="w-[58px]"
+                  onOpen={prepareGenerationOptionPicker}
+                />
               </div>
             )}
             </div>

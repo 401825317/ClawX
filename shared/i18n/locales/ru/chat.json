@@ -73,6 +73,9 @@
         "imageLoading": "Загрузка изображения",
         "imagePreviewFailed": "Не удалось загрузить полноразмерное изображение",
         "imagePreviewDescription": "Полноразмерный просмотр созданного изображения",
+        "video": "Видео",
+        "videoLoading": "Загрузка локального видео",
+        "videoLoadFailed": "Не удалось загрузить локальное видео",
         "copy": "Копировать ответ",
         "copied": "Скопировано",
         "turnDuration": "Заняло {{duration}}",
@@ -288,6 +291,9 @@
         "generatedReady": "Сгенерированное изображение готово.",
         "generatedReadyWithMissing": "Сгенерированное изображение готово, но некоторые изображения не удалось загрузить."
     },
+    "videoGeneration": {
+        "generating": "Видео создаётся, подождите…"
+    },
     "composer": {
         "attachFiles": "Прикрепить файлы",
         "pickSkill": "Выбрать Skill",
@@ -316,7 +322,7 @@
         "imageMode": "Режим изображения",
         "imageModeActive": "Режим изображения включен",
         "videoMode": "Режим видео",
-        "videoModelLabel": "Модель видео",
+        "videoReferenceImageLimit": "Для генерации видео доступно только одно референсное изображение",
         "videoAspectRatioLabel": "Соотношение сторон видео",
         "videoResolutionLabel": "Разрешение видео",
         "videoDurationLabel": "Длительность видео",

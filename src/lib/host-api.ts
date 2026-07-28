@@ -8,6 +8,7 @@ import type {
   ChannelSaveConfigPayload,
   ChannelTargetsPayload,
   ChatSendWithMediaPayload,
+  ReleaseAttachmentPlaybackPayload,
   ClawHubSearchPayload,
   CronSessionHistoryPayload,
   DialogMessagePayload,
@@ -79,6 +80,7 @@ export type {
   AttachmentRemoteRef,
   AttachmentReadError,
   AttachmentSourceRef,
+  CreateAttachmentPlaybackResult,
   ChannelAccountsResult,
   ChannelCredentialValidationResult,
   ChannelFormValuesResult,
@@ -384,6 +386,12 @@ export const hostApi = {
     readAttachmentText: (ref: AttachmentFileRef) => invokeHost('files', 'readAttachmentText', ref),
     readAttachmentBinary: (input: ReadAttachmentBinaryPayload) => (
       invokeHost('files', 'readAttachmentBinary', input)
+    ),
+    createAttachmentPlayback: (ref: AttachmentFileRef) => (
+      invokeHost('files', 'createAttachmentPlayback', ref)
+    ),
+    releaseAttachmentPlayback: (input: ReleaseAttachmentPlaybackPayload) => (
+      invokeHost('files', 'releaseAttachmentPlayback', input)
     ),
     openAttachment: (ref: AttachmentSourceRef) => invokeHost('files', 'openAttachment', ref),
     listAttachmentOpenHandlers: (ref: AttachmentFileRef) => (

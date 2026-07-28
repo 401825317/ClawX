@@ -467,6 +467,8 @@ describe('hostApi facade', () => {
     await hostApi.files.resolveAttachment(resolvePayload);
     await hostApi.files.readAttachmentText(ref);
     await hostApi.files.readAttachmentBinary({ ref, maxBytes: 2048 });
+    await hostApi.files.createAttachmentPlayback(ref);
+    await hostApi.files.releaseAttachmentPlayback({ streamId: 'stream-1' });
     await hostApi.files.openAttachment(ref);
     await hostApi.files.listAttachmentOpenHandlers(ref);
     await hostApi.files.openAttachmentWith({ ref, handlerId: 'com.apple.Preview' });
@@ -476,6 +478,8 @@ describe('hostApi facade', () => {
       ['resolveAttachment', resolvePayload],
       ['readAttachmentText', ref],
       ['readAttachmentBinary', { ref, maxBytes: 2048 }],
+      ['createAttachmentPlayback', ref],
+      ['releaseAttachmentPlayback', { streamId: 'stream-1' }],
       ['openAttachment', ref],
       ['listAttachmentOpenHandlers', ref],
       ['openAttachmentWith', { ref, handlerId: 'com.apple.Preview' }],

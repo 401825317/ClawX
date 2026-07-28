@@ -16,6 +16,8 @@ import {
   win32,
 } from 'node:path';
 import type {
+  AttachmentFileRef,
+  CreateAttachmentPlaybackResult,
   FilePreviewError,
   FilePreviewTreeNode,
   FilePreviewTreeOptions,
@@ -138,6 +140,10 @@ type WorkspaceFs = {
 type FilesApiDependencies = {
   workspaceFs?: WorkspaceFs;
   attachmentAccess?: AttachmentAccess;
+  attachmentPlayback?: {
+    create: (ref: AttachmentFileRef) => Promise<CreateAttachmentPlaybackResult>;
+    release: (streamId: string) => boolean;
+  };
   openWith?: AttachmentOpenWithService;
   stagedAttachments?: StagedAttachmentRegistry;
   stagingHooks?: {
@@ -824,6 +830,13 @@ export function createFilesApi(dependencies: FilesApiDependencies = {}): Complet
       ok: false,
       error: 'operationFailed',
     },
+    createAttachmentPlayback: async (ref) => dependencies.attachmentPlayback?.create(ref) ?? {
+      ok: false,
+      error: 'operationFailed',
+    },
+    releaseAttachmentPlayback: async (payload) => ({
+      success: dependencies.attachmentPlayback?.release(payload?.streamId) ?? false,
+    }),
     openAttachment: async (ref) => dependencies.attachmentAccess?.openAttachment(ref) ?? {
       ok: false,
       error: 'operationFailed',

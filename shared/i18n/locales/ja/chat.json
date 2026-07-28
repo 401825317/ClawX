@@ -73,6 +73,9 @@
         "imageLoading": "画像を読み込み中",
         "imagePreviewFailed": "フルサイズ画像を読み込めませんでした",
         "imagePreviewDescription": "生成画像のフルサイズプレビュー",
+        "video": "ビデオ",
+        "videoLoading": "ローカル動画を読み込み中",
+        "videoLoadFailed": "ローカル動画を読み込めません",
         "copy": "返信をコピー",
         "copied": "コピーしました",
         "turnDuration": "所要時間 {{duration}}",
@@ -288,6 +291,9 @@
         "generatedReady": "生成された画像の準備ができました。",
         "generatedReadyWithMissing": "生成された画像の準備ができましたが、一部の画像を読み込めませんでした。"
     },
+    "videoGeneration": {
+        "generating": "動画を生成しています。しばらくお待ちください…"
+    },
     "composer": {
         "attachFiles": "ファイルを添付",
         "pickSkill": "Skill を選択",
@@ -316,7 +322,7 @@
         "imageMode": "画像モード",
         "imageModeActive": "画像モードを有効にしました",
         "videoMode": "動画モード",
-        "videoModelLabel": "動画モデル",
+        "videoReferenceImageLimit": "動画生成で指定できる参照画像は1枚です",
         "videoAspectRatioLabel": "動画のアスペクト比",
         "videoResolutionLabel": "動画の解像度",
         "videoDurationLabel": "動画の長さ",

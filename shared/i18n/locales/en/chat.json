@@ -73,6 +73,9 @@
         "imageLoading": "Loading image",
         "imagePreviewFailed": "Unable to load the full-size image",
         "imagePreviewDescription": "Full-size preview of the generated image",
+        "video": "Video",
+        "videoLoading": "Loading local video",
+        "videoLoadFailed": "Unable to load the local video",
         "copy": "Copy response",
         "copied": "Copied",
         "turnDuration": "Took {{duration}}",
@@ -288,6 +291,9 @@
         "generatedReady": "Generated image is ready.",
         "generatedReadyWithMissing": "Generated image is ready. Some images could not be loaded."
     },
+    "videoGeneration": {
+        "generating": "Generating video, please wait…"
+    },
     "composer": {
         "attachFiles": "Attach files",
         "pickSkill": "Choose skill",
@@ -316,7 +322,7 @@
         "imageMode": "Image mode",
         "imageModeActive": "Image mode enabled",
         "videoMode": "Video mode",
-        "videoModelLabel": "Video model",
+        "videoReferenceImageLimit": "Video generation supports one reference image at a time",
         "videoAspectRatioLabel": "Video aspect ratio",
         "videoResolutionLabel": "Video resolution",
         "videoDurationLabel": "Video duration",

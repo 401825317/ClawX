@@ -55,6 +55,7 @@ describe('attachment access boundary', () => {
     await Promise.all([
       writeFile(join(workspaceRoot, 'notes.txt'), 'workspace notes'),
       writeFile(join(workspaceRoot, 'binary.bin'), Buffer.from([1, 2, 3])),
+      writeFile(join(workspaceRoot, 'clip.mp4'), Buffer.from('video-bytes')),
       writeFile(join(stateDir, 'media', 'state.png'), 'state image'),
       writeFile(join(configDir, 'media', 'config.png'), 'config image'),
       writeFile(join(externalMediaRoot, 'runtime.png'), 'runtime image'),
@@ -391,6 +392,29 @@ describe('attachment access boundary', () => {
       .resolves.toMatchObject({ ok: true, data: new Uint8Array([1, 2, 3]), size: 3 });
     await expect(access.readAttachmentBinary({ ref: ref(join(workspaceRoot, 'binary.bin')), maxBytes: 2 }))
       .resolves.toMatchObject({ ok: false, error: 'tooLarge', size: 3 });
+  });
+
+  it('opens only an authorized local video as a Main-owned read handle', async () => {
+    const access = getAccess();
+    const videoRef = ref(join(workspaceRoot, 'clip.mp4'));
+
+    await expect(access.resolveAttachment({ ref: videoRef })).resolves.toMatchObject({
+      ok: true,
+      mimeType: 'video/mp4',
+      size: 11,
+    });
+    const opened = await access.openVideoReadHandle(videoRef);
+    try {
+      expect(opened).toMatchObject({ mimeType: 'video/mp4', size: 11 });
+      await expect(opened.handle.readFile()).resolves.toEqual(Buffer.from('video-bytes'));
+    } finally {
+      await opened.handle.close();
+    }
+
+    await expect(access.openVideoReadHandle(ref(join(workspaceRoot, 'notes.txt'))))
+      .rejects.toThrow('invalidReference');
+    await expect(access.openVideoReadHandle(ref('https://example.com/video.mp4')))
+      .rejects.toThrow('invalidReference');
   });
 
   it('delegates validated local and remote opens to the correct shell operation', async () => {

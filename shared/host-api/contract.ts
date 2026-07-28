@@ -539,6 +539,17 @@ export type ReadAttachmentBinaryPayload = { ref: AttachmentFileRef; maxBytes?: n
 export type ReadAttachmentBinaryResult =
   | { ok: true; data: Uint8Array; mimeType: string; size: number; readOnly: true }
   | { ok: false; error: AttachmentReadError; size?: number };
+export type AttachmentPlaybackError = AttachmentAccessError | 'unsupportedMedia';
+export type CreateAttachmentPlaybackResult =
+  | {
+      ok: true;
+      streamId: string;
+      url: string;
+      mimeType: string;
+      size: number;
+    }
+  | { ok: false; error: AttachmentPlaybackError };
+export type ReleaseAttachmentPlaybackPayload = { streamId: string };
 export type OpenAttachmentResult =
   | { ok: true }
   | { ok: false; error: AttachmentAccessError };
@@ -1078,6 +1089,8 @@ export type HostApiContract = {
     resolveAttachment: (payload: ResolveAttachmentPayload) => ResolveAttachmentResult;
     readAttachmentText: (ref: AttachmentFileRef) => ReadAttachmentTextResult;
     readAttachmentBinary: (payload: ReadAttachmentBinaryPayload) => ReadAttachmentBinaryResult;
+    createAttachmentPlayback: (ref: AttachmentFileRef) => CreateAttachmentPlaybackResult;
+    releaseAttachmentPlayback: (payload: ReleaseAttachmentPlaybackPayload) => HostSuccess;
     openAttachment: (ref: AttachmentSourceRef) => OpenAttachmentResult;
     listAttachmentOpenHandlers: (ref: AttachmentFileRef) => Promise<AttachmentOpenHandlersResult>;
     openAttachmentWith: (payload: OpenAttachmentWithPayload) => Promise<OpenAttachmentResult>;

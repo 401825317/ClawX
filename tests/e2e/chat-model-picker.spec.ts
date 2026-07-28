@@ -328,7 +328,11 @@ test.describe('ClawX chat model picker', () => {
       });
 
       await expect(page.getByTestId('chat-settings-model-summary')).toContainText('Smart routing');
-      await page.getByTestId('chat-settings-picker-button').click();
+      const settingsPickerButton = page.getByTestId('chat-settings-picker-button');
+      await expect(settingsPickerButton).toHaveAttribute('aria-expanded', 'false');
+      await expect(settingsPickerButton).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+      await settingsPickerButton.click();
+      await expect(settingsPickerButton).toHaveAttribute('aria-expanded', 'true');
       await page.getByTestId('chat-settings-model-row').hover();
       await expect(page.getByTestId('chat-model-picker-menu')).toBeVisible();
       await expect(page.getByTestId('chat-settings-picker-menu')).toBeVisible();

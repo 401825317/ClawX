@@ -21,6 +21,7 @@ touchedAreas:
   - tests/unit/acp-chat-store.test.ts
   - tests/unit/chat-acp-page.test.tsx
   - tests/unit/chat-input.test.tsx
+  - tests/e2e/chat-acp-attachments.spec.ts
   - tests/e2e/chat-run-state-events.spec.ts
   - shared/i18n/locales/en/chat.json
   - shared/i18n/locales/zh/chat.json
@@ -53,6 +54,7 @@ requiredRules:
 requiredTests:
   - pnpm exec vitest run tests/unit/acp-image-generation-compat.test.ts tests/unit/acp-reducer.test.ts tests/unit/acp-chat-store.test.ts
   - pnpm exec playwright test tests/e2e/chat-run-state-events.spec.ts -g "projects OpenClaw image-generation"
+  - pnpm exec playwright test tests/e2e/chat-acp-attachments.spec.ts -g "keeps one live image reply when transcript media arrives before streamed ACP text"
   - pnpm run typecheck
   - pnpm run comms:replay
   - pnpm run comms:compare
@@ -61,7 +63,7 @@ acceptance:
   - ClawX accepts only trusted ACP or Gateway completion evidence that matches the active ACP session and recent image-generation context.
   - Internal-UI sourceReply text is authoritative for both successful media replies and text-only failure replies.
   - ClawX hydrates previews through hostApi.media.thumbnails before rendering images.
-  - Duplicate completion records do not create duplicate assistant image replies.
+  - Duplicate completion records and either live arrival order (native ACP reply first or transcript media supplement first) produce one assistant image reply before and after conversation reload.
   - Live background image generation shows its dedicated generating label until its success or failure completion is projected, without changing the existing sending/thinking behavior.
   - Switching conversations preserves each live image-generation pending state and restores its indicator on return.
   - Completion evidence received while the image conversation is inactive is deferred to that conversation, and a second prompt cannot be sent until the image task settles.

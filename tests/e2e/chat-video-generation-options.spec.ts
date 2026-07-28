@@ -1,6 +1,8 @@
 import type { ElectronApplication } from '@playwright/test';
 import { closeElectronApp, expect, getStableWindow, test } from './fixtures/electron';
 
+const VIDEO_GENERATION_TASK_ID = '27c3d85f-0d5e-4bf5-b5d3-c8316db9ddde';
+
 const VIDEO_POLICY = {
   defaultModel: 'grok-image-video',
   defaultAspectRatio: '16:9',
@@ -10,7 +12,7 @@ const VIDEO_POLICY = {
     {
       id: 'grok-image-video',
       label: 'Grok Video',
-      modes: ['text-to-video', 'image-to-video'],
+      modes: ['text-to-video'],
       aspectRatios: ['2:3', '3:2', '1:1', '9:16', '16:9'],
       resolutions: ['480P', '720P'],
       durations: [6, 10, 15],
@@ -130,6 +132,31 @@ async function installVideoComposerMocks(app: ElectronApplication): Promise<void
   }, VIDEO_POLICY);
 }
 
+async function emitAcpSessionUpdate(app: ElectronApplication, update: Record<string, unknown>): Promise<void> {
+  await app.evaluate(async ({ app: _app }, payload) => {
+    const { BrowserWindow } = process.mainModule!.require('electron') as typeof import('electron');
+    for (const window of BrowserWindow.getAllWindows()) {
+      window.webContents.send('chat:acp-session-update', {
+        sessionKey: 'agent:main:main',
+        generation: 1,
+        notification: {
+          sessionId: 'agent:main:main',
+          update: payload,
+        },
+      });
+    }
+  }, update);
+}
+
+async function emitChatRuntimeEvent(app: ElectronApplication, event: Record<string, unknown>): Promise<void> {
+  await app.evaluate(async ({ app: _app }, payload) => {
+    const { BrowserWindow } = process.mainModule!.require('electron') as typeof import('electron');
+    for (const window of BrowserWindow.getAllWindows()) {
+      window.webContents.send('chat:runtime-event', payload);
+    }
+  }, event);
+}
+
 test.describe('ClawX video generation options', () => {
   test('shows the five managed Grok aspect ratios in a compact picker', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
@@ -153,12 +180,14 @@ test.describe('ClawX video generation options', () => {
       await expect(videoMode).toBeEnabled();
       await videoMode.click();
 
-      await expect(page.getByTestId('chat-video-model')).toHaveValue('grok-image-video');
-      await expect(page.getByTestId('chat-video-aspect-trigger')).toHaveText('16:9');
-      await expect(page.getByTestId('chat-video-resolution')).toHaveValue('480P');
-      await expect(page.getByTestId('chat-video-duration')).toHaveValue('6');
+      await expect(page.getByTestId('chat-video-model')).toHaveCount(0);
+      const optionsTrigger = page.getByTestId('chat-video-options-trigger');
+      await expect(optionsTrigger).toContainText('16:9');
+      await expect(optionsTrigger).toContainText('480P');
+      await expect(optionsTrigger).toContainText('6s');
 
-      await page.getByTestId('chat-video-aspect-trigger').click();
+      await optionsTrigger.click();
+      await page.getByTestId('chat-video-aspect-row').hover();
       const menu = page.getByTestId('chat-video-aspect-menu');
       const options = menu.getByRole('menuitemradio');
       await expect(menu).toBeVisible();
@@ -170,16 +199,83 @@ test.describe('ClawX video generation options', () => {
       await expect(options.nth(4)).toHaveText(/16:9\s*宽屏/);
 
       const [menuBox, optionBox] = await Promise.all([menu.boundingBox(), options.first().boundingBox()]);
-      expect(menuBox?.width).toBeLessThanOrEqual(164);
+      expect(menuBox?.width).toBeGreaterThanOrEqual(128);
+      expect(menuBox?.width).toBeLessThanOrEqual(176);
       expect(optionBox?.height).toBeLessThanOrEqual(34);
       await expect(options.first()).toHaveCSS('font-size', '12px');
+      await expect(page.getByTestId('chat-video-aspect-1-1-description')).toHaveText('正方形');
+      expect(await page.getByTestId('chat-video-aspect-1-1-description').evaluate((element) => (
+        element.scrollWidth <= element.clientWidth
+      ))).toBe(true);
 
       await page.getByTestId('chat-video-aspect-2-3').click();
-      await expect(page.getByTestId('chat-video-aspect-trigger')).toHaveText('2:3');
-      await page.getByTestId('chat-video-resolution').selectOption('720P');
-      await page.getByTestId('chat-video-duration').selectOption('15');
-      await expect(page.getByTestId('chat-video-resolution')).toHaveValue('720P');
-      await expect(page.getByTestId('chat-video-duration')).toHaveValue('15');
+      await expect(optionsTrigger).toContainText('2:3');
+      await optionsTrigger.click();
+      await page.getByTestId('chat-video-resolution-row').hover();
+      await page.getByTestId('chat-video-resolution-option-720p').click();
+      await optionsTrigger.click();
+      await page.getByTestId('chat-video-duration-row').hover();
+      await page.getByTestId('chat-video-duration-option-15').click();
+      await expect(optionsTrigger).toContainText('720P');
+      await expect(optionsTrigger).toContainText('15s');
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('blocks another send while an asynchronous video task is running', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installVideoComposerMocks(app);
+      const page = await getStableWindow(app);
+      const rendererErrors: string[] = [];
+      page.on('console', (message) => {
+        if (message.type() === 'error') rendererErrors.push(message.text());
+      });
+      page.on('pageerror', (error) => rendererErrors.push(error.message));
+      await page.reload();
+      await expect(page.getByTestId('main-layout')).toBeVisible();
+
+      await emitAcpSessionUpdate(app, {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'video-tool',
+        status: 'completed',
+        content: [{
+          type: 'content',
+          content: {
+            type: 'text',
+            text: `Background task started for video generation (${VIDEO_GENERATION_TASK_ID}).`,
+          },
+        }],
+      });
+
+      const indicator = page.getByTestId('chat-composer-video-generation-indicator');
+      await expect(indicator).toBeVisible();
+      await expect(indicator).toContainText('视频生成中，请稍候');
+      await expect(page.getByTestId('chat-composer-image-generation-indicator')).toHaveCount(0);
+
+      const input = page.getByTestId('chat-composer-input');
+      await input.fill('视频完成后发送这条消息');
+      await expect(input).toHaveValue('视频完成后发送这条消息');
+      await expect(page.getByTestId('chat-composer-send')).toBeDisabled();
+
+      await emitChatRuntimeEvent(app, {
+        type: 'run.started',
+        runId: `video_generate:${VIDEO_GENERATION_TASK_ID}:ok`,
+        sessionKey: `video_generate:${VIDEO_GENERATION_TASK_ID}`,
+      });
+      await expect(indicator).toBeVisible();
+
+      await emitChatRuntimeEvent(app, {
+        type: 'run.ended',
+        status: 'completed',
+        runId: `video_generate:${VIDEO_GENERATION_TASK_ID}:ok`,
+        sessionKey: `video_generate:${VIDEO_GENERATION_TASK_ID}`,
+      });
+      await expect(indicator).toHaveCount(0);
+      await expect(page.getByTestId('chat-composer-send')).toBeEnabled();
+      expect(rendererErrors).toEqual([]);
     } finally {
       await closeElectronApp(app);
     }
