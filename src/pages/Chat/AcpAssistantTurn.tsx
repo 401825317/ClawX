@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import logoUclaw from '@/assets/logo-uclaw.png';
 import type { AcpAssistantTurnDisplayGroup } from '@/lib/acp/timeline-groups';
 import { AcpMessageSegment, AcpRenderPart, AcpAssistantHoverBar, clipboardTextForParts } from './AcpMessageSegment';
 import { AcpPermissionCard } from './AcpPermissionCard';
@@ -82,10 +82,8 @@ export function AcpAssistantTurn({
 
   return (
     <div data-testid="acp-assistant-turn" className="group flex w-full justify-start gap-3">
-      <div className="flex h-6 shrink-0 items-center" data-testid="acp-assistant-avatar" aria-hidden="true">
-        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-black/5 text-foreground dark:bg-white/5">
-          <Sparkles className="h-4 w-4" />
-        </div>
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center" data-testid="acp-assistant-avatar" aria-hidden="true">
+        <img src={logoUclaw} alt="" className="h-6 w-6 object-contain" />
       </div>
 
       <div className="flex min-w-0 flex-1 flex-col items-start gap-3">

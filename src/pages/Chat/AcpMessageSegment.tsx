@@ -3,8 +3,9 @@ import ReactMarkdown from 'react-markdown';
 import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
-import { AlertCircle, Check, Copy, Sparkles } from 'lucide-react';
+import { AlertCircle, Check, Copy } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import logoUclaw from '@/assets/logo-uclaw.png';
 import type { MessageSegmentItem, RenderPart } from '@/lib/acp/timeline-types';
 import { cn } from '@/lib/utils';
 import { AcpImagePart, isSafeAcpImageSource } from './AcpImagePart';
@@ -33,12 +34,12 @@ function AcpMarkdownPart({ text, tone }: { text: string; tone: RenderTone }) {
   return (
     <div
       className={cn(
-        'prose prose-sm max-w-none break-words',
+        'prose prose-sm max-w-none break-words text-[13px] leading-5',
         isUser
           ? // User messages skip full markdown rendering, so preserve \n line breaks in paragraphs
             'prose-invert text-white [&_*]:text-inherit [&_p]:whitespace-pre-wrap'
           : // AI replies render as full markdown where code blocks/lists handle line breaks natively
-            'dark:prose-invert text-foreground',
+            'text-foreground dark:prose-invert',
       )}
     >
       <ReactMarkdown
@@ -190,10 +191,8 @@ export function AcpMessageSegment({ item }: { item: MessageSegmentItem }) {
       className={cn('group flex w-full gap-3', isUser ? 'justify-end' : 'justify-start')}
     >
       {!isUser && (
-        <div className="flex h-6 shrink-0 items-center" data-testid="acp-assistant-avatar" aria-hidden="true">
-          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-black/5 text-foreground dark:bg-white/5">
-            <Sparkles className="h-4 w-4" />
-          </div>
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center" data-testid="acp-assistant-avatar" aria-hidden="true">
+          <img src={logoUclaw} alt="" className="h-6 w-6 object-contain" />
         </div>
       )}
       <div className={cn('flex min-w-0 flex-col gap-2', isUser ? 'max-w-[80%] items-end' : 'w-full items-start')}>
