@@ -11,6 +11,8 @@ import type { AcpTurnFileSummary } from '@/lib/acp/openclaw-file-activities';
 import { AcpTurnFileActivity } from './AcpTurnFileActivity';
 import { AcpAttachmentPart } from './AcpAttachmentPart';
 import type { AcpTurnTiming } from '@/lib/acp/turn-timings';
+import { groupConsecutiveToolCalls, isToolCallGroupActive } from '@/lib/acp/tool-call-groups';
+import { AcpToolCallGroup } from './AcpToolCallGroup';
 
 function assistantTurnClipboardText(group: AcpAssistantTurnDisplayGroup): string {
   const textSegments: string[] = [];
@@ -76,6 +78,7 @@ export function AcpAssistantTurn({
   onPermissionSelect?: (requestId: string, optionId: string) => void;
 }) {
   const clipboardText = useMemo(() => assistantTurnClipboardText(group), [group]);
+  const displayEntries = useMemo(() => groupConsecutiveToolCalls(group.items), [group.items]);
 
   return (
     <div data-testid="acp-assistant-turn" className="group flex w-full justify-start gap-3">
@@ -86,7 +89,21 @@ export function AcpAssistantTurn({
       </div>
 
       <div className="flex min-w-0 flex-1 flex-col items-start gap-3">
-        {group.items.map((item) => {
+        {displayEntries.map((entry, index) => {
+          if (entry.kind === 'tool-call-group') {
+            const active = isToolCallGroupActive({
+              items: entry.items,
+              isLastEntry: index === displayEntries.length - 1,
+              timing,
+            });
+            return (
+              <div key={entry.id} className="-my-1 w-full">
+                <AcpToolCallGroup id={entry.id} items={entry.items} active={active} />
+              </div>
+            );
+          }
+
+          const { item } = entry;
           if (item.kind === 'message-segment') {
             if (item.role === 'user') return <AcpMessageSegment key={item.id} item={item} />;
             return (

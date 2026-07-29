@@ -39,11 +39,18 @@ function AcpToolOutputPart({ part }: { part: RenderPart }) {
   return <AcpRenderPart part={part} tone="process" />;
 }
 
-export function AcpToolCallCard({ item }: { item: ToolCallItem }) {
+export function AcpToolCallCard({
+  item,
+  variant = 'standalone',
+}: {
+  item: ToolCallItem;
+  variant?: 'standalone' | 'grouped';
+}) {
   const { t } = useTranslation('chat');
+  const grouped = variant === 'grouped';
   const hasDetails = Boolean(item.error) || item.outputParts.length > 0;
   const isFinished = item.status === 'completed' || item.status === 'failed';
-  const shouldStartExpanded = !hasDetails || !(item.historical && isFinished);
+  const shouldStartExpanded = grouped ? !hasDetails : !hasDetails || !(item.historical && isFinished);
   const [expansionState, setExpansionState] = useState<ExpansionState>(() => ({
     toolCallId: item.toolCallId,
     expanded: shouldStartExpanded,
@@ -55,6 +62,7 @@ export function AcpToolCallCard({ item }: { item: ToolCallItem }) {
   const manualOverride = currentExpansionState.manualOverride;
   const expanded = (() => {
     if (!hasDetails) return true;
+    if (grouped) return currentExpansionState.expanded;
     if (manualOverride) return currentExpansionState.expanded;
     if (item.historical && isFinished) return false;
     if (!isFinished) return true;
@@ -62,6 +70,7 @@ export function AcpToolCallCard({ item }: { item: ToolCallItem }) {
   })();
 
   useEffect(() => {
+    if (grouped) return;
     if (manualOverride) return;
     if (!hasDetails || item.historical || !isFinished) return;
 
@@ -75,9 +84,10 @@ export function AcpToolCallCard({ item }: { item: ToolCallItem }) {
       });
     }, TOOL_AUTO_COLLAPSE_DELAY_MS);
     return () => window.clearTimeout(timer);
-  }, [hasDetails, item.historical, isFinished, item.toolCallId, manualOverride, shouldStartExpanded]);
+  }, [grouped, hasDetails, item.historical, isFinished, item.toolCallId, manualOverride, shouldStartExpanded]);
 
   const toggleLabel = expanded ? t('acp.collapseTool') : t('acp.expandTool');
+  const displayStatus = grouped && isFinished ? 'completed' : item.status;
 
   return (
     <div
@@ -104,19 +114,19 @@ export function AcpToolCallCard({ item }: { item: ToolCallItem }) {
             className="flex min-w-0 p-1 flex-1 items-center gap-2 rounded-lg text-left transition-colors hover:bg-black/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 dark:hover:bg-white/10"
           >
             {expanded ? <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" /> : <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />}
-            <span className="shrink-0 text-xs font-medium uppercase tracking-wide text-muted-foreground">{t('acp.tool')}</span>
+            {!grouped && <span className="shrink-0 text-xs font-medium uppercase tracking-wide text-muted-foreground">{t('acp.tool')}</span>}
             <span className="min-w-0 truncate text-xs font-medium text-muted-foreground">{item.title}</span>
           </button>
         ) : (
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <Wrench className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-            <span className="shrink-0 text-xs font-medium uppercase tracking-wide text-muted-foreground">{t('acp.tool')}</span>
+            {!grouped && <span className="shrink-0 text-xs font-medium uppercase tracking-wide text-muted-foreground">{t('acp.tool')}</span>}
             <span className="min-w-0 truncate text-xs font-medium text-muted-foreground">{item.title}</span>
           </div>
         )}
         <span className="inline-flex shrink-0 items-center gap-1 px-2 py-0.5 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
-          <StatusIcon status={item.status} />
-          {t(statusLabelKey(item.status))}
+          <StatusIcon status={displayStatus} />
+          {t(statusLabelKey(displayStatus))}
         </span>
       </div>
 

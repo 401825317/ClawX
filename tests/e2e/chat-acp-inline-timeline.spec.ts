@@ -567,6 +567,135 @@ test.describe('ClawX ACP inline timeline', () => {
     }
   });
 
+  test('groups consecutive ACP tool calls behind a manual disclosure', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installAcpChatMocks(app);
+      await installAcpPromptDeferredMock(app);
+      const page = await openChat(app);
+      await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible({ timeout: 30_000 });
+      await page.setViewportSize({ width: 720, height: 720 });
+
+      await page.getByTestId('chat-composer-input').fill('Exercise grouped tool motion');
+      await page.getByTestId('chat-composer-send').click();
+      await expect(page.getByText('Exercise grouped tool motion')).toBeVisible({ timeout: 30_000 });
+
+      await emitAcpSessionUpdates(app, [
+        {
+          sessionUpdate: 'agent_message_chunk',
+          messageId: 'grouped-tools-start',
+          content: { type: 'text', text: 'Inspecting the workspace.' },
+        },
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'group-read',
+          title: 'Read workspace file',
+          kind: 'read',
+          status: 'completed',
+          content: [{ type: 'content', content: { type: 'text', text: 'read output' } }],
+          locations: [],
+        },
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'group-execute',
+          title: 'Run workspace command',
+          kind: 'execute',
+          status: 'failed',
+          error: 'Command exited with a non-zero status.',
+          content: [{ type: 'content', content: { type: 'text', text: 'command output' } }],
+          locations: [],
+        },
+      ]);
+
+      const groups = page.getByTestId('acp-tool-call-group');
+      await expect(groups).toHaveCount(1, { timeout: 30_000 });
+      await expect(groups.nth(0)).toHaveAttribute('data-active', 'true');
+      await expect(groups.nth(0).getByTestId('acp-tool-group-summary')).toHaveClass(/acp-tool-group-shimmer/);
+      await expect.poll(() => groups.nth(0).getByTestId('acp-tool-group-summary').evaluate((element) => (
+        getComputedStyle(element).animationName
+      ))).toContain('acp-tool-group-shimmer');
+      const runningSummaryStyle = await groups.nth(0).getByTestId('acp-tool-group-summary').evaluate((element) => {
+        const style = getComputedStyle(element);
+        return { backgroundImage: style.backgroundImage, color: style.color };
+      });
+      expect(runningSummaryStyle.backgroundImage).toContain('linear-gradient');
+      expect(runningSummaryStyle.color).toBe('rgba(0, 0, 0, 0)');
+
+      await emitAcpSessionUpdates(app, [
+        {
+          sessionUpdate: 'agent_message_chunk',
+          messageId: 'grouped-tools-middle',
+          content: { type: 'text', text: 'Checking related files.' },
+        },
+      ]);
+
+      await expect(groups.nth(0)).toHaveAttribute('data-active', 'false');
+      await expect(groups.nth(0).getByTestId('acp-tool-group-summary')).not.toHaveClass(/acp-tool-group-shimmer/);
+
+      await emitAcpSessionUpdates(app, [
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'group-search',
+          title: 'Search workspace',
+          kind: 'search',
+          status: 'completed',
+          content: [{ type: 'content', content: { type: 'text', text: 'search output' } }],
+          locations: [],
+        },
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'group-read-related',
+          title: 'Read related file',
+          kind: 'read',
+          status: 'completed',
+          content: [{ type: 'content', content: { type: 'text', text: 'related output' } }],
+          locations: [],
+        },
+      ]);
+
+      await expect(groups).toHaveCount(2, { timeout: 30_000 });
+      await expect(groups.nth(0)).toHaveAttribute('data-expanded', 'false');
+      await expect(groups.nth(1)).toHaveAttribute('data-expanded', 'false');
+      await expect(groups.nth(1)).toHaveAttribute('data-active', 'true');
+      await expect(groups.nth(0)).not.toContainText('Failed');
+      await expect(groups.nth(1)).not.toContainText('Failed');
+      const [summaryBox, countBox] = await Promise.all([
+        groups.nth(0).getByTestId('acp-tool-group-summary').boundingBox(),
+        groups.nth(0).getByTestId('acp-tool-group-count').boundingBox(),
+      ]);
+      expect(summaryBox).not.toBeNull();
+      expect(countBox).not.toBeNull();
+      expect((summaryBox?.x ?? 0) + (summaryBox?.width ?? 0)).toBeLessThanOrEqual(countBox?.x ?? 0);
+
+      await groups.nth(0).getByTestId('acp-tool-group-toggle').click();
+
+      await expect(groups.nth(0)).toHaveAttribute('data-expanded', 'true');
+      await expect(groups.nth(1)).toHaveAttribute('data-expanded', 'false');
+      await expect(groups.nth(0).getByTestId('acp-tool-call-card')).toHaveCount(2);
+      await expect(groups.nth(1).getByTestId('acp-tool-call-card')).toHaveCount(0);
+      await expect.poll(() => groups.nth(0).locator('[data-acp-item-id]').evaluateAll((elements) => (
+        elements.map((element) => element.getAttribute('data-acp-item-id'))
+      ))).toEqual(['tool:group-read', 'tool:group-execute']);
+      await expect(groups.nth(0)).not.toContainText('Failed');
+
+      await resolveDeferredAcpPrompt(app);
+      await expect(groups.nth(1)).toHaveAttribute('data-active', 'false');
+      await expect(groups.nth(1).getByTestId('acp-tool-group-summary')).not.toHaveClass(/acp-tool-group-shimmer/);
+      const completedSummaryStyle = await groups.nth(1).getByTestId('acp-tool-group-summary').evaluate((element) => {
+        const style = getComputedStyle(element);
+        return { animationName: style.animationName, backgroundImage: style.backgroundImage };
+      });
+      expect(completedSummaryStyle.animationName).toBe('none');
+      expect(completedSummaryStyle.backgroundImage).toContain('linear-gradient');
+      await expect.poll(() => groups.nth(1).getByTestId('acp-tool-group-summary').evaluate((element) => (
+        getComputedStyle(element).color
+      ))).not.toBe('rgba(0, 0, 0, 0)');
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
   test('shows optimistic user messages immediately and coalesces streamed assistant chunks', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 

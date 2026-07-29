@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AcpToolCallCard } from '@/pages/Chat/AcpToolCallCard';
+import { AcpToolCallGroup } from '@/pages/Chat/AcpToolCallGroup';
 import { AcpAttachmentPart } from '@/pages/Chat/AcpAttachmentPart';
 import { AcpImagePart } from '@/pages/Chat/AcpImagePart';
 import { AcpTimeline } from '@/pages/Chat/AcpTimeline';
@@ -66,6 +67,21 @@ vi.mock('react-i18next', () => ({
         'acp.completed': 'Completed',
         'acp.failed': 'Failed',
         'acp.cancelled': 'Cancelled',
+        'acp.toolGroup.expand': 'Expand tool calls',
+        'acp.toolGroup.collapse': 'Collapse tool calls',
+        'acp.toolGroup.runningGeneric': 'Running {{count}} tool calls',
+        'acp.toolGroup.completedGeneric': 'Ran {{count}} tool calls',
+        'acp.toolGroup.runningRead': 'Reading {{count}} files',
+        'acp.toolGroup.completedRead': 'Read {{count}} files',
+        'acp.toolGroup.runningEdit': 'Modifying {{count}} files',
+        'acp.toolGroup.completedEdit': 'Modified {{count}} files',
+        'acp.toolGroup.runningSearch': 'Running {{count}} searches',
+        'acp.toolGroup.completedSearch': 'Ran {{count}} searches',
+        'acp.toolGroup.runningExecute': 'Running {{count}} commands',
+        'acp.toolGroup.completedExecute': 'Ran {{count}} commands',
+        'acp.toolGroup.runningFetch': 'Fetching {{count}} resources',
+        'acp.toolGroup.completedFetch': 'Fetched {{count}} resources',
+        'acp.toolGroup.itemCount': '{{count}} items',
         'acp.loadFailed': 'Load failed',
         'acp.promptFailed': 'Prompt failed',
         'acp.unsupportedContent': 'Unsupported content',
@@ -724,6 +740,195 @@ describe('ACP chat timeline components', () => {
     expect(screen.getByTestId('acp-tool-call-card')).toHaveTextContent('Read file');
     expect(screen.queryByTestId('acp-tool-toggle')).not.toBeInTheDocument();
     expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('keeps a tool group collapsed until the user expands it and preserves that choice while streaming', () => {
+    const readTool = toolCallItem({
+      id: 'tool:read-file',
+      toolCallId: 'read-file',
+      title: 'Read file',
+      toolKind: 'read',
+    });
+    const failedExecuteTool = toolCallItem({
+      id: 'tool:run-command',
+      toolCallId: 'run-command',
+      title: 'Run command',
+      toolKind: 'execute',
+      status: 'failed',
+      error: 'Command returned a non-zero exit code.',
+    });
+    const { rerender } = render(
+      <AcpToolCallGroup
+        id="tool-call-group:tool:read-file"
+        items={[readTool, failedExecuteTool]}
+        active={false}
+      />,
+    );
+
+    const group = screen.getByTestId('acp-tool-call-group');
+    expect(group).toHaveAttribute('data-expanded', 'false');
+    expect(group).not.toHaveTextContent(/failed|失败/i);
+    expect(screen.queryByText('Read file')).not.toBeInTheDocument();
+    expect(screen.queryByText('Run command')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('acp-tool-group-toggle'));
+
+    expect(group).toHaveAttribute('data-expanded', 'true');
+    expect(screen.getAllByTestId('acp-tool-call-card')).toHaveLength(2);
+    expect(screen.getAllByTestId('acp-tool-call-card').map((card) => card.textContent)).toEqual(
+      expect.arrayContaining([expect.stringContaining('Read file'), expect.stringContaining('Run command')]),
+    );
+    expect(group).not.toHaveTextContent(/failed|失败/i);
+
+    rerender(
+      <AcpToolCallGroup
+        id="tool-call-group:tool:read-file"
+        items={[readTool, failedExecuteTool, toolCallItem({
+          id: 'tool:search-files',
+          toolCallId: 'search-files',
+          title: 'Search files',
+          toolKind: 'search',
+        })]}
+        active={false}
+      />,
+    );
+
+    expect(group).toHaveAttribute('data-expanded', 'true');
+    expect(screen.getAllByTestId('acp-tool-call-card')).toHaveLength(3);
+  });
+
+  it('applies the text shimmer only while the tool group is active', () => {
+    const items = [
+      toolCallItem({ id: 'tool:motion-read', toolCallId: 'motion-read', toolKind: 'read' }),
+      toolCallItem({ id: 'tool:motion-run', toolCallId: 'motion-run', toolKind: 'execute' }),
+    ];
+    const { rerender } = render(
+      <AcpToolCallGroup id="tool-call-group:tool:motion-read" items={items} active />,
+    );
+
+    const group = screen.getByTestId('acp-tool-call-group');
+    const summary = screen.getByTestId('acp-tool-group-summary');
+    expect(group).toHaveAttribute('data-active', 'true');
+    expect(summary).toHaveClass('acp-tool-group-shimmer');
+    expect(screen.getByTestId('acp-tool-group-running-icon')).toBeInTheDocument();
+    expect(summary).toHaveTextContent('Reading 1 files');
+
+    rerender(<AcpToolCallGroup id="tool-call-group:tool:motion-read" items={items} active={false} />);
+
+    expect(group).toHaveAttribute('data-active', 'false');
+    expect(summary).not.toHaveClass('acp-tool-group-shimmer');
+    expect(screen.queryByTestId('acp-tool-group-running-icon')).not.toBeInTheDocument();
+    expect(screen.getByTestId('acp-tool-group-completed-icon')).toBeInTheDocument();
+    expect(summary).toHaveTextContent('Read 1 files');
+  });
+
+  it('keeps motion on only for the trailing tool group in a live assistant turn', () => {
+    const toolA = toolCallItem({ id: 'tool:motion-a', toolCallId: 'motion-a', toolKind: 'read' });
+    const toolB = toolCallItem({ id: 'tool:motion-b', toolCallId: 'motion-b', toolKind: 'execute' });
+    const toolC = toolCallItem({ id: 'tool:motion-c', toolCallId: 'motion-c', toolKind: 'search' });
+    const toolD = toolCallItem({ id: 'tool:motion-d', toolCallId: 'motion-d', toolKind: 'read' });
+    const state = snapshot({
+      itemOrder: ['user:motion:0', toolA.id, toolB.id, 'message:motion-boundary', toolC.id, toolD.id],
+      itemsById: {
+        'user:motion:0': {
+          kind: 'message-segment',
+          id: 'user:motion:0',
+          role: 'user',
+          messageId: 'user:motion',
+          segmentIndex: 0,
+          parts: [{ kind: 'markdown', text: 'Run motion test.' }],
+        },
+        [toolA.id]: toolA,
+        [toolB.id]: toolB,
+        'message:motion-boundary': {
+          kind: 'message-segment',
+          id: 'message:motion-boundary',
+          role: 'assistant',
+          messageId: 'message:motion-boundary',
+          segmentIndex: 0,
+          parts: [{ kind: 'markdown', text: 'Continue with another tool phase.' }],
+        },
+        [toolC.id]: toolC,
+        [toolD.id]: toolD,
+      },
+    });
+
+    render(<AcpTimeline
+      snapshot={state}
+      turnTimingsByUserMessageId={{
+        'user:motion': { source: 'live', status: 'running', startedAtMs: Date.now() },
+      }}
+    />);
+
+    const groups = screen.getAllByTestId('acp-tool-call-group');
+    expect(groups).toHaveLength(2);
+    expect(groups[0]).toHaveAttribute('data-active', 'false');
+    expect(groups[1]).toHaveAttribute('data-active', 'true');
+  });
+
+  it('groups consecutive tool calls without crossing assistant content boundaries', () => {
+    const toolA = toolCallItem({ id: 'tool:a', toolCallId: 'a', title: 'Tool A', toolKind: 'read' });
+    const toolB = toolCallItem({ id: 'tool:b', toolCallId: 'b', title: 'Tool B', toolKind: 'execute' });
+    const toolC = toolCallItem({ id: 'tool:c', toolCallId: 'c', title: 'Tool C', toolKind: 'search' });
+    const toolD = toolCallItem({ id: 'tool:d', toolCallId: 'd', title: 'Tool D', toolKind: 'read' });
+    const state = snapshot({
+      itemOrder: ['message:start', toolA.id, toolB.id, 'thought:middle', toolC.id, toolD.id, 'message:end'],
+      itemsById: {
+        'message:start': {
+          kind: 'message-segment',
+          id: 'message:start',
+          role: 'assistant',
+          messageId: 'message:start',
+          segmentIndex: 0,
+          parts: [{ kind: 'markdown', text: 'Starting work.' }],
+        },
+        [toolA.id]: toolA,
+        [toolB.id]: toolB,
+        'thought:middle': {
+          kind: 'thought',
+          id: 'thought:middle',
+          messageId: 'thought:middle',
+          parts: [{ kind: 'markdown', text: 'Checking the next step.' }],
+        },
+        [toolC.id]: toolC,
+        [toolD.id]: toolD,
+        'message:end': {
+          kind: 'message-segment',
+          id: 'message:end',
+          role: 'assistant',
+          messageId: 'message:end',
+          segmentIndex: 0,
+          parts: [{ kind: 'markdown', text: 'Work complete.' }],
+        },
+      },
+    });
+
+    const { container } = render(<AcpTimeline snapshot={state} />);
+    const groups = screen.getAllByTestId('acp-tool-call-group');
+    const toggles = screen.getAllByTestId('acp-tool-group-toggle');
+
+    expect(groups).toHaveLength(2);
+    expect(groups[0]).toHaveAttribute('data-expanded', 'false');
+    expect(groups[1]).toHaveAttribute('data-expanded', 'false');
+    expect(screen.queryByText('Tool A')).not.toBeInTheDocument();
+    expect(screen.queryByText('Tool D')).not.toBeInTheDocument();
+
+    fireEvent.click(toggles[0]);
+    expect(groups[0]).toHaveAttribute('data-expanded', 'true');
+    expect(groups[1]).toHaveAttribute('data-expanded', 'false');
+    expect(within(groups[0]).getAllByTestId('acp-tool-call-card')).toHaveLength(2);
+    expect(within(groups[1]).queryByTestId('acp-tool-call-card')).not.toBeInTheDocument();
+
+    fireEvent.click(toggles[1]);
+    expect(Array.from(container.querySelectorAll('[data-acp-item-id]')).map((node) => node.getAttribute('data-acp-item-id'))).toEqual([
+      'message:start',
+      'tool:a',
+      'tool:b',
+      'thought:middle',
+      'tool:c',
+      'tool:d',
+      'message:end',
+    ]);
   });
 
   it('starts auto-collapse when details are added to a completed no-detail tool call', () => {
