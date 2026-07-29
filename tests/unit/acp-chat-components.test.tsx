@@ -765,14 +765,24 @@ describe('ACP chat timeline components', () => {
     );
 
     const group = screen.getByTestId('acp-tool-call-group');
+    const panel = screen.getByTestId('acp-tool-group-items');
+    const panelContent = screen.getByTestId('acp-tool-group-items-content');
+    const chevron = screen.getByTestId('acp-tool-group-chevron');
     expect(group).toHaveAttribute('data-expanded', 'false');
-    expect(group).not.toHaveTextContent(/failed|失败/i);
-    expect(screen.queryByText('Read file')).not.toBeInTheDocument();
-    expect(screen.queryByText('Run command')).not.toBeInTheDocument();
+    expect(panel).toHaveAttribute('aria-hidden', 'true');
+    expect(panel).toHaveAttribute('inert');
+    expect(panel).toHaveClass('grid-rows-[0fr]', 'opacity-0', 'duration-[260ms]');
+    expect(panelContent).toHaveClass('-translate-y-[7px]', 'opacity-0');
+    expect(chevron).not.toHaveClass('rotate-90');
 
     fireEvent.click(screen.getByTestId('acp-tool-group-toggle'));
 
     expect(group).toHaveAttribute('data-expanded', 'true');
+    expect(panel).toHaveAttribute('aria-hidden', 'false');
+    expect(panel).not.toHaveAttribute('inert');
+    expect(panel).toHaveClass('grid-rows-[1fr]', 'opacity-100');
+    expect(panelContent).toHaveClass('translate-y-0', 'opacity-100', 'delay-[35ms]');
+    expect(chevron).toHaveClass('rotate-90');
     expect(screen.getAllByTestId('acp-tool-call-card')).toHaveLength(2);
     expect(screen.getAllByTestId('acp-tool-call-card').map((card) => card.textContent)).toEqual(
       expect.arrayContaining([expect.stringContaining('Read file'), expect.stringContaining('Run command')]),
