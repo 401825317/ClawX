@@ -21,6 +21,14 @@ const (
 	defaultDataDirName = "UClawData"
 	backupDirName      = ".uclaw-update-backups"
 	resultSuffix       = ".result.json"
+	// Antivirus and Explorer can retain a directory handle for tens of seconds
+	// after Electron exits. Keep the update and rollback windows symmetric so a
+	// recoverable lock never turns into a half-applied installation.
+	moveRetryAttempts = 30
+	rollbackAttempts  = 30
+	moveRetryDelay    = 500 * time.Millisecond
+	startupReadyWait  = 45 * time.Second
+	startupReadyGrace = time.Second
 )
 
 var startUpdatedApp = defaultStartUpdatedApp
@@ -36,6 +44,7 @@ type updateTask struct {
 	ParentPID     int    `json:"parentPid"`
 	LogPath       string `json:"logPath"`
 	StagingDir    string `json:"stagingDir"`
+	ReadyPath     string `json:"readyPath"`
 }
 
 type updateResult struct {
@@ -46,6 +55,19 @@ type updateResult struct {
 	LaunchedPath  string `json:"launchedPath,omitempty"`
 	TargetVersion string `json:"targetVersion,omitempty"`
 	FinishedAt    string `json:"finishedAt"`
+}
+
+type updateFailure struct {
+	cause              error
+	restartPreviousApp bool
+}
+
+func (e *updateFailure) Error() string {
+	return e.cause.Error()
+}
+
+func (e *updateFailure) Unwrap() error {
+	return e.cause
 }
 
 type updater struct {
@@ -101,25 +123,41 @@ func run(taskPath string) int {
 		Detail:  "请不要关闭此窗口，更新完成后会自动重启 UClaw。",
 		Percent: 2,
 	})
+	result := updateResult{TargetVersion: task.TargetVersion}
 	if task.ParentPID > 0 {
 		progress.Update(progressState{
 			Title:   "正在关闭旧版本",
 			Detail:  "等待 UClaw 完全退出，随后开始替换文件。",
 			Percent: 5,
 		})
-		waitForParentExit(task.ParentPID, 45*time.Second, func(format string, args ...any) {
+		if err := waitForParentExit(task.ParentPID, 45*time.Second, func(format string, args ...any) {
 			u.logf(format, args...)
-		})
+		}); err != nil {
+			err = fmt.Errorf("old UClaw did not exit; update was not started: %w", err)
+			u.logf("portable update aborted before file replacement: %v", err)
+			progress.Fail("更新失败", err.Error())
+			result.Success = false
+			result.Error = err.Error()
+			u.writeResult(result)
+			return 1
+		}
 	} else {
 		time.Sleep(2 * time.Second)
 	}
 
-	result := updateResult{TargetVersion: task.TargetVersion}
 	backupDir, stagingDir, launchedPath, err := u.apply()
 	result.BackupDir = backupDir
 	result.StagingDir = stagingDir
 	result.LaunchedPath = launchedPath
 	if err != nil {
+		if shouldRestartPreviousApp(err) {
+			if previousPath, restartErr := u.restartPreviousApp(); restartErr != nil {
+				err = fmt.Errorf("%w; previous UClaw could not be restarted: %v", err, restartErr)
+				u.logf("failed to restart previous UClaw after update failure: %v", restartErr)
+			} else {
+				u.logf("previous UClaw restarted after update failure: %s", previousPath)
+			}
+		}
 		result.Success = false
 		result.Error = err.Error()
 		u.logf("portable update failed: %v", err)
@@ -157,15 +195,20 @@ func validateTask(task *updateTask) error {
 	task.RootDir = strings.TrimSpace(task.RootDir)
 	task.DataDirName = strings.TrimSpace(task.DataDirName)
 	task.LaunchPath = strings.TrimSpace(task.LaunchPath)
+	task.TargetVersion = strings.TrimSpace(task.TargetVersion)
+	task.ReadyPath = strings.TrimSpace(task.ReadyPath)
 	task.Sha512 = strings.ToLower(strings.TrimSpace(task.Sha512))
 	if task.DataDirName == "" {
 		task.DataDirName = defaultDataDirName
 	}
-	if task.ZipPath == "" || task.RootDir == "" || task.LaunchPath == "" {
-		return errors.New("zipPath, rootDir and launchPath are required")
+	if task.ZipPath == "" || task.RootDir == "" || task.LaunchPath == "" || task.TargetVersion == "" || task.ReadyPath == "" {
+		return errors.New("zipPath, rootDir, launchPath, targetVersion and readyPath are required")
 	}
 	if !filepath.IsAbs(task.ZipPath) || !filepath.IsAbs(task.RootDir) || !filepath.IsAbs(task.LaunchPath) {
 		return errors.New("zipPath, rootDir and launchPath must be absolute")
+	}
+	if !filepath.IsAbs(task.ReadyPath) {
+		return errors.New("readyPath must be absolute")
 	}
 	if task.DataDirName == "." || task.DataDirName == ".." || strings.ContainsAny(task.DataDirName, `/\`) {
 		return errors.New("dataDirName must be a single directory name")
@@ -261,18 +304,17 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 		return "", stagingDir, "", err
 	}
 
-	backupDir = filepath.Join(u.task.RootDir, backupDirName, time.Now().UTC().Format("20060102-150405"))
+	backupDir, err = u.createBackupDir()
+	if err != nil {
+		_ = os.RemoveAll(stagingDir)
+		return "", stagingDir, "", err
+	}
 	u.logf("backing up current app files to %s", backupDir)
 	u.progress.Update(progressState{
 		Title:   "正在备份旧版本",
 		Detail:  "正在保存可回滚的旧文件。",
 		Percent: 64,
 	})
-	if err := os.MkdirAll(backupDir, 0o755); err != nil {
-		_ = os.RemoveAll(stagingDir)
-		return backupDir, stagingDir, "", err
-	}
-
 	replacementEntries, err := replacementEntrySet(stagingDir, u.task.DataDirName)
 	if err != nil {
 		_ = os.RemoveAll(stagingDir)
@@ -281,10 +323,7 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 
 	moved, err := u.moveCurrentFilesToBackup(backupDir, replacementEntries)
 	if err != nil {
-		u.logf("backup failed; rolling back moved entries")
-		_ = moveEntriesBack(backupDir, u.task.RootDir, moved)
-		_ = os.RemoveAll(stagingDir)
-		return backupDir, stagingDir, "", err
+		return u.rollbackAfterFailure(backupDir, stagingDir, nil, moved, err)
 	}
 
 	copied, err := copyReplacementFiles(stagingDir, u.task.RootDir, u.task.DataDirName, func(percent int, detail string) {
@@ -295,13 +334,7 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 		})
 	})
 	if err != nil {
-		u.logf("copy failed; rolling back replacement")
-		rollbackErr := rollbackReplacement(u.task.RootDir, backupDir, copied, moved)
-		_ = os.RemoveAll(stagingDir)
-		if rollbackErr != nil {
-			return backupDir, stagingDir, "", fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
-		}
-		return backupDir, stagingDir, "", err
+		return u.rollbackAfterFailure(backupDir, stagingDir, copied, moved, err)
 	}
 
 	launchPath := u.task.LaunchPath
@@ -309,36 +342,78 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 		u.logf("declared launch path unavailable after update: %v", err)
 		launchPath = findLaunchPath(u.task.RootDir)
 		if launchPath == "" {
-			launchErr := errors.New("updated app launch path was not found")
-			u.logf("launch path validation failed; rolling back replacement")
-			rollbackErr := rollbackReplacement(u.task.RootDir, backupDir, copied, moved)
-			_ = os.RemoveAll(stagingDir)
-			if rollbackErr != nil {
-				return backupDir, stagingDir, "", fmt.Errorf("%w; rollback failed: %v", launchErr, rollbackErr)
-			}
-			return backupDir, stagingDir, "", launchErr
+			return u.rollbackAfterFailure(backupDir, stagingDir, copied, moved, errors.New("updated app launch path was not found"))
 		}
 	}
-	_ = chmodExecutable(launchPath)
+	if err := chmodExecutable(launchPath); err != nil {
+		return u.rollbackAfterFailure(backupDir, stagingDir, copied, moved, fmt.Errorf("failed to make updated app executable: %w", err))
+	}
+	if err := prepareReadyMarker(u.task.ReadyPath); err != nil {
+		return u.rollbackAfterFailure(backupDir, stagingDir, copied, moved, fmt.Errorf("failed to prepare startup verification: %w", err))
+	}
 
 	u.progress.Update(progressState{
 		Title:   "正在启动新版 UClaw",
 		Detail:  "更新即将完成。",
 		Percent: 96,
 	})
-	if err := startUpdatedApp(launchPath, u.task.RootDir); err != nil {
-		u.logf("updated app failed to start; rolling back replacement")
-		rollbackErr := rollbackReplacement(u.task.RootDir, backupDir, copied, moved)
-		_ = os.RemoveAll(stagingDir)
-		if rollbackErr != nil {
-			return backupDir, stagingDir, "", fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
+	startedApp, err := startUpdatedApp(launchPath, u.task.RootDir, u.task.ReadyPath)
+	if err != nil {
+		return u.rollbackAfterFailure(backupDir, stagingDir, copied, moved, err)
+	}
+	if err := waitForUpdatedAppReady(u.task.ReadyPath, u.task.TargetVersion, startedApp, startupReadyWait); err != nil {
+		u.logf("updated app did not become ready: %v", err)
+		if stopErr := stopUpdatedApp(startedApp, u.logf); stopErr != nil {
+			return backupDir, stagingDir, "", &updateFailure{
+				cause:              fmt.Errorf("updated app failed startup: %w; automatic rollback was skipped because the new app could not be stopped: %v; backup remains at %s", err, stopErr, backupDir),
+				restartPreviousApp: false,
+			}
 		}
-		return backupDir, stagingDir, "", err
+		return u.rollbackAfterFailure(backupDir, stagingDir, copied, moved, fmt.Errorf("updated app failed startup verification: %w", err))
 	}
 
-	_ = os.RemoveAll(stagingDir)
+	if err := os.RemoveAll(stagingDir); err != nil {
+		u.logf("failed to remove staging directory after successful update: %v", err)
+	}
 	cleanupOldBackups(filepath.Join(u.task.RootDir, backupDirName), backupDir, 7*24*time.Hour, u.logf)
 	return backupDir, stagingDir, launchPath, nil
+}
+
+// createBackupDir must not reuse a previous attempt's second-level timestamp.
+// Users can retry immediately after a failed update, and sharing a backup
+// directory would make a later rollback ambiguous.
+func (u *updater) createBackupDir() (string, error) {
+	backupsRoot := filepath.Join(u.task.RootDir, backupDirName)
+	if err := os.MkdirAll(backupsRoot, 0o755); err != nil {
+		return "", err
+	}
+	return os.MkdirTemp(backupsRoot, time.Now().UTC().Format("20060102-150405")+"-")
+}
+
+func (u *updater) rollbackAfterFailure(backupDir string, stagingDir string, copied []string, moved []string, cause error) (string, string, string, error) {
+	u.logf("update step failed; restoring the previous version: %v", cause)
+	if rollbackErr := rollbackReplacement(backupDir, u.task.RootDir, copied, moved); rollbackErr != nil {
+		u.logf("automatic rollback failed; preserving backup at %s: %v", backupDir, rollbackErr)
+		return backupDir, stagingDir, "", &updateFailure{
+			cause:              fmt.Errorf("%w; automatic rollback failed: %v; do not delete the backup at %s", cause, rollbackErr, backupDir),
+			restartPreviousApp: false,
+		}
+	}
+	if err := os.RemoveAll(stagingDir); err != nil {
+		u.logf("failed to remove staging directory after rollback: %v", err)
+	}
+	return backupDir, stagingDir, "", &updateFailure{
+		cause:              fmt.Errorf("%w; previous version restored", cause),
+		restartPreviousApp: true,
+	}
+}
+
+func shouldRestartPreviousApp(err error) bool {
+	var failure *updateFailure
+	if errors.As(err, &failure) {
+		return failure.restartPreviousApp
+	}
+	return true
 }
 
 func clampProgressPercent(value int, min int, max int) int {
@@ -400,6 +475,16 @@ func extractZip(zipPath string, destDir string, onProgress func(percent int, det
 		return err
 	}
 	defer reader.Close()
+	if err := validateZipEntries(reader.File); err != nil {
+		return err
+	}
+
+	// macOS app bundles carry code-signing and other metadata in extended
+	// attributes. The USB archive is created with ditto, so use it for both
+	// extraction and .app copying instead of silently dropping that metadata.
+	if runtime.GOOS == "darwin" {
+		return extractMacZipWithDitto(zipPath, destDir, onProgress)
+	}
 
 	destClean, err := filepath.Abs(destDir)
 	if err != nil {
@@ -414,16 +499,16 @@ func extractZip(zipPath string, destDir string, onProgress func(percent int, det
 			current := index + 1
 			onProgress(current*100/totalEntries, fmt.Sprintf("正在解压 %d/%d", current, totalEntries))
 		}
-		name := strings.ReplaceAll(file.Name, "\\", "/")
-		if name == "" || strings.HasPrefix(name, "/") || strings.Contains(name, "../") || strings.HasPrefix(name, "../") {
-			return fmt.Errorf("unsafe zip entry path: %s", file.Name)
+		name, err := normalizedZipEntryPath(file.Name)
+		if err != nil {
+			return err
 		}
 		target := filepath.Join(destClean, filepath.FromSlash(name))
 		targetClean, err := filepath.Abs(target)
 		if err != nil {
 			return err
 		}
-		if targetClean != destClean && !strings.HasPrefix(targetClean, destClean+string(os.PathSeparator)) {
+		if targetClean == destClean || !strings.HasPrefix(targetClean, destClean+string(os.PathSeparator)) {
 			return fmt.Errorf("zip entry escapes staging directory: %s", file.Name)
 		}
 
@@ -449,6 +534,74 @@ func extractZip(zipPath string, destDir string, onProgress func(percent int, det
 		if err := extractRegularFile(file, targetClean, filePerm(mode)); err != nil {
 			return err
 		}
+	}
+	if onProgress != nil {
+		onProgress(100, "解压完成。")
+	}
+	return nil
+}
+
+func validateZipEntries(files []*zip.File) error {
+	for _, file := range files {
+		if _, err := normalizedZipEntryPath(file.Name); err != nil {
+			return err
+		}
+		if file.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		src, err := file.Open()
+		if err != nil {
+			return err
+		}
+		raw, readErr := io.ReadAll(src)
+		closeErr := src.Close()
+		if readErr != nil {
+			return readErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if err := validateZipSymlinkTarget(string(raw), file.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizedZipEntryPath(rawName string) (string, error) {
+	name := strings.ReplaceAll(rawName, "\\", "/")
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(name)))
+	if name == "" || strings.HasPrefix(name, "/") || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("unsafe zip entry path: %s", rawName)
+	}
+	portablePath := filepath.FromSlash(clean)
+	if filepath.IsAbs(portablePath) || filepath.VolumeName(portablePath) != "" {
+		return "", fmt.Errorf("unsafe zip entry path: %s", rawName)
+	}
+	return clean, nil
+}
+
+func validateZipSymlinkTarget(linkTarget string, entryName string) error {
+	normalized := strings.ReplaceAll(linkTarget, "\\", "/")
+	parts := strings.Split(normalized, "/")
+	for _, part := range parts {
+		if part == ".." {
+			return fmt.Errorf("unsafe symlink target in zip entry %s", entryName)
+		}
+	}
+	if linkTarget == "" || filepath.IsAbs(linkTarget) || filepath.VolumeName(linkTarget) != "" {
+		return fmt.Errorf("unsafe symlink target in zip entry %s", entryName)
+	}
+	return nil
+}
+
+func extractMacZipWithDitto(zipPath string, destDir string, onProgress func(percent int, detail string)) error {
+	if onProgress != nil {
+		onProgress(5, "正在保留 macOS 应用签名和权限。")
+	}
+	output, err := exec.Command("/usr/bin/ditto", "-x", "-k", zipPath, destDir).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to extract macOS update archive with ditto: %w (%s)", err, strings.TrimSpace(string(output)))
 	}
 	if onProgress != nil {
 		onProgress(100, "解压完成。")
@@ -502,15 +655,8 @@ func extractSymlink(file *zip.File, target string) error {
 		return err
 	}
 	linkTarget := string(raw)
-	normalized := strings.ReplaceAll(linkTarget, "\\", "/")
-	parts := strings.Split(normalized, "/")
-	for _, part := range parts {
-		if part == ".." {
-			return fmt.Errorf("unsafe symlink target in zip entry %s", file.Name)
-		}
-	}
-	if linkTarget == "" || filepath.IsAbs(linkTarget) {
-		return fmt.Errorf("unsafe symlink target in zip entry %s", file.Name)
+	if err := validateZipSymlinkTarget(linkTarget, file.Name); err != nil {
+		return err
 	}
 	_ = os.Remove(target)
 	return os.Symlink(linkTarget, target)
@@ -565,7 +711,7 @@ func (u *updater) moveCurrentFilesToBackup(backupDir string, replacementEntries 
 		}
 		src := filepath.Join(u.task.RootDir, name)
 		dst := filepath.Join(backupDir, name)
-		if err := retry(fmt.Sprintf("move %s", name), 18, 500*time.Millisecond, func() error {
+		if err := retry(fmt.Sprintf("move %s", name), moveRetryAttempts, moveRetryDelay, func() error {
 			return os.Rename(src, dst)
 		}); err != nil {
 			return moved, err
@@ -604,6 +750,9 @@ func copyReplacementFiles(stagingDir string, rootDir string, dataDirName string,
 		if onProgress != nil {
 			onProgress(index*100/total, fmt.Sprintf("正在替换 %d/%d: %s", index+1, total, name))
 		}
+		// Record the entry before copyPath starts. A newly introduced top-level
+		// directory can be partially written before copyPath returns an error,
+		// and it has no old counterpart for moveEntriesBack to overwrite.
 		copied = append(copied, name)
 		if err := copyPath(src, dst); err != nil {
 			return copied, err
@@ -629,6 +778,9 @@ func copyPath(src string, dst string) error {
 		return os.Symlink(target, dst)
 	}
 	if info.IsDir() {
+		if runtime.GOOS == "darwin" && strings.HasSuffix(strings.ToLower(src), ".app") {
+			return copyMacAppBundleWithDitto(src, dst)
+		}
 		if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
 			return err
 		}
@@ -641,9 +793,17 @@ func copyPath(src string, dst string) error {
 				return err
 			}
 		}
-		return os.Chmod(dst, info.Mode().Perm())
+		return preserveFileMode(dst, info.Mode().Perm())
 	}
 	return copyFile(src, dst, info.Mode().Perm())
+}
+
+func copyMacAppBundleWithDitto(src string, dst string) error {
+	output, err := exec.Command("/usr/bin/ditto", src, dst).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to copy macOS app bundle with ditto: %w (%s)", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func copyFile(src string, dst string, perm os.FileMode) error {
@@ -667,47 +827,68 @@ func copyFile(src string, dst string, perm os.FileMode) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	return os.Chmod(dst, perm)
+	return preserveFileMode(dst, perm)
 }
 
 func moveEntriesBack(backupDir string, rootDir string, entries []string) error {
-	var firstErr error
+	var rollbackErr error
 	for i := len(entries) - 1; i >= 0; i-- {
 		name := entries[i]
 		src := filepath.Join(backupDir, name)
 		dst := filepath.Join(rootDir, name)
-		_ = os.RemoveAll(dst)
-		if err := os.Rename(src, dst); err != nil && firstErr == nil {
-			firstErr = err
+		if err := retry(fmt.Sprintf("restore %s", name), rollbackAttempts, moveRetryDelay, func() error {
+			if err := os.RemoveAll(dst); err != nil {
+				return err
+			}
+			return os.Rename(src, dst)
+		}); err != nil {
+			rollbackErr = errors.Join(rollbackErr, err)
 		}
 	}
-	return firstErr
+	return rollbackErr
 }
 
 func removeCopiedEntries(rootDir string, entries []string) error {
-	var firstErr error
+	var rollbackErr error
 	for i := len(entries) - 1; i >= 0; i-- {
-		if err := os.RemoveAll(filepath.Join(rootDir, entries[i])); err != nil && firstErr == nil {
-			firstErr = err
+		name := entries[i]
+		if err := retry(fmt.Sprintf("remove replacement %s", name), rollbackAttempts, moveRetryDelay, func() error {
+			return os.RemoveAll(filepath.Join(rootDir, name))
+		}); err != nil {
+			rollbackErr = errors.Join(rollbackErr, err)
 		}
 	}
-	return firstErr
+	return rollbackErr
 }
 
-func rollbackReplacement(rootDir string, backupDir string, copied []string, moved []string) error {
-	removeErr := removeCopiedEntries(rootDir, copied)
-	restoreErr := moveEntriesBack(backupDir, rootDir, moved)
-	return errors.Join(removeErr, restoreErr)
+func rollbackReplacement(backupDir string, rootDir string, copied []string, moved []string) error {
+	var rollbackErr error
+	if err := removeCopiedEntries(rootDir, copied); err != nil {
+		rollbackErr = errors.Join(rollbackErr, err)
+	}
+	if err := moveEntriesBack(backupDir, rootDir, moved); err != nil {
+		rollbackErr = errors.Join(rollbackErr, err)
+	}
+	return rollbackErr
 }
 
 func retry(label string, attempts int, delay time.Duration, fn func() error) error {
+	if attempts < 1 {
+		return fmt.Errorf("%s failed: retry attempts must be positive", label)
+	}
 	var err error
 	for attempt := 1; attempt <= attempts; attempt++ {
 		err = fn()
 		if err == nil {
 			return nil
 		}
-		time.Sleep(delay * time.Duration(attempt))
+		if attempt < attempts {
+			backoff := delay * time.Duration(attempt)
+			if backoff > 3*time.Second {
+				backoff = 3 * time.Second
+			}
+			time.Sleep(backoff)
+		}
 	}
 	return fmt.Errorf("%s failed after %d attempts: %w", label, attempts, err)
 }
@@ -747,30 +928,162 @@ func chmodExecutable(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.Chmod(path, info.Mode().Perm()|0o755)
+	if info.Mode().Perm()&0o111 != 0 {
+		return nil
+	}
+	return preserveFileMode(path, info.Mode().Perm()|0o755)
 }
 
-func defaultStartUpdatedApp(launchPath string, rootDir string) error {
-	if runtime.GOOS == "darwin" {
-		if appBundle := findAppBundleFromLaunchPath(launchPath); appBundle != "" {
-			cmd := exec.Command("/usr/bin/open", "-n", appBundle)
-			cmd.Dir = rootDir
-			return cmd.Start()
+// Removable macOS volumes can expose fixed permissions and reject chmod even
+// when the copied file already has every requested permission. Preserve that
+// usable mode instead of needlessly rolling back a valid USB update.
+func preserveFileMode(path string, expected os.FileMode) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	chmodErr := os.Chmod(path, expected)
+	if chmodErr == nil {
+		return nil
+	}
+	info, statErr := os.Stat(path)
+	if statErr == nil && info.Mode().Perm()&expected.Perm() == expected.Perm() {
+		return nil
+	}
+	return chmodErr
+}
+
+func prepareReadyMarker(readyPath string) error {
+	if readyPath == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(readyPath), 0o700); err != nil {
+		return err
+	}
+	if err := os.Remove(readyPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+type startupReadyMarker struct {
+	Version string `json:"version"`
+	PID     int    `json:"pid"`
+	ReadyAt string `json:"readyAt"`
+}
+
+func waitForUpdatedAppReady(readyPath string, targetVersion string, cmd *exec.Cmd, timeout time.Duration) error {
+	if readyPath == "" {
+		return errors.New("updated app startup verification path is missing")
+	}
+	if cmd == nil || cmd.Process == nil {
+		return errors.New("updated app did not provide a process handle")
+	}
+
+	exitCh := make(chan error, 1)
+	go func() {
+		exitCh <- cmd.Wait()
+	}()
+
+	deadline := time.Now().Add(timeout)
+	for {
+		if raw, err := os.ReadFile(readyPath); err == nil {
+			var marker startupReadyMarker
+			if err := json.Unmarshal(raw, &marker); err != nil {
+				return fmt.Errorf("updated app wrote an invalid startup marker: %w", err)
+			}
+			if !sameReleaseVersion(marker.Version, targetVersion) {
+				return fmt.Errorf("updated app reported version %q, expected %q", marker.Version, targetVersion)
+			}
+			if marker.PID != cmd.Process.Pid {
+				return fmt.Errorf("updated app startup marker PID %d does not match launched PID %d", marker.PID, cmd.Process.Pid)
+			}
+			if marker.ReadyAt == "" {
+				return errors.New("updated app wrote an incomplete startup marker")
+			}
+			select {
+			case exitErr := <-exitCh:
+				if exitErr != nil {
+					return fmt.Errorf("updated app exited immediately after it became ready: %w", exitErr)
+				}
+				return errors.New("updated app exited immediately after it became ready")
+			case <-time.After(startupReadyGrace):
+				return nil
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to read updated app startup marker: %w", err)
+		}
+
+		select {
+		case exitErr := <-exitCh:
+			if exitErr != nil {
+				return fmt.Errorf("updated app exited before it became ready: %w", exitErr)
+			}
+			return errors.New("updated app exited before it became ready")
+		default:
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("updated app did not become ready within %s", timeout)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// Release metadata may use a git tag form (v1.0.5) while Electron reports the
+// package form (1.0.5). Build metadata has no SemVer precedence either, so it
+// must not cause a healthy newly launched app to be rolled back.
+func sameReleaseVersion(left string, right string) bool {
+	normalize := func(value string) string {
+		value = strings.TrimSpace(value)
+		if len(value) > 1 && (value[0] == 'v' || value[0] == 'V') {
+			value = value[1:]
+		}
+		if plus := strings.IndexByte(value, '+'); plus >= 0 {
+			value = value[:plus]
+		}
+		return value
+	}
+	return normalize(left) == normalize(right)
+}
+
+func stopUpdatedApp(cmd *exec.Cmd, logf func(string, ...any)) error {
+	if cmd == nil || cmd.Process == nil {
+		return errors.New("updated app process handle is unavailable")
+	}
+	pid := cmd.Process.Pid
+	if err := stopUpdatedAppProcessTree(pid, 15*time.Second, logf); err != nil {
+		return fmt.Errorf("updated app process %d did not exit after startup failure: %w", pid, err)
+	}
+	return nil
+}
+
+func (u *updater) restartPreviousApp() (string, error) {
+	launchPath := u.task.LaunchPath
+	if !existsFile(launchPath) {
+		launchPath = findLaunchPath(u.task.RootDir)
+		if launchPath == "" {
+			return "", errors.New("previous UClaw launch path was not found")
 		}
 	}
+	if err := chmodExecutable(launchPath); err != nil {
+		return "", err
+	}
+	if _, err := startUpdatedApp(launchPath, u.task.RootDir, ""); err != nil {
+		return "", err
+	}
+	return launchPath, nil
+}
+
+func defaultStartUpdatedApp(launchPath string, rootDir string, readyPath string) (*exec.Cmd, error) {
 	cmd := exec.Command(launchPath)
 	cmd.Dir = rootDir
-	return cmd.Start()
-}
-
-func findAppBundleFromLaunchPath(launchPath string) string {
-	parts := strings.Split(filepath.Clean(launchPath), string(os.PathSeparator))
-	for index := len(parts) - 1; index >= 0; index-- {
-		if strings.HasSuffix(parts[index], ".app") {
-			return string(os.PathSeparator) + filepath.Join(parts[:index+1]...)
-		}
+	configureUpdatedAppProcessGroup(cmd)
+	if readyPath != "" {
+		cmd.Env = append(os.Environ(), "UCLAW_PORTABLE_UPDATE_READY_PATH="+readyPath)
 	}
-	return ""
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return cmd, nil
 }
 
 func cleanupOldBackups(backupsRoot string, keep string, maxAge time.Duration, logf func(string, ...any)) {

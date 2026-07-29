@@ -38,6 +38,10 @@ const REQUIRED_FILES = [
   'resources/openclaw/node_modules/@img/sharp-win32-x64/package.json',
   'resources/openclaw/node_modules/@img/sharp-win32-x64/lib/sharp-win32-x64.node',
   'resources/openclaw/node_modules/@img/sharp-win32-x64/lib/libvips-42.dll',
+  'resources/app.asar.unpacked/node_modules/sharp/package.json',
+  'resources/app.asar.unpacked/node_modules/@img/sharp-win32-x64/package.json',
+  'resources/app.asar.unpacked/node_modules/@img/sharp-win32-x64/lib/sharp-win32-x64.node',
+  'resources/app.asar.unpacked/node_modules/@img/sharp-win32-x64/lib/libvips-42.dll',
   ...BUNDLED_OPENCLAW_PLUGINS.flatMap(({ pluginId }) => [
     `resources/openclaw-plugins/${pluginId}/package.json`,
     `resources/openclaw-plugins/${pluginId}/openclaw.plugin.json`,
