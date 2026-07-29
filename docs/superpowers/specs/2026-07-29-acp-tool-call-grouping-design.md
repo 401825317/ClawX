@@ -71,7 +71,7 @@ assistant text -> group(A, B) -> thought -> group(C, D) -> assistant text
 
 退出活动态时，用约 160ms 的透明度过渡移除流光，状态环切换为静态中性对勾，摘要从“正在执行”变为“已执行”。不播放成功闪光，不自动展开工具组，也不根据失败数量改变颜色或文案。网关短暂重连本身不作为完成信号；只要 renderer 仍认为当前轮次在运行，动效继续，避免误报完成。
 
-流光周期约 1.8 秒，使用现有 muted/foreground token 形成轻微亮度差。页面启用 `prefers-reduced-motion: reduce` 时禁用旋转和流光，只保留静态运行文案与图标。任一时刻每个 assistant turn 最多只有末尾一个工具组播放动效。
+流光周期约 5 秒，使用现有 muted/foreground token 形成轻微亮度差。页面启用 `prefers-reduced-motion: reduce` 时禁用旋转和流光，只保留静态运行文案与图标。任一时刻每个 assistant turn 最多只有末尾一个工具组播放动效。
 
 ## 性能
 

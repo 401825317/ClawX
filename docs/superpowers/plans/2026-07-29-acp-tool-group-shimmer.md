@@ -137,7 +137,7 @@ Append a focused class to `src/styles/globals.css`:
   );
   background-size: 220% 100%;
   background-clip: text;
-  animation: acp-tool-group-shimmer 1.8s linear infinite;
+  animation: acp-tool-group-shimmer 5s linear infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
