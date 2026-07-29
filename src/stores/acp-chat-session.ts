@@ -26,7 +26,7 @@ import {
 } from '@/lib/acp/image-generation-compat';
 import {
   extractVideoGenerationStartFromAcpEnvelope,
-  extractVideoGenerationTerminalTaskIdFromAcpEnvelope,
+  extractVideoGenerationTerminalFromAcpEnvelope,
   extractVideoGenerationTerminalTaskIdFromGatewayChatMessage,
   extractVideoGenerationTerminalTaskIdFromRuntimeEvent,
 } from '@/lib/acp/video-generation-status';
@@ -347,20 +347,36 @@ function applyVideoGenerationUpdateToSnapshot(
   event: AcpSessionUpdateEnvelope,
 ): LiveSessionSnapshot {
   if (event.historical) return snapshot;
-  const terminalTaskId = extractVideoGenerationTerminalTaskIdFromAcpEnvelope(event);
+  const terminal = extractVideoGenerationTerminalFromAcpEnvelope(event);
   const start = extractVideoGenerationStartFromAcpEnvelope(event);
   let pendingVideoGenerationTaskIds = snapshot.pendingVideoGenerationTaskIds;
-  if (terminalTaskId) {
-    clearVideoGenerationTaskTimeout(terminalTaskId);
-    pendingVideoGenerationTaskIds = pendingVideoGenerationTaskIds.filter((taskId) => taskId !== terminalTaskId);
+  let timeline = snapshot.timeline;
+  if (terminal) {
+    clearVideoGenerationTaskTimeout(terminal.taskId);
+    pendingVideoGenerationTaskIds = pendingVideoGenerationTaskIds.filter((taskId) => taskId !== terminal.taskId);
+    if (terminal.status === 'failed') timeline = appendVideoGenerationFailure(timeline, terminal.taskId);
   }
   if (start && !pendingVideoGenerationTaskIds.includes(start.taskId)) {
     scheduleVideoGenerationTaskTimeout(start.taskId);
     pendingVideoGenerationTaskIds = [...pendingVideoGenerationTaskIds, start.taskId];
   }
-  return pendingVideoGenerationTaskIds === snapshot.pendingVideoGenerationTaskIds
+  return pendingVideoGenerationTaskIds === snapshot.pendingVideoGenerationTaskIds && timeline === snapshot.timeline
     ? snapshot
-    : { ...snapshot, pendingVideoGenerationTaskIds };
+    : { ...snapshot, pendingVideoGenerationTaskIds, timeline };
+}
+
+/** Adds one deterministic user-visible failure without exposing internal provider details. */
+function appendVideoGenerationFailure(
+  timeline: AcpTimelineSnapshot,
+  taskId: string,
+): AcpTimelineSnapshot {
+  const evidenceId = `video-generation:${taskId}:failed`;
+  return appendSyntheticAssistantMessage(timeline, {
+    messageId: `compat:${evidenceId}`,
+    evidenceId,
+    source: 'video-generation',
+    parts: [{ kind: 'error', message: i18n.t('chat:videoGeneration.failed') }],
+  });
 }
 
 function scheduleVideoGenerationTaskTimeout(taskId: string): void {
@@ -2047,9 +2063,18 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
 
   recordVideoGenerationUpdate(event) {
     if (event.historical) return;
-    const terminalTaskId = extractVideoGenerationTerminalTaskIdFromAcpEnvelope(event);
-    if (terminalTaskId) {
-      completeVideoGenerationTask(terminalTaskId);
+    const terminal = extractVideoGenerationTerminalFromAcpEnvelope(event);
+    if (terminal) {
+      if (terminal.status === 'failed') {
+        get().settleVideoGenerationTask(terminal.taskId);
+        set((current) => (
+          current.activeSessionKey === event.sessionKey && current.generation === event.generation
+            ? { timeline: appendVideoGenerationFailure(current.timeline, terminal.taskId) }
+            : {}
+        ));
+      } else {
+        completeVideoGenerationTask(terminal.taskId);
+      }
       return;
     }
 

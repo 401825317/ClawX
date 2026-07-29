@@ -292,7 +292,8 @@
         "generatedReadyWithMissing": "生成的图片已准备好，但有部分图片无法加载。"
     },
     "videoGeneration": {
-        "generating": "视频生成中，请稍候…"
+        "generating": "视频生成中，请稍候…",
+        "failed": "视频生成失败，请重试。"
     },
     "composer": {
         "attachFiles": "添加文件",

@@ -292,7 +292,8 @@
         "generatedReadyWithMissing": "Generated image is ready. Some images could not be loaded."
     },
     "videoGeneration": {
-        "generating": "Generating video, please wait…"
+        "generating": "Generating video, please wait…",
+        "failed": "Video generation failed. Please try again."
     },
     "composer": {
         "attachFiles": "Attach files",

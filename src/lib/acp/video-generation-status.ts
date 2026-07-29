@@ -5,6 +5,12 @@ import type { GatewayChatMessageEvent } from '@shared/host-events/contract';
 const VIDEO_TASK_START_RE = /Background task started for video generation \(([0-9a-f-]{36})\)/iu;
 const VIDEO_TASK_REF_RE = /(?:^|:)video_generate:([0-9a-f-]{36})(?::|$)/iu;
 const VIDEO_COMPLETION_SOURCE_RE = /sourceSession=video_generate:([0-9a-f-]{36})(?=[:\s]|$)/iu;
+const VIDEO_INTERNAL_SESSION_RE = /^session_key:\s*video_generate:([0-9a-f-]{36})\s*$/imu;
+
+export type VideoGenerationTerminal = {
+  taskId: string;
+  status: 'completed' | 'failed';
+};
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -72,17 +78,34 @@ export function extractVideoGenerationStartFromAcpEnvelope(
   return { taskId: match[1], ...(toolCallId ? { toolCallId } : {}) };
 }
 
-/** Detects the internal completion wake delivered back into the original ACP session. */
-export function extractVideoGenerationTerminalTaskIdFromAcpEnvelope(
+/** Detects both routed completions and immediate native background-task terminal events. */
+export function extractVideoGenerationTerminalFromAcpEnvelope(
   event: AcpSessionUpdateEnvelope,
-): string | null {
+): VideoGenerationTerminal | null {
   const structuredTaskId = structuredCompletionTaskId(event.notification);
-  if (structuredTaskId) return structuredTaskId;
   const strings: string[] = [];
   collectStrings(event.notification, strings);
   const text = strings.join('\n');
-  if (!/sourceTool=video_generate\b/iu.test(text)) return null;
-  return text.match(VIDEO_COMPLETION_SOURCE_RE)?.[1] ?? null;
+  const failed = /^status:\s*(?:failed|error|cancelled|canceled)\b/imu.test(text);
+  if (structuredTaskId) return { taskId: structuredTaskId, status: failed ? 'failed' : 'completed' };
+
+  if (/sourceTool=video_generate\b/iu.test(text)) {
+    const taskId = text.match(VIDEO_COMPLETION_SOURCE_RE)?.[1];
+    return taskId ? { taskId, status: failed ? 'failed' : 'completed' } : null;
+  }
+
+  const nativeInternalCompletion = /\[Internal task completion event\]/iu.test(text)
+    && /^source:\s*video_generation\s*$/imu.test(text);
+  if (!nativeInternalCompletion) return null;
+  const taskId = text.match(VIDEO_INTERNAL_SESSION_RE)?.[1];
+  return taskId ? { taskId, status: failed ? 'failed' : 'completed' } : null;
+}
+
+/** Preserves the task-id-only API used by existing terminal event consumers. */
+export function extractVideoGenerationTerminalTaskIdFromAcpEnvelope(
+  event: AcpSessionUpdateEnvelope,
+): string | null {
+  return extractVideoGenerationTerminalFromAcpEnvelope(event)?.taskId ?? null;
 }
 
 /** Detects a completion-agent Gateway message without inspecting nested tool-result details. */

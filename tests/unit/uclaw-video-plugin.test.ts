@@ -1,11 +1,12 @@
 import http from 'node:http';
 import { Buffer } from 'node:buffer';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertLocalMediaAllowed } from 'openclaw/plugin-sdk/media-runtime';
 import { describe, expect, it } from 'vitest';
+import sharp from 'sharp';
 
 const VIDEO_PLUGIN_CONFIG = {
   defaultModel: 'grok-image-video',
@@ -471,6 +472,77 @@ describe('UClaw video plugin', () => {
       cfg: {},
     })).rejects.toThrow('supports at most one reference image');
   });
+
+  it('compresses a large reference image before submitting the video request', async () => {
+    const maxInputImageBytes = 1024 * 1024;
+    const source = await sharp(randomBytes(700 * 700 * 3), {
+      raw: { width: 700, height: 700, channels: 3 },
+    }).png().toBuffer();
+    expect(source.byteLength).toBeGreaterThan(maxInputImageBytes);
+
+    let submittedImage = '';
+    const videoBytes = completeMp4Bytes();
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        if (req.method === 'POST') {
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { image?: string };
+          submittedImage = body.image ?? '';
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ data: { task_id: 'compressed-image-task', status: 'queued' } }));
+          return;
+        }
+        if (req.url?.endsWith('/content')) {
+          res.writeHead(200, { 'content-type': 'video/mp4', 'content-length': String(videoBytes.length) });
+          res.end(videoBytes);
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          data: { task_id: 'compressed-image-task', status: 'completed', result_url: 'https://example.test/video.mp4' },
+        }));
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('Test server did not bind');
+      const plugin = await import('../../resources/openclaw-plugins/uclaw-video/index.mjs');
+      let provider: { generateVideo: (request: Record<string, unknown>) => Promise<unknown> } | undefined;
+      plugin.default.register({
+        pluginConfig: { ...VIDEO_PLUGIN_CONFIG, maxInputImageBytes },
+        registerVideoGenerationProvider(nextProvider: typeof provider) {
+          provider = nextProvider;
+        },
+      });
+
+      await provider?.generateVideo({
+        provider: 'uclaw-video',
+        model: 'grok-video-1.5',
+        prompt: 'Animate this image.',
+        inputImages: [{ buffer: source, mimeType: 'image/png' }],
+        cfg: {
+          models: {
+            providers: {
+              'uclaw-video': {
+                baseUrl: `http://127.0.0.1:${address.port}/v1`,
+                apiKey: 'video-test-key',
+                request: { allowPrivateNetwork: true },
+              },
+            },
+          },
+        },
+      });
+
+      expect(submittedImage).toMatch(/^data:image\/jpeg;base64,/u);
+      const encoded = submittedImage.split(',', 2)[1] ?? '';
+      expect(Buffer.from(encoded, 'base64').byteLength).toBeLessThanOrEqual(maxInputImageBytes);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 15_000);
 
   it('rejects a normalized reference image that still exceeds the managed byte limit', async () => {
     const plugin = await import('../../resources/openclaw-plugins/uclaw-video/index.mjs');

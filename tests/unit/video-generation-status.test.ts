@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   extractVideoGenerationStartFromAcpEnvelope,
+  extractVideoGenerationTerminalFromAcpEnvelope,
   extractVideoGenerationTerminalTaskIdFromAcpEnvelope,
   extractVideoGenerationTerminalTaskIdFromGatewayChatMessage,
   extractVideoGenerationTerminalTaskIdFromRuntimeEvent,
@@ -46,6 +47,30 @@ describe('video generation task status extraction', () => {
         },
       },
     } as never)).toBe(TASK_ID);
+  });
+
+  it('extracts an immediate failed video task from the native internal completion event', () => {
+    expect(extractVideoGenerationTerminalFromAcpEnvelope({
+      sessionKey: 'agent:main:main',
+      generation: 1,
+      notification: {
+        sessionId: 'agent:main:main',
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'text',
+            text: [
+              '[Internal task completion event]',
+              'source: video_generation',
+              `session_key: video_generate:${TASK_ID}`,
+              'status: failed',
+              '',
+              'Reference image exceeds the managed limit.',
+            ].join('\n'),
+          },
+        },
+      },
+    } as never)).toEqual({ taskId: TASK_ID, status: 'failed' });
   });
 
   it('uses only the completion envelope identity from Gateway messages', () => {

@@ -2,6 +2,7 @@ import { definePluginEntry } from 'openclaw/plugin-sdk/core';
 import { isProviderApiKeyConfigured } from 'openclaw/plugin-sdk/provider-auth';
 import { resolveApiKeyForProvider } from 'openclaw/plugin-sdk/provider-auth-runtime';
 import { resolveStateDir } from 'openclaw/plugin-sdk/state-paths';
+import { resizeToJpeg } from 'openclaw/plugin-sdk/media-runtime';
 import { createHash, randomUUID } from 'node:crypto';
 import { readdir, readFile, rename, rm } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -20,6 +21,13 @@ const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024;
 const DEFAULT_MAX_INPUT_IMAGE_BYTES = 1024 * 1024;
 const DEFAULT_MIME_TYPE = 'video/mp4';
+const REFERENCE_IMAGE_COMPRESSION_ATTEMPTS = [
+  { maxSide: 1600, quality: 76 },
+  { maxSide: 1280, quality: 60 },
+  { maxSide: 1024, quality: 48 },
+  { maxSide: 768, quality: 40 },
+  { maxSide: 512, quality: 32 },
+];
 const RESOLUTION_SIZES = {
   '480P': '854x480',
   '720P': '1280x720',
@@ -637,24 +645,43 @@ function applyOptionsForModel(videoOptions, model) {
   };
 }
 
-function inputImageByteLength(asset) {
-  if (!asset?.buffer) return undefined;
-  return Buffer.from(asset.buffer).byteLength;
-}
-
 function referenceImageLimitLabel(maxBytes) {
   return `${maxBytes} ${maxBytes === 1 ? 'byte' : 'bytes'}`;
 }
 
-function resolveModelRequest(req, config) {
+/** Compresses every buffered reference image at the provider boundary, including reused generated media. */
+async function prepareInputImage(asset, maxBytes) {
+  if (!asset?.buffer) return asset;
+  const input = Buffer.from(asset.buffer);
+  if (input.byteLength <= maxBytes) return asset;
+
+  try {
+    for (const attempt of REFERENCE_IMAGE_COMPRESSION_ATTEMPTS) {
+      const output = await resizeToJpeg({
+        buffer: input,
+        maxSide: attempt.maxSide,
+        quality: attempt.quality,
+        withoutEnlargement: true,
+      });
+      if (output.byteLength <= maxBytes) {
+        return { ...asset, buffer: output, mimeType: 'image/jpeg' };
+      }
+    }
+  } catch {
+    // The stable limit error below is safe to surface when image processing is unavailable.
+  }
+
+  throw new Error(
+    `Reference image exceeds the ${referenceImageLimitLabel(maxBytes)} reference-image limit and could not be compressed below it`,
+  );
+}
+
+async function resolveModelRequest(req, config) {
   const inputImages = Array.isArray(req.inputImages) ? req.inputImages : [];
   const model = automaticModelForInputImages(config, inputImages.length);
-  const inputBytes = inputImages.length === 1 ? inputImageByteLength(inputImages[0]) : undefined;
-  if (inputBytes !== undefined && inputBytes > config.maxInputImageBytes) {
-    throw new Error(
-      `Reference image exceeds the ${referenceImageLimitLabel(config.maxInputImageBytes)} reference-image limit after client compression`,
-    );
-  }
+  const inputImage = inputImages.length === 1
+    ? await prepareInputImage(inputImages[0], config.maxInputImageBytes)
+    : undefined;
 
   const requestedSize = aspectRatioForSize(req.size, config.resolutionSizes);
   const requestedAspectRatio = normalizeOptionalString(req.aspectRatio)
@@ -679,7 +706,7 @@ function resolveModelRequest(req, config) {
     throw new Error(`${model.id} does not support ${requestedDuration} second videos`);
   }
 
-  const image = inputImages.length === 1 ? inputImageValue(inputImages[0]) : undefined;
+  const image = inputImages.length === 1 ? inputImageValue(inputImage) : undefined;
   if (inputImages.length === 1 && !image) {
     throw new Error(`${model.id} reference image is missing data`);
   }
@@ -741,7 +768,7 @@ function buildProvider(config) {
     async generateVideo(req) {
       const providerConfig = resolveProviderConfig(req);
       const baseUrl = normalizeBaseUrl(providerConfig.baseUrl);
-      const request = resolveModelRequest(req, config);
+      const request = await resolveModelRequest(req, config);
       const apiKey = await resolveApiKey(req);
       const deadline = Date.now() + normalizePositiveInteger(req.timeoutMs, config.timeoutMs);
 

@@ -2320,6 +2320,68 @@ describe('ACP Chat store', () => {
     expect(useAcpChatSessionStore.getState().pendingVideoGenerationTaskIds).toEqual([]);
   });
 
+  it('releases the video lock and displays an error for an immediate internal failure', async () => {
+    const taskId = '56db7fb4-8809-46e9-8ad4-d7724918f295';
+    const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+    ensureAcpChatSubscriptions();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1',
+      workspaceRoot: '/repo',
+      cwd: '/repo',
+    });
+
+    hostEventsMock.updateListener?.({
+      sessionKey: 'agent:pi:s1',
+      generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'video-tool',
+          status: 'completed',
+          content: [{
+            type: 'content',
+            content: {
+              type: 'text',
+              text: `Background task started for video generation (${taskId}).`,
+            },
+          }],
+        },
+      },
+    });
+    expect(useAcpChatSessionStore.getState().pendingVideoGenerationTaskIds).toEqual([taskId]);
+
+    hostEventsMock.updateListener?.({
+      sessionKey: 'agent:pi:s1',
+      generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'text',
+            text: [
+              '[Internal task completion event]',
+              'source: video_generation',
+              `session_key: video_generate:${taskId}`,
+              'status: failed',
+            ].join('\n'),
+          },
+        },
+      },
+    });
+
+    const state = useAcpChatSessionStore.getState();
+    expect(state.pendingVideoGenerationTaskIds).toEqual([]);
+    expect(state.timeline.itemOrder.some((itemId) => {
+      const item = state.timeline.itemsById[itemId];
+      return item?.kind === 'message-segment'
+        && item.role === 'assistant'
+        && item.compat?.source === 'video-generation'
+        && item.parts.some((part) => part.kind === 'error');
+    })).toBe(true);
+  });
+
   it('projects one local video when completion arrives after the initial live transcript window', async () => {
     vi.useFakeTimers();
     try {

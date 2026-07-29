@@ -70,7 +70,7 @@ export type MessageSegmentItem = {
   blockCount?: number;
   optimistic?: boolean;
   /** Renderer-only compatibility projection, not an ACP protocol event. */
-  compat?: { source: 'image-generation' | 'openclaw-media'; evidenceId: string };
+  compat?: { source: 'image-generation' | 'openclaw-media' | 'video-generation'; evidenceId: string };
 };
 
 export type ThoughtItem = {
