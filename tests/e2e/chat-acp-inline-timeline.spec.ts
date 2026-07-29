@@ -617,8 +617,13 @@ test.describe('ClawX ACP inline timeline', () => {
       ))).toContain('acp-tool-group-shimmer');
       const runningSummaryStyle = await groups.nth(0).getByTestId('acp-tool-group-summary').evaluate((element) => {
         const style = getComputedStyle(element);
-        return { backgroundImage: style.backgroundImage, color: style.color };
+        return {
+          animationDuration: style.animationDuration,
+          backgroundImage: style.backgroundImage,
+          color: style.color,
+        };
       });
+      expect(runningSummaryStyle.animationDuration).toBe('5s');
       expect(runningSummaryStyle.backgroundImage).toContain('linear-gradient');
       expect(runningSummaryStyle.color).toBe('rgba(0, 0, 0, 0)');
 

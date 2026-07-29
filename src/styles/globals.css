@@ -550,3 +550,39 @@
     transform: translateY(-4px);
   }
 }
+
+/* Keep the active ACP tool phase visible without animating the whole timeline row. */
+@keyframes acp-tool-group-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.acp-tool-group-summary {
+  background-image: linear-gradient(
+    90deg,
+    hsl(var(--muted-foreground)) 20%,
+    hsl(var(--foreground) / 0.85) 45%,
+    hsl(var(--muted-foreground)) 70%
+  );
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  transition: color 160ms ease, opacity 160ms ease;
+}
+
+.acp-tool-group-shimmer {
+  color: transparent;
+  animation: acp-tool-group-shimmer 5s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .acp-tool-group-shimmer {
+    color: inherit;
+    animation: none;
+  }
+}
