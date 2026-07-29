@@ -69,19 +69,18 @@ vi.mock('react-i18next', () => ({
         'acp.cancelled': 'Cancelled',
         'acp.toolGroup.expand': 'Expand tool calls',
         'acp.toolGroup.collapse': 'Collapse tool calls',
-        'acp.toolGroup.runningGeneric': 'Running {{count}} tool calls',
-        'acp.toolGroup.completedGeneric': 'Ran {{count}} tool calls',
-        'acp.toolGroup.runningRead': 'Reading {{count}} files',
-        'acp.toolGroup.completedRead': 'Read {{count}} files',
-        'acp.toolGroup.runningEdit': 'Modifying {{count}} files',
-        'acp.toolGroup.completedEdit': 'Modified {{count}} files',
-        'acp.toolGroup.runningSearch': 'Running {{count}} searches',
-        'acp.toolGroup.completedSearch': 'Ran {{count}} searches',
-        'acp.toolGroup.runningExecute': 'Running {{count}} commands',
-        'acp.toolGroup.completedExecute': 'Ran {{count}} commands',
-        'acp.toolGroup.runningFetch': 'Fetching {{count}} resources',
-        'acp.toolGroup.completedFetch': 'Fetched {{count}} resources',
-        'acp.toolGroup.itemCount': '{{count}} items',
+        'acp.toolGroup.runningGeneric': 'Working on related operations',
+        'acp.toolGroup.completedGeneric': 'Completed related operations',
+        'acp.toolGroup.runningRead': 'Reading files',
+        'acp.toolGroup.completedRead': 'Read files',
+        'acp.toolGroup.runningEdit': 'Modifying files',
+        'acp.toolGroup.completedEdit': 'Modified files',
+        'acp.toolGroup.runningSearch': 'Researching information',
+        'acp.toolGroup.completedSearch': 'Researched information',
+        'acp.toolGroup.runningExecute': 'Running commands',
+        'acp.toolGroup.completedExecute': 'Ran commands',
+        'acp.toolGroup.runningFetch': 'Researching information',
+        'acp.toolGroup.completedFetch': 'Researched information',
         'acp.loadFailed': 'Load failed',
         'acp.promptFailed': 'Prompt failed',
         'acp.unsupportedContent': 'Unsupported content',
@@ -811,7 +810,7 @@ describe('ACP chat timeline components', () => {
     expect(group).toHaveAttribute('data-active', 'true');
     expect(summary).toHaveClass('acp-tool-group-shimmer');
     expect(screen.getByTestId('acp-tool-group-running-icon')).toBeInTheDocument();
-    expect(summary).toHaveTextContent('Reading 1 files');
+    expect(summary).toHaveTextContent('Reading files');
 
     rerender(<AcpToolCallGroup id="tool-call-group:tool:motion-read" items={items} active={false} />);
 
@@ -819,7 +818,37 @@ describe('ACP chat timeline components', () => {
     expect(summary).not.toHaveClass('acp-tool-group-shimmer');
     expect(screen.queryByTestId('acp-tool-group-running-icon')).not.toBeInTheDocument();
     expect(screen.getByTestId('acp-tool-group-completed-icon')).toBeInTheDocument();
-    expect(summary).toHaveTextContent('Read 1 files');
+    expect(screen.getByTestId('acp-tool-group-completed-icon')).toHaveAttribute('data-activity-kind', 'execute');
+    expect(summary).toHaveTextContent('Read files');
+  });
+
+  it('uses the two highest-priority known activities when a tool group also contains unknown tools', () => {
+    const items = [
+      toolCallItem({ id: 'tool:unknown', toolCallId: 'unknown' }),
+      toolCallItem({ id: 'tool:read', toolCallId: 'read', toolKind: 'read' }),
+      toolCallItem({ id: 'tool:search', toolCallId: 'search', toolKind: 'search' }),
+      toolCallItem({ id: 'tool:execute', toolCallId: 'execute', toolKind: 'execute' }),
+      toolCallItem({ id: 'tool:edit', toolCallId: 'edit', toolKind: 'edit' }),
+    ];
+
+    render(<AcpToolCallGroup id="tool-call-group:tool:unknown" items={items} active={false} />);
+
+    const summary = screen.getByTestId('acp-tool-group-summary');
+    expect(summary).toHaveTextContent('Modified files');
+    expect(summary).toHaveTextContent('Ran commands');
+    expect(summary).not.toHaveTextContent('Read files');
+    expect(summary).not.toHaveTextContent('tool calls');
+  });
+
+  it('uses a neutral operation summary when no tool activity can be identified', () => {
+    const items = [
+      toolCallItem({ id: 'tool:unknown-a', toolCallId: 'unknown-a' }),
+      toolCallItem({ id: 'tool:unknown-b', toolCallId: 'unknown-b' }),
+    ];
+
+    render(<AcpToolCallGroup id="tool-call-group:tool:unknown-a" items={items} active={false} />);
+
+    expect(screen.getByTestId('acp-tool-group-summary')).toHaveTextContent('Completed related operations');
   });
 
   it('keeps motion on only for the trailing tool group in a live assistant turn', () => {

@@ -83,7 +83,7 @@ expect(screen.getByTestId('acp-tool-group-summary')).toHaveClass('acp-tool-group
 expect(screen.getByTestId('acp-tool-group-toggle')).toHaveTextContent('Running');
 ```
 
-Rerender with `active={false}` and assert the shimmer class is absent, the check icon is present, and the completed copy is shown. Render a timeline with two separated groups plus live timing and assert only the final display group is active.
+Rerender with `active={false}` and assert the shimmer class is absent, the activity-specific icon is present, and the completed copy is shown. Render a timeline with two separated groups plus live timing and assert only the final display group is active.
 
 - [ ] **Step 2: Verify RED**
 
@@ -145,7 +145,7 @@ Append a focused class to `src/styles/globals.css`:
 }
 ```
 
-Also add `motion-reduce:animate-none` to the running spinner. Do not animate the row background, Chevron or item count.
+Also add `motion-reduce:animate-none` to the running spinner. Do not animate the row background or Chevron.
 
 - [ ] **Step 6: Verify GREEN**
 
@@ -178,7 +178,7 @@ Run:
 pnpm exec playwright test tests/e2e/chat-acp-inline-timeline.spec.ts --grep "groups consecutive ACP tool calls"
 ```
 
-Expected: one test PASS at normal and narrow widths with no text/count overlap.
+Expected: one test PASS at normal and narrow widths with clean summary truncation.
 
 - [ ] **Step 4: Run final static verification**
 

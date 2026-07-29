@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import { spawn, type ForkOptions } from 'node:child_process';
 import { homedir } from 'node:os';
-import { delimiter, join, dirname } from 'node:path';
+import { join, dirname } from 'node:path';
 import { getOpenClawDir, getOpenClawEntryPath } from './paths';
 import { logger } from './logger';
 
@@ -124,21 +124,6 @@ function getWindowsCmdWrapperSpawnSpec(cmdPath: string): OpenClawCliSpawnSpec {
   };
 }
 
-function getExecutableFromPath(command: string): string | null {
-  const pathEnv = process.env.PATH || '';
-  for (const dir of pathEnv.split(delimiter)) {
-    if (!dir) continue;
-    const candidate = join(dir, command);
-    if (fileExists(candidate)) return candidate;
-  }
-  return null;
-}
-
-function getDevNodeExecPath(): string | null {
-  const nodeCommand = process.platform === 'win32' ? 'node.exe' : 'node';
-  return getExecutableFromPath(nodeCommand);
-}
-
 export function getOpenClawCliSpawnSpec(): OpenClawCliSpawnSpec {
   const entryPath = getOpenClawEntryPath();
   const platform = process.platform;
@@ -198,11 +183,9 @@ export function getOpenClawCliSpawnSpec(): OpenClawCliSpawnSpec {
 
 function getOpenClawEmbeddedExecPath(): { execPath: string; electronRunAsNode: boolean } {
   if (!app.isPackaged) {
-    const nodeExecPath = getDevNodeExecPath();
-    if (nodeExecPath) return { execPath: nodeExecPath, electronRunAsNode: false };
-    if (process.versions?.electron) {
-      throw new Error('Node executable not found on PATH for embedded OpenClaw launch');
-    }
+    // ACP is part of the Electron app runtime. Keep it on Electron's bundled
+    // Node instead of inheriting an arbitrary, potentially outdated PATH Node.
+    return { execPath: process.execPath, electronRunAsNode: true };
   }
 
   if (app.isPackaged && process.platform === 'win32') {

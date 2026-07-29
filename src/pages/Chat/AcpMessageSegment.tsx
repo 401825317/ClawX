@@ -1,9 +1,9 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
-import { AlertCircle, Check, Copy } from 'lucide-react';
+import { AlertCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import logoUclaw from '@/assets/logo-uclaw.png';
 import type { MessageSegmentItem, RenderPart } from '@/lib/acp/timeline-types';
@@ -112,50 +112,6 @@ function AcpErrorPart({ message }: { message: string }) {
   );
 }
 
-function clipboardTextForPart(part: RenderPart): string {
-  return part.kind === 'markdown' ? part.text : '';
-}
-
-export function clipboardTextForParts(parts: RenderPart[]): string {
-  return parts
-    .map(clipboardTextForPart)
-    .filter((text) => text.trim().length > 0)
-    .join('\n\n');
-}
-
-export function AcpAssistantHoverBar({ text }: { text: string }) {
-  const { t } = useTranslation('chat');
-  const [copied, setCopied] = useState(false);
-
-  const copyContent = useCallback(async () => {
-    if (!text.trim()) return;
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
-  }, [text]);
-
-  const label = copied ? t('acp.copied') : t('acp.copy');
-
-  return (
-    <div className="flex w-full justify-end px-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
-      <button
-        type="button"
-        data-testid="acp-assistant-copy"
-        aria-label={label}
-        title={label}
-        onClick={() => void copyContent()}
-        className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-black/5 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 dark:hover:bg-white/10"
-      >
-        {copied ? (
-          <Check className="h-3.5 w-3.5 text-green-700 dark:text-green-400" aria-hidden="true" />
-        ) : (
-          <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-        )}
-      </button>
-    </div>
-  );
-}
-
 export function AcpRenderPart({ part, tone = 'assistant' }: { part: RenderPart; tone?: RenderTone }) {
   if (part.kind === 'markdown') {
     if (tone === 'user') {
@@ -177,7 +133,6 @@ export function AcpRenderPart({ part, tone = 'assistant' }: { part: RenderPart; 
 
 export function AcpMessageSegment({ item }: { item: MessageSegmentItem }) {
   const isUser = item.role === 'user';
-  const clipboardText = useMemo(() => clipboardTextForParts(item.parts), [item.parts]);
   const orderedParts = useMemo(() => isUser
     ? [
       ...item.parts.filter((part) => part.kind !== 'attachment'),
@@ -199,7 +154,6 @@ export function AcpMessageSegment({ item }: { item: MessageSegmentItem }) {
         {orderedParts.map((part, index) => (
           <AcpRenderPart key={`${part.kind}:${index}`} part={part} tone={item.role} />
         ))}
-        {!isUser && clipboardText.trim().length > 0 && <AcpAssistantHoverBar text={clipboardText} />}
       </div>
     </div>
   );

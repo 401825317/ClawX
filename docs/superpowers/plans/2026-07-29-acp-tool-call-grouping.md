@@ -134,7 +134,7 @@ const [expanded, setExpanded] = useState(false);
 const running = items.some((item) => item.status === 'pending' || item.status === 'running');
 ```
 
-Use a stable `button` with `aria-expanded`, `aria-controls`, `data-testid="acp-tool-group-toggle"`, and render children only while expanded. Build category counts from ACP `toolKind`; use `Intl.ListFormat(i18n.language)` for up to three localized activity phrases and fall back to a generic count. Do not inspect `item.error` or count `failed` items when building the group summary.
+Use a stable `button` with `aria-expanded`, `aria-controls`, `data-testid="acp-tool-group-toggle"`, and render children only while expanded. Identify categories from ACP `toolKind`; use `Intl.ListFormat(i18n.language)` for at most two prioritized activity phrases, ignore unknown kinds when known activities exist, and fall back to a neutral operation phrase only when no activity can be identified. Do not inspect `item.error`, expose call counts, or count `failed` items when building the group summary.
 
 - [ ] **Step 5: Add all locale strings**
 
@@ -144,19 +144,18 @@ Under `chat.acp.toolGroup`, add localized equivalents for:
 {
   "expand": "Expand tool calls",
   "collapse": "Collapse tool calls",
-  "runningGeneric": "Running {{count}} tool calls",
-  "completedGeneric": "Ran {{count}} tool calls",
-  "runningRead": "Reading {{count}} files",
-  "completedRead": "Read {{count}} files",
-  "runningEdit": "Modifying {{count}} files",
-  "completedEdit": "Modified {{count}} files",
-  "runningSearch": "Running {{count}} searches",
-  "completedSearch": "Ran {{count}} searches",
-  "runningExecute": "Running {{count}} commands",
-  "completedExecute": "Ran {{count}} commands",
-  "runningFetch": "Fetching {{count}} resources",
-  "completedFetch": "Fetched {{count}} resources",
-  "itemCount": "{{count}} items"
+  "runningGeneric": "Working on related operations",
+  "completedGeneric": "Completed related operations",
+  "runningRead": "Reading files",
+  "completedRead": "Read files",
+  "runningEdit": "Editing files",
+  "completedEdit": "Edited files",
+  "runningSearch": "Researching information",
+  "completedSearch": "Researched information",
+  "runningExecute": "Running commands",
+  "completedExecute": "Ran multiple commands",
+  "runningFetch": "Researching information",
+  "completedFetch": "Researched information"
 }
 ```
 
@@ -257,7 +256,7 @@ Expected: all commands exit 0. Existing Vite chunk-size warnings may remain; no 
 
 - [ ] **Step 2: Inspect the rendered application**
 
-Start `pnpm dev`, open a controlled ACP session, and verify desktop plus a narrow viewport: summaries truncate without overlapping the item count, keyboard toggle works, both themes remain legible, and stream appends do not jump or reopen groups.
+Start `pnpm dev`, open a controlled ACP session, and verify desktop plus a narrow viewport: summaries truncate cleanly, keyboard toggle works, both themes remain legible, and stream appends do not jump or reopen groups.
 
 - [ ] **Step 3: Audit scope**
 

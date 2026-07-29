@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import logoUclaw from '@/assets/logo-uclaw.png';
 import type { AcpAssistantTurnDisplayGroup } from '@/lib/acp/timeline-groups';
-import { AcpMessageSegment, AcpRenderPart, AcpAssistantHoverBar, clipboardTextForParts } from './AcpMessageSegment';
+import { AcpMessageSegment, AcpRenderPart } from './AcpMessageSegment';
 import { AcpPermissionCard } from './AcpPermissionCard';
 import { AcpPlanItem } from './AcpPlanItem';
 import { AcpThoughtBlock } from './AcpThoughtBlock';
@@ -13,19 +13,6 @@ import { AcpAttachmentPart } from './AcpAttachmentPart';
 import type { AcpTurnTiming } from '@/lib/acp/turn-timings';
 import { groupConsecutiveToolCalls, isToolCallGroupActive } from '@/lib/acp/tool-call-groups';
 import { AcpToolCallGroup } from './AcpToolCallGroup';
-
-function assistantTurnClipboardText(group: AcpAssistantTurnDisplayGroup): string {
-  const textSegments: string[] = [];
-
-  for (const item of group.items) {
-    if (item.kind !== 'message-segment' || item.role !== 'assistant') continue;
-
-    const text = clipboardTextForParts(item.parts);
-    if (text.trim().length > 0) textSegments.push(text);
-  }
-
-  return textSegments.join('\n\n');
-}
 
 function formatDuration(durationMs: number, language: string): string {
   const wholeSeconds = Math.floor(Math.max(0, durationMs) / 1000);
@@ -77,7 +64,6 @@ export function AcpAssistantTurn({
   timing?: AcpTurnTiming;
   onPermissionSelect?: (requestId: string, optionId: string) => void;
 }) {
-  const clipboardText = useMemo(() => assistantTurnClipboardText(group), [group]);
   const displayEntries = useMemo(() => groupConsecutiveToolCalls(group.items), [group.items]);
 
   return (
@@ -154,14 +140,9 @@ export function AcpAssistantTurn({
 
         {workspaceRoot && <AcpTurnFileActivity summaries={fileSummaries} workspaceRoot={workspaceRoot} />}
 
-        {(timing || clipboardText.trim().length > 0) && (
+        {timing && (
           <div className="flex w-full items-center">
-            {timing && <AcpTurnDuration timing={timing} />}
-            {clipboardText.trim().length > 0 && (
-              <div className="ml-auto min-w-0 flex-1">
-                <AcpAssistantHoverBar text={clipboardText} />
-              </div>
-            )}
+            <AcpTurnDuration timing={timing} />
           </div>
         )}
       </div>

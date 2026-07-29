@@ -1,5 +1,16 @@
 import { useState } from 'react';
-import { CheckCircle2, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronRight,
+  FileText,
+  Globe2,
+  Loader2,
+  Pencil,
+  Search,
+  SquareTerminal,
+  Wrench,
+  type LucideIcon,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { ToolCallItem } from '@/lib/acp/timeline-types';
 import { cn } from '@/lib/utils';
@@ -17,31 +28,54 @@ const ACTIVITY_KINDS: Partial<Record<NonNullable<ToolCallItem['toolKind']>, Acti
   fetch: 'fetch',
 };
 
+const ACTIVITY_ICONS: Record<ActivityKind, LucideIcon> = {
+  read: FileText,
+  edit: Pencil,
+  search: Search,
+  execute: SquareTerminal,
+  fetch: Globe2,
+};
+
+const ACTIVITY_ICON_PRIORITY: ActivityKind[] = ['edit', 'execute', 'search', 'fetch', 'read'];
+
+function primaryActivityKind(items: ToolCallItem[]): ActivityKind | 'generic' {
+  const activities = new Set(items.flatMap((item) => {
+    const activity = item.toolKind ? ACTIVITY_KINDS[item.toolKind] : undefined;
+    return activity ? [activity] : [];
+  }));
+  return ACTIVITY_ICON_PRIORITY.find((activity) => activities.has(activity)) ?? 'generic';
+}
+
 function activitySummary(
   items: ToolCallItem[],
   running: boolean,
   language: string,
   t: (key: string, options?: Record<string, unknown>) => string,
 ): string {
-  const counts = new Map<ActivityKind, number>();
+  const activities = new Set<ActivityKind>();
 
-  // Unknown or non-action tool kinds cannot be summarized naturally, so keep the copy generic.
   for (const item of items) {
     const activity = item.toolKind ? ACTIVITY_KINDS[item.toolKind] : undefined;
-    if (!activity) {
-      return t(running ? 'acp.toolGroup.runningGeneric' : 'acp.toolGroup.completedGeneric', { count: items.length });
-    }
-    counts.set(activity, (counts.get(activity) ?? 0) + 1);
+    if (activity) activities.add(activity);
   }
 
-  if (counts.size > 3) {
-    return t(running ? 'acp.toolGroup.runningGeneric' : 'acp.toolGroup.completedGeneric', { count: items.length });
+  // Search and fetch share one user-facing research phrase; show at most two primary actions.
+  const summaryActivities: ActivityKind[] = [];
+  for (const activity of ACTIVITY_ICON_PRIORITY) {
+    if (!activities.has(activity)) continue;
+    const summaryActivity = activity === 'fetch' ? 'search' : activity;
+    if (!summaryActivities.includes(summaryActivity)) summaryActivities.push(summaryActivity);
+    if (summaryActivities.length === 2) break;
   }
 
-  const phrases = Array.from(counts, ([activity, count]) => {
+  if (summaryActivities.length === 0) {
+    return t(running ? 'acp.toolGroup.runningGeneric' : 'acp.toolGroup.completedGeneric');
+  }
+
+  const phrases = summaryActivities.map((activity) => {
     const state = running ? 'running' : 'completed';
     const key = `acp.toolGroup.${state}${activity[0].toUpperCase()}${activity.slice(1)}`;
-    return t(key, { count });
+    return t(key);
   });
   return new Intl.ListFormat(language, { style: 'short', type: 'conjunction' }).format(phrases);
 }
@@ -61,6 +95,8 @@ export function AcpToolCallGroup({
   const panelId = `${id.replace(/[^a-zA-Z0-9_-]/g, '-')}-items`;
   const toggleLabel = expanded ? t('acp.toolGroup.collapse') : t('acp.toolGroup.expand');
   const summary = activitySummary(items, active, i18n.language, t);
+  const activityKind = primaryActivityKind(items);
+  const CompletedIcon = activityKind === 'generic' ? Wrench : ACTIVITY_ICONS[activityKind];
 
   return (
     <div
@@ -85,14 +121,20 @@ export function AcpToolCallGroup({
           : <ChevronRight className="h-4 w-4 shrink-0" aria-hidden="true" />}
         {active
           ? <Loader2 data-testid="acp-tool-group-running-icon" className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />
-          : <CheckCircle2 data-testid="acp-tool-group-completed-icon" className="h-4 w-4 shrink-0" aria-hidden="true" />}
+          : (
+              <CompletedIcon
+                data-testid="acp-tool-group-completed-icon"
+                data-activity-kind={activityKind}
+                className="h-4 w-4 shrink-0"
+                aria-hidden="true"
+              />
+            )}
         <span
           data-testid="acp-tool-group-summary"
           className={cn('acp-tool-group-summary min-w-0 flex-1 truncate font-medium', active && 'acp-tool-group-shimmer')}
         >
           {summary}
         </span>
-        <span data-testid="acp-tool-group-count" className="shrink-0 text-2xs">{t('acp.toolGroup.itemCount', { count: items.length })}</span>
       </button>
 
       {expanded && (

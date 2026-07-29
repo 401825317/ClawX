@@ -665,13 +665,7 @@ test.describe('ClawX ACP inline timeline', () => {
       await expect(groups.nth(1)).toHaveAttribute('data-active', 'true');
       await expect(groups.nth(0)).not.toContainText('Failed');
       await expect(groups.nth(1)).not.toContainText('Failed');
-      const [summaryBox, countBox] = await Promise.all([
-        groups.nth(0).getByTestId('acp-tool-group-summary').boundingBox(),
-        groups.nth(0).getByTestId('acp-tool-group-count').boundingBox(),
-      ]);
-      expect(summaryBox).not.toBeNull();
-      expect(countBox).not.toBeNull();
-      expect((summaryBox?.x ?? 0) + (summaryBox?.width ?? 0)).toBeLessThanOrEqual(countBox?.x ?? 0);
+      await expect(groups.nth(0).getByTestId('acp-tool-group-count')).toHaveCount(0);
 
       await groups.nth(0).getByTestId('acp-tool-group-toggle').click();
 
@@ -879,25 +873,13 @@ test.describe('ClawX ACP inline timeline', () => {
     }
   });
 
-  test('shows assistant identity and copies ACP assistant text', async ({ launchElectronApp }) => {
+  test('shows assistant identity without a reply copy action', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 
     try {
       await installAcpChatMocks(app);
       const page = await openChat(app);
       await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible({ timeout: 30_000 });
-
-      await page.evaluate(() => {
-        Object.defineProperty(navigator, 'clipboard', {
-          value: {
-            writeText: (value: string) => {
-              (window as unknown as { __acpCopiedText?: string }).__acpCopiedText = value;
-              return Promise.resolve();
-            },
-          },
-          configurable: true,
-        });
-      });
 
       await emitAcpSessionUpdates(app, [
         {
@@ -910,12 +892,7 @@ test.describe('ClawX ACP inline timeline', () => {
       const assistantMessage = page.getByTestId('acp-assistant-message');
       await expect(assistantMessage).toBeVisible({ timeout: 30_000 });
       await expect(page.getByTestId('acp-assistant-avatar')).toBeVisible();
-
-      await assistantMessage.hover();
-      await page.getByTestId('acp-assistant-copy').click();
-
-      await expect(page.getByTestId('acp-assistant-copy')).toHaveAttribute('aria-label', 'Copied');
-      await expect.poll(() => page.evaluate(() => (window as unknown as { __acpCopiedText?: string }).__acpCopiedText)).toBe('Copy this ACP answer');
+      await expect(page.getByTestId('acp-assistant-copy')).toHaveCount(0);
     } finally {
       await closeElectronApp(app);
     }
@@ -981,7 +958,7 @@ test.describe('ClawX ACP inline timeline', () => {
 
       await expect(page.getByTestId('acp-assistant-turn')).toHaveCount(1, { timeout: 30_000 });
       await expect(page.getByTestId('acp-assistant-avatar')).toHaveCount(1);
-      await expect(page.getByTestId('acp-assistant-copy')).toHaveCount(1);
+      await expect(page.getByTestId('acp-assistant-copy')).toHaveCount(0);
       await expect(page.getByTestId('acp-tool-call-card')).toContainText('Read grouped file');
       await expect.poll(async () => await page.getByTestId('acp-tool-call-card').evaluate((element) => Boolean(element.closest('[data-testid="acp-assistant-turn"]')))).toBe(true);
       await expect(page.getByTestId('acp-assistant-turn')).toContainText('I will inspect the file.');

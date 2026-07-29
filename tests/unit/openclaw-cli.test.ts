@@ -255,20 +255,19 @@ describe('getOpenClawEmbeddedForkSpec', () => {
     });
   });
 
-  it('uses a real Node executable from PATH for dev embedded launches instead of Electron', async () => {
-    const execPath = '/Users/zhuoxu/workspace/ClawX/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron';
-    setPlatform('darwin');
+  it('uses Electron Node mode for dev embedded launches even when PATH contains an older Node', async () => {
+    const execPath = 'C:\\workspace\\ClawX\\node_modules\\electron\\dist\\electron.exe';
+    setPlatform('win32');
     setExecPath(execPath);
-    process.env.PATH = '/opt/node/bin:/usr/bin';
-    process.env.ELECTRON_RUN_AS_NODE = '1';
-    mockExistsSync.mockImplementation((p: string) => p === '/opt/node/bin/node');
+    process.env.PATH = '/old-node/bin:/usr/bin';
+    delete process.env.ELECTRON_RUN_AS_NODE;
+    mockExistsSync.mockImplementation((p: string) => p === '/old-node/bin/node.exe');
 
     const { getOpenClawEmbeddedForkSpec } = await import('@electron/utils/openclaw-cli');
     const spec = getOpenClawEmbeddedForkSpec(['acp']);
 
-    expect(spec.options.execPath).toBe('/opt/node/bin/node');
-    expect(spec.options.execPath).not.toBe(execPath);
-    expect(spec.options.env).not.toMatchObject({ ELECTRON_RUN_AS_NODE: '1' });
+    expect(spec.options.execPath).toBe(execPath);
+    expect(spec.options.env).toMatchObject({ ELECTRON_RUN_AS_NODE: '1' });
   });
 
   it('fails packaged macOS embedded launch when the Helper executable is missing', async () => {

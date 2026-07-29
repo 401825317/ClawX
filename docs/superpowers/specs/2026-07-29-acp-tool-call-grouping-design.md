@@ -45,7 +45,7 @@ assistant text -> group(A, B) -> thought -> group(C, D) -> assistant text
 
 负责组摘要、折叠状态、无障碍属性和展开后的工具列表。折叠状态初始化为 `false`，没有完成后自动折叠或失败后自动展开的 effect。
 
-摘要优先按 ACP `toolKind` 统计 `read`、`edit/delete/move`、`search`、`execute`、`fetch`；种类过多或 `other` 无法自然描述时使用“正在执行 N 项工具调用”或“已执行 N 项工具调用”。摘要只反映执行活动，不反映成功率。
+摘要优先按 ACP `toolKind` 识别 `read`、`edit/delete/move`、`search`、`execute`、`fetch`，按编辑、命令、搜索、获取、读取的顺序选择最多两个主要行为。未知类型不再让整个工具组退化为数量文案；只有完全无法识别行为时才使用“正在处理相关操作”或“完成了相关操作”。摘要不展示调用数量，只反映执行活动，不反映成功率。
 
 ### `src/pages/Chat/AcpToolCallCard.tsx`
 
@@ -57,7 +57,7 @@ assistant text -> group(A, B) -> thought -> group(C, D) -> assistant text
 
 ## 运行态动效
 
-采用已确认的 B 方案：旋转状态环保留现有运行提示，仅对“正在执行……”摘要文案增加低对比度流光。流光从左向右循环扫过文字，不覆盖 Chevron、右侧数量、工具组背景或展开后的单项内容，避免整行闪烁和布局跳动。
+采用已确认的 B 方案：旋转状态环保留现有运行提示，仅对“正在执行……”摘要文案增加低对比度流光。流光从左向右循环扫过文字，不覆盖 Chevron、工具组背景或展开后的单项内容，避免整行闪烁和布局跳动。工具组不在右侧重复展示项目数量。
 
 动效状态完全从现有 renderer 输入派生，不向 Store 写入新的运行状态：
 
@@ -69,7 +69,7 @@ assistant text -> group(A, B) -> thought -> group(C, D) -> assistant text
 6. timing 缺失时退化为组内是否存在 `pending/running` 工具，不能因为缺少 timing 无限播放。
 7. 历史回放的工具组始终使用静态完成态，不播放流光。
 
-退出活动态时，用约 160ms 的透明度过渡移除流光，状态环切换为静态中性对勾，摘要从“正在执行”变为“已执行”。不播放成功闪光，不自动展开工具组，也不根据失败数量改变颜色或文案。网关短暂重连本身不作为完成信号；只要 renderer 仍认为当前轮次在运行，动效继续，避免误报完成。
+退出活动态时，用约 160ms 的透明度过渡移除流光，状态环切换为静态行为图标，摘要从“正在执行”变为“已执行”。读取、编辑、命令、搜索和网络获取分别使用文件、铅笔、终端、放大镜和地球图标；混合组按编辑、命令、搜索、获取、读取的顺序选择主要图标，未知工具使用扳手。不播放成功闪光，不自动展开工具组，也不根据失败数量改变颜色或文案。网关短暂重连本身不作为完成信号；只要 renderer 仍认为当前轮次在运行，动效继续，避免误报完成。
 
 流光周期约 5 秒，使用现有 muted/foreground token 形成轻微亮度差。页面启用 `prefers-reduced-motion: reduce` 时禁用旋转和流光，只保留静态运行文案与图标。任一时刻每个 assistant turn 最多只有末尾一个工具组播放动效。
 
@@ -83,8 +83,8 @@ assistant text -> group(A, B) -> thought -> group(C, D) -> assistant text
 ## 无障碍与视觉
 
 - 摘要使用真实 `button`，提供 `aria-expanded` 与稳定的 `aria-controls`。
-- Chevron 表示展开方向；运行中使用 spinner 与摘要文案流光，终态使用中性完成图标。
-- 摘要单行截断，右侧数量固定宽度，窄窗口不会挤出容器。
+- Chevron 表示展开方向；运行中使用 spinner 与摘要文案流光，终态使用中性的工具行为图标。
+- 摘要单行截断，窄窗口不会挤出容器。
 - 支持键盘 Enter/Space、focus ring 与 `prefers-reduced-motion`。
 - 使用现有设计 token、Lucide 图标和 8px 以内圆角，不引入新配色系统。
 
