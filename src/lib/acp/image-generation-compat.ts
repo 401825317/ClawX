@@ -182,6 +182,11 @@ function imageGenerationTaskId(value: unknown): string | undefined {
   return text.match(/(?:^|:)image_generate:([0-9a-f-]{36})(?::|$)/i)?.[1];
 }
 
+function imageGenerationRunFailed(value: unknown): boolean {
+  const text = stringValue(value);
+  return Boolean(text && /(?:^|:)image_generate:[0-9a-f-]{36}:(?:error|failed)(?::|$)/i.test(text));
+}
+
 function dedupeCandidates(candidates: ImageGenerationMediaCandidate[]): ImageGenerationMediaCandidate[] {
   return candidates.filter((candidate, index) => candidates.findIndex((entry) => entry.key === candidate.key) === index);
 }
@@ -431,6 +436,7 @@ export function extractImageGenerationCompletionFromGatewayChatMessage(
   const runId = stringValue(envelope.runId) ?? stringValue(root.runId) ?? 'unknown-run';
   const sessionKey = stringValue(envelope.sessionKey) ?? stringValue(root.sessionKey);
   const taskId = imageGenerationTaskId(runId) ?? imageGenerationTaskId(sessionKey);
+  const runFailed = imageGenerationRunFailed(runId);
   const finalAssistantText = role === 'assistant' && taskId && stringValue(envelope.state)?.toLowerCase() === 'final'
     ? textFromMessageContent(message.content)
     : '';
@@ -442,7 +448,10 @@ export function extractImageGenerationCompletionFromGatewayChatMessage(
   const trustedMessageToolResult = (role === 'toolresult' || role === 'tool_result') && toolName === MESSAGE_TOOL;
   const trustedAssistantMedia = assistantAttachedCandidates.length > 0;
   const trustedEnvelopeMedia = !nestedMessage && Boolean(stringValue(envelope.state)) && hasStructuredMediaFields(envelope);
-  const trustedFinalCompletion = Boolean(taskId && (finalAssistantCaption || finalAssistantCandidates.length > 0));
+  const trustedFinalCompletion = Boolean(taskId && (
+    finalAssistantCandidates.length > 0
+    || (runFailed && finalAssistantCaption)
+  ));
   if (!trustedMessageToolResult && !trustedAssistantMedia && !trustedEnvelopeMedia && !trustedFinalCompletion) return null;
   if (trustedMessageToolResult && (
     message.isError === true
@@ -460,6 +469,7 @@ export function extractImageGenerationCompletionFromGatewayChatMessage(
     ...finalAssistantCandidates,
     ...(trustedMessageToolResult ? collectStructuredMediaCandidates(details) : []),
   ]);
+  if (trustedMessageToolResult && taskId && !runFailed && candidates.length === 0) return null;
   if (!sourceReplyCaption && candidates.length === 0) return null;
 
   return {
@@ -502,6 +512,7 @@ export function extractImageGenerationCompletionFromRuntimeEvent(
     ]);
     if (name !== MESSAGE_TOOL || (!caption && candidates.length === 0)) return null;
     const taskId = imageGenerationTaskId(sessionKey) ?? imageGenerationTaskId(record.runId);
+    if (taskId && !imageGenerationRunFailed(record.runId) && candidates.length === 0) return null;
     return {
       ...(sessionKey ? { sessionKey } : {}),
       source: 'runtime-event',
@@ -525,6 +536,7 @@ export function extractImageGenerationCompletionFromRuntimeEvent(
     ...collectMediaTagCandidates(finalText),
   ]);
   if (type !== 'assistant.delta' || (!caption && candidates.length === 0)) return null;
+  if (!imageGenerationRunFailed(record.runId) && candidates.length === 0) return null;
   return {
     ...(sessionKey ? { sessionKey } : {}),
     source: 'runtime-event',

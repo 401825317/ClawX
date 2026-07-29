@@ -229,16 +229,9 @@ function applyPermissionRequestToTimeline(
 }
 
 function captureLiveSession(state: AcpChatSessionState): void {
-  if (
-    (
-      !state.sending
-      && state.pendingImageGenerationTaskIds.length === 0
-      && state.pendingVideoGenerationTaskIds.length === 0
-    )
-    || !state.activeSessionKey
-  ) return;
+  if (!state.activeSessionKey) return;
   const existing = liveSessionSnapshots.get(state.activeSessionKey);
-  liveSessionSnapshots.set(state.activeSessionKey, {
+  const snapshot: LiveSessionSnapshot = {
     sessionKey: state.activeSessionKey,
     workspaceRoot: state.workspaceRoot,
     cwd: state.cwd,
@@ -250,6 +243,102 @@ function captureLiveSession(state: AcpChatSessionState): void {
     turnTimingsByUserMessageId: state.turnTimingsByUserMessageId,
     deferredImageUpdates: existing?.deferredImageUpdates ?? [],
     deferredImageCompletions: existing?.deferredImageCompletions ?? [],
+  };
+  storeLiveSessionSnapshot(snapshot);
+}
+
+function hasLiveSessionSnapshotWork(snapshot: LiveSessionSnapshot): boolean {
+  return snapshot.sending || hasBackgroundMediaSnapshotWork(snapshot);
+}
+
+function hasBackgroundMediaSnapshotWork(snapshot: LiveSessionSnapshot): boolean {
+  return snapshot.pendingImageGenerationTaskIds.length > 0
+    || snapshot.pendingVideoGenerationTaskIds.length > 0
+    || snapshot.deferredImageUpdates.length > 0
+    || snapshot.deferredImageCompletions.length > 0;
+}
+
+function hasImageSnapshotWork(snapshot: LiveSessionSnapshot): boolean {
+  return snapshot.pendingImageGenerationTaskIds.length > 0
+    || snapshot.deferredImageUpdates.length > 0
+    || snapshot.deferredImageCompletions.length > 0;
+}
+
+function deleteLiveSessionSnapshot(sessionKey: string, generation: number): void {
+  if (liveSessionSnapshots.get(sessionKey)?.generation === generation) {
+    liveSessionSnapshots.delete(sessionKey);
+  }
+}
+
+function storeLiveSessionSnapshot(snapshot: LiveSessionSnapshot): void {
+  if (hasLiveSessionSnapshotWork(snapshot)) {
+    liveSessionSnapshots.set(snapshot.sessionKey, snapshot);
+    return;
+  }
+  liveSessionSnapshots.delete(snapshot.sessionKey);
+}
+
+function pruneSettledActiveSnapshot(state: AcpChatSessionState): void {
+  if (!state.activeSessionKey) return;
+  const snapshot = liveSessionSnapshots.get(state.activeSessionKey);
+  if (snapshot?.generation !== state.generation) return;
+  storeLiveSessionSnapshot({
+    ...snapshot,
+    sending: state.sending,
+    pendingImageGenerationTaskIds: state.pendingImageGenerationTaskIds,
+    pendingVideoGenerationTaskIds: state.pendingVideoGenerationTaskIds,
+    timeline: state.timeline,
+    turnTimingsByUserMessageId: state.turnTimingsByUserMessageId,
+  });
+}
+
+function normalizedImageProjectionKey(
+  evidence: ImageGenerationCompletionEvidence,
+  sessionKey: string,
+): string {
+  const taskId = evidence.taskId ?? imageGenerationTaskIdFromSessionKey(evidence.sessionKey);
+  return imageGenerationEvidenceKey({
+    ...evidence,
+    sessionKey,
+    ...(taskId ? { taskId } : {}),
+  });
+}
+
+/** Consumes only the deferred evidence represented by a successfully committed projection. */
+function consumeDeferredImageProjection(input: {
+  sessionKey: string;
+  generation: number;
+  evidence: ImageGenerationCompletionEvidence;
+  correlatedTaskId: string | undefined;
+  state: AcpChatSessionState;
+}): void {
+  const snapshot = liveSessionSnapshots.get(input.sessionKey);
+  if (snapshot?.generation !== input.generation) return;
+
+  const rawEvidenceKey = imageGenerationEvidenceKey(input.evidence);
+  const projectionKey = normalizedImageProjectionKey(input.evidence, input.sessionKey);
+  const matchesEvidence = (candidate: ImageGenerationCompletionEvidence): boolean => (
+    imageGenerationEvidenceKey(candidate) === rawEvidenceKey
+    || normalizedImageProjectionKey(candidate, input.sessionKey) === projectionKey
+  );
+  const deferredImageUpdates = snapshot.deferredImageUpdates.filter(({ event }) => {
+    const start = extractImageGenerationStartFromAcpEnvelope(event);
+    if (input.correlatedTaskId && start?.taskId === input.correlatedTaskId) return false;
+    const evidence = extractImageGenerationCompletionFromAcpEnvelope(event);
+    return !evidence || !matchesEvidence(evidence);
+  });
+  const deferredImageCompletions = snapshot.deferredImageCompletions.filter(
+    ({ evidence }) => !matchesEvidence(evidence),
+  );
+  storeLiveSessionSnapshot({
+    ...snapshot,
+    sending: input.state.sending,
+    pendingImageGenerationTaskIds: input.state.pendingImageGenerationTaskIds,
+    pendingVideoGenerationTaskIds: input.state.pendingVideoGenerationTaskIds,
+    timeline: input.state.timeline,
+    turnTimingsByUserMessageId: input.state.turnTimingsByUserMessageId,
+    deferredImageUpdates,
+    deferredImageCompletions,
   });
 }
 
@@ -499,13 +588,17 @@ function imageGenerationAnchorItemId(
   state: AcpChatSessionState,
   sessionKey: string,
   evidence: ImageGenerationCompletionEvidence,
+  correlatedTaskId: string | undefined,
 ): string | undefined {
   const session = imageGenerationCompatSessions.get(sessionKey);
   const replay = usesReplayImageGenerationContext(evidence);
-  const taskId = evidence.taskId ?? imageGenerationTaskIdFromSessionKey(evidence.sessionKey);
+  const taskToolCallId = correlatedTaskId
+    ? (replay ? session?.replayTaskToolCallIds : session?.taskToolCallIds)?.get(correlatedTaskId)
+    : undefined;
+  // The delivery tool follows the native caption, so anchor matching to the originating image task.
   const candidates = [
+    taskToolCallId,
     evidence.toolCallId,
-    taskId ? (replay ? session?.replayTaskToolCallIds : session?.taskToolCallIds)?.get(taskId) : undefined,
     replay ? session?.lastReplayToolCallId : session?.lastTaskToolCallId,
   ];
 
@@ -1442,20 +1535,13 @@ function settleBackgroundPromptSnapshot(input: {
   const snapshot = liveSessionSnapshots.get(input.sessionKey);
   if (snapshot?.generation !== input.generation) return;
 
-  const hasPendingMedia = snapshot.pendingImageGenerationTaskIds.length > 0
-    || snapshot.pendingVideoGenerationTaskIds.length > 0;
-  if (!hasPendingMedia) {
-    liveSessionSnapshots.delete(input.sessionKey);
-    return;
-  }
-
   const generation = input.success
     ? input.resultGeneration ?? snapshot.generation
     : snapshot.generation;
   const timeline = input.success
     ? snapshot.timeline
     : removePendingOptimisticUserSegment(snapshot.timeline, input.messageId);
-  liveSessionSnapshots.set(input.sessionKey, {
+  storeLiveSessionSnapshot({
     ...snapshot,
     generation,
     sending: false,
@@ -1467,12 +1553,6 @@ function settleBackgroundPromptSnapshot(input: {
       input,
     ),
   });
-}
-
-function deleteLiveSessionSnapshot(sessionKey: string, generation: number): void {
-  if (liveSessionSnapshots.get(sessionKey)?.generation === generation) {
-    liveSessionSnapshots.delete(sessionKey);
-  }
 }
 
 function applyOperationGeneration(
@@ -1531,7 +1611,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
     const generation = get().generation;
     const liveSnapshot = liveSessionSnapshots.get(input.sessionKey);
     invalidateTranscriptSupplement();
-    if (!liveSnapshot?.pendingImageGenerationTaskIds.length) {
+    if (!liveSnapshot || !hasImageSnapshotWork(liveSnapshot)) {
       resetImageGenerationCompatSession(input.sessionKey);
     }
     set({
@@ -1611,10 +1691,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         && currentBackgroundSnapshot.sessionKey === input.sessionKey
         && currentBackgroundSnapshot.workspaceRoot === input.workspaceRoot
         && currentBackgroundSnapshot.cwd === input.cwd
-        && (
-          currentBackgroundSnapshot.pendingImageGenerationTaskIds.length > 0
-          || currentBackgroundSnapshot.pendingVideoGenerationTaskIds.length > 0
-        )
+        && hasBackgroundMediaSnapshotWork(currentBackgroundSnapshot)
         ? currentBackgroundSnapshot
         : undefined;
       if (currentBackgroundSnapshot && !restorableBackgroundSnapshot) {
@@ -1661,27 +1738,38 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
           ?? restorableBackgroundSnapshot?.turnTimingsByUserMessageId
           ?? {},
       });
-      if (currentResumedSnapshot) {
-        liveSessionSnapshots.set(input.sessionKey, {
-          ...currentResumedSnapshot,
+      const restoredSnapshot = currentResumedSnapshot ?? restorableBackgroundSnapshot;
+      if (restoredSnapshot) {
+        const activeState = get();
+        storeLiveSessionSnapshot({
+          ...restoredSnapshot,
+          generation,
+          sending: activeState.sending,
+          pendingImageGenerationTaskIds: activeState.pendingImageGenerationTaskIds,
+          pendingVideoGenerationTaskIds: activeState.pendingVideoGenerationTaskIds,
           timeline,
-          deferredImageUpdates: [],
-          deferredImageCompletions: [],
+          turnTimingsByUserMessageId: activeState.turnTimingsByUserMessageId,
         });
       } else {
         liveSessionSnapshots.delete(input.sessionKey);
       }
       resolvePendingAttachments(input.sessionKey, generation, pendingAttachments);
-      const restoredSnapshot = currentResumedSnapshot ?? restorableBackgroundSnapshot;
+      const deferredProjectionOwner = `deferred-load:${requestId}:${generation}`;
       for (const { event } of restoredSnapshot?.deferredImageUpdates ?? []) {
         const reboundEvent = event.generation === generation ? event : { ...event, generation };
         get().recordImageGenerationStart(reboundEvent);
         get().recordVideoGenerationUpdate(reboundEvent);
         const evidence = extractImageGenerationCompletionFromAcpEnvelope(reboundEvent);
-        if (evidence) void get().projectImageGenerationCompletion(evidence);
+        if (evidence) {
+          void get().projectImageGenerationCompletion(evidence, {
+            reservationOwner: deferredProjectionOwner,
+          });
+        }
       }
       for (const { evidence } of restoredSnapshot?.deferredImageCompletions ?? []) {
-        void get().projectImageGenerationCompletion(evidence);
+        void get().projectImageGenerationCompletion(evidence, {
+          reservationOwner: deferredProjectionOwner,
+        });
       }
       for (const event of sessionUpdates) {
         get().recordImageGenerationStart(event);
@@ -2013,9 +2101,10 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         }
         : {}
     ));
-    for (const [sessionKey, snapshot] of liveSessionSnapshots) {
+    pruneSettledActiveSnapshot(get());
+    for (const snapshot of liveSessionSnapshots.values()) {
       if (!snapshot.pendingVideoGenerationTaskIds.includes(taskId)) continue;
-      liveSessionSnapshots.set(sessionKey, {
+      storeLiveSessionSnapshot({
         ...snapshot,
         pendingVideoGenerationTaskIds: snapshot.pendingVideoGenerationTaskIds.filter(
           (pendingTaskId) => pendingTaskId !== taskId,
@@ -2095,10 +2184,25 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       sessionKey,
       ...(correlatedTaskId ? { taskId: correlatedTaskId } : {}),
     });
+    const finalizeProjection = (committed: boolean): void => {
+      const current = get();
+      if (!isCurrentAction(current, sessionKey, generation)) return;
+      if (committed) {
+        consumeDeferredImageProjection({
+          sessionKey,
+          generation,
+          evidence,
+          correlatedTaskId,
+          state: current,
+        });
+        return;
+      }
+      pruneSettledActiveSnapshot(current);
+    };
     const reconcileSyntheticCompletion = (trackingKey: string): void => {
       const current = get();
       if (!isCurrentAction(current, sessionKey, generation)) return;
-      const afterItemId = imageGenerationAnchorItemId(current, sessionKey, evidence);
+      const afterItemId = imageGenerationAnchorItemId(current, sessionKey, evidence, correlatedTaskId);
       if (!trackSyntheticImageCompletion(
         current.timeline,
         sessionKey,
@@ -2139,6 +2243,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
           pendingImageGenerationTaskIds: settlePendingTask(current),
         }));
         stopLiveTranscriptSupplementRetry(sessionKey, generation, correlatedTaskId);
+        finalizeProjection(true);
       }
       return;
     }
@@ -2278,7 +2383,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         : missingCount > 0
           ? i18n.t('chat:imageGeneration.generatedReadyWithMissing')
           : i18n.t('chat:imageGeneration.generatedReady');
-    const afterItemId = imageGenerationAnchorItemId(latest, sessionKey, evidence);
+    const afterItemId = imageGenerationAnchorItemId(latest, sessionKey, evidence, correlatedTaskId);
     const matchingAcpItemId = authoritativeCaption
       ? matchingAcpImageCompletionItemId(
           latest.timeline,
@@ -2303,6 +2408,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         details: projectionTraceDetails(evidence, { reason: 'matching-acp-reply' }),
       });
       stopLiveTranscriptSupplementRetry(sessionKey, generation, correlatedTaskId);
+      finalizeProjection(missingCount === 0);
       return;
     }
     const duplicateItemId = matchingSyntheticImageItemId(latest.timeline, imageParts);
@@ -2332,6 +2438,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         details: projectionTraceDetails(evidence, { reason: 'resolved-media-identity' }),
       });
       stopLiveTranscriptSupplementRetry(sessionKey, generation, correlatedTaskId);
+      finalizeProjection(missingCount === 0);
       return;
     }
     const parts: RenderPart[] = [{ kind: 'markdown', text: caption }, ...imageParts];
@@ -2357,6 +2464,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       details: projectionTraceDetails(evidence, { imageCount: imageParts.length, missingCount }),
     });
     stopLiveTranscriptSupplementRetry(sessionKey, generation, correlatedTaskId);
+    finalizeProjection(missingCount === 0);
   },
 
   applyUpdateEnvelope(event) {
@@ -2368,7 +2476,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       } else {
         const liveSnapshot = liveSessionSnapshots.get(event.sessionKey);
         if (liveSnapshot?.generation === event.generation) {
-          liveSessionSnapshots.set(event.sessionKey, applyVideoGenerationUpdateToSnapshot(deferInactiveImageUpdate({
+          storeLiveSessionSnapshot(applyVideoGenerationUpdateToSnapshot(deferInactiveImageUpdate({
             ...liveSnapshot,
             timeline: applyAcpSessionUpdate(
               liveSnapshot.timeline,
@@ -2383,7 +2491,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
     if (event.sessionKey !== state.activeSessionKey || event.generation !== state.generation) {
       const liveSnapshot = liveSessionSnapshots.get(event.sessionKey);
       if (liveSnapshot?.generation === event.generation) {
-        liveSessionSnapshots.set(event.sessionKey, applyVideoGenerationUpdateToSnapshot(deferInactiveImageUpdate({
+        storeLiveSessionSnapshot(applyVideoGenerationUpdateToSnapshot(deferInactiveImageUpdate({
           ...liveSnapshot,
           timeline: applyAcpSessionUpdate(
             liveSnapshot.timeline,

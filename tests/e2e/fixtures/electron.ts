@@ -710,7 +710,6 @@ export async function installAttachmentHostFixture(
       replayReady: Record<string, Promise<void> | undefined>;
       deferredTranscriptResolvers: Record<string, (() => void) | undefined>;
       deferredTranscriptReady: Record<string, boolean>;
-      deferredTranscriptReturned: Record<string, boolean>;
       deferredTranscriptCompleted: Record<string, boolean>;
       openHandlersResult: AttachmentOpenHandlersFixtureResult;
       hostInvocations: RecordedHostInvocation[];
@@ -730,7 +729,6 @@ export async function installAttachmentHostFixture(
       replayReady: {},
       deferredTranscriptResolvers: {},
       deferredTranscriptReady: {},
-      deferredTranscriptReturned: {},
       deferredTranscriptCompleted: {},
       openHandlersResult: {
         ok: true,
@@ -900,7 +898,7 @@ export async function installAttachmentHostFixture(
             state.deferredTranscriptResolvers[response.deferId!] = resolveResponse;
           });
           delete state.deferredTranscriptResolvers[response.deferId];
-          state.deferredTranscriptReturned[response.deferId] = true;
+          state.deferredTranscriptCompleted[response.deferId] = true;
         }
         return respond(request.id, { success: true, messages: response.messages });
       }
@@ -953,11 +951,6 @@ export async function installAttachmentHostFixture(
         return respond(request.id, await productionMediaApi.thumbnails(request.payload));
       }
       if (request.module === 'diagnostics' && request.action === 'recordAcpTrace') {
-        if (request.payload?.event === 'openclaw-media:projection-stale') {
-          for (const deferId of Object.keys(state.deferredTranscriptReturned)) {
-            state.deferredTranscriptCompleted[deferId] = true;
-          }
-        }
         return respond(request.id, { success: true });
       }
 

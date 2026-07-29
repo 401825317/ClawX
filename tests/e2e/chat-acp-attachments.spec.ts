@@ -792,6 +792,71 @@ test.describe('ACP media attachments', () => {
     }
   });
 
+  test('merges a live message-tool image completion into the preceding native ACP caption', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const prompt = 'Generate a blue coffee cup product photo';
+    const caption = 'The blue coffee cup product photo is ready.';
+    const taskId = '25272bb3-b8d2-4a24-99d2-27b95e606bcc';
+
+    try {
+      const fixture = await installAttachmentHostFixture(app, {
+        sessions: [{ key: MAIN_SESSION_KEY, title: 'Main session' }],
+      });
+      const imagePath = await fixture.createOpenClawMediaFile(
+        'tool-image-generation/live-blue-coffee-cup.png',
+        Uint8Array.from(Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+          'base64',
+        )),
+      );
+      await fixture.setPromptUpdates(prompt, [
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'image-tool-live-caption-first',
+          status: 'completed',
+          content: [{
+            type: 'content',
+            content: {
+              type: 'text',
+              text: `Background task started for image generation (${taskId}).`,
+            },
+          }],
+        },
+        {
+          sessionUpdate: 'agent_message',
+          messageId: 'native-image-caption-first',
+          content: [{ type: 'text', text: caption }],
+        },
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'message-tool-live-caption-first',
+          status: 'completed',
+          rawOutput: {
+            details: {
+              status: 'ok',
+              deliveryStatus: 'sent',
+              sourceReplySink: 'internal-ui',
+              sourceReply: { text: caption, mediaUrls: [imagePath] },
+            },
+          },
+        },
+      ]);
+
+      const page = await openChat(app);
+      await page.getByTestId('chat-composer-input').fill(prompt);
+      await page.getByTestId('chat-composer-send').click();
+
+      const timeline = page.getByTestId('acp-chat-timeline');
+      await expect(timeline.getByText(caption, { exact: true })).toHaveCount(1, { timeout: 30_000 });
+      await expect(timeline.getByTestId('acp-image-part')).toHaveCount(1);
+      const reply = timeline.getByTestId('acp-assistant-turn').filter({ hasText: caption });
+      await expect(reply).toHaveCount(1);
+      await expect(reply.getByTestId('acp-image-part')).toHaveCount(1);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
   test('keeps historical media visible while background generation is pending', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
     const historicalPrompt = 'Generate the original city image';
@@ -931,7 +996,6 @@ test.describe('ACP media attachments', () => {
       await fixture.waitForDeferredTranscriptCompleted(deferredHistoryId);
       await expect(timeline.getByText(historicalCaption, { exact: true })).toHaveCount(1);
       await expect(timeline.getByTestId('acp-image-part')).toHaveCount(1);
-      await page.screenshot({ path: '/tmp/clawx-background-media-restored.png', fullPage: false });
     } finally {
       await closeElectronApp(app);
     }

@@ -474,4 +474,29 @@ describe('background ACP media projections', () => {
     expect(result.unrestoredImageEvidenceIds).toEqual([]);
     expect(JSON.stringify(result.timeline)).not.toContain('Stale native caption');
   });
+
+  it('does not restore a synthetic image projection that contains no image', () => {
+    const previous = timeline([
+      message('old-user', 'user', 'Generate an unavailable image'),
+      message('old-empty-projection', 'assistant', 'Image preview is unavailable.', {
+        messageId: 'compat:image-generation:empty-evidence',
+        compat: { source: 'image-generation', evidenceId: 'empty-evidence' },
+      }),
+    ]);
+    const replay = timeline([
+      message('new-user', 'user', 'Generate an unavailable image'),
+      message('new-assistant', 'assistant', 'Authoritative failure response'),
+    ], 8);
+
+    const result = restoreBackgroundMediaProjections({
+      replay,
+      previous,
+      sessionKey: 'agent:main:current',
+      generation: 8,
+    });
+
+    expect(result.timeline).toEqual(replay);
+    expect(result.unrestoredImageEvidenceIds).toEqual(['empty-evidence']);
+    expect(JSON.stringify(result.timeline)).not.toContain('Image preview is unavailable.');
+  });
 });

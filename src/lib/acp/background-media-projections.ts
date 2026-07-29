@@ -209,6 +209,10 @@ export function restoreBackgroundMediaProjections(input: {
 
     const reboundParts = item.parts.map((part) => rebindPart(part, input.sessionKey, input.generation));
     if (item.compat.source === 'image-generation') {
+      if (!reboundParts.some((part) => part.kind === 'image')) {
+        unrestoredImageEvidenceIds.add(item.compat.evidenceId);
+        continue;
+      }
       const captionMatches = replayTurn.assistantItemsByCaption.get(markdownText(item)) ?? [];
       if (captionMatches.length === 1) {
         mergeImagesIntoReplayItem(

@@ -263,6 +263,27 @@ describe('ACP image-generation compatibility extraction', () => {
     });
   });
 
+  it('ignores successful text-only image completion events until media is available', () => {
+    expect(extractImageGenerationCompletionFromRuntimeEvent({
+      type: 'assistant.delta',
+      runId: `image_generate:${TASK_ID}:ok`,
+      sessionKey: SESSION_KEY,
+      phase: 'final_answer',
+      text: 'The generated image is ready.',
+    })).toBeNull();
+    expect(extractImageGenerationCompletionFromGatewayChatMessage({
+      message: {
+        runId: `image_generate:${TASK_ID}:ok`,
+        sessionKey: SESSION_KEY,
+        state: 'final',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'The generated image is ready.' }],
+        },
+      },
+    })).toBeNull();
+  });
+
   it('extracts final Gateway assistant MEDIA replies from a correlated completion run', () => {
     const evidence = extractImageGenerationCompletionFromGatewayChatMessage({
       message: {
