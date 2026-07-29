@@ -82,6 +82,7 @@ vi.mock('@/stores/settings', () => ({
 vi.mock('react-i18next', () => ({
   initReactI18next: { type: '3rdParty', init: vi.fn() },
   useTranslation: () => ({
+    i18n: { language: 'en' },
     t: (key: string, params?: Record<string, unknown> | string) => {
       if (typeof params === 'string') return params;
       if (key === 'executionGraph.collapsedSummary') {

@@ -306,7 +306,8 @@
         "generatedReadyWithMissing": "生成された画像の準備ができましたが、一部の画像を読み込めませんでした。"
     },
     "videoGeneration": {
-        "generating": "動画を生成しています。しばらくお待ちください…"
+        "generating": "動画を生成しています。しばらくお待ちください…",
+        "failed": "動画の生成に失敗しました。もう一度お試しください。"
     },
     "composer": {
         "attachFiles": "ファイルを添付",

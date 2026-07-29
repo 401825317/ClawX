@@ -45,7 +45,7 @@ const mocks = vi.hoisted(() => ({
   installManagedRuntimeProviderState: vi.fn(),
   snapshotManagedRuntimeConfig: vi.fn(),
   updateManagedRuntimeConfig: vi.fn(),
-  cacheManagedClientTextModelPolicyFromPayload: vi.fn(),
+  cacheManagedClientModelPoliciesFromPayload: vi.fn(),
   readOpenClawConfig: vi.fn(),
   writeOpenClawConfig: vi.fn(),
   storeGet: vi.fn(),
@@ -137,7 +137,7 @@ vi.mock('@electron/services/providers/managed-runtime-config', () => ({
 }));
 
 vi.mock('@electron/services/managed-client-config-service', () => ({
-  cacheManagedClientTextModelPolicyFromPayload: mocks.cacheManagedClientTextModelPolicyFromPayload,
+  cacheManagedClientModelPoliciesFromPayload: mocks.cacheManagedClientModelPoliciesFromPayload,
 }));
 
 vi.mock('@electron/utils/openclaw-auth', () => ({
@@ -257,6 +257,13 @@ const MANAGED_MODEL_POLICY = {
     { id: 'smart-latest', label: 'Smart Latest' },
     { id: 'gpt-5.4', label: 'GPT-5.4' },
   ],
+};
+const MANAGED_VIDEO_MODEL_POLICY = {
+  defaultModel: 'grok-imagine-video',
+  defaultAspectRatio: '16:9',
+  defaultResolution: '480P',
+  defaultDurationSeconds: 6,
+  models: [],
 };
 
 function activationFilesSnapshot(state: ActivationState = activationState) {
@@ -480,7 +487,10 @@ beforeEach(() => {
   mocks.restoreManagedAgentModelsFiles.mockResolvedValue(undefined);
   mocks.snapshotManagedAgentModelsFiles.mockResolvedValue({ files: [] });
   mocks.updateManagedAgentModelProviderStrict.mockResolvedValue(undefined);
-  mocks.cacheManagedClientTextModelPolicyFromPayload.mockResolvedValue(MANAGED_MODEL_POLICY);
+  mocks.cacheManagedClientModelPoliciesFromPayload.mockResolvedValue({
+    text: MANAGED_MODEL_POLICY,
+    video: MANAGED_VIDEO_MODEL_POLICY,
+  });
   mocks.createManagedRuntimeProviderEntry.mockImplementation((policy) => ({
     baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
     api: 'openai-responses',
@@ -519,6 +529,7 @@ beforeEach(() => {
   mocks.installManagedRuntimeProviderState.mockImplementation(async (
     snapshotValue,
     policy,
+    _videoPolicy: unknown,
     additionalProviderIds: Iterable<string>,
   ) => {
     const managedProviderIds = new Set([
@@ -967,7 +978,7 @@ describe('managed auth service transaction and compatibility behavior', () => {
       }),
       new Set(['openai', 'lingzhiwuxian']),
     );
-    expect(mocks.cacheManagedClientTextModelPolicyFromPayload).toHaveBeenCalledWith(
+    expect(mocks.cacheManagedClientModelPoliciesFromPayload).toHaveBeenCalledWith(
       expect.objectContaining({
         accessToken: 'access-secret',
         client: { modelOptions: { text: MANAGED_MODEL_POLICY } },
