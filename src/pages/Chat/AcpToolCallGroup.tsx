@@ -118,7 +118,7 @@ export function AcpToolCallGroup({
         <ChevronRight
           data-testid="acp-tool-group-chevron"
           className={cn(
-            'h-4 w-4 shrink-0 transition-transform duration-[260ms] ease-[cubic-bezier(0.2,0.8,0.2,1)] motion-reduce:transition-none',
+            'h-4 w-4 shrink-0 transition-transform [transition-duration:260ms] [transition-timing-function:cubic-bezier(0.2,0.8,0.2,1)] motion-reduce:transition-none',
             expanded && 'rotate-90',
           )}
           aria-hidden="true"
@@ -147,7 +147,7 @@ export function AcpToolCallGroup({
         aria-hidden={!expanded}
         inert={!expanded}
         className={cn(
-          'grid transition-[grid-template-rows,opacity] duration-[260ms] ease-[cubic-bezier(0.2,0.8,0.2,1)] motion-reduce:transition-none',
+          'grid transition-[grid-template-rows,opacity] [transition-duration:260ms] [transition-timing-function:cubic-bezier(0.2,0.8,0.2,1)] motion-reduce:transition-none',
           expanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
         )}
       >
@@ -155,10 +155,10 @@ export function AcpToolCallGroup({
           <div
             data-testid="acp-tool-group-items-content"
             className={cn(
-              'ml-3 mt-1 border-l border-border/70 pl-3 transition-[transform,opacity] duration-[240ms] ease-[cubic-bezier(0.2,0.8,0.2,1)] motion-reduce:delay-0 motion-reduce:transition-none',
+              'ml-3 mt-1 border-l border-border/70 pl-3 transition-[transform,opacity] [transition-duration:240ms] [transition-timing-function:cubic-bezier(0.2,0.8,0.2,1)] motion-reduce:[transition-delay:0ms] motion-reduce:transition-none',
               expanded
-                ? 'translate-y-0 opacity-100 delay-[35ms]'
-                : '-translate-y-[7px] opacity-0 delay-0',
+                ? 'translate-y-0 opacity-100 [transition-delay:35ms]'
+                : '-translate-y-[7px] opacity-0 [transition-delay:0ms]',
             )}
           >
             <div className="flex min-w-0 flex-col gap-0.5">

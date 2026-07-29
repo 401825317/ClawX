@@ -50,7 +50,7 @@ export function AcpToolCallCard({
   const grouped = variant === 'grouped';
   const hasDetails = Boolean(item.error) || item.outputParts.length > 0;
   const isFinished = item.status === 'completed' || item.status === 'failed';
-  const shouldStartExpanded = grouped ? !hasDetails : !hasDetails || !(item.historical && isFinished);
+  const shouldStartExpanded = grouped ? false : !hasDetails || !(item.historical && isFinished);
   const [expansionState, setExpansionState] = useState<ExpansionState>(() => ({
     toolCallId: item.toolCallId,
     expanded: shouldStartExpanded,

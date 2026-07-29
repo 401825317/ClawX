@@ -771,7 +771,7 @@ describe('ACP chat timeline components', () => {
     expect(group).toHaveAttribute('data-expanded', 'false');
     expect(panel).toHaveAttribute('aria-hidden', 'true');
     expect(panel).toHaveAttribute('inert');
-    expect(panel).toHaveClass('grid-rows-[0fr]', 'opacity-0', 'duration-[260ms]');
+    expect(panel).toHaveClass('grid-rows-[0fr]', 'opacity-0', '[transition-duration:260ms]');
     expect(panelContent).toHaveClass('-translate-y-[7px]', 'opacity-0');
     expect(chevron).not.toHaveClass('rotate-90');
 
@@ -781,7 +781,7 @@ describe('ACP chat timeline components', () => {
     expect(panel).toHaveAttribute('aria-hidden', 'false');
     expect(panel).not.toHaveAttribute('inert');
     expect(panel).toHaveClass('grid-rows-[1fr]', 'opacity-100');
-    expect(panelContent).toHaveClass('translate-y-0', 'opacity-100', 'delay-[35ms]');
+    expect(panelContent).toHaveClass('translate-y-0', 'opacity-100', '[transition-delay:35ms]');
     expect(chevron).toHaveClass('rotate-90');
     expect(screen.getAllByTestId('acp-tool-call-card')).toHaveLength(2);
     expect(screen.getAllByTestId('acp-tool-call-card').map((card) => card.textContent)).toEqual(
@@ -804,6 +804,41 @@ describe('ACP chat timeline components', () => {
 
     expect(group).toHaveAttribute('data-expanded', 'true');
     expect(screen.getAllByTestId('acp-tool-call-card')).toHaveLength(3);
+  });
+
+  it('keeps grouped child disclosures independent when details arrive before the group opens', () => {
+    const pendingItem = toolCallItem({
+      id: 'tool:streaming-child',
+      toolCallId: 'streaming-child',
+      status: 'running',
+      outputParts: [],
+    });
+    const { rerender } = render(
+      <AcpToolCallGroup id="tool-call-group:tool:streaming-child" items={[pendingItem]} active />,
+    );
+
+    rerender(
+      <AcpToolCallGroup
+        id="tool-call-group:tool:streaming-child"
+        items={[{ ...pendingItem, status: 'completed', outputParts: [{ kind: 'markdown', text: 'Details arrived.' }] }]}
+        active={false}
+      />,
+    );
+
+    const groupToggle = screen.getByTestId('acp-tool-group-toggle');
+    fireEvent.click(groupToggle);
+
+    const card = screen.getByTestId('acp-tool-call-card');
+    const childToggle = screen.getByTestId('acp-tool-toggle');
+    expect(card).toHaveAttribute('data-expanded', 'false');
+    expect(childToggle).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(childToggle);
+    expect(card).toHaveAttribute('data-expanded', 'true');
+
+    fireEvent.click(groupToggle);
+    fireEvent.click(groupToggle);
+    expect(card).toHaveAttribute('data-expanded', 'true');
   });
 
   it('applies the text shimmer only while the tool group is active', () => {
