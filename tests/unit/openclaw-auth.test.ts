@@ -1011,7 +1011,7 @@ describe('sanitizeOpenClawConfig', () => {
   });
 
   it('skips sanitization when openclaw.json does not exist', async () => {
-    // Ensure the .openclaw dir doesn't exist at all
+    // Legacy extension state can exist before OpenClaw creates its config.
     const retiredPluginPath = join(testHome, '.openclaw', 'extensions', 'uclaw-artifact-guard');
     await mkdir(retiredPluginPath, { recursive: true });
     await writeFile(join(retiredPluginPath, 'openclaw.plugin.json'), '{"id":"uclaw-artifact-guard"}', 'utf8');
