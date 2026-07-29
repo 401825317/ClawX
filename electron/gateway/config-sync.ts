@@ -27,7 +27,11 @@ import {
 } from '../utils/paths';
 import { getUvMirrorEnv } from '../utils/uv-env';
 import { cleanupDanglingWeChatPluginState, listConfiguredChannelsFromConfig, readOpenClawConfig } from '../utils/channel-config';
-import { sanitizeOpenClawConfig, batchSyncConfigFields } from '../utils/openclaw-auth';
+import {
+  RetiredUclawPluginCleanupError,
+  sanitizeOpenClawConfig,
+  batchSyncConfigFields,
+} from '../utils/openclaw-auth';
 import { buildProxyEnv, resolveProxySettings } from '../utils/proxy';
 import { syncProxyConfigToOpenClaw } from '../utils/openclaw-proxy';
 import { logger } from '../utils/logger';
@@ -454,6 +458,10 @@ export async function syncGatewayConfigBeforeLaunch(
   try {
     await measureAsync(timingsMs, 'sanitizeMs', sanitizeOpenClawConfig);
   } catch (err) {
+    if (err instanceof RetiredUclawPluginCleanupError) {
+      logger.error('Failed to retire legacy UClaw plugins; Gateway startup is blocked:', err);
+      throw err;
+    }
     logger.warn('Failed to sanitize openclaw.json:', err);
   }
 

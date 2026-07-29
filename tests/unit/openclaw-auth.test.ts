@@ -1012,6 +1012,9 @@ describe('sanitizeOpenClawConfig', () => {
 
   it('skips sanitization when openclaw.json does not exist', async () => {
     // Ensure the .openclaw dir doesn't exist at all
+    const retiredPluginPath = join(testHome, '.openclaw', 'extensions', 'uclaw-artifact-guard');
+    await mkdir(retiredPluginPath, { recursive: true });
+    await writeFile(join(retiredPluginPath, 'openclaw.plugin.json'), '{"id":"uclaw-artifact-guard"}', 'utf8');
     const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
@@ -1020,6 +1023,7 @@ describe('sanitizeOpenClawConfig', () => {
 
     const configPath = join(testHome, '.openclaw', 'openclaw.json');
     await expect(readFile(configPath, 'utf8')).rejects.toThrow();
+    await expect(readFile(join(retiredPluginPath, 'openclaw.plugin.json'), 'utf8')).rejects.toThrow();
 
     logSpy.mockRestore();
   });
@@ -1030,6 +1034,9 @@ describe('sanitizeOpenClawConfig', () => {
     await mkdir(openclawDir, { recursive: true });
     const configPath = join(openclawDir, 'openclaw.json');
     await writeFile(configPath, 'NOT VALID JSON {{{', 'utf8');
+    const retiredPluginPath = join(openclawDir, 'extensions', 'parallel');
+    await mkdir(retiredPluginPath, { recursive: true });
+    await writeFile(join(retiredPluginPath, 'openclaw.plugin.json'), '{"id":"parallel"}', 'utf8');
     const before = await readFile(configPath, 'utf8');
 
     const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
@@ -1040,6 +1047,7 @@ describe('sanitizeOpenClawConfig', () => {
     const after = await readFile(configPath, 'utf8');
     // Corrupt file must not be overwritten
     expect(after).toBe(before);
+    await expect(readFile(join(retiredPluginPath, 'openclaw.plugin.json'), 'utf8')).rejects.toThrow();
 
     logSpy.mockRestore();
   });
@@ -1519,7 +1527,7 @@ describe('sanitizeOpenClawConfig', () => {
     expect(plugins.entries).toEqual({ 'custom-installed': { enabled: true } });
     expect(plugins.installs).toEqual({ 'custom-installed': { source: 'user' } });
     expect(plugins.load).toEqual({ paths: [customPluginPath] });
-    expect((result.tools as Record<string, unknown>).web).toEqual({});
+    expect((result.tools as Record<string, unknown>).web).toBeUndefined();
   });
 
   it('preserves allowlisted plugins loaded from local plugin paths', async () => {

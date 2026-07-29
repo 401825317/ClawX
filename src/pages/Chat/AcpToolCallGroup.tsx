@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import {
-  ChevronDown,
   ChevronRight,
   FileText,
   Globe2,
@@ -116,9 +115,14 @@ export function AcpToolCallGroup({
         onClick={() => setExpanded((value) => !value)}
         className="flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-black/5 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 dark:hover:bg-white/10"
       >
-        {expanded
-          ? <ChevronDown className="h-4 w-4 shrink-0" aria-hidden="true" />
-          : <ChevronRight className="h-4 w-4 shrink-0" aria-hidden="true" />}
+        <ChevronRight
+          data-testid="acp-tool-group-chevron"
+          className={cn(
+            'h-4 w-4 shrink-0 transition-transform duration-[260ms] ease-[cubic-bezier(0.2,0.8,0.2,1)] motion-reduce:transition-none',
+            expanded && 'rotate-90',
+          )}
+          aria-hidden="true"
+        />
         {active
           ? <Loader2 data-testid="acp-tool-group-running-icon" className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />
           : (
@@ -137,17 +141,36 @@ export function AcpToolCallGroup({
         </span>
       </button>
 
-      {expanded && (
-        <div id={panelId} className="ml-3 mt-1 border-l border-border/70 pl-3" data-testid="acp-tool-group-items">
-          <div className="flex min-w-0 flex-col gap-0.5">
-            {items.map((item) => (
-              <div key={item.id} data-acp-item-id={item.id} className="min-w-0">
-                <AcpToolCallCard item={item} variant="grouped" />
-              </div>
-            ))}
+      <div
+        id={panelId}
+        data-testid="acp-tool-group-items"
+        aria-hidden={!expanded}
+        inert={!expanded}
+        className={cn(
+          'grid transition-[grid-template-rows,opacity] duration-[260ms] ease-[cubic-bezier(0.2,0.8,0.2,1)] motion-reduce:transition-none',
+          expanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
+        )}
+      >
+        <div className="min-h-0 overflow-hidden">
+          <div
+            data-testid="acp-tool-group-items-content"
+            className={cn(
+              'ml-3 mt-1 border-l border-border/70 pl-3 transition-[transform,opacity] duration-[240ms] ease-[cubic-bezier(0.2,0.8,0.2,1)] motion-reduce:delay-0 motion-reduce:transition-none',
+              expanded
+                ? 'translate-y-0 opacity-100 delay-[35ms]'
+                : '-translate-y-[7px] opacity-0 delay-0',
+            )}
+          >
+            <div className="flex min-w-0 flex-col gap-0.5">
+              {items.map((item) => (
+                <div key={item.id} data-acp-item-id={item.id} className="min-w-0">
+                  <AcpToolCallCard item={item} variant="grouped" />
+                </div>
+              ))}
+            </div>
           </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }

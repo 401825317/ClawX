@@ -9,7 +9,7 @@
  * equivalents could stall for 500 ms – 2 s+ per call, causing "Not
  * Responding" hangs.
  */
-import { access, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from 'fs/promises';
+import { access, lstat, mkdir, open, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'fs/promises';
 import { constants, readdirSync, readFileSync, existsSync } from 'fs';
 import { basename, dirname, join } from 'path';
 import { createHash } from 'node:crypto';
@@ -64,6 +64,17 @@ const AUTH_STORE_VERSION = 1;
 const AUTH_PROFILE_FILENAME = 'auth-profiles.json';
 const LEGACY_MINIMAX_OAUTH_PLUGIN_ID = 'minimax-portal-auth';
 const MERGED_MINIMAX_PLUGIN_ID = 'minimax';
+const RETIRED_UCLAW_PLUGIN_IDS = [
+  'uclaw-artifact-guard',
+  'uclaw-blender',
+  'uclaw-desktop-control',
+  'uclaw-local-artifacts',
+  'uclaw-task-bridge',
+  'uclaw-video-project',
+  'parallel',
+] as const;
+const RETIRED_PARALLEL_SEARCH_PROVIDER_IDS = new Set(['parallel', 'parallel-free']);
+const RETIRED_PLUGIN_REMOVE_MAX_RETRIES = process.platform === 'win32' ? 10 : 3;
 
 interface BundledPluginManifest {
   id: string;
@@ -79,6 +90,14 @@ interface OAuthPluginRegistration {
 
 interface MiniMaxPluginRegistration extends OAuthPluginRegistration {
   mergedPlugin: boolean;
+}
+
+/** Raised when a retired product plugin cannot be fully removed before Gateway launch. */
+export class RetiredUclawPluginCleanupError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'RetiredUclawPluginCleanupError';
+  }
 }
 
 let _bundledPluginManifestCache: BundledPluginManifest[] | null = null;
@@ -299,6 +318,17 @@ async function fileExists(p: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+/** Detect filesystem entries without following symlinks. */
+async function pathEntryExists(p: string): Promise<boolean> {
+  try {
+    await lstat(p);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
   }
 }
 
@@ -1309,6 +1339,142 @@ async function discoverLoadedPluginIdsFromConfig(config: Record<string, unknown>
   }
 
   return ids;
+}
+
+/** Match only product-owned retired plugin IDs in explicit load paths. */
+function isRetiredUclawPluginLoadPath(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const normalized = value.replace(/\\/g, '/').replace(/\/+$/, '');
+  return RETIRED_UCLAW_PLUGIN_IDS.some((pluginId) => (
+    normalized === pluginId || normalized.split('/').includes(pluginId)
+  ));
+}
+
+/** Remove explicit plugin registrations while preserving unrelated user extensions. */
+function removeRetiredUclawPluginConfig(config: Record<string, unknown>): boolean {
+  const plugins = config.plugins;
+  if (Array.isArray(plugins)) {
+    const retained = plugins.filter((value) => !isRetiredUclawPluginLoadPath(value));
+    if (retained.length === plugins.length) return false;
+    if (retained.length > 0) config.plugins = retained;
+    else delete config.plugins;
+    return true;
+  }
+  if (!isPlainRecord(plugins)) return false;
+
+  let modified = false;
+  if (Array.isArray(plugins.allow)) {
+    const retained = plugins.allow.filter((value) => (
+      typeof value !== 'string' || !RETIRED_UCLAW_PLUGIN_IDS.includes(value as typeof RETIRED_UCLAW_PLUGIN_IDS[number])
+    ));
+    if (retained.length !== plugins.allow.length) {
+      if (retained.length > 0) plugins.allow = retained;
+      else delete plugins.allow;
+      modified = true;
+    }
+  }
+
+  for (const key of ['entries', 'installs'] as const) {
+    if (!isPlainRecord(plugins[key])) continue;
+    const registrations = plugins[key] as Record<string, unknown>;
+    for (const pluginId of RETIRED_UCLAW_PLUGIN_IDS) {
+      if (!(pluginId in registrations)) continue;
+      delete registrations[pluginId];
+      modified = true;
+    }
+    if (Object.keys(registrations).length === 0) {
+      delete plugins[key];
+      modified = true;
+    }
+  }
+
+  if (Array.isArray(plugins.load)) {
+    const retained = plugins.load.filter((value) => !isRetiredUclawPluginLoadPath(value));
+    if (retained.length !== plugins.load.length) {
+      if (retained.length > 0) plugins.load = retained;
+      else delete plugins.load;
+      modified = true;
+    }
+  } else if (isPlainRecord(plugins.load) && Array.isArray(plugins.load.paths)) {
+    const retained = plugins.load.paths.filter((value) => !isRetiredUclawPluginLoadPath(value));
+    if (retained.length !== plugins.load.paths.length) {
+      if (retained.length > 0) plugins.load.paths = retained;
+      else delete plugins.load.paths;
+      if (Object.keys(plugins.load).length === 0) delete plugins.load;
+      modified = true;
+    }
+  }
+
+  if (Object.keys(plugins).length === 0) {
+    delete config.plugins;
+    modified = true;
+  }
+  return modified;
+}
+
+/** Remove obsolete Parallel Search configuration now that its plugin is no longer shipped. */
+function removeRetiredParallelSearchConfig(config: Record<string, unknown>): boolean {
+  if (!isPlainRecord(config.tools) || !isPlainRecord(config.tools.web) || !isPlainRecord(config.tools.web.search)) {
+    return false;
+  }
+  const search = config.tools.web.search;
+  if (typeof search.provider !== 'string' || !RETIRED_PARALLEL_SEARCH_PROVIDER_IDS.has(search.provider)) {
+    return false;
+  }
+
+  delete config.tools.web.search;
+  if (Object.keys(config.tools.web).length === 0) delete config.tools.web;
+  return true;
+}
+
+/** Remove master-only UClaw plugins before OpenClaw can auto-discover local extensions. */
+async function retireMasterOnlyUclawPlugins(config: Record<string, unknown>): Promise<boolean> {
+  const extensionsRoot = join(resolveOpenClawStateDir(), 'extensions');
+  for (const pluginId of RETIRED_UCLAW_PLUGIN_IDS) {
+    const pluginPath = join(extensionsRoot, pluginId);
+    let pluginExists: boolean;
+    try {
+      pluginExists = await pathEntryExists(pluginPath);
+    } catch (error) {
+      throw new RetiredUclawPluginCleanupError(
+        `Unable to inspect retired UClaw plugin "${pluginId}" at ${pluginPath}`,
+        { cause: error },
+      );
+    }
+    if (!pluginExists) continue;
+
+    try {
+      await rm(pluginPath, {
+        recursive: true,
+        force: true,
+        maxRetries: RETIRED_PLUGIN_REMOVE_MAX_RETRIES,
+        retryDelay: 200,
+      });
+    } catch (error) {
+      throw new RetiredUclawPluginCleanupError(
+        `Unable to remove retired UClaw plugin "${pluginId}" from ${pluginPath}`,
+        { cause: error },
+      );
+    }
+    try {
+      pluginExists = await pathEntryExists(pluginPath);
+    } catch (error) {
+      throw new RetiredUclawPluginCleanupError(
+        `Unable to verify retired UClaw plugin cleanup for "${pluginId}" at ${pluginPath}`,
+        { cause: error },
+      );
+    }
+    if (pluginExists) {
+      throw new RetiredUclawPluginCleanupError(
+        `Retired UClaw plugin "${pluginId}" still exists after cleanup: ${pluginPath}`,
+      );
+    }
+    console.log(`[sanitize] Removed retired UClaw plugin: ${pluginId}`);
+  }
+
+  const removedPluginConfig = removeRetiredUclawPluginConfig(config);
+  const removedParallelSearchConfig = removeRetiredParallelSearchConfig(config);
+  return removedPluginConfig || removedParallelSearchConfig;
 }
 
 function normalizeAgentsDefaultsCompactionMode(config: Record<string, unknown>): void {
@@ -3717,6 +3883,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     // by the Gateway on its first run.
     const configPath = resolveOpenClawConfigPath();
     if (!(await fileExists(configPath))) {
+      await retireMasterOnlyUclawPlugins({});
       console.log('[sanitize] openclaw.json does not exist yet, skipping sanitization');
       return;
     }
@@ -3727,10 +3894,23 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     // bail out to avoid overwriting the user's data with a skeleton config).
     const rawConfig = await readJsonFile<Record<string, unknown>>(configPath);
     if (rawConfig === null) {
+      await retireMasterOnlyUclawPlugins({});
       console.log('[sanitize] openclaw.json could not be parsed, skipping sanitization to preserve data');
       return;
     }
     const config: Record<string, unknown> = rawConfig;
+    const retiredPluginConfigModified = await retireMasterOnlyUclawPlugins(config);
+    if (retiredPluginConfigModified) {
+      try {
+        // Persist retirement before the broader best-effort sanitizer runs.
+        await writeOpenClawJson(config);
+      } catch (error) {
+        throw new RetiredUclawPluginCleanupError(
+          'Unable to persist retired UClaw plugin cleanup to openclaw.json',
+          { cause: error },
+        );
+      }
+    }
     let modified = false;
 
     // ── skills section ──────────────────────────────────────────────

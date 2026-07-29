@@ -663,6 +663,11 @@ test.describe('ClawX ACP inline timeline', () => {
       await expect(groups.nth(0)).toHaveAttribute('data-expanded', 'false');
       await expect(groups.nth(1)).toHaveAttribute('data-expanded', 'false');
       await expect(groups.nth(1)).toHaveAttribute('data-active', 'true');
+      const firstGroupPanel = groups.nth(0).getByTestId('acp-tool-group-items');
+      const secondGroupPanel = groups.nth(1).getByTestId('acp-tool-group-items');
+      await expect(firstGroupPanel).toHaveAttribute('aria-hidden', 'true');
+      await expect(firstGroupPanel).toHaveAttribute('inert', '');
+      await expect(secondGroupPanel).toHaveAttribute('aria-hidden', 'true');
       await expect(groups.nth(0)).not.toContainText('Failed');
       await expect(groups.nth(1)).not.toContainText('Failed');
       await expect(groups.nth(0).getByTestId('acp-tool-group-count')).toHaveCount(0);
@@ -671,8 +676,21 @@ test.describe('ClawX ACP inline timeline', () => {
 
       await expect(groups.nth(0)).toHaveAttribute('data-expanded', 'true');
       await expect(groups.nth(1)).toHaveAttribute('data-expanded', 'false');
+      await expect(firstGroupPanel).toHaveAttribute('aria-hidden', 'false');
+      await expect(firstGroupPanel).not.toHaveAttribute('inert');
+      await expect(secondGroupPanel).toHaveAttribute('aria-hidden', 'true');
       await expect(groups.nth(0).getByTestId('acp-tool-call-card')).toHaveCount(2);
-      await expect(groups.nth(1).getByTestId('acp-tool-call-card')).toHaveCount(0);
+      await expect(groups.nth(1).getByTestId('acp-tool-call-card')).toHaveCount(2);
+      const groupMotionStyle = await firstGroupPanel.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return {
+          transitionDuration: style.transitionDuration,
+          transitionProperty: style.transitionProperty,
+        };
+      });
+      expect(groupMotionStyle.transitionDuration).toContain('0.26s');
+      expect(groupMotionStyle.transitionProperty).toContain('grid-template-rows');
+      expect(groupMotionStyle.transitionProperty).toContain('opacity');
       await expect.poll(() => groups.nth(0).locator('[data-acp-item-id]').evaluateAll((elements) => (
         elements.map((element) => element.getAttribute('data-acp-item-id'))
       ))).toEqual(['tool:group-read', 'tool:group-execute']);

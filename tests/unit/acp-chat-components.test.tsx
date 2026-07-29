@@ -949,14 +949,16 @@ describe('ACP chat timeline components', () => {
     expect(groups).toHaveLength(2);
     expect(groups[0]).toHaveAttribute('data-expanded', 'false');
     expect(groups[1]).toHaveAttribute('data-expanded', 'false');
-    expect(screen.queryByText('Tool A')).not.toBeInTheDocument();
-    expect(screen.queryByText('Tool D')).not.toBeInTheDocument();
+    expect(within(groups[0]).getByTestId('acp-tool-group-items')).toHaveAttribute('aria-hidden', 'true');
+    expect(within(groups[0]).getByTestId('acp-tool-group-items')).toHaveAttribute('inert');
+    expect(within(groups[1]).getByTestId('acp-tool-group-items')).toHaveAttribute('aria-hidden', 'true');
+    expect(within(groups[1]).getByTestId('acp-tool-group-items')).toHaveAttribute('inert');
 
     fireEvent.click(toggles[0]);
     expect(groups[0]).toHaveAttribute('data-expanded', 'true');
     expect(groups[1]).toHaveAttribute('data-expanded', 'false');
     expect(within(groups[0]).getAllByTestId('acp-tool-call-card')).toHaveLength(2);
-    expect(within(groups[1]).queryByTestId('acp-tool-call-card')).not.toBeInTheDocument();
+    expect(within(groups[1]).getAllByTestId('acp-tool-call-card')).toHaveLength(2);
 
     fireEvent.click(toggles[1]);
     expect(Array.from(container.querySelectorAll('[data-acp-item-id]')).map((node) => node.getAttribute('data-acp-item-id'))).toEqual([
