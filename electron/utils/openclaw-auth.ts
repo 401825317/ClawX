@@ -2487,6 +2487,25 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/** Disable only the exact Tool Search defaults previously written by ClawX. */
+function disableLegacyClawXToolSearchDefault(config: Record<string, unknown>): boolean {
+  if (!isPlainRecord(config.tools) || !isPlainRecord(config.tools.toolSearch)) return false;
+
+  const tools = config.tools;
+  const toolSearch = tools.toolSearch as Record<string, unknown>;
+  const keys = Object.keys(toolSearch);
+  const isDirectoryDefault = toolSearch.enabled === true && toolSearch.mode === 'directory';
+  const isBasicDefault = isDirectoryDefault && keys.length === 2;
+  const isLimitedDefault = isDirectoryDefault
+    && keys.length === 4
+    && toolSearch.searchDefaultLimit === 8
+    && toolSearch.maxSearchLimit === 12;
+  if (!isBasicDefault && !isLimitedDefault) return false;
+
+  tools.toolSearch = false;
+  return true;
+}
+
 function removeLegacyMoonshotKimiSearchConfig(config: Record<string, unknown>): boolean {
   if (!isPlainRecord(config.tools) || !isPlainRecord(config.tools.web) || !isPlainRecord(config.tools.web.search)) {
     return false;
@@ -3191,6 +3210,12 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
     // ── web_fetch SSRF policy (fake-IP / transparent-proxy environments) ──
     if (ensureWebFetchSsrfPolicyInConfig(config)) {
       modified = true;
+    }
+
+    // Remove the Tool Search directory defaults seeded by older ClawX builds.
+    if (disableLegacyClawXToolSearchDefault(config)) {
+      modified = true;
+      console.log('[batch-sync] Disabled legacy ClawX tools.toolSearch directory default');
     }
 
     const pinnedProviderRuntimes = applyOpenClawProviderAgentRuntimePinsToConfig(config);

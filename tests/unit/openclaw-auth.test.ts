@@ -3560,6 +3560,64 @@ describe('batchSyncConfigFields', () => {
     expect(ssrfPolicy.allowIpv6UniqueLocalRange).toBe(false);
   });
 
+  it.each([
+    [
+      'directory default',
+      { enabled: true, mode: 'directory' },
+    ],
+    [
+      'directory default with legacy limits',
+      {
+        enabled: true,
+        mode: 'directory',
+        searchDefaultLimit: 8,
+        maxSearchLimit: 12,
+      },
+    ],
+  ])('disables the legacy ClawX Tool Search %s', async (_label, toolSearch) => {
+    await writeOpenClawJson({
+      gateway: { auth: { mode: 'token', token: 'old' } },
+      tools: {
+        allow: ['read'],
+        toolSearch,
+      },
+    });
+
+    const { batchSyncConfigFields } = await import('@electron/utils/openclaw-auth');
+    await batchSyncConfigFields('new-token');
+
+    const config = await readOpenClawJson();
+    const tools = config.tools as Record<string, unknown>;
+    expect(tools.toolSearch).toBe(false);
+    expect(tools.allow).toEqual(['read']);
+  });
+
+  it.each([
+    ['explicit opt-out', false],
+    ['tools mode', { enabled: true, mode: 'tools' }],
+    [
+      'custom directory limits',
+      {
+        enabled: true,
+        mode: 'directory',
+        searchDefaultLimit: 4,
+        maxSearchLimit: 6,
+      },
+    ],
+  ])('preserves the user Tool Search %s', async (_label, toolSearch) => {
+    await writeOpenClawJson({
+      gateway: { auth: { mode: 'token', token: 'old' } },
+      tools: { toolSearch },
+    });
+
+    const { batchSyncConfigFields } = await import('@electron/utils/openclaw-auth');
+    await batchSyncConfigFields('new-token');
+
+    const config = await readOpenClawJson();
+    const tools = config.tools as Record<string, unknown>;
+    expect(tools.toolSearch).toEqual(toolSearch);
+  });
+
   it('seeds compaction safeguard default when compaction is unset', async () => {
     await writeOpenClawJson({ gateway: { auth: { mode: 'token', token: 'old' } } });
 
