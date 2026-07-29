@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 describe('openclaw bundle config', () => {
   it('includes Electron runtime-only packages needed in packaged builds', async () => {
@@ -41,5 +42,50 @@ describe('openclaw bundle config', () => {
       devDependencies?: Record<string, string>;
     };
     expect(packageJson.devDependencies?.acpx ?? packageJson.dependencies?.acpx).toBe('0.5.3');
+  });
+
+  it('keeps externalized Electron main packages in production dependencies', () => {
+    const packageJson = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf8')) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+
+    expect(packageJson.dependencies).toMatchObject({
+      jszip: '^3.10.1',
+      sharp: '^0.34.5',
+      undici: '8.1.0',
+    });
+    expect(packageJson.devDependencies).not.toHaveProperty('jszip');
+    expect(packageJson.devDependencies).not.toHaveProperty('sharp');
+    expect(packageJson.devDependencies).not.toHaveProperty('undici');
+  });
+
+  it('unpacks the complete sharp runtime used by Electron main', () => {
+    const builderConfig = parse(
+      readFileSync(resolve(process.cwd(), 'electron-builder.yml'), 'utf8'),
+    ) as { asarUnpack?: string[] };
+
+    expect(builderConfig.asarUnpack).toEqual(expect.arrayContaining([
+      '**/node_modules/sharp/**',
+      '**/node_modules/@img/sharp-*/**',
+    ]));
+  });
+
+  it('writes the build identity schema required by the USB self-check', () => {
+    const afterPackSource = readFileSync(
+      resolve(process.cwd(), 'scripts/after-pack.cjs'),
+      'utf8',
+    );
+    const selfCheckSource = readFileSync(
+      resolve(process.cwd(), 'scripts/windows-support/UClaw-SelfCheck.mjs'),
+      'utf8',
+    );
+    const writtenSchema = Number(afterPackSource.match(/schemaVersion:\s*(\d+)/u)?.[1]);
+    const requiredSchema = Number(
+      selfCheckSource.match(/usbIdentity\.schemaVersion !== (\d+)/u)?.[1],
+    );
+
+    expect(writtenSchema).toBe(2);
+    expect(writtenSchema).toBe(requiredSchema);
   });
 });

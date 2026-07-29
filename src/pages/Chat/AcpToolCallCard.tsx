@@ -29,7 +29,7 @@ function AcpToolOutputPart({ part }: { part: RenderPart }) {
     return (
       <pre
         data-testid="acp-tool-output-pre"
-        className="max-h-96 overflow-auto whitespace-pre rounded-xl border border-black/10 bg-surface-input px-3 py-2 font-mono text-xs leading-relaxed text-foreground dark:border-white/10"
+        className="max-h-48 overflow-auto whitespace-pre rounded-xl border border-black/10 bg-surface-input px-3 py-2 font-mono text-xs leading-relaxed text-foreground dark:border-white/10"
       >
         {part.text}
       </pre>

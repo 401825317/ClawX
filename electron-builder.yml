@@ -39,16 +39,19 @@ afterPack: ./scripts/after-pack.cjs
 asar: true
 asarUnpack:
   - "**/*.node"
+  # Electron Main uses sharp to compress video reference images. Keep its
+  # JavaScript and native runtime together so libvips can load from disk.
+  - "**/node_modules/sharp/**"
+  - "**/node_modules/@img/sharp-*/**"
   # lru-cache CJS/ESM interop: older CJS versions (v5, v6, v7) don't export
   # `LRUCache` as a named property, breaking `import { LRUCache }` in Node.js
   # 22+ (Electron 40+).  Unpacking lets afterPack patch them in place.
   - "**/node_modules/lru-cache/**"
 
 # Disable native module rebuilding.
-# The Electron renderer/main process has no native (.node) dependencies.
-# All native modules (opus, sharp, koffi …) belong to openclaw, which is
-# bundled separately (bundle-openclaw.mjs → extraResources) and runs in its
-# own process — @electron/rebuild must NOT touch them.
+# Electron Main uses the prebuilt sharp runtime above. Other native modules
+# (opus, koffi, and OpenClaw's sharp copy) belong to the separately bundled
+# OpenClaw process. Do not let @electron/rebuild replace these pinned binaries.
 npmRebuild: false
 
 # Auto-update configuration

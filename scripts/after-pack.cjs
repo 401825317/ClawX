@@ -194,7 +194,7 @@ function writeBuildIdentity(resourcesDir, context, platform, arch) {
     ? `github-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT || '1'}`
     : `local-${createdAt.replace(/[^0-9]/g, '')}`;
   const identity = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     product: 'UClaw',
     appVersion: context.packager.appInfo.version,
     gitCommit,
