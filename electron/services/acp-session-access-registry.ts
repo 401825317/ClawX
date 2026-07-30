@@ -1,6 +1,6 @@
 import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute, relative, sep } from 'node:path';
-import { expandPath } from '../utils/paths';
+import { resolveOpenClawWorkspacePath } from '../utils/paths';
 
 export type AcpSessionAccessContext = {
   sessionKey: string;
@@ -14,7 +14,7 @@ export type AcpSessionAccessGrantListener = (
 ) => void;
 
 async function canonicalDirectory(input: string, label: string): Promise<string> {
-  const canonicalPath = await realpath(expandPath(input));
+  const canonicalPath = await realpath(resolveOpenClawWorkspacePath(input));
   const directoryStat = await stat(canonicalPath);
   if (!directoryStat.isDirectory()) throw new Error(`${label} must be a directory`);
   return canonicalPath;

@@ -52,6 +52,7 @@ describe('workspace-scoped files api', () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     mocks.home = '';
     await rm(testDir, { recursive: true, force: true });
   });
@@ -249,6 +250,24 @@ describe('workspace-scoped files api', () => {
       workspaceRoot,
       executionCwd: testDir,
     })).resolves.toEqual({ ok: false, error: 'outsideSandbox' });
+  });
+
+  it('resolves the default workspace against the isolated OpenClaw state directory', async () => {
+    const portableStateDir = join(testDir, 'portable-openclaw-state');
+    const portableWorkspace = join(portableStateDir, 'workspace');
+    const portableCwd = join(portableWorkspace, 'projects', 'demo');
+    await mkdir(portableCwd, { recursive: true });
+    vi.stubEnv('OPENCLAW_STATE_DIR', portableStateDir);
+    const api = await getApi();
+
+    await expect(api.resolveWorkspaceContext({
+      workspaceRoot: '~/.openclaw/workspace',
+      executionCwd: '~/.openclaw/workspace/projects/demo',
+    })).resolves.toEqual({
+      ok: true,
+      workspaceRoot: await realpath(portableWorkspace),
+      executionCwd: await realpath(portableCwd),
+    });
   });
 
   it('reads text and binary files and stats normal children', async () => {

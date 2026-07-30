@@ -3,9 +3,10 @@
  * Cross-platform path resolution helpers
  */
 import { createRequire } from 'node:module';
-import { dirname, join, resolve } from 'path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import { homedir } from 'os';
 import { existsSync, mkdirSync, readFileSync, realpathSync } from 'fs';
+import { DEFAULT_WORKSPACE_CWD } from '@shared/workspace';
 
 const require = createRequire(import.meta.url);
 
@@ -82,6 +83,18 @@ export function getOpenClawConfigDir(): string {
 export function resolveOpenClawStateDir(env: NodeJS.ProcessEnv = process.env): string {
   const configured = env.OPENCLAW_STATE_DIR?.trim();
   return resolve(expandOpenClawPath(configured || join(resolveOpenClawEffectiveHomeDir(env), '.openclaw'), env));
+}
+
+/** Resolve the logical default workspace and its children inside the active OpenClaw state directory. */
+export function resolveOpenClawWorkspacePath(path: string, env: NodeJS.ProcessEnv = process.env): string {
+  const expandedPath = expandPath(path);
+  const defaultWorkspace = expandPath(DEFAULT_WORKSPACE_CWD);
+  const relativePath = relative(defaultWorkspace, expandedPath);
+  const isDefaultWorkspace = relativePath === ''
+    || (!isAbsolute(relativePath) && relativePath !== '..' && !relativePath.startsWith(`..${sep}`));
+  if (!isDefaultWorkspace) return expandedPath;
+
+  return resolve(resolveOpenClawStateDir(env), 'workspace', relativePath);
 }
 
 export function resolveOpenClawConfigPath(env: NodeJS.ProcessEnv = process.env): string {

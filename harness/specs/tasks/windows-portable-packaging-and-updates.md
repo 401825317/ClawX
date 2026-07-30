@@ -21,6 +21,8 @@ touchedAreas:
   - electron/main/portable-update-security.ts
   - electron/main/portable-update-installer.ts
   - electron/services/files-api.ts
+  - electron/services/acp-chat-service.ts
+  - electron/services/acp-session-access-registry.ts
   - electron/services/updates-api.ts
   - electron/utils/agent-config.ts
   - electron/utils/channel-config.ts
@@ -64,6 +66,7 @@ expectedUserBehavior:
   - A downloaded USB update is installed only after filename, ZIP signature, size, and SHA-512 verification.
   - Portable update installation preserves UClawData, rolls back application files on failure, and restarts the updated executable.
   - Existing chat, media, authentication, Provider, skill, and OpenClaw event behavior is unchanged.
+  - The logical default chat workspace resolves inside the active isolated OpenClaw state directory, so ACP sessions can load and send prompts in portable mode.
 requiredProfiles:
   - fast
   - comms
@@ -78,6 +81,7 @@ requiredRules:
 requiredTests:
   - pnpm run typecheck
   - pnpm exec vitest run tests/unit/portable-update-security.test.ts tests/unit/portable-runtime-state.test.ts tests/unit/updates-api.test.ts
+  - pnpm exec vitest run tests/unit/files-api-workspace.test.ts tests/unit/acp-session-access-registry.test.ts tests/unit/acp-chat-service.test.ts
   - go test ./...
   - pnpm harness validate --spec harness/specs/tasks/windows-portable-packaging-and-updates.md
 acceptance:
@@ -85,6 +89,7 @@ acceptance:
   - The companion metadata contains version, platform, architecture, package type, file name, byte size, SHA-512, Git commit, build ID, and release date.
   - afterPack writes a build identity containing package version, Git commit, source-tree state, platform, architecture, build ID, and timestamp.
   - Portable state uses a durable portable ID and a local per-ID OpenClaw state directory; only snapshots with a complete manifest are restored.
+  - The default workspace alias and its descendants resolve to `<OPENCLAW_STATE_DIR>/workspace` consistently in Files API validation, ACP access grants, and ACP prompt cwd checks.
   - Snapshot creation uses stable file copies, atomic completion, path-boundary validation, and bounded retention.
   - The renderer calls update operations only through src/lib/host-api.ts; no new direct IPC or Gateway HTTP calls are added.
   - Portable update URLs and timeouts are defined by shared/junfeiai-endpoints.json and validated before use.

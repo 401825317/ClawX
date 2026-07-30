@@ -30,7 +30,7 @@ import {
   FILE_PREVIEW_MAX_TEXT_BYTES,
 } from '@shared/file-preview/limits';
 import type { CompleteHostServiceRegistry } from '../main/ipc/host-contract';
-import { expandPath, resolveOpenClawStateDir } from '../utils/paths';
+import { expandPath, resolveOpenClawStateDir, resolveOpenClawWorkspacePath } from '../utils/paths';
 import {
   resolveClawXStagingDir,
   type AttachmentAccess,
@@ -674,8 +674,8 @@ export function createFilesApi(dependencies: FilesApiDependencies = {}): Complet
       const fsP = await getWorkspaceFs();
       try {
         const [workspaceRoot, executionCwd] = await Promise.all([
-          fsP.realpath(expandPath(input.workspaceRoot)),
-          fsP.realpath(expandPath(input.executionCwd)),
+          fsP.realpath(resolveOpenClawWorkspacePath(input.workspaceRoot)),
+          fsP.realpath(resolveOpenClawWorkspacePath(input.executionCwd)),
         ]);
         const [rootStat, cwdStat] = await Promise.all([
           fsP.stat(workspaceRoot),

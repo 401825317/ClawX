@@ -18,6 +18,7 @@ function createDirectories() {
 }
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -55,6 +56,28 @@ describe('AcpSessionAccessRegistry', () => {
       workspaceRoot: filePath,
       executionCwd,
     })).rejects.toThrow('ACP workspace root must be a directory');
+  });
+
+  it('resolves the default workspace inside the isolated OpenClaw state directory', async () => {
+    const { parent } = createDirectories();
+    const stateDir = join(parent, 'openclaw-state');
+    const workspaceRoot = join(stateDir, 'workspace');
+    const executionCwd = join(workspaceRoot, 'projects', 'demo');
+    mkdirSync(executionCwd, { recursive: true });
+    vi.stubEnv('OPENCLAW_STATE_DIR', stateDir);
+    const registry = new AcpSessionAccessRegistry();
+
+    await expect(registry.prepareGrant({
+      sessionKey: 'agent:main:portable-session',
+      generation: 1,
+      workspaceRoot: '~/.openclaw/workspace',
+      executionCwd: '~/.openclaw/workspace/projects/demo',
+    })).resolves.toEqual({
+      sessionKey: 'agent:main:portable-session',
+      generation: 1,
+      workspaceRoot: realpathSync(workspaceRoot),
+      executionCwd: realpathSync(executionCwd),
+    });
   });
 
   it('commits access only for the exact session and generation', async () => {

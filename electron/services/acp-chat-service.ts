@@ -39,7 +39,7 @@ import {
   acpTurnVideoPreferenceStore,
   type AcpTurnVideoPreferenceStore,
 } from './acp-turn-video-preference-store';
-import { expandPath } from '../utils/paths';
+import { resolveOpenClawWorkspacePath } from '../utils/paths';
 import { prepareVideoReferenceImage } from '../utils/video-reference-image';
 
 type AcpConnection = Pick<ClientSideConnection, 'initialize' | 'newSession' | 'loadSession' | 'prompt' | 'cancel'>;
@@ -398,7 +398,7 @@ export class AcpChatService {
       const promptCwd = payload.cwd === accessGrant.executionCwd
         ? payload.cwd
         : await import('node:fs/promises')
-          .then((fsP) => fsP.realpath(expandPath(payload.cwd)))
+          .then((fsP) => fsP.realpath(resolveOpenClawWorkspacePath(payload.cwd)))
           .catch(() => null);
       if (promptCwd !== accessGrant.executionCwd) {
         return fail('ACP prompt cwd does not match the registered execution cwd');

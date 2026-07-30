@@ -1140,6 +1140,40 @@ describe('AcpChatService', () => {
     }
   });
 
+  it('loads and prompts from the default workspace in the isolated OpenClaw state directory', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'clawx-acp-service-portable-'));
+    const stateDir = join(parent, 'openclaw-state');
+    const workspaceRoot = join(stateDir, 'workspace');
+    mkdirSync(workspaceRoot, { recursive: true });
+    vi.stubEnv('OPENCLAW_STATE_DIR', stateDir);
+
+    try {
+      const { AcpSessionAccessRegistry } = await import('../../electron/services/acp-session-access-registry');
+      const { service, connection } = await createService(createConnection(), new AcpSessionAccessRegistry());
+
+      await expect(service.loadSession({
+        sessionKey: 'agent:pi:portable',
+        workspaceRoot: '~/.openclaw/workspace',
+        cwd: '~/.openclaw/workspace',
+      })).resolves.toEqual({ success: true, generation: 1 });
+      await expect(service.sendPrompt({
+        sessionKey: 'agent:pi:portable',
+        cwd: '~/.openclaw/workspace',
+        message: 'hello',
+      })).resolves.toEqual({ success: true, generation: 1 });
+
+      expect(connection.loadSession).toHaveBeenCalledWith({
+        sessionId: 'agent:pi:portable',
+        cwd: realpathSync(workspaceRoot),
+        mcpServers: [],
+      });
+      expect(connection.prompt).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
   it('restores the previous access grant when a later load fails', async () => {
     const parent = mkdtempSync(join(tmpdir(), 'clawx-acp-service-rollback-'));
     const firstRoot = join(parent, 'first');
