@@ -400,7 +400,8 @@ async function resolveSandboxedPath(
   if (!input.trim()) {
     throw new Error('outsideSandbox');
   }
-  const expanded = expandPath(input);
+  // Keep logical default-workspace paths aligned with the active OpenClaw state directory.
+  const expanded = resolveOpenClawWorkspacePath(input);
   const fsP = await import('node:fs/promises');
   let real: string;
   try {

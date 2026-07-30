@@ -97,6 +97,24 @@ export function resolveOpenClawWorkspacePath(path: string, env: NodeJS.ProcessEn
   return resolve(resolveOpenClawStateDir(env), 'workspace', relativePath);
 }
 
+/** Convert the active state directory's physical default workspace back to its stable logical path. */
+export function collapseOpenClawWorkspacePath(
+  path: string,
+  stateDir: string = resolveOpenClawStateDir(),
+): string {
+  if (!isAbsolute(path)) return path;
+
+  const physicalWorkspace = resolve(stateDir, 'workspace');
+  const relativePath = relative(physicalWorkspace, resolve(path));
+  const isDefaultWorkspace = relativePath === ''
+    || (!isAbsolute(relativePath) && relativePath !== '..' && !relativePath.startsWith(`..${sep}`));
+  if (!isDefaultWorkspace) return path;
+
+  return relativePath
+    ? `${DEFAULT_WORKSPACE_CWD}/${relativePath.split(sep).join('/')}`
+    : DEFAULT_WORKSPACE_CWD;
+}
+
 export function resolveOpenClawConfigPath(env: NodeJS.ProcessEnv = process.env): string {
   const configured = env.OPENCLAW_CONFIG_PATH?.trim() || env.OPENCLAW_CONFIG?.trim();
   return resolve(expandOpenClawPath(configured || join(resolveOpenClawStateDir(env), 'openclaw.json'), env));

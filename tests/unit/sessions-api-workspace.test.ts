@@ -5,15 +5,20 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { DEFAULT_WORKSPACE_CWD } from '@shared/workspace';
 
 const testOpenClawDir = join(tmpdir(), `clawx-session-workspace-${process.pid}`);
 const testOpenClawConfigDir = join(tmpdir(), `clawx-session-config-${process.pid}`);
 
-vi.mock('@electron/utils/paths', () => ({
-  getOpenClawConfigDir: () => testOpenClawDir,
-  resolveOpenClawStateDir: () => testOpenClawDir,
-  resolveOpenClawConfigDir: () => testOpenClawConfigDir,
-}));
+vi.mock('@electron/utils/paths', async () => {
+  const actual = await vi.importActual<typeof import('@electron/utils/paths')>('@electron/utils/paths');
+  return {
+    ...actual,
+    getOpenClawConfigDir: () => testOpenClawDir,
+    resolveOpenClawStateDir: () => testOpenClawDir,
+    resolveOpenClawConfigDir: () => testOpenClawConfigDir,
+  };
+});
 
 function seedAcpCwd(sessionKey: string, cwd: string) {
   const stateDir = join(testOpenClawDir, 'state');
@@ -243,6 +248,35 @@ describe('sessions API workspace summaries', () => {
     expect(result.summaries?.[0]).toMatchObject({
       sessionKey: 'agent:main:session-a',
       workspacePath: '/Users/alex/workspace/ReplayProject',
+    });
+  });
+
+  it('returns the logical default workspace for its isolated physical cwd', async () => {
+    seedAcpReplayCwd('agent:main:session-default', join(testOpenClawDir, 'workspace'));
+    const { createSessionsApi } = await import('@electron/services/sessions-api');
+    const api = createSessionsApi();
+
+    const result = await api.summaries({ sessionKeys: ['agent:main:session-default'] });
+
+    expect(result.summaries?.[0]).toMatchObject({
+      sessionKey: 'agent:main:session-default',
+      workspacePath: DEFAULT_WORKSPACE_CWD,
+    });
+  });
+
+  it('preserves the relative path below the isolated default workspace', async () => {
+    seedAcpReplayCwd(
+      'agent:main:session-default-child',
+      join(testOpenClawDir, 'workspace', 'projects', 'demo'),
+    );
+    const { createSessionsApi } = await import('@electron/services/sessions-api');
+    const api = createSessionsApi();
+
+    const result = await api.summaries({ sessionKeys: ['agent:main:session-default-child'] });
+
+    expect(result.summaries?.[0]).toMatchObject({
+      sessionKey: 'agent:main:session-default-child',
+      workspacePath: `${DEFAULT_WORKSPACE_CWD}/projects/demo`,
     });
   });
 

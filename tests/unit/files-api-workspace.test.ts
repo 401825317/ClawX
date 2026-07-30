@@ -270,6 +270,26 @@ describe('workspace-scoped files api', () => {
     });
   });
 
+  it('reads the default workspace tree from the isolated OpenClaw state directory', async () => {
+    const portableStateDir = join(testDir, 'portable-openclaw-state');
+    const portableWorkspace = join(portableStateDir, 'workspace');
+    await mkdir(portableWorkspace, { recursive: true });
+    await writeFile(join(portableWorkspace, 'portable-only.txt'), 'portable', 'utf8');
+    vi.stubEnv('OPENCLAW_STATE_DIR', portableStateDir);
+    const api = await getApi();
+
+    await expect(api.listTree({
+      path: '~/.openclaw/workspace',
+      opts: { includeHidden: true },
+    })).resolves.toMatchObject({
+      ok: true,
+      root: {
+        absPath: await realpath(portableWorkspace),
+        children: [expect.objectContaining({ name: 'portable-only.txt' })],
+      },
+    });
+  });
+
   it('reads text and binary files and stats normal children', async () => {
     const api = await getApi();
     const textRef = { workspaceRoot, relativePath: 'hello.txt' };

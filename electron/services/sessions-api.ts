@@ -6,7 +6,7 @@ import { stripAcpWorkingDirectoryPrefix } from '@shared/chat/session-title';
 import { isOpenClawHeartbeatPollText } from '@shared/chat/openclaw-internal';
 import type { RawMessage } from '@shared/chat/types';
 import type { SessionTurnTimingCandidate } from '@shared/host-api/contract';
-import { resolveOpenClawStateDir } from '../utils/paths';
+import { collapseOpenClawWorkspacePath, resolveOpenClawStateDir } from '../utils/paths';
 import { logger } from '../utils/logger';
 import {
   removeSessionEntry,
@@ -231,7 +231,8 @@ async function readOpenClawAcpSessionCwds(sessionKeys: string[]): Promise<Map<st
   const workspaceByKey = new Map<string, string>();
   if (normalizedKeys.length === 0) return workspaceByKey;
 
-  const databasePath = join(resolveOpenClawStateDir(), 'state', 'openclaw.sqlite');
+  const stateDir = resolveOpenClawStateDir();
+  const databasePath = join(stateDir, 'state', 'openclaw.sqlite');
   try {
     await access(databasePath);
     const sqliteSpecifier = 'node:sqlite';
@@ -240,7 +241,7 @@ async function readOpenClawAcpSessionCwds(sessionKeys: string[]): Promise<Map<st
     try {
       for (const sessionKey of normalizedKeys) {
         const cwd = readAcpReplayCwd(db, sessionKey) ?? readAcpRuntimeMetaCwd(db, sessionKey);
-        if (cwd) workspaceByKey.set(sessionKey, cwd);
+        if (cwd) workspaceByKey.set(sessionKey, collapseOpenClawWorkspacePath(cwd, stateDir));
       }
       return workspaceByKey;
     } finally {

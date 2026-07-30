@@ -61,7 +61,11 @@ export function getWorkspaceDisplayLabel(
 ): string {
   const normalized = normalizeWorkspacePath(workspace) ?? DEFAULT_WORKSPACE_CWD;
   if (isDefaultWorkspacePath(normalized)) return defaultLabel;
-  return workspaceLabels[normalized]?.trim() || formatWorkspacePath(normalized);
+  const configuredLabel = workspaceLabels[normalized]?.trim();
+  if (configuredLabel) return configuredLabel;
+
+  const slashed = slashPath(normalized);
+  return slashed.slice(slashed.lastIndexOf('/') + 1) || formatWorkspacePath(normalized);
 }
 
 export function resolveEffectiveWorkspace(input: {
