@@ -35,14 +35,15 @@ import {
   type WorkspaceTreeNode,
 } from '@/lib/workspace-tree';
 import type { AgentSummary } from '@/types/agent';
+import { useArtifactPanel } from '@/stores/artifact-panel';
 import { formatFileSize } from './format';
 import {
   confirmAndOpenFile,
   shouldOfferDirectOpenFallback,
 } from './open-file-utils';
 import { MaterialFileIcon } from './MaterialFileIcon';
+import { buildWorkspacePreviewTarget } from './build-preview-target';
 import MarkdownPreview from './MarkdownPreview';
-import HtmlPreview from './HtmlPreview';
 import ImageViewer from './ImageViewer';
 import { getFilePreviewTargetIdentity } from './types';
 
@@ -453,6 +454,13 @@ export function WorkspaceBrowserBody({
                 node.toggle();
                 return;
               }
+              if (isHtmlPreviewExt(node.data.ext)) {
+                useArtifactPanel.getState().openPreview(buildWorkspacePreviewTarget({
+                  workspaceRoot: workspace,
+                  relativePath: node.data.relPath,
+                }));
+                return;
+              }
               setSelectedRel(node.data.relPath);
             }}
             onToggle={(id) => {
@@ -665,16 +673,6 @@ export function WorkspaceBrowserBody({
           />
         </Suspense>
       ) : null;
-    }
-
-    if (isHtmlPreviewExt(selectedNode.ext)) {
-      return (
-        <HtmlPreview
-          source={displayedFileState.content}
-          filePath={selectedNode.absPath}
-          fileName={selectedNode.name}
-        />
-      );
     }
 
     if (selectedNode.contentType === 'document') {

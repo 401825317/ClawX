@@ -130,7 +130,6 @@ export function AcpAttachmentPart({ part, tone = 'assistant' }: { part: Attachme
     mode === 'preview'
       ? part.access.target.ref
       : null;
-
   const activate = async () => {
     if (part.access.status !== 'available') return;
     if (mode === 'preview') {
@@ -203,7 +202,11 @@ export function AcpAttachmentPart({ part, tone = 'assistant' }: { part: Attachme
       primaryDisabled={disabled}
       onPrimary={() => void activate()}
       openWith={openWithFileRef
-        ? { target: { kind: 'attachment', ref: openWithFileRef }, name }
+        ? {
+            target: { kind: 'attachment', ref: openWithFileRef },
+            name,
+            previewTarget: buildAttachmentPreviewTarget(part),
+          }
         : undefined}
     >
       {attachmentContent}

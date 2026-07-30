@@ -1,25 +1,26 @@
 /**
  * Right-side artifact panel — the WorkBuddy-style split-pane sidebar
- * shown next to the Chat conversation.  Hosts four top-level tabs:
+ * shown next to the Chat conversation. Normally hosts three top-level tabs:
  *
  *   - Workspace (browser): read-only workspace tree + file preview,
  *     scoped to the effective chat workspace.
  *   - Preview: rendered preview of whichever file is currently focused.
  *   - Changes: projected ACP file activity grouped by workspace path.
- *   - Web Browser: stable layout anchor for the globally hosted webview.
  *
  * Open/close + tab + focused-file state lives in the
  * `useArtifactPanel` zustand store so any part of the page (file cards,
  * toolbar buttons, "View file changes →" links) can drive it.
  */
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { cn } from '@/lib/utils';
-import { Eye, FileEdit, FolderOpen, FolderTree, Globe2, X } from 'lucide-react';
+import { ExternalLink, Eye, FileEdit, FolderOpen, FolderTree, Maximize2, Minimize2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
-import { supportsRichDocumentPreview } from '@/lib/generated-files';
+import { isHtmlPreviewExt, supportsRichDocumentPreview } from '@/lib/generated-files';
 import { hostApi } from '@/lib/host-api';
+import { htmlPreviewFileUrl } from '@/lib/local-html-browser';
 import type { AcpSessionFileGroup } from '@/lib/acp/openclaw-file-activities';
 import type { AgentSummary } from '@/types/agent';
 import { useArtifactPanel } from '@/stores/artifact-panel';
@@ -28,7 +29,7 @@ import { FilePreviewBody } from './FilePreviewBody';
 import { WorkspaceBrowserBody } from './WorkspaceBrowserBody';
 import { WORKSPACE_BROWSER_ENABLED } from './workspace-browser-config';
 import { AcpSessionChangesView } from './AcpSessionChangesView';
-import { WebBrowserAnchor } from '@/components/web-browser/WebBrowserAnchor';
+import { MAC_TRAFFIC_LIGHT_SAFE_INSET } from '@shared/sidebar-layout';
 
 export interface ArtifactPanelProps {
   fileGroups: AcpSessionFileGroup[];
@@ -59,7 +60,6 @@ export function ArtifactPanel({ fileGroups, uniqueFileCount, agent, workspacePat
     && supportsRichDocumentPreview(focusedFile.ext);
   const requestedTab = !WORKSPACE_BROWSER_ENABLED && tab === 'browser' ? 'changes' : tab;
   const visibleTab = requestedTab;
-
   const handleRevealFocusedFile = () => {
     if (!focusedFile || focusedFile.attachmentFileRef) return;
     hostApi.shell.showItemInFolder(focusedFile.filePath).catch(() => {
@@ -104,13 +104,6 @@ export function ArtifactPanel({ fileGroups, uniqueFileCount, agent, workspacePat
             active={visibleTab === 'changes'}
             onClick={() => setTab('changes')}
           />
-          <PanelTabButton
-            testId="artifact-panel-tab-web-browser"
-            icon={<Globe2 className="h-3.5 w-3.5" />}
-            label={t('artifactPanel.tabs.webBrowser', 'Web Browser')}
-            active={visibleTab === 'web-browser'}
-            onClick={() => setTab('web-browser')}
-          />
           {richFocusedFile && (
             <PanelTabButton
               testId="artifact-panel-action-open-folder"
@@ -152,9 +145,6 @@ export function ArtifactPanel({ fileGroups, uniqueFileCount, agent, workspacePat
         </div>
         <div className={cn('h-full min-h-0', visibleTab !== 'changes' && 'hidden')}>
           <AcpSessionChangesView fileGroups={fileGroups} uniqueFileCount={uniqueFileCount} focus={focusedChange} />
-        </div>
-        <div className={cn('h-full min-h-0', visibleTab !== 'web-browser' && 'hidden')}>
-          {visibleTab === 'web-browser' && <WebBrowserAnchor />}
         </div>
       </div>
     </div>
@@ -209,7 +199,25 @@ interface PreviewTabProps {
 
 function PreviewTab({ focusedFile, active }: PreviewTabProps) {
   const { t } = useTranslation('chat');
+  const isMac = window.electron?.platform === 'darwin';
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [pptxSlidePositions] = useState(() => new Map<string, number>());
+  const fullscreenButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!isFullscreen) return;
+    fullscreenButtonRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setIsFullscreen(false);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isFullscreen]);
+
+  useEffect(() => useArtifactPanel.subscribe((state) => {
+    if (state.tab !== 'preview') setIsFullscreen(false);
+  }), []);
+
   if (!focusedFile) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
@@ -226,17 +234,79 @@ function PreviewTab({ focusedFile, active }: PreviewTabProps) {
     );
   }
   const identity = getFilePreviewTargetIdentity(focusedFile);
-  return (
-    <FilePreviewBody
-      key={identity}
-      file={focusedFile}
-      compact
-      mode="preview"
-      active={active}
-      initialPptxSlideIndex={pptxSlidePositions.get(identity) ?? 0}
-      onPptxSlideIndexChange={(index) => pptxSlidePositions.set(identity, index)}
-    />
+  const toggleLabel = isFullscreen
+    ? t('filePreview.actions.exitFullscreen', 'Exit fullscreen')
+    : t('filePreview.actions.enterFullscreen', 'Enter fullscreen');
+  const isHtml = isHtmlPreviewExt(focusedFile.ext);
+  const htmlExternalUrl = isHtml ? htmlPreviewFileUrl(focusedFile) : null;
+  const openExternalLabel = t(
+    'filePreview.actions.openHtmlExternally',
+    'Open HTML in system browser',
   );
+  const preview = (
+    <div
+      data-testid={isFullscreen ? 'file-preview-fullscreen-layer' : undefined}
+      role={isFullscreen ? 'dialog' : undefined}
+      aria-modal={isFullscreen ? true : undefined}
+      aria-label={isFullscreen ? t('artifactPanel.preview.fullscreenLabel', 'Fullscreen file preview') : undefined}
+      className={cn(
+        'h-full min-h-0 bg-background',
+        isFullscreen && 'fixed inset-0 z-[100]',
+      )}
+    >
+      <FilePreviewBody
+        key={identity}
+        file={focusedFile}
+        compact={!isFullscreen}
+        headerLeftInset={isFullscreen && isMac ? MAC_TRAFFIC_LIGHT_SAFE_INSET : undefined}
+        mode="preview"
+        active={active}
+        initialPptxSlideIndex={pptxSlidePositions.get(identity) ?? 0}
+        onPptxSlideIndexChange={(index) => pptxSlidePositions.set(identity, index)}
+        trailingHeader={(
+          <>
+            {htmlExternalUrl && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 shrink-0"
+                onClick={() => {
+                  hostApi.webBrowser.openExternal(htmlExternalUrl).catch(() => {
+                    toast.error(t(
+                      'filePreview.errors.openHtmlExternallyFailed',
+                      'Could not open HTML in system browser',
+                    ));
+                  });
+                }}
+                aria-label={openExternalLabel}
+                title={openExternalLabel}
+                data-testid="html-preview-open-external"
+              >
+                <ExternalLink className="h-4 w-4 pointer-events-none" />
+              </Button>
+            )}
+            <Button
+              ref={fullscreenButtonRef}
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 shrink-0"
+              onClick={() => setIsFullscreen((value) => !value)}
+              aria-label={toggleLabel}
+              title={toggleLabel}
+              data-testid="file-preview-fullscreen-toggle"
+            >
+              {isFullscreen
+                ? <Minimize2 className="h-4 w-4 pointer-events-none" />
+                : <Maximize2 className="h-4 w-4 pointer-events-none" />}
+            </Button>
+          </>
+        )}
+      />
+    </div>
+  );
+  return isFullscreen ? createPortal(preview, document.body) : preview;
 }
 
 export default ArtifactPanel;

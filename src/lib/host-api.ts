@@ -124,9 +124,9 @@ export const hostApi = {
   },
   webBrowser: {
     navigate: (url: string) => invokeHost('webBrowser', 'navigate', { url } satisfies WebBrowserNavigatePayload),
-    clearCookies: () => invokeHost('webBrowser', 'clearCookies'),
-    clearSiteData: () => invokeHost('webBrowser', 'clearSiteData'),
-    openExternal: () => invokeHost('webBrowser', 'openExternal'),
+    openExternal: (url: string) => (
+      invokeHost('webBrowser', 'openExternal', { url } satisfies WebBrowserNavigatePayload)
+    ),
   },
   dialog: {
     open: (input: DialogOpenPayload) => invokeHost('dialog', 'open', input),

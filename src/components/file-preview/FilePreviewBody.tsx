@@ -53,8 +53,8 @@ import {
   shouldOfferDirectOpenFallback,
 } from './open-file-utils';
 import MarkdownPreview from './MarkdownPreview';
-import HtmlPreview from './HtmlPreview';
 import ImageViewer from './ImageViewer';
+import { HtmlPreviewAnchor } from '@/components/web-browser/WebBrowserAnchor';
 
 const MonacoViewerLazy = lazy(() => import('./MonacoViewer'));
 const MonacoDiffViewerLazy = lazy(() => import('./MonacoDiffViewer'));
@@ -82,6 +82,8 @@ export interface FilePreviewBodyProps {
   leadingHeader?: React.ReactNode;
   /** Optional slot rendered to the RIGHT of the header (extra actions). */
   trailingHeader?: React.ReactNode;
+  /** Optional left padding override for headers rendered beneath native window chrome. */
+  headerLeftInset?: number;
   /** Limit the visible tabs.  Default: 'full'. */
   mode?: FilePreviewBodyMode;
   /** When true, hide the file header (name / path / actions). */
@@ -212,6 +214,7 @@ export function FilePreviewBody({
   compact = false,
   leadingHeader,
   trailingHeader,
+  headerLeftInset,
   mode = 'full',
   hideHeader = false,
   active = true,
@@ -687,13 +690,7 @@ export function FilePreviewBody({
                 ) : null
               ) : file.contentType === 'document' ? (
                 isHtmlPreviewExt(file.ext) ? (
-                  <HtmlPreview
-                    source={draft ?? state.content}
-                    filePath={file.filePath}
-                    fileName={file.fileName}
-                    attachmentFileRef={file.attachmentFileRef}
-                    workspaceFileRef={file.workspaceFileRef}
-                  />
+                  <HtmlPreviewAnchor />
                 ) : (
                   <MarkdownPreview source={draft ?? state.content} />
                 )
@@ -756,11 +753,13 @@ export function FilePreviewBody({
     >
       {!hideHeader && (
       <header
+        data-testid="file-preview-header"
         className={
           compact
             ? 'flex items-center justify-between gap-3 border-b border-black/5 px-4 py-2 dark:border-white/10'
             : 'flex items-center justify-between gap-3 border-b border-black/5 px-5 py-3 dark:border-white/10'
         }
+        style={headerLeftInset == null ? undefined : { paddingLeft: headerLeftInset }}
       >
         <div className="flex min-w-0 items-center gap-3">
           {leadingHeader}

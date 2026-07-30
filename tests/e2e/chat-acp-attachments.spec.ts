@@ -10,6 +10,10 @@ import {
   test,
   type RecordedHostInvocation,
 } from './fixtures/electron';
+import {
+  executeInWebBrowserGuest,
+  getWebBrowserMainSnapshot,
+} from './fixtures/web-browser';
 
 const MAIN_SESSION_KEY = 'agent:main:main';
 const OTHER_SESSION_KEY = 'agent:main:other';
@@ -85,7 +89,7 @@ async function openChat(app: ElectronApplication): Promise<Page> {
 }
 
 test.describe('ACP media attachments', () => {
-  test('opens a local HTML attachment in the right-side Web Browser', async ({ launchElectronApp }) => {
+  test('opens a local HTML attachment in the right-side Preview tab', async ({ launchElectronApp }) => {
     // Electron's webview support is unstable on Linux.
     test.skip(process.platform !== 'win32' && process.platform !== 'darwin');
 
@@ -112,29 +116,28 @@ test.describe('ACP media attachments', () => {
       await fixture.setTranscriptResponses(MAIN_SESSION_KEY, [[]]);
 
       const page = await openChat(app);
-      const trigger = page.getByRole('button', { name: 'Open browser demo.html with', exact: true });
-      await expect(trigger).toBeEnabled({ timeout: 30_000 });
-      await trigger.click();
-      const browserItem = page.getByTestId('acp-file-open-in-built-in-browser');
-      await expect(page.getByRole('menuitem').first()).toHaveAttribute(
-        'data-testid',
-        'acp-file-open-in-built-in-browser',
-      );
-      await browserItem.click();
+      const attachment = page.getByRole('button', { name: 'Preview browser demo.html', exact: true });
+      await expect(attachment).toBeEnabled({ timeout: 30_000 });
+      await attachment.click();
 
       const expectedUrl = pathToFileURL(htmlPath).href;
       const panel = page.getByTestId('artifact-panel');
       await expect(panel).toBeVisible();
-      await expect(panel.getByTestId('artifact-panel-tab-web-browser')).toHaveClass(/bg-foreground\/10/);
-      await expect(page.getByTestId('web-browser-host')).toHaveAttribute('aria-hidden', 'false');
+      await expect(panel.getByTestId('artifact-panel-tab-preview')).toHaveClass(/bg-foreground\/10/);
+      await expect(panel.getByTestId('artifact-panel-tab-web-browser')).toHaveCount(0);
+      await expect(page.getByTestId('html-preview-host')).toHaveAttribute('aria-hidden', 'false');
+      await expect(panel.getByTestId('html-preview-open-external')).toBeVisible();
+      await panel.getByTestId('file-preview-fullscreen-toggle').click();
+      await expect(page.getByTestId('file-preview-fullscreen-layer')).toBeVisible();
+      await expect(page.getByTestId('html-preview-host')).toHaveCSS('z-index', '110');
+      await expect(page.getByTestId('html-preview-webview')).toBeVisible();
+      await page.getByTestId('file-preview-fullscreen-toggle').click();
       await expect.poll(async () => (await fixture.getHostInvocations()).some((request) => (
         request.module === 'webBrowser'
         && request.action === 'navigate'
         && request.payload?.url === expectedUrl
       ))).toBe(true);
-      await expect(page.getByTestId('web-browser-address-display')).toHaveAccessibleName(
-        new RegExp(expectedUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
-      );
+      await expect(page.getByTestId('web-browser-address-display')).toHaveCount(0);
     } finally {
       await closeElectronApp(app);
     }
@@ -252,7 +255,7 @@ test.describe('ACP media attachments', () => {
     }
   });
 
-  test('keeps the HTML preview and source switcher in the file header', async ({ launchElectronApp }) => {
+  test('previews local HTML while blocking every link and popup', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 
     try {
@@ -261,7 +264,7 @@ test.describe('ACP media attachments', () => {
       });
       const htmlPath = await fixture.createWorkspaceFile(
         'inline-preview.html',
-        '<!doctype html><html><body><h1>Inline HTML preview</h1></body></html>',
+        '<!doctype html><html><body><a id="external" href="https://example.com/from-html">External</a></body></html>',
       );
       await fixture.setSessionReplay(MAIN_SESSION_KEY, [
         userUpdate('html-preview-user', 'Show the HTML file'),
@@ -278,20 +281,51 @@ test.describe('ACP media attachments', () => {
       const attachment = page.getByRole('button', { name: 'Preview inline-preview.html', exact: true });
       await expect(attachment).toBeEnabled({ timeout: 30_000 });
       await attachment.click();
+      await expect(page.getByTestId('artifact-panel-tab-preview')).toBeVisible();
+      await expect(page.getByTestId('artifact-panel-tab-web-browser')).toHaveCount(0);
 
-      const panel = page.getByTestId('artifact-panel');
-      const fileHeader = panel.locator('header').filter({ hasText: 'inline-preview.html' });
-      const viewTabs = fileHeader.getByTestId('file-preview-view-tabs');
-      await expect(viewTabs).toBeVisible();
-      await expect(viewTabs.getByRole('tab', { name: 'Preview', exact: true })).toHaveAttribute('data-state', 'active');
-      await expect(panel.getByTestId('html-preview-frame')).toBeVisible();
-
-      await viewTabs.getByRole('tab', { name: 'Source', exact: true }).click();
-      await expect(viewTabs.getByRole('tab', { name: 'Source', exact: true })).toHaveAttribute('data-state', 'active');
-      await expect(panel.getByTestId('html-preview-frame')).toHaveCount(0);
-
-      await viewTabs.getByRole('tab', { name: 'Preview', exact: true }).click();
-      await expect(panel.getByTestId('html-preview-frame')).toBeVisible();
+      await expect.poll(() => getWebBrowserMainSnapshot(app)).toMatchObject({
+        url: pathToFileURL(htmlPath).href,
+        matchingGuestCount: 1,
+      });
+      const guestId = (await getWebBrowserMainSnapshot(app)).guestId;
+      if (!guestId) throw new Error('HTML preview guest was not created');
+      const linkPolicy = await executeInWebBrowserGuest<{
+        pointerEvents: string;
+        textDecorationLine: string;
+        color: string;
+        parentColor: string;
+        popupBlocked: boolean;
+      }>(
+        app,
+        guestId,
+        `(() => {
+          const link = document.querySelector('#external');
+          if (!(link instanceof HTMLAnchorElement) || !link.parentElement) {
+            throw new Error('Expected external link');
+          }
+          const style = getComputedStyle(link);
+          return {
+            pointerEvents: style.pointerEvents,
+            textDecorationLine: style.textDecorationLine,
+            color: style.color,
+            parentColor: getComputedStyle(link.parentElement).color,
+            popupBlocked: window.open('https://example.com/popup') === null,
+          };
+        })()`,
+      );
+      expect(linkPolicy).toEqual({
+        pointerEvents: 'none',
+        textDecorationLine: 'none',
+        color: linkPolicy.parentColor,
+        parentColor: linkPolicy.parentColor,
+        popupBlocked: true,
+      });
+      await expect(getWebBrowserMainSnapshot(app)).resolves.toMatchObject({
+        url: pathToFileURL(htmlPath).href,
+        matchingGuestCount: 1,
+      });
+      expect(await fixture.getShellInvocations()).toEqual([]);
       expect(await getRecordedLegacyIpcInvocations(app)).toEqual([]);
     } finally {
       await closeElectronApp(app);
@@ -374,6 +408,7 @@ test.describe('ACP media attachments', () => {
           sessionUpdate: 'agent_message',
           messageId: 'ineligible-reply',
           content: [
+            { type: 'text', text: 'Reference: [External reference](https://example.test/reference)' },
             { type: 'resource_link', uri: 'https://example.test/remote-report.pdf', name: 'Remote report.pdf', mimeType: 'application/pdf' },
             { type: 'resource_link', uri: missingPath, name: 'Missing report.pdf', mimeType: 'application/pdf' },
             { type: 'resource_link', uri: zipPath, name: 'System open.zip', mimeType: 'application/zip' },
@@ -387,6 +422,10 @@ test.describe('ACP media attachments', () => {
       await expect(page.getByText('Remote report.pdf')).toBeVisible();
       await expect(page.getByText('Missing report.pdf')).toBeVisible();
       await expect(page.getByText('System open.zip')).toBeVisible();
+      const externalReference = page.getByText('External reference', { exact: true });
+      await expect(externalReference).toBeVisible();
+      await expect(externalReference).not.toHaveAttribute('href');
+      await expect(page.getByRole('link', { name: 'External reference' })).toHaveCount(0);
       for (const name of ['User report.pdf', 'Remote report.pdf', 'Missing report.pdf', 'System open.zip']) {
         await expect(page.getByRole('button', { name: `Open ${name} with`, exact: true })).toHaveCount(0);
       }
@@ -580,6 +619,7 @@ test.describe('ACP media attachments', () => {
       const panel = page.getByTestId('artifact-panel');
       await expect(panel).toBeVisible();
       await expect(panel.getByTestId('artifact-panel-tab-preview')).toBeVisible();
+      await expect(panel.getByTestId('artifact-panel-tab-web-browser')).toHaveCount(0);
       await expect(panel.getByText('Operations')).toBeVisible({ timeout: 30_000 });
       await expect.poll(async () => (await fixture.getHostInvocations()).some((call) => (
         call.module === 'files'

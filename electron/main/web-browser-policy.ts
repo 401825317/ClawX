@@ -3,11 +3,19 @@ import {
   WEB_BROWSER_INITIAL_URL,
   WEB_BROWSER_PARTITION,
   WEB_BROWSER_USER_AGENT,
-  normalizeWebBrowserTopLevelUrl,
+  normalizeWebBrowserHtmlFileUrl,
 } from '../../shared/web-browser';
 import { logger } from '../utils/logger';
 
 const DENY_WINDOW_OPEN = { action: 'deny' } as const;
+const INERT_LINK_CSS = `
+  a, area {
+    color: inherit !important;
+    cursor: inherit !important;
+    pointer-events: none !important;
+    text-decoration: none !important;
+  }
+`;
 
 export class WebBrowserGuestRegistry {
   private guest: WebContents | null = null;
@@ -67,7 +75,7 @@ export function isExpectedWebBrowserAttachment(
   return params.partition === WEB_BROWSER_PARTITION
     && params.src === WEB_BROWSER_INITIAL_URL
     && params.useragent === WEB_BROWSER_USER_AGENT
-    && params.allowpopups === true
+    && params.allowpopups !== true
     && params.preload === '';
 }
 
@@ -135,47 +143,69 @@ export function installWebBrowserGuestPolicy(
     }
 
     guest.setUserAgent(WEB_BROWSER_USER_AGENT);
+    let committedHtmlUrl = normalizeWebBrowserHtmlFileUrl(guest.getURL());
+    let restoringCommittedUrl = false;
 
-    const rejectDisallowedNavigation = (
-      details: Electron.Event<Electron.WebContentsWillNavigateEventParams>,
+    const blockPageNavigation = (
+      details: Electron.Event<Electron.WebContentsWillFrameNavigateEventParams>,
     ): void => {
-      if (!details.isMainFrame || normalizeWebBrowserTopLevelUrl(details.url) !== null) {
-        return;
-      }
-
-      logger.warn(`[WebBrowser] Blocked top-level navigation to ${details.url}`);
+      logger.warn(`[WebBrowser] Blocked guest navigation to ${details.url}`);
       details.preventDefault();
     };
 
-    const rejectDisallowedRedirect = (
+    const stopInvalidProgrammaticNavigation = (
+      details: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>,
+    ): void => {
+      if (!details.isMainFrame || normalizeWebBrowserHtmlFileUrl(details.url)) {
+        return;
+      }
+
+      logger.warn(`[WebBrowser] Stopped invalid programmatic navigation to ${details.url}`);
+      guest.stop();
+    };
+
+    const blockRedirect = (
       details: Electron.Event<Electron.WebContentsWillRedirectEventParams>,
     ): void => {
-      if (!details.isMainFrame || normalizeWebBrowserTopLevelUrl(details.url) !== null) {
-        return;
-      }
-
-      logger.warn(`[WebBrowser] Blocked top-level redirect to ${details.url}`);
+      logger.warn(`[WebBrowser] Blocked guest redirect to ${details.url}`);
       details.preventDefault();
     };
 
-    // Same-tab fallback cannot preserve window.opener, returned window handles, or full POST/referrer fidelity.
     guest.setWindowOpenHandler(({ url }) => {
-      const target = normalizeWebBrowserTopLevelUrl(url);
-      if (!target || !registry.owns(guest)) {
-        logger.warn(`[WebBrowser] Blocked popup target ${url}`);
-        return DENY_WINDOW_OPEN;
-      }
-
-      try {
-        void guest.loadURL(target).catch((error) => {
-          logger.warn(`[WebBrowser] Failed to load popup target ${target}:`, error);
-        });
-      } catch (error) {
-        logger.warn(`[WebBrowser] Failed to load popup target ${target}:`, error);
-      }
-
+      logger.warn(`[WebBrowser] Blocked popup target ${url}`);
       return DENY_WINDOW_OPEN;
     });
+
+    const makeLinksVisuallyInert = (): void => {
+      void guest.insertCSS(INERT_LINK_CSS, { cssOrigin: 'user' }).catch((error) => {
+        logger.warn('[WebBrowser] Failed to neutralize HTML links:', error);
+      });
+    };
+
+    const rememberCommittedHtml = (_event: Electron.Event, url: string): void => {
+      const normalizedUrl = normalizeWebBrowserHtmlFileUrl(url);
+      if (normalizedUrl) {
+        committedHtmlUrl = normalizedUrl;
+      }
+      restoringCommittedUrl = false;
+    };
+
+    const restoreAfterInPageNavigation = (
+      _event: Electron.Event,
+      url: string,
+      isMainFrame: boolean,
+    ): void => {
+      if (!isMainFrame || !committedHtmlUrl || url === committedHtmlUrl || restoringCommittedUrl) {
+        return;
+      }
+
+      restoringCommittedUrl = true;
+      logger.warn(`[WebBrowser] Reverting blocked in-page navigation to ${url}`);
+      void guest.loadURL(committedHtmlUrl).catch((error) => {
+        restoringCommittedUrl = false;
+        logger.warn(`[WebBrowser] Failed to restore local HTML preview ${committedHtmlUrl}:`, error);
+      });
+    };
 
     let cleaned = false;
     const cleanup = (): void => {
@@ -184,8 +214,12 @@ export function installWebBrowserGuestPolicy(
       }
       cleaned = true;
 
-      guest.off('will-navigate', rejectDisallowedNavigation);
-      guest.off('will-redirect', rejectDisallowedRedirect);
+      guest.off('will-frame-navigate', blockPageNavigation);
+      guest.off('did-start-navigation', stopInvalidProgrammaticNavigation);
+      guest.off('will-redirect', blockRedirect);
+      guest.off('did-finish-load', makeLinksVisuallyInert);
+      guest.off('did-navigate', rememberCommittedHtml);
+      guest.off('did-navigate-in-page', restoreAfterInPageNavigation);
       guest.off('destroyed', cleanup);
       if (!guest.isDestroyed()) {
         guest.setWindowOpenHandler(() => DENY_WINDOW_OPEN);
@@ -195,8 +229,12 @@ export function installWebBrowserGuestPolicy(
       }
     };
 
-    guest.on('will-navigate', rejectDisallowedNavigation);
-    guest.on('will-redirect', rejectDisallowedRedirect);
+    guest.on('will-frame-navigate', blockPageNavigation);
+    guest.on('did-start-navigation', stopInvalidProgrammaticNavigation);
+    guest.on('will-redirect', blockRedirect);
+    guest.on('did-finish-load', makeLinksVisuallyInert);
+    guest.on('did-navigate', rememberCommittedHtml);
+    guest.on('did-navigate-in-page', restoreAfterInPageNavigation);
     guest.once('destroyed', cleanup);
     cleanupGuestPolicy = cleanup;
   };

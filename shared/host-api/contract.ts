@@ -832,9 +832,7 @@ export type HostApiContract = {
   };
   webBrowser: {
     navigate: (payload: WebBrowserNavigatePayload) => void;
-    clearCookies: () => void;
-    clearSiteData: () => void;
-    openExternal: () => void;
+    openExternal: (payload: WebBrowserNavigatePayload) => void;
   };
   dialog: {
     open: (payload: DialogOpenPayload) => DialogOpenResult;
