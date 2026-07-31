@@ -4,8 +4,14 @@
  * entry point.  Rendered in the Header when on the Chat page.
  */
 import { useMemo } from 'react';
-import { RefreshCw, Bot, FolderTree, ListTree } from 'lucide-react';
+import { RefreshCw, Bot, FolderTree, ListTree, ChevronDown, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useChatStore } from '@/stores/chat';
 import { useAgentsStore } from '@/stores/agents';
@@ -29,6 +35,7 @@ export function ChatToolbar({
 }: ChatToolbarProps = {}) {
   const refresh = useChatStore((s) => s.refresh);
   const loading = useChatStore((s) => s.loading);
+  const switchSession = useChatStore((s) => s.switchSession);
   const currentAgentId = useChatStore((s) => s.currentAgentId);
   const agents = useAgentsStore((s) => s.agents);
   const openBrowser = useArtifactPanel((s) => s.openBrowser);
@@ -47,10 +54,50 @@ export function ChatToolbar({
 
   return (
     <div className="flex items-center gap-2">
-      <div className="hidden sm:flex items-center gap-1.5 rounded-full border border-black/10 bg-white/70 px-3 py-1.5 text-xs font-medium text-foreground/80 dark:border-white/10 dark:bg-white/5">
-        <Bot className="h-3.5 w-3.5 text-primary" />
-        <span>{t('toolbar.currentAgent', { agent: currentAgentName })}</span>
-      </div>
+      {/* Switch to the selected Agent's canonical main session. */}
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            data-testid="chat-agent-switcher"
+            type="button"
+            variant="outline"
+            className="hidden h-8 max-w-[260px] items-center gap-1.5 rounded-full border-black/10 bg-white/70 px-3 text-xs font-medium text-foreground/80 shadow-none hover:bg-black/5 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10 sm:flex"
+            aria-label={t('toolbar.agentSwitcher')}
+          >
+            <Bot className="h-3.5 w-3.5 shrink-0 text-primary" />
+            <span className="truncate">{t('toolbar.currentAgent', { agent: currentAgentName })}</span>
+            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          className="max-h-80 w-64 overflow-y-auto rounded-lg border-black/10 p-1.5 shadow-xl dark:border-white/10"
+        >
+          {(agents ?? []).map((agent) => {
+            const isActive = agent.id === currentAgentId;
+            return (
+              <DropdownMenuItem
+                key={agent.id}
+                onSelect={() => switchSession(agent.mainSessionKey)}
+                className={cn(
+                  'flex min-h-12 cursor-pointer gap-2.5 rounded-md px-2 py-2',
+                  isActive && 'bg-black/5 dark:bg-white/10',
+                )}
+                aria-current={isActive ? 'true' : undefined}
+              >
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+                  <Bot className="h-4 w-4" />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-medium text-foreground">{agent.name}</span>
+                  <span className="block truncate text-xs text-muted-foreground">{agent.modelDisplay}</span>
+                </span>
+                {isActive ? <Check className="h-3.5 w-3.5 shrink-0 text-primary" /> : null}
+              </DropdownMenuItem>
+            );
+          })}
+        </DropdownMenuContent>
+      </DropdownMenu>
       {WORKSPACE_BROWSER_ENABLED && (
         <Tooltip>
           <TooltipTrigger asChild>

@@ -17,6 +17,7 @@
     "toolbar": {
         "refresh": "Обновить чат",
         "currentAgent": "Общение с {{agent}}",
+        "agentSwitcher": "Выбрать агента",
         "workspace": "Рабочая область"
     },
     "generatedFiles": {
