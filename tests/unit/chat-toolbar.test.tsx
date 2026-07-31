@@ -22,12 +22,22 @@ const { chatState, agentsState, artifactPanelState } = vi.hoisted(() => ({
         name: 'Main Agent',
         mainSessionKey: 'agent:main:main',
         modelDisplay: '智能路由',
+        profile: {
+          personaName: 'UClaw 主助手',
+          roleName: '通用助手',
+          avatarId: 'strategist',
+        },
       },
       {
         id: 'research',
         name: 'Research Agent',
         mainSessionKey: 'agent:research:main',
         modelDisplay: '智能路由',
+        profile: {
+          personaName: 'Atlas',
+          roleName: '研究助手',
+          avatarId: 'analyst',
+        },
       },
     ],
   },
@@ -81,7 +91,10 @@ describe('ChatToolbar Agent switcher', () => {
       button: 0,
       ctrlKey: false,
     });
-    fireEvent.click(await screen.findByRole('menuitem', { name: /Research Agent/ }));
+    expect(screen.getByTestId('chat-agent-switcher')).toHaveTextContent('UClaw 主助手');
+    expect(screen.getByTestId('chat-agent-avatar-main')).toBeInTheDocument();
+    expect(await screen.findByText('研究助手')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('menuitem', { name: /Atlas/ }));
 
     expect(chatState.switchSession).toHaveBeenCalledWith('agent:research:main');
   });

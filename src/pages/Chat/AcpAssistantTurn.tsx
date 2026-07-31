@@ -56,12 +56,14 @@ export function AcpAssistantTurn({
   fileSummaries = [],
   workspaceRoot,
   timing,
+  assistantAvatarSrc,
   onPermissionSelect,
 }: {
   group: AcpAssistantTurnDisplayGroup;
   fileSummaries?: AcpTurnFileSummary[];
   workspaceRoot?: string;
   timing?: AcpTurnTiming;
+  assistantAvatarSrc?: string;
   onPermissionSelect?: (requestId: string, optionId: string) => void;
 }) {
   const displayEntries = useMemo(() => groupConsecutiveToolCalls(group.items), [group.items]);
@@ -69,7 +71,13 @@ export function AcpAssistantTurn({
   return (
     <div data-testid="acp-assistant-turn" className="group flex w-full justify-start gap-3">
       <div className="flex h-8 w-8 shrink-0 items-center justify-center" data-testid="acp-assistant-avatar" aria-hidden="true">
-        <img src={logoUclaw} alt="" className="h-6 w-6 object-contain" />
+        <img
+          src={assistantAvatarSrc ?? logoUclaw}
+          alt=""
+          className={assistantAvatarSrc
+            ? 'h-6 w-6 rounded-full object-cover'
+            : 'h-6 w-6 object-contain'}
+        />
       </div>
 
       <div className="flex min-w-0 flex-1 flex-col items-start gap-3">

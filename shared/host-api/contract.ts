@@ -6,7 +6,11 @@ import type {
   AcpChatRespondPermissionPayload,
 } from '../acp-chat/types';
 import type { RawMessage } from '../chat/types';
-import type { AgentsSnapshot } from '../types/agent';
+import type {
+  AgentProfileDraft,
+  AgentProfileGenerationInput,
+  AgentsSnapshot,
+} from '../types/agent';
 import type { CronJob, CronJobCreateInput, CronJobUpdateInput } from '../types/cron';
 import type { GatewayHealth, GatewayStatus } from '../types/gateway';
 import type { MarketplaceSkill, QuickAccessSkill, Skill } from '../types/skill';
@@ -295,7 +299,12 @@ export type ChannelSaveConfigResult = HostSuccess & {
 export type ChannelConfiguredResult = HostSuccess & { channels?: Array<string | JsonRecord> };
 
 export type AgentSnapshotResult = AgentsSnapshot & OptionalHostSuccess;
-export type AgentCreatePayload = { name: string; inheritWorkspace?: boolean };
+export type AgentCreatePayload = {
+  name: string;
+  inheritWorkspace?: boolean;
+  profile?: AgentProfileDraft;
+};
+export type AgentProfileGenerationResult = HostSuccess & { profile: AgentProfileDraft };
 export type AgentUpdatePayload = { id: string; name: string };
 export type AgentUpdateModelPayload = { id: string; modelRef: string | null };
 export type AgentIdPayload = { id: string };
@@ -999,6 +1008,7 @@ export type HostApiContract = {
   };
   agents: {
     list: () => AgentSnapshotResult;
+    generateProfile: (payload: AgentProfileGenerationInput) => AgentProfileGenerationResult;
     create: (payload: AgentCreatePayload) => AgentSnapshotResult;
     update: (payload: AgentUpdatePayload) => AgentSnapshotResult;
     updateModel: (payload: AgentUpdateModelPayload) => AgentSnapshotResult;

@@ -29,6 +29,7 @@ import { getAcpUserMessageAnchorId } from '@/lib/acp/timeline-anchors';
 import type { MessageSegmentItem, RenderPart } from '@/lib/acp/timeline-types';
 import { projectOpenClawFileActivities, type AcpFileActivityProjection } from '@/lib/acp/openclaw-file-activities';
 import { hostApi } from '@/lib/host-api';
+import { getAgentAvatar } from '@/lib/agent-avatars';
 import { ChatInput, type ChatWorkspaceOption, type FileAttachment } from './ChatInput';
 import { ChatToolbar } from './ChatToolbar';
 import { AcpTimeline } from './AcpTimeline';
@@ -237,6 +238,9 @@ export function Chat() {
     () => (agents ?? []).find((agent) => agent.id === currentAgentId) ?? null,
     [agents, currentAgentId],
   );
+  const assistantAvatarSrc = currentAgent?.profile?.avatarId
+    ? getAgentAvatar(currentAgent.profile.avatarId).src
+    : undefined;
 
   const acpTimeline = useAcpChatSessionStore((s) => s.timeline);
   const acpTurnTimings = useAcpChatSessionStore((s) => s.turnTimingsByUserMessageId);
@@ -472,6 +476,7 @@ export function Chat() {
                   ) : (
                     <AcpTimeline
                       snapshot={acpTimeline}
+                      assistantAvatarSrc={assistantAvatarSrc}
                       turnTimingsByUserMessageId={acpTurnTimings}
                       fileActivity={fileActivity}
                       workspaceRoot={resolvedWorkspaceContext?.key === workspaceContextKey

@@ -70,6 +70,7 @@ import type {
   BillingOrderStatusPayload,
 } from '@shared/billing';
 import type { SupportContactConfig } from '@shared/support';
+import type { AgentProfileGenerationInput } from '@shared/types/agent';
 import { invokeHost } from './host-api-client';
 
 export type {
@@ -239,6 +240,9 @@ export const hostApi = {
   },
   agents: {
     list: () => invokeHost('agents', 'list'),
+    generateProfile: (input: AgentProfileGenerationInput) => (
+      invokeHost('agents', 'generateProfile', input)
+    ),
     create: (input: AgentCreatePayload) => invokeHost('agents', 'create', input),
     update: (id: string, input: Omit<AgentUpdatePayload, 'id'>) => (
       invokeHost('agents', 'update', {

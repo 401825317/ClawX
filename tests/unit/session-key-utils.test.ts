@@ -3,12 +3,23 @@ import {
   findHiddenOpenClawHeartbeatSession,
   isChannelSessionKey,
   isClawXDesktopSessionKey,
+  isInternalProfileSessionKey,
   isPlaceholderChannelSession,
   shouldIncludeSessionInSidebarList,
 } from '@/stores/chat/session-key-utils';
 import type { ChatSession } from '@/stores/chat/types';
 
 describe('session-key-utils', () => {
+  it('only hides the exact UClaw profile-generation session prefix', () => {
+    expect(isInternalProfileSessionKey('agent:main:uclaw-profile-123')).toBe(true);
+    expect(shouldIncludeSessionInSidebarList({ key: 'agent:main:uclaw-profile-123' })).toBe(false);
+
+    expect(isInternalProfileSessionKey('agent:main:main')).toBe(false);
+    expect(isInternalProfileSessionKey('agent:profile-writer:main')).toBe(false);
+    expect(isInternalProfileSessionKey('agent:main:session-profile-notes')).toBe(false);
+    expect(shouldIncludeSessionInSidebarList({ key: 'agent:profile-writer:main' })).toBe(true);
+  });
+
   it('detects feishu and other channel session keys', () => {
     expect(isChannelSessionKey('agent:main:feishu:ou_abc123')).toBe(true);
     expect(isChannelSessionKey('agent:main:telegram:12345')).toBe(true);

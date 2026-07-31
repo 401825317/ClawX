@@ -1,3 +1,27 @@
+export interface AgentProfileDraft {
+  roleName: string;
+  personaName: string;
+  responsibility: string;
+  capabilities: string[];
+  boundaries: string[];
+  workspaceInstructions: string;
+  welcomeMessage: string;
+  avatarId: string;
+}
+
+export interface AgentProfile extends AgentProfileDraft {
+  agentId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentProfileGenerationInput {
+  roleName: string;
+  responsibility: string;
+  avatarId: string;
+  locale?: string;
+}
+
 export interface AgentSummary {
   id: string;
   name: string;
@@ -10,6 +34,7 @@ export interface AgentSummary {
   agentDir: string;
   mainSessionKey: string;
   channelTypes: string[];
+  profile?: AgentProfile | null;
 }
 
 export interface AgentsSnapshot {
@@ -19,4 +44,5 @@ export interface AgentsSnapshot {
   configuredChannelTypes: string[];
   channelOwners: Record<string, string>;
   channelAccountOwners: Record<string, string>;
+  createdAgentId?: string;
 }

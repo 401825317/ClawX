@@ -236,6 +236,28 @@ describe('ACP chat timeline components', () => {
     });
   });
 
+  it('renders assistant turns with the active Agent avatar', () => {
+    const state = snapshot({
+      itemOrder: ['msg-agent-avatar:0'],
+      itemsById: {
+        'msg-agent-avatar:0': {
+          kind: 'message-segment',
+          id: 'msg-agent-avatar:0',
+          role: 'assistant',
+          messageId: 'msg-agent-avatar',
+          segmentIndex: 0,
+          parts: [{ kind: 'markdown', text: 'Agent reply' }],
+        },
+      },
+    });
+
+    render(<AcpTimeline snapshot={state} assistantAvatarSrc="/agent-avatar.png" />);
+
+    const avatar = screen.getByTestId('acp-assistant-avatar').querySelector('img');
+    expect(avatar).toHaveAttribute('src', '/agent-avatar.png');
+    expect(avatar).toHaveClass('rounded-full', 'object-cover');
+  });
+
   it('does not apply background highlighting to chat code', () => {
     const state = snapshot({
       itemOrder: ['msg-a:0'],

@@ -45,6 +45,7 @@ async function readOpenClawJson(): Promise<Record<string, unknown>> {
 
 describe('agent config lifecycle', () => {
   beforeEach(async () => {
+    vi.doUnmock('@electron/utils/channel-config');
     vi.resetModules();
     vi.restoreAllMocks();
     await rm(testHome, { recursive: true, force: true });
@@ -102,6 +103,38 @@ describe('agent config lifecycle', () => {
         }),
       ]),
     );
+  });
+
+  it('attaches persisted personas to snapshots while preserving legacy Agents', async () => {
+    await writeOpenClawJson({
+      agents: {
+        list: [
+          { id: 'main', name: 'Main', default: true },
+          { id: 'planner', name: 'Planner' },
+          { id: 'legacy', name: 'Legacy' },
+        ],
+      },
+    });
+    const { upsertAgentProfile } = await import('@electron/utils/agent-profile');
+    await upsertAgentProfile('planner', {
+      roleName: 'Product Lead',
+      personaName: 'Lin',
+      responsibility: 'Own product planning.',
+      capabilities: ['Roadmaps'],
+      boundaries: ['Confirm scope changes'],
+      workspaceInstructions: 'Keep decisions traceable.',
+      welcomeMessage: 'Ready to plan.',
+      avatarId: 'strategist',
+    });
+    const { listAgentsSnapshot } = await import('@electron/utils/agent-config');
+
+    const snapshot = await listAgentsSnapshot();
+
+    expect(snapshot.agents.find((agent) => agent.id === 'planner')?.profile).toMatchObject({
+      personaName: 'Lin',
+      avatarId: 'strategist',
+    });
+    expect(snapshot.agents.find((agent) => agent.id === 'legacy')?.profile).toBeNull();
   });
 
   it('exposes effective and override model refs in the snapshot', async () => {
@@ -302,6 +335,17 @@ describe('agent config lifecycle', () => {
       'utf8',
     );
     await writeFile(join(test2WorkspaceDir, 'AGENTS.md'), '# test2', 'utf8');
+    const { upsertAgentProfile } = await import('@electron/utils/agent-profile');
+    await upsertAgentProfile('test2', {
+      roleName: 'Test Agent',
+      personaName: 'Test Two',
+      responsibility: 'Test workflows.',
+      capabilities: [],
+      boundaries: [],
+      workspaceInstructions: 'Test carefully.',
+      welcomeMessage: '',
+      avatarId: 'operator',
+    });
 
     const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
     const { deleteAgentConfig } = await import('@electron/utils/agent-config');
@@ -321,6 +365,8 @@ describe('agent config lifecycle', () => {
     // Workspace deletion is intentionally deferred by `deleteAgentConfig` to avoid
     // ENOENT errors during Gateway restart, so it should still exist here.
     await expect(access(test2WorkspaceDir)).resolves.toBeUndefined();
+    const { readAgentProfiles } = await import('@electron/utils/agent-profile');
+    expect((await readAgentProfiles()).test2).toBeUndefined();
 
     infoSpy.mockRestore();
   });
@@ -570,5 +616,71 @@ describe('agent config lifecycle', () => {
     await createAgent('Research');
 
     await expect(readFile(join(testHome, '.openclaw', 'workspace-research', 'IDENTITY.md'), 'utf8')).resolves.toContain('ClawX');
+  });
+
+  it('creates a profiled Agent with workspace instructions, welcome transcript, and created id', async () => {
+    await writeOpenClawJson({
+      session: { mainKey: 'main' },
+      agents: { list: [{ id: 'main', name: 'Main', default: true }] },
+    });
+    const profile = {
+      roleName: 'Product Lead',
+      personaName: 'Lin',
+      responsibility: 'Own product planning.',
+      capabilities: ['Roadmaps', 'Requirements', 'Delivery'],
+      boundaries: ['Confirm scope changes'],
+      workspaceInstructions: 'Keep decisions traceable.',
+      welcomeMessage: 'Ready to plan the next milestone.',
+      avatarId: 'strategist',
+    };
+    const { createAgent } = await import('@electron/utils/agent-config');
+
+    const snapshot = await createAgent('Product Lead', { inheritWorkspace: true, profile });
+
+    expect(snapshot.createdAgentId).toBe('product-lead');
+    expect(snapshot.agents.find((agent) => agent.id === 'product-lead')?.profile).toMatchObject(profile);
+    const workspace = join(testHome, '.openclaw', 'workspace-product-lead');
+    expect(await readFile(join(workspace, 'UCLAW_AGENT_PROFILE.md'), 'utf8')).toContain('Lin');
+    expect(await readFile(join(workspace, 'AGENTS.md'), 'utf8')).toContain('UCLAW_AGENT_PROFILE_START');
+    const sessionsDir = join(testHome, '.openclaw', 'agents', 'product-lead', 'sessions');
+    const sessions = JSON.parse(await readFile(join(sessionsDir, 'sessions.json'), 'utf8'));
+    const record = sessions['agent:product-lead:main'];
+    expect(await readFile(record.sessionFile, 'utf8')).toContain(profile.welcomeMessage);
+    expect(((await readOpenClawJson()).agents as { list: Array<{ id: string }> }).list)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ id: 'product-lead' })]));
+  });
+
+  it('rolls back profile, session, runtime, and workspace when config commit fails', async () => {
+    await writeOpenClawJson({
+      agents: { list: [{ id: 'main', name: 'Main', default: true }] },
+    });
+    const actualChannelConfig = await vi.importActual<typeof import('@electron/utils/channel-config')>(
+      '@electron/utils/channel-config',
+    );
+    vi.doMock('@electron/utils/channel-config', () => ({
+      ...actualChannelConfig,
+      writeOpenClawConfig: vi.fn().mockRejectedValue(new Error('config write failed')),
+    }));
+    const { createAgent } = await import('@electron/utils/agent-config');
+
+    await expect(createAgent('Product Lead', {
+      profile: {
+        roleName: 'Product Lead',
+        personaName: 'Lin',
+        responsibility: 'Own product planning.',
+        capabilities: ['Roadmaps', 'Requirements', 'Delivery'],
+        boundaries: [],
+        workspaceInstructions: 'Keep decisions traceable.',
+        welcomeMessage: 'Ready to plan.',
+        avatarId: 'strategist',
+      },
+    })).rejects.toThrow('config write failed');
+
+    expect(((await readOpenClawJson()).agents as { list: Array<{ id: string }> }).list)
+      .toEqual([{ id: 'main', name: 'Main', default: true }]);
+    await expect(access(join(testHome, '.openclaw', 'agents', 'product-lead'))).rejects.toThrow();
+    await expect(access(join(testHome, '.openclaw', 'workspace-product-lead'))).rejects.toThrow();
+    const { readAgentProfiles } = await import('@electron/utils/agent-profile');
+    expect((await readAgentProfiles())['product-lead']).toBeUndefined();
   });
 });

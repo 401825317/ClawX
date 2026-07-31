@@ -16,6 +16,7 @@ export function AcpTimeline({
   onPermissionSelect,
   fileActivity,
   workspaceRoot,
+  assistantAvatarSrc,
   turnTimingsByUserMessageId = {},
 }: {
   snapshot: AcpTimelineSnapshot;
@@ -25,6 +26,7 @@ export function AcpTimeline({
   onPermissionSelect?: (requestId: string, optionId: string) => void;
   fileActivity?: AcpFileActivityProjection;
   workspaceRoot?: string;
+  assistantAvatarSrc?: string;
   turnTimingsByUserMessageId?: Record<string, AcpTurnTiming>;
 }) {
   const groups = groupAcpTimelineItems(snapshot);
@@ -65,6 +67,7 @@ export function AcpTimeline({
               fileSummaries={fileActivity?.turnSummariesByTurnId[group.id]}
               workspaceRoot={workspaceRoot}
               timing={group.userMessageId ? turnTimingsByUserMessageId[group.userMessageId] : undefined}
+              assistantAvatarSrc={assistantAvatarSrc}
               onPermissionSelect={onPermissionSelect}
             />
           </div>

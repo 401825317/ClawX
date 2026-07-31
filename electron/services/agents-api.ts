@@ -1,5 +1,6 @@
 import type { GatewayManager } from '../gateway/manager';
 import type { CompleteHostServiceRegistry } from '../main/ipc/host-contract';
+import type { AgentProfileDraft } from '@shared/types/agent';
 import {
   assignChannelToAgent,
   clearChannelBinding,
@@ -13,6 +14,7 @@ import {
 } from '../utils/agent-config';
 import { deleteChannelAccountConfig } from '../utils/channel-config';
 import { ensureClawXContext } from '../utils/openclaw-workspace';
+import { generateAgentProfileViaGateway } from './agent-profile-generation-service';
 import { isRecord } from './payload-utils';
 import { syncAgentModelOverrideToRuntime, syncAllProviderAuthToRuntime } from './providers/provider-runtime-sync';
 
@@ -25,6 +27,30 @@ function requireString(payload: unknown, key: string): string {
     throw new Error(`${key} is required`);
   }
   return payload[key].trim();
+}
+
+function readOptionalProfile(payload: unknown): AgentProfileDraft | undefined {
+  if (!isRecord(payload) || payload.profile == null) return undefined;
+  if (!isRecord(payload.profile)) throw new Error('profile must be an object');
+  const profile = payload.profile;
+  const requiredStrings = [
+    'roleName',
+    'personaName',
+    'responsibility',
+    'workspaceInstructions',
+    'welcomeMessage',
+    'avatarId',
+  ] as const;
+  for (const key of requiredStrings) {
+    if (typeof profile[key] !== 'string') throw new Error(`profile.${key} is required`);
+  }
+  if (!Array.isArray(profile.capabilities) || !profile.capabilities.every((item) => typeof item === 'string')) {
+    throw new Error('profile.capabilities must be a string array');
+  }
+  if (!Array.isArray(profile.boundaries) || !profile.boundaries.every((item) => typeof item === 'string')) {
+    throw new Error('profile.boundaries must be a string array');
+  }
+  return profile as unknown as AgentProfileDraft;
 }
 
 function scheduleGatewayReload(ctx: AgentsApiContext, reason: string): void {
@@ -47,10 +73,27 @@ async function restartGatewayForAgentDeletion(ctx: AgentsApiContext): Promise<vo
 export function createAgentsApi(ctx: AgentsApiContext): CompleteHostServiceRegistry['agents'] {
   return {
     list: async () => ({ success: true, ...(await listAgentsSnapshot()) }),
+    generateProfile: async (payload) => {
+      const roleName = requireString(payload, 'roleName');
+      const responsibility = requireString(payload, 'responsibility');
+      const avatarId = requireString(payload, 'avatarId');
+      const locale = isRecord(payload) && typeof payload.locale === 'string'
+        ? payload.locale.trim() || undefined
+        : undefined;
+      const profile = await generateAgentProfileViaGateway(
+        { gatewayManager: ctx.gatewayManager },
+        { roleName, responsibility, avatarId, locale },
+      );
+      return { success: true, profile };
+    },
     create: async (payload) => {
       const name = requireString(payload, 'name');
       const inheritWorkspace = isRecord(payload) ? payload.inheritWorkspace === true : undefined;
-      const snapshot = await createAgent(name, { inheritWorkspace });
+      const profile = readOptionalProfile(payload);
+      const snapshot = await createAgent(name, {
+        inheritWorkspace,
+        ...(profile ? { profile } : {}),
+      });
       // Do not reload a newly created Agent while managed credential cleanup is incomplete.
       try {
         await syncAllProviderAuthToRuntime({ reconcileManagedRuntime: true });

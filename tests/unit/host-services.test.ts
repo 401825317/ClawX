@@ -13,6 +13,7 @@ const {
   deleteChannelAccountConfigMock,
   deleteChannelConfigMock,
   ensureFeishuPluginInstalledMock,
+  generateAgentProfileViaGatewayMock,
   getAllSettingsMock,
   getChannelFormValuesMock,
   getSettingMock,
@@ -49,6 +50,7 @@ const {
   deleteChannelAccountConfigMock: vi.fn(),
   deleteChannelConfigMock: vi.fn(),
   ensureFeishuPluginInstalledMock: vi.fn(),
+  generateAgentProfileViaGatewayMock: vi.fn(),
   getAllSettingsMock: vi.fn(),
   getChannelFormValuesMock: vi.fn(),
   getSettingMock: vi.fn(),
@@ -184,6 +186,10 @@ vi.mock('@electron/utils/agent-config', () => ({
   resolveAccountIdForAgent: vi.fn((agentId: string) => agentId === 'main' ? 'default' : agentId),
   updateAgentModel: vi.fn(),
   updateAgentName: (...args: unknown[]) => updateAgentNameMock(...args),
+}));
+
+vi.mock('@electron/services/agent-profile-generation-service', () => ({
+  generateAgentProfileViaGateway: (...args: unknown[]) => generateAgentProfileViaGatewayMock(...args),
 }));
 
 vi.mock('@electron/utils/plugin-install', () => ({
@@ -1483,6 +1489,51 @@ describe('host services', () => {
     expect(removeAgentWorkspaceDirectoryMock).toHaveBeenCalledWith(removedEntry);
   });
 
+  it('generates an Agent profile through the focused Gateway service', async () => {
+    const profile = {
+      roleName: 'Product Lead',
+      personaName: 'Lin',
+      responsibility: 'Own product planning.',
+      capabilities: ['Roadmaps', 'Requirements', 'Delivery'],
+      boundaries: ['Confirm scope changes'],
+      workspaceInstructions: 'Keep decisions traceable.',
+      welcomeMessage: 'Ready to plan the next milestone.',
+      avatarId: 'strategist',
+    };
+    generateAgentProfileViaGatewayMock.mockResolvedValue(profile);
+    const gatewayManager = { rpc: vi.fn() };
+    const { createAgentsApi } = await import('@electron/services/agents-api');
+
+    await expect(createAgentsApi({ gatewayManager: gatewayManager as never }).generateProfile({
+      roleName: ' Product Lead ',
+      responsibility: ' Own product planning. ',
+      avatarId: 'strategist',
+      locale: 'zh-CN',
+    })).resolves.toEqual({ success: true, profile });
+
+    expect(generateAgentProfileViaGatewayMock).toHaveBeenCalledWith(
+      { gatewayManager },
+      {
+        roleName: 'Product Lead',
+        responsibility: 'Own product planning.',
+        avatarId: 'strategist',
+        locale: 'zh-CN',
+      },
+    );
+  });
+
+  it('rejects incomplete Agent profile inputs before calling the Gateway', async () => {
+    const { createAgentsApi } = await import('@electron/services/agents-api');
+    const api = createAgentsApi({ gatewayManager: { rpc: vi.fn() } as never });
+
+    await expect(api.generateProfile({
+      roleName: 'Product Lead',
+      responsibility: ' ',
+      avatarId: 'strategist',
+    })).rejects.toThrow('responsibility is required');
+    expect(generateAgentProfileViaGatewayMock).not.toHaveBeenCalled();
+  });
+
   it('updates agent model and schedules gateway reload', async () => {
     const snapshot = {
       agents: [{ id: 'main', modelRef: 'custom-enterpri/claude-sonnet-4' }],
@@ -1549,6 +1600,45 @@ describe('host services', () => {
     );
     expect(gatewayManager.debouncedReload).not.toHaveBeenCalled();
     warnSpy.mockRestore();
+  });
+
+  it('forwards an optional generated profile when creating an Agent', async () => {
+    const profile = {
+      roleName: 'Product Lead',
+      personaName: 'Lin',
+      responsibility: 'Own product planning.',
+      capabilities: ['Roadmaps', 'Requirements', 'Delivery'],
+      boundaries: ['Confirm scope changes'],
+      workspaceInstructions: 'Keep decisions traceable.',
+      welcomeMessage: 'Ready to plan.',
+      avatarId: 'strategist',
+    };
+    const snapshot = {
+      agents: [{ id: 'product-lead', name: 'Product Lead', profile }],
+      defaultAgentId: 'main',
+      defaultModelRef: null,
+      configuredChannelTypes: [],
+      channelOwners: {},
+      channelAccountOwners: {},
+      createdAgentId: 'product-lead',
+    };
+    createAgentMock.mockResolvedValue(snapshot);
+    const gatewayManager = {
+      getStatus: vi.fn(() => ({ state: 'stopped' })),
+      debouncedReload: vi.fn(),
+    };
+    const { createAgentsApi } = await import('@electron/services/agents-api');
+
+    await expect(createAgentsApi({ gatewayManager: gatewayManager as never }).create({
+      name: 'Product Lead',
+      inheritWorkspace: true,
+      profile,
+    })).resolves.toEqual({ success: true, ...snapshot });
+
+    expect(createAgentMock).toHaveBeenCalledWith('Product Lead', {
+      inheritWorkspace: true,
+      profile,
+    });
   });
 
   it('does not reload after an agent model update when managed auth synchronization fails', async () => {

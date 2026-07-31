@@ -4,7 +4,7 @@
  * entry point.  Rendered in the Header when on the Chat page.
  */
 import { useMemo } from 'react';
-import { RefreshCw, Bot, FolderTree, ListTree, ChevronDown, Check } from 'lucide-react';
+import { RefreshCw, FolderTree, ListTree, ChevronDown, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -19,6 +19,7 @@ import { useArtifactPanel } from '@/stores/artifact-panel';
 import { cn } from '@/lib/utils';
 import { useTranslation } from 'react-i18next';
 import { WORKSPACE_BROWSER_ENABLED } from '@/components/file-preview/workspace-browser-config';
+import { DEFAULT_AGENT_AVATAR_SRC, getAgentAvatar } from '@/lib/agent-avatars';
 
 type ChatToolbarProps = {
   questionDirectoryOpen?: boolean;
@@ -47,7 +48,8 @@ export function ChatToolbar({
     () => (agents ?? []).find((agent) => agent.id === currentAgentId) ?? null,
     [agents, currentAgentId],
   );
-  const currentAgentName = currentAgent?.name ?? currentAgentId;
+  const currentAgentName = currentAgent?.profile?.personaName ?? currentAgent?.name ?? currentAgentId;
+  const currentAgentAvatar = getAgentAvatar(currentAgent?.profile?.avatarId);
 
   const browserActive = WORKSPACE_BROWSER_ENABLED && panelOpen && panelTab === 'browser';
   const questionDirectoryAvailable = questionDirectoryCount > 1 && !!onToggleQuestionDirectory;
@@ -64,7 +66,12 @@ export function ChatToolbar({
             className="hidden h-8 max-w-[260px] items-center gap-1.5 rounded-full border-black/10 bg-white/70 px-3 text-xs font-medium text-foreground/80 shadow-none hover:bg-black/5 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10 sm:flex"
             aria-label={t('toolbar.agentSwitcher')}
           >
-            <Bot className="h-3.5 w-3.5 shrink-0 text-primary" />
+            <img
+              data-testid={`chat-agent-avatar-${currentAgent?.id ?? currentAgentId}`}
+              src={currentAgent?.profile?.avatarId ? currentAgentAvatar.src : DEFAULT_AGENT_AVATAR_SRC}
+              alt=""
+              className="h-5 w-5 shrink-0 rounded-full object-cover"
+            />
             <span className="truncate">{t('toolbar.currentAgent', { agent: currentAgentName })}</span>
             <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           </Button>
@@ -75,6 +82,8 @@ export function ChatToolbar({
         >
           {(agents ?? []).map((agent) => {
             const isActive = agent.id === currentAgentId;
+            const avatar = getAgentAvatar(agent.profile?.avatarId);
+            const displayName = agent.profile?.personaName || agent.name;
             return (
               <DropdownMenuItem
                 key={agent.id}
@@ -85,12 +94,17 @@ export function ChatToolbar({
                 )}
                 aria-current={isActive ? 'true' : undefined}
               >
-                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
-                  <Bot className="h-4 w-4" />
-                </span>
+                <img
+                  data-testid={`chat-agent-menu-avatar-${agent.id}`}
+                  src={agent.profile?.avatarId ? avatar.src : DEFAULT_AGENT_AVATAR_SRC}
+                  alt=""
+                  className="h-8 w-8 shrink-0 rounded-full border border-black/5 object-cover dark:border-white/10"
+                />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-medium text-foreground">{agent.name}</span>
-                  <span className="block truncate text-xs text-muted-foreground">{agent.modelDisplay}</span>
+                  <span className="block truncate text-sm font-medium text-foreground">{displayName}</span>
+                  <span className="block truncate text-xs text-muted-foreground">
+                    {agent.profile?.roleName || agent.modelDisplay}
+                  </span>
                 </span>
                 {isActive ? <Check className="h-3.5 w-3.5 shrink-0 text-primary" /> : null}
               </DropdownMenuItem>

@@ -895,7 +895,40 @@ test.describe('ClawX ACP inline timeline', () => {
     const app = await launchElectronApp({ skipSetup: true });
 
     try {
-      await installAcpChatMocks(app);
+      await installIpcMocks(app, {
+        gatewayStatus: { state: 'running', gatewayReady: true, port: 18789, pid: 12345 },
+        gatewayRpc: {
+          [stableStringify(['sessions.list', {}])]: {
+            success: true,
+            result: {
+              sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main', workspacePath: MAIN_WORKSPACE }],
+            },
+          },
+        },
+        hostApi: {
+          ...baseHostApiMocks(),
+          [stableStringify(['/api/agents', 'GET'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: {
+                success: true,
+                agents: [{
+                  id: 'main',
+                  name: 'main',
+                  workspace: MAIN_WORKSPACE,
+                  mainSessionKey: MAIN_SESSION_KEY,
+                  profile: {
+                    personaName: 'Atlas',
+                    avatarId: 'analyst',
+                  },
+                }],
+              },
+            },
+          },
+        },
+      });
       const page = await openChat(app);
       await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible({ timeout: 30_000 });
 
@@ -909,7 +942,11 @@ test.describe('ClawX ACP inline timeline', () => {
 
       const assistantMessage = page.getByTestId('acp-assistant-message');
       await expect(assistantMessage).toBeVisible({ timeout: 30_000 });
-      await expect(page.getByTestId('acp-assistant-avatar')).toBeVisible();
+      const toolbarAvatar = page.getByTestId('chat-agent-avatar-main');
+      const assistantAvatar = page.getByTestId('acp-assistant-avatar').locator('img');
+      const toolbarAvatarSrc = await toolbarAvatar.getAttribute('src');
+      expect(toolbarAvatarSrc).not.toBeNull();
+      await expect(assistantAvatar).toHaveAttribute('src', toolbarAvatarSrc!);
       await expect(page.getByTestId('acp-assistant-copy')).toHaveCount(0);
     } finally {
       await closeElectronApp(app);

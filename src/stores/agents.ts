@@ -1,7 +1,12 @@
 import { create } from 'zustand';
 import { hostApi } from '@/lib/host-api';
 import type { ChannelType } from '@/types/channel';
-import type { AgentSummary, AgentsSnapshot } from '@/types/agent';
+import type {
+  AgentProfileDraft,
+  AgentProfileGenerationInput,
+  AgentSummary,
+  AgentsSnapshot,
+} from '@/types/agent';
 
 interface AgentsState {
   agents: AgentSummary[];
@@ -13,7 +18,11 @@ interface AgentsState {
   loading: boolean;
   error: string | null;
   fetchAgents: () => Promise<void>;
-  createAgent: (name: string, options?: { inheritWorkspace?: boolean }) => Promise<void>;
+  createAgent: (
+    name: string,
+    options?: { inheritWorkspace?: boolean; profile?: AgentProfileDraft },
+  ) => Promise<AgentSummary | null>;
+  generateAgentProfile: (input: AgentProfileGenerationInput) => Promise<AgentProfileDraft>;
   updateAgent: (agentId: string, name: string) => Promise<void>;
   updateAgentModel: (agentId: string, modelRef: string | null) => Promise<void>;
   deleteAgent: (agentId: string) => Promise<void>;
@@ -56,14 +65,33 @@ export const useAgentsStore = create<AgentsState>((set) => ({
     }
   },
 
-  createAgent: async (name: string, options?: { inheritWorkspace?: boolean }) => {
+  createAgent: async (
+    name: string,
+    options?: { inheritWorkspace?: boolean; profile?: AgentProfileDraft },
+  ) => {
     set({ error: null });
     try {
       const snapshot = await hostApi.agents.create({
         name,
         inheritWorkspace: options?.inheritWorkspace,
+        profile: options?.profile,
       });
       set(applySnapshot(snapshot));
+      return snapshot.createdAgentId
+        ? snapshot.agents.find((agent) => agent.id === snapshot.createdAgentId) ?? null
+        : null;
+    } catch (error) {
+      set({ error: String(error) });
+      throw error;
+    }
+  },
+
+  // Profile generation remains Main-owned so the renderer never talks to the Gateway directly.
+  generateAgentProfile: async (input: AgentProfileGenerationInput) => {
+    set({ error: null });
+    try {
+      const response = await hostApi.agents.generateProfile(input);
+      return response.profile;
     } catch (error) {
       set({ error: String(error) });
       throw error;

@@ -177,6 +177,28 @@ describe('gateway store event wiring', () => {
     ]);
   });
 
+  it('ignores runtime events from internal profile-generation sessions', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessions: [{ key: 'agent:main:main' }],
+      sending: false,
+      activeRunId: null,
+      runtimeRuns: {},
+    });
+
+    useChatStore.getState().handleRuntimeEvent({
+      type: 'run.started',
+      runId: 'run-profile-generation',
+      sessionKey: 'agent:main:uclaw-profile-123',
+      startedAt: 1,
+    });
+
+    expect(useChatStore.getState().runtimeRuns).toEqual({});
+    expect(useChatStore.getState().sending).toBe(false);
+    expect(useChatStore.getState().activeRunId).toBeNull();
+  });
+
   it('does not let a stale send RPC re-arm a completed run after a newer send starts', async () => {
     let now = 1773281731000;
     const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);

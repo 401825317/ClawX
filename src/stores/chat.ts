@@ -18,6 +18,7 @@ import { isCronSessionKey, sessionKeysAreEquivalent } from './chat/cron-session-
 import {
   findHiddenOpenClawHeartbeatSession,
   isClawXDesktopSessionKey,
+  isInternalProfileSessionKey,
   isOpenClawHeartbeatOnlySession,
   shouldIncludeSessionInSidebarList,
 } from './chat/session-key-utils';
@@ -5690,6 +5691,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   handleRuntimeEvent: (event: ChatRuntimeEvent) => {
     const eventSessionKey = event.sessionKey ?? null;
+    // Profile generation is an internal background run and must not enter the
+    // visible runtime graph or mutate the active conversation lifecycle.
+    if (eventSessionKey && isInternalProfileSessionKey(eventSessionKey)) return;
+
     const initialState = get();
     const { activeRunId, currentSessionKey } = initialState;
     // Cron runs stream under the run-scoped session key while the UI tracks the

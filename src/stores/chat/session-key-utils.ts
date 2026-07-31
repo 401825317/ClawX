@@ -9,6 +9,7 @@ import type { ChatSession } from './types';
 
 const CHANNEL_SESSION_SEGMENTS = new Set<string>(Object.keys(CHANNEL_NAMES));
 const NON_USER_SESSION_LABELS = new Set(['clawx', 'main']);
+const INTERNAL_PROFILE_SESSION_PREFIX = 'agent:main:uclaw-profile-';
 
 function stripHeartbeatSentinel(value: string | undefined): string {
   return (value ?? '').replaceAll(OPENCLAW_HEARTBEAT_POLL_SENTINEL, '').trim();
@@ -34,6 +35,11 @@ export function isChannelSessionKey(sessionKey: string): boolean {
 
 export function isClawXDesktopSessionKey(sessionKey: string): boolean {
   return !isCronSessionKey(sessionKey) && !isChannelSessionKey(sessionKey);
+}
+
+/** Hidden sessions used only while UClaw generates an Agent profile. */
+export function isInternalProfileSessionKey(sessionKey: string): boolean {
+  return sessionKey.startsWith(INTERNAL_PROFILE_SESSION_PREFIX);
 }
 
 /**
@@ -71,6 +77,7 @@ export function findHiddenOpenClawHeartbeatSession(sessionKey: string, sessions:
 
 export function shouldIncludeSessionInSidebarList(session: ChatSession): boolean {
   if (!session.key) return false;
+  if (isInternalProfileSessionKey(session.key)) return false;
   // Hide renderer-local placeholders created by New Chat until the first message
   // creates the backing ACP session (acknowledgeAcpSessionCreated clears the flag).
   if (session.createdLocally) return false;

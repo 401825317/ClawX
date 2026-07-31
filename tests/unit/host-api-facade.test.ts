@@ -221,6 +221,66 @@ describe('hostApi facade', () => {
     }));
   });
 
+  it('calls agents.generateProfile through hostInvoke', async () => {
+    const input = {
+      roleName: 'Marketing Strategist',
+      responsibility: 'Plan product launches',
+      avatarId: 'strategist',
+      locale: 'en',
+    };
+    const profile = {
+      ...input,
+      personaName: 'Mira',
+      capabilities: ['Campaign planning'],
+      boundaries: ['No direct ad purchases'],
+      workspaceInstructions: 'Focus on launch strategy.',
+      welcomeMessage: 'Ready to plan your launch.',
+    };
+    hostInvoke.mockResolvedValueOnce({ id: 'req', ok: true, data: { success: true, profile } });
+    const { hostApi } = await import('@/lib/host-api');
+
+    await expect(hostApi.agents.generateProfile(input)).resolves.toEqual({ success: true, profile });
+    expect(hostInvoke).toHaveBeenCalledWith(expect.objectContaining({
+      module: 'agents',
+      action: 'generateProfile',
+      payload: input,
+    }));
+  });
+
+  it('passes an optional agent profile when creating an agent', async () => {
+    const profile = {
+      roleName: 'Marketing Strategist',
+      personaName: 'Mira',
+      responsibility: 'Plan product launches',
+      capabilities: ['Campaign planning'],
+      boundaries: ['No direct ad purchases'],
+      workspaceInstructions: 'Focus on launch strategy.',
+      welcomeMessage: 'Ready to plan your launch.',
+      avatarId: 'strategist',
+    };
+    hostInvoke.mockResolvedValueOnce({ id: 'req', ok: true, data: { success: true, agents: [] } });
+    const { hostApi } = await import('@/lib/host-api');
+
+    await expect(hostApi.agents.create({
+      name: 'Mira',
+      inheritWorkspace: true,
+      profile,
+    })).resolves.toEqual({ success: true, agents: [] });
+    expect(hostInvoke).toHaveBeenCalledWith(expect.objectContaining({
+      module: 'agents',
+      action: 'create',
+      payload: {
+        name: 'Mira',
+        inheritWorkspace: true,
+        profile,
+      },
+    }));
+  });
+
+  it('keeps the default agent avatar asset available', () => {
+    expect(existsSync(join(process.cwd(), 'src/assets/openclaw-default-agent.png'))).toBe(true);
+  });
+
   it('routes ACP diagnostics trace calls through hostInvoke', async () => {
     hostInvoke
       .mockResolvedValueOnce({ id: 'req-1', ok: true, data: { capturedAt: 123, maxSize: 500, size: 0, entries: [] } })
