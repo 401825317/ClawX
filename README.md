@@ -412,11 +412,11 @@ pnpm package              # Package for current platform (includes bundled prein
 pnpm package:mac          # Package for macOS
 pnpm package:win          # Package for Windows
 pnpm package:win:usb      # Build the Windows x64 USB ZIP (Windows only, clean source required)
-pnpm package:win:verify   # Build and run the final NSIS metadata/install lifecycle gate
+pnpm release              # Build and verify a local Windows USB candidate; never publishes remotely
 pnpm package:linux        # Package for Linux
 ```
 
-The Windows USB build emits `UClaw-<version>-win-x64-usb.zip` and matching JSON metadata. It keeps durable data in `UClawData`, uses an isolated local runtime profile for high-frequency state, and installs portable updates only after ZIP, size, and SHA-512 verification. Windows release jobs rebuild the NSIS block map and update metadata after signing, then validate install, startup, overwrite upgrade, uninstall, and user-data retention before publishing artifacts.
+The Windows USB build emits `UClaw-<version>-win-x64-usb.zip` and matching JSON metadata. It keeps durable data in `UClawData`, uses an isolated local runtime profile for high-frequency state, and installs portable updates only after ZIP, size, and SHA-512 verification. `pnpm release` is a Windows-only local gate: it requires a clean Git workspace, builds the USB package, runs its Full regression, and verifies the exact version, commit, size, and SHA-512. It never signs, uploads, changes the production feed, creates a Git tag, or creates a GitHub Release. Formal signing, Live regression, and publication run only through `.github/workflows/uclaw-portable-production.yml`.
 
 On headless Linux, run Electron tests under a display server such as `xvfb-run -a pnpm run test:e2e`.
 

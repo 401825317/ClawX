@@ -1756,7 +1756,7 @@ test('runs the packaged UClaw regression matrix', async () => {
             ? 'Requires the deterministic local Provider and packaged artifact plugin.'
             : hasLocalArtifactsPlugin
               ? undefined
-              : 'The current 0.5.1 package does not bundle uclaw-local-artifacts.',
+              : 'The current package does not bundle uclaw-local-artifacts.',
         },
       );
     }

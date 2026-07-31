@@ -1,6 +1,6 @@
 {
     "name": "clawx",
-    "version": "0.5.1",
+    "version": "2.0.0",
     "pnpm": {
         "onlyBuiltDependencies": [
             "@discordjs/opus",
@@ -55,7 +55,7 @@
         "test:packaged:win": "node scripts/windows-support/run-packaged-regression.mjs --latest --profile core",
         "test:packaged:win:full": "node scripts/windows-support/run-packaged-regression.mjs --latest --profile full",
         "test:packaged:win:live": "node scripts/windows-support/run-packaged-regression.mjs --latest --profile live",
-        "test:release:pipeline": "node --test scripts/windows-support/refresh-portable-release-metadata.test.mjs scripts/windows-support/stage-production-release-candidate.test.mjs",
+        "test:release:pipeline": "node --test scripts/release.test.mjs scripts/windows-support/refresh-portable-release-metadata.test.mjs scripts/windows-support/stage-production-release-candidate.test.mjs",
         "harness": "pnpm --filter @clawx/harness start --",
         "harness:ci": "pnpm harness list && pnpm harness validate --spec harness/specs/scenarios/gateway-backend-communication.md && pnpm harness validate --spec harness/specs/tasks/fix-chat-history-gateway-timeout.example.md --no-diff && pnpm harness run --spec harness/specs/scenarios/gateway-backend-communication.md --dry-run && pnpm exec vitest run tests/unit/harness-specs.test.ts tests/unit/harness-git.test.ts",
         "comms:replay": "node scripts/comms/replay.mjs",
@@ -88,7 +88,7 @@
         "package:win:portable": "pnpm run prep:win-binaries:x64 && pnpm run package && node scripts/run-electron-builder.mjs --skip-nsis-patch --win portable --x64 --publish never",
         "package:win:usb": "node scripts/build-usb-release.mjs --clean-only --require-clean-source --win --arch=x64 && pnpm run prep:win-binaries:x64 && pnpm run updater:build:win && pnpm run package && node scripts/run-electron-builder.mjs --skip-nsis-patch --win dir --x64 --publish never && node scripts/build-usb-release.mjs --win --arch=x64 && node scripts/windows-support/run-packaged-regression.mjs --latest --profile full",
         "package:linux": "pnpm run package && node scripts/run-electron-builder.mjs --linux --publish never",
-        "release": "pnpm run uv:download && pnpm run agent-browser:download && pnpm run package && node scripts/run-electron-builder.mjs --publish always",
+        "release": "node scripts/release.mjs",
         "preversion": "node scripts/pre-version-fetch-tags.mjs",
         "version": "node scripts/assert-release-version.mjs",
         "version:patch": "pnpm version patch",

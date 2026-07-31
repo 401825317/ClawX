@@ -1,8 +1,20 @@
 # UClaw Windows 便携正式发布
 
-正式 Windows USB ZIP 使用 `.github/workflows/uclaw-portable-production.yml`。该工作流覆盖候选构建、签名后 Full、全新账号注册 Live、OSS、生产更新记录、Git 标签和 GitHub Release。
+当前分支的首个正式版本为 `2.0.0`。正式 Windows USB ZIP 只使用 `.github/workflows/uclaw-portable-production.yml`；该工作流覆盖候选构建、签名后 Full、全新账号注册 Live、OSS、生产更新记录、Git 标签和 GitHub Release。
 
-旧的 `release.yml` 仍用于通用多平台 Electron 发布，但不能替代 UClaw Windows 便携版的生产 feed 流程。
+旧的 `release.yml` 仍保留为通用多平台 Electron 流程，但不是 UClaw 产品发布入口，也不能替代 Windows USB 便携版的生产 feed 流程。
+
+## 本地候选包
+
+在 Windows 的干净 Git 工作区中运行：
+
+```powershell
+pnpm release
+```
+
+该命令只执行 `package:win:usb`，生成并校验当前版本和当前完整 commit 对应的 USB ZIP、JSON、文件大小及 SHA-512。它不会调用 SignPath，不会上传 OSS，不会修改数据库或生产更新入口，也不会创建 Git 标签或 GitHub Release。
+
+本地候选包用于开发验收，不能代替正式工作流的签名后 Full、全新账号 Live 和生产发布门禁。
 
 ## 发布顺序
 

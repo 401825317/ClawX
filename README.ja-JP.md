@@ -409,11 +409,11 @@ pnpm package              # 現在のプラットフォーム向けにパッケ�
 pnpm package:mac          # macOS向けにパッケージ化
 pnpm package:win          # Windows向けにパッケージ化
 pnpm package:win:usb      # Windows x64 USB ZIPを作成（Windowsのみ、クリーンなソースが必要）
-pnpm package:win:verify   # 最終NSISメタデータとインストールライフサイクルを検証
+pnpm release              # ローカルWindows USB候補を作成・検証（リモート公開は行わない）
 pnpm package:linux        # Linux向けにパッケージ化
 ```
 
-Windows USB ビルドは `UClaw-<version>-win-x64-usb.zip` と対応する JSON メタデータを生成します。永続データは `UClawData` に保存し、頻繁に更新される状態は分離されたローカル実行プロファイルを使用します。ポータブル更新は ZIP、サイズ、SHA-512 の検証後にのみインストールされます。Windows リリースでは署名後に NSIS blockmap と更新メタデータを再生成し、公開前にインストール、起動、上書き更新、アンインストール、ユーザーデータ保持を検証します。
+Windows USB ビルドは `UClaw-<version>-win-x64-usb.zip` と対応する JSON メタデータを生成します。永続データは `UClawData` に保存し、頻繁に更新される状態は分離されたローカル実行プロファイルを使用します。ポータブル更新は ZIP、サイズ、SHA-512 の検証後にのみインストールされます。`pnpm release` は Windows 専用のローカル候補ゲートです。クリーンな Git ワークスペースを要求し、USB パッケージを作成して Full 回帰を実行し、正確なバージョン、コミット、サイズ、SHA-512 を検証します。署名、アップロード、本番更新フィードの変更、Git タグ、GitHub Release の作成は行いません。正式な署名、Live 回帰、公開は `.github/workflows/uclaw-portable-production.yml` からのみ実行します。
 
 ヘッドレス Linux では Electron テストに表示サーバーが必要です。`xvfb-run -a pnpm run test:e2e` を利用してください。
 
