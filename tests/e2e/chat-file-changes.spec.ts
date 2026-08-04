@@ -408,6 +408,11 @@ test.describe('ClawX chat file changes', () => {
               rawInput: { path: 'failed.ts', content: 'nope' },
               finalStatus: 'failed',
             }),
+            {
+              sessionUpdate: 'agent_message',
+              messageId: 'continue-after-failed-write',
+              content: [{ type: 'text', text: 'Continuing without that file.' }],
+            },
             ...toolSequence({
               id: 'unsupported-read',
               title: 'Read: unsupported.ts',
