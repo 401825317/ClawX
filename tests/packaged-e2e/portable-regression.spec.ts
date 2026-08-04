@@ -1218,6 +1218,7 @@ test('runs the packaged UClaw regression matrix', async () => {
       try {
         const failedStart = await rawHostInvoke(page, 'gateway', 'start');
         expect(failedStart.ok).toBe(false);
+        expect(blocker.listening).toBe(true);
         await expect(page.getByTestId('main-layout')).toBeVisible();
       } finally {
         await closeServer(blocker);

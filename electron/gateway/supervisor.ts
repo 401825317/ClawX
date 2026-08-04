@@ -10,6 +10,13 @@ import { probeGatewayReady } from './ws-client';
 
 const OWNED_GATEWAY_EXIT_TIMEOUT_MS = 5000;
 
+export class GatewayPortConflictError extends Error {
+  constructor(port: number) {
+    super(`Gateway port ${port} is already in use by another process`);
+    this.name = 'GatewayPortConflictError';
+  }
+}
+
 function describeTerminationError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -241,47 +248,6 @@ async function getListeningProcessIds(port: number): Promise<string[]> {
   return [...new Set(stdout.trim().split(/\r?\n/).map((value) => value.trim()).filter(Boolean))];
 }
 
-async function terminateOrphanedProcessIds(port: number, pids: string[]): Promise<void> {
-  logger.info(`Found orphaned process listening on port ${port} (PIDs: ${pids.join(', ')}), attempting to kill...`);
-
-  if (process.platform === 'darwin') {
-    await unloadLaunchctlGatewayService();
-  }
-
-  for (const pid of pids) {
-    try {
-      if (process.platform === 'win32') {
-        const cp = await import('child_process');
-        await new Promise<void>((resolve) => {
-          cp.exec(
-            `taskkill /F /PID ${pid} /T`,
-            { timeout: 5000, windowsHide: true },
-            () => resolve(),
-          );
-        });
-      } else {
-        process.kill(parseInt(pid, 10), 'SIGTERM');
-      }
-    } catch {
-      // Ignore processes that have already exited.
-    }
-  }
-
-  await new Promise((resolve) => setTimeout(resolve, process.platform === 'win32' ? 2000 : 3000));
-
-  if (process.platform !== 'win32') {
-    for (const pid of pids) {
-      try {
-        process.kill(parseInt(pid, 10), 0);
-        process.kill(parseInt(pid, 10), 'SIGKILL');
-      } catch {
-        // Already exited.
-      }
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-}
-
 export async function findExistingGatewayProcess(options: {
   port: number;
   ownedPid?: number;
@@ -289,24 +255,30 @@ export async function findExistingGatewayProcess(options: {
   const { port, ownedPid } = options;
 
   try {
-    try {
-      const pids = await getListeningProcessIds(port);
-      if (pids.length > 0 && (!ownedPid || !pids.includes(String(ownedPid)))) {
-        await terminateOrphanedProcessIds(port, pids);
-        if (process.platform === 'win32') {
-          await waitForPortFree(port, 10000);
-        }
-        return null;
-      }
-    } catch (err) {
-      logger.warn('Error checking for existing process on port:', err);
-    }
-
     const ready = await probeGatewayReady(port, 5000);
-    return ready ? { port } : null;
-  } catch {
+    if (ready) return { port };
+  } catch (error) {
+    logger.debug(`Existing Gateway probe failed on port ${port}: ${describeTerminationError(error)}`);
+  }
+
+  let pids: string[];
+  try {
+    pids = await getListeningProcessIds(port);
+  } catch (error) {
+    logger.warn('Error checking for existing process on port:', error);
     return null;
   }
+
+  const externalPids = pids.filter((pid) => !ownedPid || pid !== String(ownedPid));
+  if (externalPids.length > 0) {
+    logger.warn(
+      `Gateway port ${port} is occupied by an external process (PIDs: ${externalPids.join(', ')}); `
+      + 'refusing to terminate a process UClaw does not own',
+    );
+    throw new GatewayPortConflictError(port);
+  }
+
+  return null;
 }
 
 export async function runOpenClawDoctorRepair(): Promise<boolean> {

@@ -25,6 +25,7 @@ touchedAreas:
   - src/stores/chat/**
   - tests/e2e/**
   - tests/packaged-e2e/**
+  - tests/unit/gateway-supervisor.test.ts
   - playwright.config.ts
   - playwright.packaged.config.ts
   - PACKAGED_REGRESSION.md
@@ -51,7 +52,7 @@ requiredTests:
   - tests/packaged-e2e/portable-regression.spec.ts
 acceptance:
   - `package:win:usb` requires a clean source tree, creates ZIP and companion metadata, then runs the `full` packaged regression as a release gate.
-  - Core coverage validates package identity, SHA-512, static self-check, empty portable state, first launch, navigation, Gateway stop/start, port conflict, single instance, relaunch persistence, and managed startup without auth.
+  - Core coverage validates package identity, SHA-512, static self-check, empty portable state, first launch, navigation, Gateway stop/start, port conflict, single instance, relaunch persistence, and managed startup without auth; the port-conflict scenario must prove that UClaw reports the conflict without terminating the foreign listener and recovers after that listener is released.
   - Full coverage uses two deterministic local Providers through the real UI and runtime synchronization for fallback/deletion, session lifecycle, chat, transient retries, malformed streaming, cancellation, 401 credential recovery, file/browser/DOCX/XLSX/PPTX tools, Skills configuration, Doctor/log/Control UI diagnostics, Agent, and Cron.
   - DOCX, XLSX, and PPTX passes require a visible chat attachment recovered from either direct `toolResult.details` or nested `toolResult.details.result.details`, plus readable package structure and content evidence.
   - Chat and error scenarios require both Renderer state and a matching recorded Provider request so cooldowns cannot create false passes.
