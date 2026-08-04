@@ -1,4 +1,4 @@
-import { PORTS } from '../utils/config';
+import { getPort } from '../utils/config';
 import { logger } from '../utils/logger';
 import type { GatewayStatus } from './manager';
 
@@ -8,7 +8,7 @@ type GatewayStateHooks = {
 };
 
 export class GatewayStateController {
-  private status: GatewayStatus = { state: 'stopped', port: PORTS.OPENCLAW_GATEWAY };
+  private status: GatewayStatus = { state: 'stopped', port: getPort('OPENCLAW_GATEWAY') };
 
   constructor(private readonly hooks: GatewayStateHooks) {}
 

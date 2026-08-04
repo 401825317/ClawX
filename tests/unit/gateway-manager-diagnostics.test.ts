@@ -23,6 +23,7 @@ vi.mock('@electron/utils/logger', () => ({
 
 describe('GatewayManager diagnostics', () => {
   const originalPlatform = process.platform;
+  const originalGatewayPort = process.env.CLAWX_PORT_OPENCLAW_GATEWAY;
 
   beforeEach(() => {
     vi.resetModules();
@@ -35,6 +36,18 @@ describe('GatewayManager diagnostics', () => {
   afterEach(() => {
     vi.useRealTimers();
     Object.defineProperty(process, 'platform', { value: originalPlatform });
+    if (originalGatewayPort === undefined) {
+      delete process.env.CLAWX_PORT_OPENCLAW_GATEWAY;
+    } else {
+      process.env.CLAWX_PORT_OPENCLAW_GATEWAY = originalGatewayPort;
+    }
+  });
+
+  it('uses the configured Gateway port override for isolated packaged runtimes', async () => {
+    process.env.CLAWX_PORT_OPENCLAW_GATEWAY = '45568';
+    const { GatewayManager } = await import('@electron/gateway/manager');
+
+    expect(new GatewayManager().getStatus().port).toBe(45568);
   });
 
   it('updates diagnostics on gateway message, rpc success/timeout, and socket close', async () => {
