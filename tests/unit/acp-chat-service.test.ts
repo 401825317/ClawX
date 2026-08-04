@@ -33,6 +33,7 @@ const loggerMock = vi.hoisted(() => ({
   info: vi.fn(),
   warn: vi.fn(),
   error: vi.fn(),
+  debug: vi.fn(),
 }));
 
 vi.mock('@electron/utils/logger', () => ({
@@ -118,7 +119,10 @@ function createFakeChild() {
   return child;
 }
 
-async function createSpawnedService(connection = createConnection()) {
+async function createSpawnedService(
+  connection = createConnection(),
+  gateway?: { getStatus: () => { port?: number } },
+) {
   const send = vi.fn();
   const child = createFakeChild();
   acpSdkMock.state.connectionForSpawn = connection;
@@ -128,7 +132,7 @@ async function createSpawnedService(connection = createConnection()) {
     { webContents: { send } } as never,
     createPassthroughAccessRegistry() as never,
     undefined,
-    undefined,
+    gateway as never,
   );
   return { service, connection, send, child };
 }
@@ -184,6 +188,22 @@ describe('AcpChatService', () => {
           OPENCLAW_EXEC_SHELL_SNAPSHOT: '0',
         }),
       }),
+    );
+  });
+
+  it('routes ACP through the active isolated Gateway port', async () => {
+    const gateway = { getStatus: vi.fn(() => ({ port: 60792 })) };
+    const { service } = await createSpawnedService(createConnection(), gateway);
+
+    await expect(service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' })).resolves.toEqual({
+      success: true,
+      generation: 1,
+    });
+
+    expect(childProcessMock.fork).toHaveBeenCalledWith(
+      expect.stringContaining('openclaw.mjs'),
+      ['acp', '--url', 'ws://127.0.0.1:60792'],
+      expect.anything(),
     );
   });
 

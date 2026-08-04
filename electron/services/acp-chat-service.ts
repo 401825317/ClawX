@@ -606,7 +606,12 @@ export class AcpChatService {
   }
 
   private spawnConnection(): ClientSideConnection {
-    const spec = getOpenClawEmbeddedForkSpec(['acp']);
+    const gatewayPort = this.gateway?.getStatus?.().port;
+    const args = ['acp'];
+    if (typeof gatewayPort === 'number' && Number.isInteger(gatewayPort) && gatewayPort > 0 && gatewayPort <= 65_535) {
+      args.push('--url', `ws://127.0.0.1:${gatewayPort}`);
+    }
+    const spec = getOpenClawEmbeddedForkSpec(args);
     const forked = fork(spec.modulePath, spec.args, spec.options);
     if (!forked.stdin || !forked.stdout || !forked.stderr) {
       forked.kill();
