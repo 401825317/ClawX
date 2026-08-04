@@ -121,7 +121,7 @@ function createFakeChild() {
 
 async function createSpawnedService(
   connection = createConnection(),
-  gateway?: { getStatus: () => { port?: number } },
+  gateway?: { getStatus: () => { port?: number }; getGatewayToken?: () => Promise<string> },
 ) {
   const send = vi.fn();
   const child = createFakeChild();
@@ -192,7 +192,10 @@ describe('AcpChatService', () => {
   });
 
   it('routes ACP through the active isolated Gateway port', async () => {
-    const gateway = { getStatus: vi.fn(() => ({ port: 60792 })) };
+    const gateway = {
+      getStatus: vi.fn(() => ({ port: 60792 })),
+      getGatewayToken: vi.fn().mockResolvedValue('test-gateway-token'),
+    };
     const { service } = await createSpawnedService(createConnection(), gateway);
 
     await expect(service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' })).resolves.toEqual({
@@ -203,7 +206,9 @@ describe('AcpChatService', () => {
     expect(childProcessMock.fork).toHaveBeenCalledWith(
       expect.stringContaining('openclaw.mjs'),
       ['acp', '--url', 'ws://127.0.0.1:60792'],
-      expect.anything(),
+      expect.objectContaining({
+        env: expect.objectContaining({ OPENCLAW_GATEWAY_TOKEN: 'test-gateway-token' }),
+      }),
     );
   });
 

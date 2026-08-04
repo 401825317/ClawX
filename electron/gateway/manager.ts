@@ -319,6 +319,10 @@ export class GatewayManager extends EventEmitter {
     return this.stateController.getStatus();
   }
 
+  async getGatewayToken(): Promise<string> {
+    return await import('../utils/store').then(({ getSetting }) => getSetting('gatewayToken'));
+  }
+
   /** Acquire exclusive runtime authority before a managed credential transaction. */
   acquireManagedRuntimeMutationLease(): ManagedRuntimeMutationLease {
     const lease = acquireRuntimeMutationLease();
