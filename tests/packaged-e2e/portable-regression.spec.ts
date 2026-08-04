@@ -8,9 +8,7 @@ import {
   mkdir,
   readFile,
   readdir,
-  realpath,
   rm,
-  stat,
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
@@ -25,9 +23,9 @@ import {
   allocatePort,
   closePackagedApp,
   ensurePortableRoot,
-  hostApiJson,
+  hostInvokeJson,
   launchPackagedApp,
-  rawHostApi,
+  rawHostInvoke,
   seedGatewaySettings,
   waitForGateway,
   waitForGatewayReady,
@@ -45,14 +43,6 @@ type ScenarioResult = {
   details?: unknown;
   error?: string;
   screenshot?: string;
-};
-
-type HostTask = {
-  taskId?: string;
-  status?: string;
-  artifacts?: Array<{ filePath?: string; kind?: string; title?: string }>;
-  verifications?: Array<{ status?: string; kind?: string }>;
-  error?: string;
 };
 
 const appRoot = requiredEnv('UCLAW_PACKAGED_ROOT');
@@ -214,24 +204,23 @@ async function readLiveAdminCredentials(): Promise<LiveLoginCredentials> {
   return { username, password };
 }
 
-async function loginManagedAccount(hostApiPort: number, credentials: LiveLoginCredentials): Promise<Record<string, unknown>> {
-  const response = await fetch(`http://127.0.0.1:${hostApiPort}/api/junfeiai/login`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(credentials),
+async function loginManagedAccount(page: Page, credentials: LiveLoginCredentials): Promise<Record<string, unknown>> {
+  const payload = await hostInvokeJson(page, 'managedAuth', 'login', {
+    account: credentials.username,
+    password: credentials.password,
   });
-  const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
-  if (!response.ok || payload.success === false) {
-    const code = typeof payload.code === 'string' ? payload.code : `http_${response.status}`;
-    const message = typeof payload.message === 'string' ? payload.message : 'Managed login failed.';
+  if (payload.success === false) {
+    const code = payload.errorCode || 'managed_login_failed';
+    const message = payload.message || 'Managed login failed.';
     throw new Error(`Managed login failed (${code}): ${message}`);
   }
+  const status = payload.status;
   return {
-    managed: payload.managed === true,
-    authValid: payload.authValid === true,
-    hasRelayToken: payload.hasRelayToken === true,
-    deviceActivated: payload.deviceActivated === true,
-    activationRequired: payload.activationRequired === true,
+    managed: status?.managed === true,
+    authValid: status?.authValid === true,
+    hasRelayToken: status?.hasRelayToken === true,
+    deviceActivated: status?.deviceActivated === true,
+    activationRequired: status?.activationRequired === true,
   };
 }
 
@@ -324,37 +313,19 @@ async function sanitizedControlUiInfo(page: Page): Promise<{
   tokenInFragment: boolean;
   sanitizedUrl: string;
 }> {
-  return await page.evaluate(async () => {
-    const electronApi = (window as unknown as {
-      electron: { ipcRenderer: { invoke(channel: string, payload: unknown): Promise<unknown> } };
-    }).electron;
-    const raw = await electronApi.ipcRenderer.invoke('hostapi:fetch', {
-      path: '/api/gateway/control-ui',
-      method: 'GET',
-      headers: {},
-      body: null,
-    });
-    const response = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
-    const data = response.data && typeof response.data === 'object' && !Array.isArray(response.data)
-      ? response.data as Record<string, unknown>
-      : response;
-    const json = data.json && typeof data.json === 'object' && !Array.isArray(data.json)
-      ? data.json as Record<string, unknown>
-      : {};
-    const rawUrl = typeof json.url === 'string' ? json.url : '';
-    const url = rawUrl ? new URL(rawUrl) : null;
-    const tokenInFragment = Boolean(url?.hash && new URLSearchParams(url.hash.slice(1)).has('token'));
-    if (url) {
-      url.hash = '';
-      for (const name of ['token', 'key', 'signature', 'sig']) url.searchParams.delete(name);
-    }
-    return {
-      success: json.success === true,
-      port: typeof json.port === 'number' ? json.port : null,
-      tokenInFragment,
-      sanitizedUrl: url?.toString() || '',
-    };
-  });
+  const result = await hostInvokeJson(page, 'gateway', 'controlUi');
+  const url = result.url ? new URL(result.url) : null;
+  const tokenInFragment = Boolean(url?.hash && new URLSearchParams(url.hash.slice(1)).has('token'));
+  if (url) {
+    url.hash = '';
+    for (const name of ['token', 'key', 'signature', 'sig']) url.searchParams.delete(name);
+  }
+  return {
+    success: result.success === true,
+    port: typeof result.port === 'number' ? result.port : null,
+    tokenInFragment,
+    sanitizedUrl: url?.toString() || '',
+  };
 }
 
 async function verifyOfficePackage(
@@ -373,28 +344,12 @@ async function verifyOfficePackage(
 }
 
 async function listGatewaySessions(page: Page): Promise<Array<Record<string, unknown>>> {
-  const payload = await hostApiJson<{ result?: { sessions?: Array<Record<string, unknown>> } }>(page, '/api/chat/sessions');
-  return Array.isArray(payload.result?.sessions) ? payload.result.sessions : [];
+  const payload = await gatewayRpc<{ sessions?: Array<Record<string, unknown>> }>(page, 'sessions.list');
+  return Array.isArray(payload.sessions) ? payload.sessions : [];
 }
 
 async function gatewayRpc<T>(page: Page, method: string, params?: unknown, timeoutMs = 30_000): Promise<T> {
-  const response = await page.evaluate(async (request) => {
-    const electronApi = (window as unknown as {
-      electron: {
-        ipcRenderer: {
-          invoke(channel: string, method: string, params?: unknown, timeoutMs?: number): Promise<unknown>;
-        };
-      };
-    }).electron;
-    return await electronApi.ipcRenderer.invoke('gateway:rpc', request.method, request.params, request.timeoutMs);
-  }, { method, params, timeoutMs });
-  const record = response && typeof response === 'object' && !Array.isArray(response)
-    ? response as Record<string, unknown>
-    : {};
-  if (record.success !== true) {
-    throw new Error(typeof record.error === 'string' ? record.error : `Gateway RPC failed: ${method}`);
-  }
-  return record.result as T;
+  return await hostInvokeJson(page, 'gateway', 'rpc', { method, params, timeoutMs }) as T;
 }
 
 class ScenarioRunner {
@@ -495,7 +450,7 @@ async function addCustomProvider(
   await expect(page.getByTestId('add-provider-dialog')).toHaveCount(0, { timeout: 60_000 });
   const card = page.locator('[data-testid^="provider-card-"]').filter({ hasText: label });
   await expect(card).toBeVisible();
-  const accounts = await hostApiJson<Array<{ id: string; label: string }>>(page, '/api/provider-accounts');
+  const accounts = await hostInvokeJson(page, 'providers', 'accounts');
   const account = accounts.find((entry) => entry.label === label);
   if (!account?.id) throw new Error(`Provider account was not persisted for ${label}.`);
   return account.id;
@@ -651,46 +606,6 @@ async function waitForProviderRequestCount(
   throw new Error(`Provider did not receive ${minimum} ${scenario} request(s) within ${timeoutMs}ms.`);
 }
 
-async function createHostTask(
-  page: Page,
-  kind: string,
-  title: string,
-  input: unknown,
-  suffix: string,
-): Promise<string> {
-  const sessionKey = 'agent:main:main';
-  const response = await hostApiJson<{ success: boolean; task: HostTask }>(page, '/api/task-bridge/tasks', 'POST', {
-    kind,
-    title,
-    input,
-    completion: { mode: 'internal' },
-    correlation: {
-      sessionKey,
-      runId: `run-${runId}-${suffix}`,
-      toolCallId: `tool-${runId}-${suffix}`,
-      idempotencyKey: `idem-${runId}-${suffix}`,
-    },
-  });
-  const taskId = response.task?.taskId;
-  if (!taskId) throw new Error(`Host task ${kind} did not return a taskId.`);
-  return taskId;
-}
-
-async function waitForHostTask(page: Page, taskId: string, timeoutMs = 180_000): Promise<HostTask> {
-  const deadline = Date.now() + timeoutMs;
-  let last: HostTask | null = null;
-  while (Date.now() < deadline) {
-    const response = await hostApiJson<{ tasks: HostTask[] }>(
-      page,
-      '/api/task-bridge/tasks?sessionKey=agent%3Amain%3Amain&activeOnly=false',
-    );
-    last = response.tasks.find((task) => task.taskId === taskId) ?? null;
-    if (last && ['succeeded', 'failed', 'blocked', 'cancelled', 'timed_out', 'lost'].includes(last.status || '')) return last;
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-  }
-  throw new Error(`Host task ${taskId} timed out. Last=${JSON.stringify(last)}`);
-}
-
 async function waitForCronDelivery(
   page: Page,
   jobId: string,
@@ -699,11 +614,8 @@ async function waitForCronDelivery(
   const deadline = Date.now() + timeoutMs;
   let lastRun: { success?: boolean; delivered?: boolean; deliveryStatus?: string; deliveryError?: string } | undefined;
   while (Date.now() < deadline) {
-    const jobs = await hostApiJson<Array<{
-      id: string;
-      lastRun?: { success?: boolean; delivered?: boolean; deliveryStatus?: string; deliveryError?: string };
-    }>>(page, '/api/cron/jobs');
-    lastRun = jobs.find((job) => job.id === jobId)?.lastRun;
+    const jobs = await hostInvokeJson(page, 'cron', 'list');
+    lastRun = jobs.find((job) => job.id === jobId)?.lastRun as typeof lastRun;
     if (lastRun?.delivered === true || ['delivered', 'sent'].includes(lastRun?.deliveryStatus || '')) return lastRun;
     if (lastRun && lastRun.success === false) {
       throw new Error(`External delivery failed: ${lastRun.deliveryError || lastRun.deliveryStatus || 'unknown error'}`);
@@ -746,52 +658,6 @@ async function waitForChildExit(child: ReturnType<typeof spawn>, timeoutMs: numb
       resolve(code);
     });
   });
-}
-
-async function runChildWithOutput(
-  command: string,
-  args: string[],
-  options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs?: number },
-): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
-  const child = spawn(command, args, {
-    cwd: options.cwd,
-    env: options.env,
-    windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  let stdout = '';
-  let stderr = '';
-  child.stdout?.on('data', (chunk) => { stdout = (stdout + String(chunk)).slice(-200_000); });
-  child.stderr?.on('data', (chunk) => { stderr = (stderr + String(chunk)).slice(-200_000); });
-  const exitCode = await new Promise<number | null>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      try {
-        child.kill();
-      } catch {
-        // Ignore cleanup failure.
-      }
-      reject(new Error(`Child process timed out after ${options.timeoutMs ?? 60_000}ms.`));
-    }, options.timeoutMs ?? 60_000);
-    child.once('error', (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.once('exit', (code) => {
-      clearTimeout(timer);
-      resolve(code);
-    });
-  });
-  return { exitCode, stdout, stderr };
-}
-
-async function assertPathInside(root: string, candidate: string, label: string): Promise<string> {
-  const [resolvedRoot, resolvedCandidate] = await Promise.all([realpath(root), realpath(candidate)]);
-  const relative = path.relative(resolvedRoot, resolvedCandidate);
-  expect(
-    relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative),
-    `${label} must stay under ${resolvedRoot}; received ${resolvedCandidate}`,
-  ).toBe(true);
-  return relative;
 }
 
 function managedStatusUserId(status: Record<string, unknown>): number | undefined {
@@ -886,7 +752,7 @@ async function registerFreshAccountThroughPackagedUi(
   await expect(page.getByTestId('setup-welcome-step')).toBeVisible();
   await clickSetupNextButton(page);
   await expect(page.getByTestId('managed-account-auth-panel')).toBeVisible({ timeout: 120_000 });
-  const status = await hostApiJson<Record<string, unknown>>(page, '/api/junfeiai/status');
+  const status = await hostInvokeJson(page, 'managedAuth', 'status');
   const bootstrap = plainRecord(status.bootstrap);
   const auth = plainRecord(bootstrap.auth);
   if (auth.emailVerifyEnabled === true) {
@@ -894,8 +760,8 @@ async function registerFreshAccountThroughPackagedUi(
   }
   await submitManagedAuthPanel(page, account, account.activationCode);
   account.activationCode = '';
-  const local = await hostApiJson<Record<string, unknown>>(page, '/api/junfeiai/status/local');
-  const userId = managedStatusUserId(local);
+  const local = await hostInvokeJson(page, 'managedAuth', 'localStatus');
+  const userId = managedStatusUserId(local as unknown as Record<string, unknown>);
   if (!userId) throw new Error('Fresh registration succeeded but the managed user identity was not persisted.');
   account.userId = userId;
 
@@ -984,7 +850,7 @@ async function runLiveRegression(runner: ScenarioRunner): Promise<void> {
       const account = freshAccount;
       if (!account) throw new Error('Fresh registration did not produce an account for relogin.');
       const previous = contextOrThrow(context);
-      await hostApiJson(previous.page, '/api/junfeiai/logout', 'POST', {});
+      await hostInvokeJson(previous.page, 'managedAuth', 'logout');
       await closePackagedApp(previous);
       context = null;
       const nextHostApiPort = await allocatePort();
@@ -1013,7 +879,7 @@ async function runLiveRegression(runner: ScenarioRunner): Promise<void> {
       if (liveLoginStdin) {
         const credentials = await readLiveLoginCredentials();
         try {
-          login = await loginManagedAccount(current.hostApiPort, credentials);
+          login = await loginManagedAccount(current.page, credentials);
         } finally {
           credentials.username = '';
           credentials.password = '';
@@ -1058,8 +924,8 @@ async function runLiveRegression(runner: ScenarioRunner): Promise<void> {
 
   await runner.run('live.account.status', 'read managed account, activation, and relay readiness using sanitized fields', async () => {
     const page = contextOrThrow(context).page;
-    const local = await hostApiJson<Record<string, unknown>>(page, '/api/junfeiai/status/local');
-    const remote = await hostApiJson<Record<string, unknown>>(page, '/api/junfeiai/status');
+    const local = await hostInvokeJson(page, 'managedAuth', 'localStatus');
+    const remote = await hostInvokeJson(page, 'managedAuth', 'status');
     expect(local.authValid === true || remote.authValid === true).toBe(true);
     expect(local.hasRelayToken === true || remote.hasRelayToken === true).toBe(true);
     expect(remote.activationRequired).not.toBe(true);
@@ -1073,20 +939,13 @@ async function runLiveRegression(runner: ScenarioRunner): Promise<void> {
 
   await runner.run('live.billing.read-only', 'read recharge overview and order history without creating or paying an order', async () => {
     const page = contextOrThrow(context).page;
-    const overview = await hostApiJson<Record<string, unknown>>(page, '/api/junfeiai/topup/overview');
-    const orders = await hostApiJson<unknown>(page, '/api/junfeiai/topup/orders?page=1&pageSize=20');
-    const orderRecord = orders && typeof orders === 'object' && !Array.isArray(orders) ? orders as Record<string, unknown> : {};
-    const rows = Array.isArray(orders)
-      ? orders
-      : Array.isArray(orderRecord.items)
-        ? orderRecord.items
-        : Array.isArray(orderRecord.orders)
-          ? orderRecord.orders
-          : Array.isArray(orderRecord.data)
-            ? orderRecord.data
-            : [];
+    const overview = await hostInvokeJson(page, 'billing', 'overview');
+    const orders = await hostInvokeJson(page, 'billing', 'history', { page: 1, pageSize: 20 });
+    expect(overview.success, overview.success ? undefined : overview.message).toBe(true);
+    expect(orders.success, orders.success ? undefined : orders.message).toBe(true);
+    const rows = orders.success ? orders.data.items : [];
     return {
-      overviewAvailable: Object.keys(overview).length > 0,
+      overviewAvailable: overview.success && Object.keys(overview.data).length > 0,
       orderHistoryAvailable: Array.isArray(rows),
       orderCount: rows.length,
       paymentAttempted: false,
@@ -1134,7 +993,7 @@ async function runLiveRegression(runner: ScenarioRunner): Promise<void> {
     const page = contextOrThrow(context).page;
     await page.getByTestId('sidebar-nav-channels').click();
     await expect(page.getByTestId('channels-page')).toBeVisible();
-    const health = await hostApiJson<unknown>(page, '/api/gateway/health?probe=1');
+    const health = await hostInvokeJson(page, 'gateway', 'health', { probe: true });
     return { health: Boolean(health), externalDeliveryAllowed: allowExternalDelivery };
   });
 
@@ -1147,7 +1006,7 @@ async function runLiveRegression(runner: ScenarioRunner): Promise<void> {
         throw new Error('External delivery was enabled without a complete dedicated destination contract.');
       }
       const name = `UClaw live delivery ${runId}`;
-      const created = await hostApiJson<Record<string, unknown>>(page, '/api/cron/jobs', 'POST', {
+      const created = await hostInvokeJson(page, 'cron', 'create', {
         name,
         message: `[UCLAW LIVE REGRESSION ${runId}] Reply with UCLAW_LIVE_DELIVERY_OK only.`,
         schedule: '0 0 1 1 *',
@@ -1160,12 +1019,12 @@ async function runLiveRegression(runner: ScenarioRunner): Promise<void> {
           to: externalDelivery.target,
         },
       });
-      let jobId = typeof created.id === 'string' ? created.id : '';
-      const jobs = await hostApiJson<Array<{ id: string; name: string }>>(page, '/api/cron/jobs');
+      let jobId = created.id;
+      const jobs = await hostInvokeJson(page, 'cron', 'list');
       jobId ||= jobs.find((job) => job.name === name)?.id || '';
       expect(jobId).toBeTruthy();
       try {
-        await hostApiJson(page, '/api/cron/trigger', 'POST', { id: jobId });
+        await hostInvokeJson(page, 'cron', 'trigger', { id: jobId });
         const lastRun = await waitForCronDelivery(page, jobId);
         expect(lastRun.success).toBe(true);
         return {
@@ -1175,7 +1034,7 @@ async function runLiveRegression(runner: ScenarioRunner): Promise<void> {
           deliveryStatus: lastRun.deliveryStatus,
         };
       } finally {
-        await rawHostApi(page, `/api/cron/jobs/${encodeURIComponent(jobId)}`, 'DELETE');
+        await rawHostInvoke(page, 'cron', 'delete', { id: jobId });
       }
     },
     { skip: allowExternalDelivery ? undefined : 'Pass --allow-external-delivery only with a dedicated test destination.' },
@@ -1290,7 +1149,7 @@ test('runs the packaged UClaw regression matrix', async () => {
         await skipButton.click();
         completionMode = 'development-skip-control';
       } else {
-        await hostApiJson(page, '/api/settings/setupComplete', 'PUT', { value: true });
+        await hostInvokeJson(page, 'settings', 'set', { key: 'setupComplete', value: true });
         await page.reload({ waitUntil: 'domcontentloaded' });
         await page.evaluate(() => {
           window.location.hash = '#/';
@@ -1344,26 +1203,26 @@ test('runs the packaged UClaw regression matrix', async () => {
 
     await runner.run('gateway.stop-start', 'stop and restart the real packaged Gateway', async () => {
       const page = contextOrThrow(context).page;
-      await hostApiJson(page, '/api/gateway/stop', 'POST', {});
+      await hostInvokeJson(page, 'gateway', 'stop');
       await waitForGateway(page, (status) => status.state === 'stopped', 60_000);
       await expect(page.getByTestId('main-layout')).toBeVisible();
-      await hostApiJson(page, '/api/gateway/start', 'POST', {});
+      await hostInvokeJson(page, 'gateway', 'start');
       return await waitForGatewayReady(page, 180_000);
     });
 
     await runner.run('gateway.port-conflict', 'surface a foreign port owner and recover after release', async () => {
       const page = contextOrThrow(context).page;
-      await hostApiJson(page, '/api/gateway/stop', 'POST', {});
+      await hostInvokeJson(page, 'gateway', 'stop');
       await waitForGateway(page, (status) => status.state === 'stopped', 60_000);
       const blocker = await listenOnPort(gatewayPort);
       try {
-        const failedStart = await rawHostApi(page, '/api/gateway/start', 'POST', {});
+        const failedStart = await rawHostInvoke(page, 'gateway', 'start');
         expect(failedStart.ok).toBe(false);
         await expect(page.getByTestId('main-layout')).toBeVisible();
       } finally {
         await closeServer(blocker);
       }
-      await hostApiJson(page, '/api/gateway/start', 'POST', {});
+      await hostInvokeJson(page, 'gateway', 'start');
       return await waitForGatewayReady(page, 180_000);
     });
 
@@ -1390,11 +1249,11 @@ test('runs the packaged UClaw regression matrix', async () => {
         await expect(page.getByTestId('add-provider-dialog')).toHaveCount(0, { timeout: 60_000 });
         const card = page.locator('[data-testid^="provider-card-"]').filter({ hasText: 'UClaw Regression Local' });
         await expect(card).toBeVisible();
-        const accounts = await hostApiJson<Array<{ id: string; label: string }>>(page, '/api/provider-accounts');
+        const accounts = await hostInvokeJson(page, 'providers', 'accounts');
         const account = accounts.find((entry) => entry.label === 'UClaw Regression Local');
         expect(account?.id).toBeTruthy();
         regressionAccountId = account!.id;
-        const selected = await hostApiJson<{ accountId: string | null }>(page, '/api/provider-accounts/default');
+        const selected = await hostInvokeJson(page, 'providers', 'getDefaultAccount');
         expect(selected.accountId).toBe(account!.id);
         const afterSwitch = await waitForGateway(page, (status) => (
           status.state === 'running'
@@ -1432,15 +1291,15 @@ test('runs the packaged UClaw regression matrix', async () => {
           localFallback.baseUrl,
           REGRESSION_FALLBACK_MODEL,
         );
-        await hostApiJson(page, `/api/provider-accounts/${encodeURIComponent(regressionAccountId)}`, 'PUT', {
+        await hostInvokeJson(page, 'providers', 'updateAccount', {
+          accountId: regressionAccountId,
           updates: { fallbackAccountIds: [fallbackAccountId] },
         });
         await waitForGatewayReady(page, 180_000);
-        const primaryAccount = await hostApiJson<{ fallbackAccountIds?: string[] }>(
-          page,
-          `/api/provider-accounts/${encodeURIComponent(regressionAccountId)}`,
-        );
-        expect(primaryAccount.fallbackAccountIds).toContain(fallbackAccountId);
+        const primaryAccount = await hostInvokeJson(page, 'providers', 'getAccount', {
+          accountId: regressionAccountId,
+        });
+        expect(primaryAccount?.fallbackAccountIds).toContain(fallbackAccountId);
         const primaryBefore = providerRequestCount(localPrimary, 'FALLBACK');
         const fallbackBefore = providerRequestCount(localFallback, 'FALLBACK');
         await startNewChat(page);
@@ -1471,7 +1330,7 @@ test('runs the packaged UClaw regression matrix', async () => {
         await card.hover();
         await page.getByTestId(`provider-delete-${fallbackAccountId}`).click();
         await expect(card).toHaveCount(0, { timeout: 60_000 });
-        const accounts = await hostApiJson<Array<{ id: string; fallbackAccountIds?: string[] }>>(page, '/api/provider-accounts');
+        const accounts = await hostInvokeJson(page, 'providers', 'accounts');
         expect(accounts.some((account) => account.id === fallbackAccountId)).toBe(false);
         const primaryAccount = accounts.find((account) => account.id === regressionAccountId);
         expect(primaryAccount?.fallbackAccountIds ?? []).not.toContain(fallbackAccountId);
@@ -1544,21 +1403,28 @@ test('runs the packaged UClaw regression matrix', async () => {
           if (!createdKey) await page.waitForTimeout(250);
         }
         expect(createdKey).toBeTruthy();
-        const transcriptPath = `/api/sessions/transcript?sessionKey=${encodeURIComponent(createdKey)}&limit=20`;
-        const transcript = await hostApiJson<{ messages?: unknown[] }>(page, transcriptPath);
+        const transcript = await hostInvokeJson(page, 'sessions', 'history', {
+          sessionKey: createdKey,
+          limit: 20,
+        });
+        expect(transcript.success).toBe(true);
         expect(transcript.messages?.length ?? 0).toBeGreaterThan(0);
         const label = `QA ${runId.slice(-10)}`;
-        await hostApiJson(page, '/api/sessions/rename', 'POST', { sessionKey: createdKey, label });
+        await hostInvokeJson(page, 'sessions', 'rename', { id: createdKey, title: label });
         await page.reload({ waitUntil: 'domcontentloaded' });
         await expect(page.getByTestId(`sidebar-session-${createdKey}`)).toContainText(label, { timeout: 60_000 });
-        await hostApiJson(page, '/api/sessions/delete', 'POST', { sessionKey: createdKey });
+        await hostInvokeJson(page, 'sessions', 'delete', { id: createdKey });
         await page.reload({ waitUntil: 'domcontentloaded' });
         await expect(page.getByTestId(`sidebar-session-${createdKey}`)).toHaveCount(0, { timeout: 60_000 });
         expect((await listGatewaySessions(page)).some((session) => (
           String(session.key ?? session.sessionKey ?? '') === createdKey
         ))).toBe(false);
-        const missingTranscript = await rawHostApi(page, transcriptPath);
-        expect(missingTranscript.status).toBe(404);
+        const missingTranscript = await hostInvokeJson(page, 'sessions', 'history', {
+          sessionKey: createdKey,
+          limit: 20,
+        });
+        expect(missingTranscript.success).toBe(false);
+        expect(missingTranscript.error).toMatch(/not found/iu);
         return { sessionKey: createdKey, transcriptMessages: transcript.messages?.length ?? 0, deleted: true };
       },
       { skip: profile !== 'full' ? 'Requires a real model turn to persist the session.' : undefined },
@@ -1805,9 +1671,9 @@ test('runs the packaged UClaw regression matrix', async () => {
       async () => {
         const page = contextOrThrow(context).page;
         const beforeRestart = await waitForGatewayReady(page, 180_000);
-        await hostApiJson(page, '/api/gateway/stop', 'POST', {});
+        await hostInvokeJson(page, 'gateway', 'stop');
         await waitForGateway(page, (status) => status.state === 'stopped', 60_000);
-        await hostApiJson(page, '/api/gateway/start', 'POST', {});
+        await hostInvokeJson(page, 'gateway', 'start');
         const afterRestart = await waitForGatewayReady(page, 180_000);
         expect(
           afterRestart.pid !== beforeRestart.pid
@@ -1831,29 +1697,30 @@ test('runs the packaged UClaw regression matrix', async () => {
 
     await runner.run('agents.crud', 'create, rename, display, and delete an Agent through real Host routes', async () => {
       const page = contextOrThrow(context).page;
-      const created = await hostApiJson<{ createdAgentId: string }>(page, '/api/agents', 'POST', {
+      const created = await hostInvokeJson(page, 'agents', 'create', {
         name: 'Regression Analyst',
         inheritWorkspace: true,
-        profile: { responsibility: 'Packaged regression verification' },
       });
-      expect(created.createdAgentId).toBeTruthy();
+      const agentId = created.createdAgentId;
+      expect(agentId).toBeTruthy();
+      if (!agentId) throw new Error('Agent creation did not return an ID.');
       await page.getByTestId('sidebar-nav-agents').click();
       await page.reload();
-      await expect(page.getByTestId(`agent-card-${created.createdAgentId}`)).toBeVisible({ timeout: 60_000 });
-      await hostApiJson(page, `/api/agents/${encodeURIComponent(created.createdAgentId)}`, 'PUT', { name: 'Regression Renamed' });
-      const agents = await hostApiJson<{ agents: Array<{ id: string; name: string }> }>(page, '/api/agents');
-      expect(agents.agents.find((agent) => agent.id === created.createdAgentId)?.name).toBe('Regression Renamed');
-      await hostApiJson(page, `/api/agents/${encodeURIComponent(created.createdAgentId)}`, 'DELETE');
-      const afterDelete = await hostApiJson<{ agents: Array<{ id: string }> }>(page, '/api/agents');
-      expect(afterDelete.agents.some((agent) => agent.id === created.createdAgentId)).toBe(false);
+      await expect(page.getByTestId(`agent-card-${agentId}`)).toBeVisible({ timeout: 60_000 });
+      await hostInvokeJson(page, 'agents', 'update', { id: agentId, name: 'Regression Renamed' });
+      const agents = await hostInvokeJson(page, 'agents', 'list');
+      expect(agents.agents.find((agent) => agent.id === agentId)?.name).toBe('Regression Renamed');
+      await hostInvokeJson(page, 'agents', 'delete', { id: agentId });
+      const afterDelete = await hostInvokeJson(page, 'agents', 'list');
+      expect(afterDelete.agents.some((agent) => agent.id === agentId)).toBe(false);
       await waitForGatewayReady(page, 180_000);
-      return { agentId: created.createdAgentId };
+      return { agentId };
     });
 
     await runner.run('cron.crud', 'create, disable, reject invalid, and delete a Cron job', async () => {
       const page = contextOrThrow(context).page;
       const name = `UClaw regression ${runId}`;
-      const created = await hostApiJson<Record<string, unknown>>(page, '/api/cron/jobs', 'POST', {
+      const created = await hostInvokeJson(page, 'cron', 'create', {
         name,
         message: '[REGRESSION:CRON] scheduled regression probe',
         schedule: '0 0 1 1 *',
@@ -1861,12 +1728,12 @@ test('runs the packaged UClaw regression matrix', async () => {
         agentId: 'main',
         delivery: { mode: 'none' },
       });
-      let jobId = typeof created.id === 'string' ? created.id : '';
-      const jobs = await hostApiJson<Array<{ id: string; name: string; enabled: boolean }>>(page, '/api/cron/jobs');
+      let jobId = created.id;
+      const jobs = await hostInvokeJson(page, 'cron', 'list');
       jobId ||= jobs.find((job) => job.name === name)?.id || '';
       expect(jobId).toBeTruthy();
-      await hostApiJson(page, '/api/cron/toggle', 'POST', { id: jobId, enabled: false });
-      const invalid = await rawHostApi(page, '/api/cron/jobs', 'POST', {
+      await hostInvokeJson(page, 'cron', 'toggle', { id: jobId, enabled: false });
+      const invalid = await rawHostInvoke(page, 'cron', 'create', {
         name: `${name} invalid`,
         message: 'invalid',
         schedule: 'not-a-cron-expression',
@@ -1874,45 +1741,34 @@ test('runs the packaged UClaw regression matrix', async () => {
         delivery: { mode: 'none' },
       });
       expect(invalid.ok).toBe(false);
-      await hostApiJson(page, `/api/cron/jobs/${encodeURIComponent(jobId)}`, 'DELETE');
-      const afterDelete = await hostApiJson<Array<{ id: string }>>(page, '/api/cron/jobs');
+      await hostInvokeJson(page, 'cron', 'delete', { id: jobId });
+      const afterDelete = await hostInvokeJson(page, 'cron', 'list');
       expect(afterDelete.some((job) => job.id === jobId)).toBe(false);
       return { jobId };
     });
 
     await runner.run('skills.local-config', 'discover packaged Skills, persist enablement, and expose enabled quick access', async () => {
       const page = contextOrThrow(context).page;
-      const initial = await hostApiJson<{ skills?: Array<{
-        id?: string;
-        name?: string;
-        enabled?: boolean;
-        isCore?: boolean;
-        source?: string;
-      }> }>(page, '/api/skills/local');
+      const initial = await hostInvokeJson(page, 'skills', 'local');
       const skills = initial.skills ?? [];
       expect(skills.length).toBeGreaterThan(0);
       const target = skills.find((skill) => skill.id && !skill.isCore) ?? skills.find((skill) => skill.id);
       if (!target?.id) throw new Error('No configurable packaged Skill was discovered.');
-      const disabled = await hostApiJson<{ success?: boolean }>(page, '/api/skills/config', 'PUT', {
+      const disabled = await hostInvokeJson(page, 'skills', 'updateConfig', {
         skillKey: target.id,
         enabled: false,
       });
       expect(disabled.success).toBe(true);
-      const disabledConfigs = await hostApiJson<Record<string, { enabled?: boolean }>>(page, '/api/skills/configs');
+      const disabledConfigs = await hostInvokeJson(page, 'skills', 'configs');
       expect(disabledConfigs[target.id]?.enabled).toBe(false);
-      const afterDisable = await hostApiJson<{ skills?: Array<{ id?: string; enabled?: boolean }> }>(page, '/api/skills/local');
+      const afterDisable = await hostInvokeJson(page, 'skills', 'local');
       expect(afterDisable.skills?.find((skill) => skill.id === target.id)?.enabled).toBe(false);
-      const restored = await hostApiJson<{ success?: boolean }>(page, '/api/skills/config', 'PUT', {
+      const restored = await hostInvokeJson(page, 'skills', 'updateConfig', {
         skillKey: target.id,
         enabled: true,
       });
       expect(restored.success).toBe(true);
-      const quickAccess = await hostApiJson<{ skills?: Array<{ id?: string; name?: string; slug?: string }> }>(
-        page,
-        '/api/skills/quick-access',
-        'POST',
-        {},
-      );
+      const quickAccess = await hostInvokeJson(page, 'skills', 'quickAccess', {});
       expect(quickAccess.skills?.some((skill) => (
         skill.id === target.id || skill.slug === target.id || skill.name === target.name
       ))).toBe(true);
@@ -1935,7 +1791,7 @@ test('runs the packaged UClaw regression matrix', async () => {
         const page = current.page;
         const runtime = await resolvePortableRuntimeStateDir(appRoot, current.osHome);
         const pluginSkillsDir = path.join(runtime.stateDir, 'plugin-skills');
-        await hostApiJson(page, '/api/skills/local');
+        await hostInvokeJson(page, 'skills', 'local');
         const entries = await readdir(pluginSkillsDir, { withFileTypes: true });
         let managedName = '';
         for (const entry of entries) {
@@ -1964,12 +1820,12 @@ test('runs the packaged UClaw regression matrix', async () => {
         let gatewayStopped = false;
         let userCollisionInstalled = false;
         const stopGateway = async (): Promise<void> => {
-          await hostApiJson(page, '/api/gateway/stop', 'POST', {});
+          await hostInvokeJson(page, 'gateway', 'stop');
           await waitForGateway(page, (status) => status.state === 'stopped', 60_000);
           gatewayStopped = true;
         };
         const startGateway = async (): Promise<void> => {
-          await hostApiJson(page, '/api/gateway/start', 'POST', {});
+          await hostInvokeJson(page, 'gateway', 'start');
           await waitForGatewayReady(page, 180_000);
           gatewayStopped = false;
         };
@@ -1994,7 +1850,7 @@ test('runs the packaged UClaw regression matrix', async () => {
           await writeFile(path.join(staleEntry, 'stale.txt'), 'remove-me\n', 'utf8');
 
           await startGateway();
-          await hostApiJson(page, '/api/skills/local');
+          await hostInvokeJson(page, 'skills', 'local');
           expect(await readFile(path.join(managedEntry, 'user-sentinel.txt'), 'utf8')).toBe('preserve-me\n');
           expect(await access(path.join(managedEntry, '.uclaw-skill-manifest.json')).then(() => true).catch(() => false)).toBe(false);
           expect(await access(staleEntry).then(() => true).catch(() => false)).toBe(false);
@@ -2007,12 +1863,11 @@ test('runs the packaged UClaw regression matrix', async () => {
         } finally {
           if (gatewayStopped) await startGateway().catch(() => undefined);
           if (userCollisionInstalled) {
-            await hostApiJson(page, '/api/gateway/stop', 'POST', {}).catch(() => undefined);
+            await hostInvokeJson(page, 'gateway', 'stop').catch(() => undefined);
             await waitForGateway(page, (status) => status.state === 'stopped', 60_000).catch(() => undefined);
             await rm(managedEntry, { recursive: true, force: true }).catch(() => undefined);
             await cp(managedBackup, managedEntry, { recursive: true }).catch(() => undefined);
-            userCollisionInstalled = false;
-            await hostApiJson(page, '/api/gateway/start', 'POST', {}).catch(() => undefined);
+            await hostInvokeJson(page, 'gateway', 'start').catch(() => undefined);
             await waitForGatewayReady(page, 180_000).catch(() => undefined);
           }
           await rm(managedBackup, { recursive: true, force: true }).catch(() => undefined);
@@ -2023,10 +1878,7 @@ test('runs the packaged UClaw regression matrix', async () => {
 
     await runner.run('skills.marketplace-capability', 'probe packaged Skill marketplace capability without installing from the network', async () => {
       const page = contextOrThrow(context).page;
-      const response = await hostApiJson<{ success?: boolean; capability?: Record<string, unknown> }>(
-        page,
-        '/api/skills/marketplace/capability',
-      );
+      const response = await hostInvokeJson(page, 'skills', 'marketplaceCapability');
       expect(response.success).toBe(true);
       return {
         capabilityAvailable: Boolean(response.capability),
@@ -2055,9 +1907,9 @@ test('runs the packaged UClaw regression matrix', async () => {
 
     await runner.run('diagnostics.logs', 'read packaged runtime logs and verify credential redaction', async () => {
       const page = contextOrThrow(context).page;
-      const logDir = await hostApiJson<{ dir?: string | null }>(page, '/api/logs/dir');
-      const logFiles = await hostApiJson<{ files?: unknown[] }>(page, '/api/logs/files');
-      const logs = await hostApiJson<{ content?: string }>(page, '/api/logs?tailLines=500');
+      const logDir = await hostInvokeJson(page, 'logs', 'dir');
+      const logFiles = await hostInvokeJson(page, 'logs', 'listFiles');
+      const logs = await hostInvokeJson(page, 'logs', 'recent', { tailLines: 500 });
       const content = logs.content ?? '';
       expect(logDir.dir).toBeTruthy();
       expect(path.resolve(logDir.dir!)).toBe(path.resolve(osHome, 'AppData', 'Local', 'UClawRuntime', 'logs'));
@@ -2072,17 +1924,7 @@ test('runs the packaged UClaw regression matrix', async () => {
 
     await runner.run('diagnostics.doctor', 'run the bundled OpenClaw Doctor through the real Host API', async () => {
       const page = contextOrThrow(context).page;
-      const result = await hostApiJson<{
-        success?: boolean;
-        exitCode?: number | null;
-        stdout?: string;
-        stderr?: string;
-        command?: string;
-        cwd?: string;
-        durationMs?: number;
-        timedOut?: boolean;
-        error?: string;
-      }>(page, '/api/app/openclaw-doctor', 'POST', { mode: 'diagnose' });
+      const result = await hostInvokeJson(page, 'app', 'openClawDoctor', { mode: 'diagnose' });
       expect(result.command).toBe('openclaw doctor');
       expect(result.timedOut).not.toBe(true);
       expect(typeof result.exitCode).toBe('number');
@@ -2120,13 +1962,13 @@ test('runs the packaged UClaw regression matrix', async () => {
       'desktop.observe',
       'capture and verify one managed desktop screenshot',
       async () => {
-        const page = contextOrThrow(context).page;
-        const taskId = await createHostTask(page, 'desktop.observe', 'Regression desktop observation', {}, 'desktop');
-        const task = await waitForHostTask(page, taskId, 120_000);
-        expect(task.status, task.error).toBe('succeeded');
-        return { taskId, artifacts: task.artifacts?.length || 0 };
+        throw new Error('Desktop capture is not exposed by the production Host API.');
       },
-      { skip: allowDesktopCapture ? undefined : 'Desktop capture is privacy-sensitive; pass --allow-desktop-capture explicitly.' },
+      {
+        skip: allowDesktopCapture
+          ? 'Desktop capture authorization was supplied, but the production Host API exposes no direct capture action.'
+          : 'Desktop capture is privacy-sensitive; pass --allow-desktop-capture explicitly.',
+      },
     );
 
     await runner.run('process.single-instance', 'reject a duplicate packaged process without disturbing the active app', async () => {

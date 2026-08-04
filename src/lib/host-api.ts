@@ -132,6 +132,7 @@ export type { SupportContact, SupportContactConfig } from '@shared/support';
 
 export const hostApi = {
   app: {
+    quit: () => invokeHost('app', 'quit'),
     openClawDoctor: async (mode: OpenClawDoctorMode): Promise<OpenClawDoctorResult> => ({
       ...(await invokeHost('app', 'openClawDoctor', { mode })),
       mode,

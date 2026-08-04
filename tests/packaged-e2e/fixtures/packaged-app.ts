@@ -3,15 +3,15 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import path from 'node:path';
+import type {
+  HostApiAction,
+  HostApiModule,
+  HostApiPayloadArgs,
+  HostApiResult,
+} from '@shared/host-api/contract';
+import type { HostResponse } from '@shared/host-api/types';
 
-export type RawHostApiResponse = {
-  transportOk: boolean;
-  status: number;
-  ok: boolean;
-  json: unknown;
-  text: string;
-  error: string;
-};
+export type RawHostInvokeResponse<T> = HostResponse<T>;
 
 export type PackagedAppContext = {
   browser: Browser;
@@ -248,10 +248,11 @@ export async function closePackagedApp(context: PackagedAppContext | null, timeo
   try {
     await Promise.race([
       context.page.evaluate(async () => {
-        const electronApi = (window as unknown as {
-          electron: { ipcRenderer: { invoke(channel: string): Promise<unknown> } };
-        }).electron;
-        await electronApi.ipcRenderer.invoke('app:quit');
+        await window.clawx?.hostInvoke({
+          id: `packaged-close-${Date.now()}`,
+          module: 'app',
+          action: 'quit',
+        });
       }),
       new Promise((resolve) => setTimeout(resolve, Math.min(3_000, Math.floor(timeoutMs / 3)))),
     ]);
@@ -267,66 +268,56 @@ export async function closePackagedApp(context: PackagedAppContext | null, timeo
   await waitForProcessExit(context.process, 5_000);
 }
 
-export async function rawHostApi(
+export async function rawHostInvoke<
+  M extends HostApiModule,
+  A extends HostApiAction<M>,
+>(
   page: Page,
-  requestPath: string,
-  method = 'GET',
-  body?: unknown,
-): Promise<RawHostApiResponse> {
-  const rawResponse = await page.evaluate(async (request) => {
-    const electronApi = (window as unknown as {
-      electron: { ipcRenderer: { invoke(channel: string, payload: unknown): Promise<unknown> } };
-    }).electron;
-    return await electronApi.ipcRenderer.invoke('hostapi:fetch', {
-      path: request.path,
-      method: request.method,
-      headers: request.body === undefined ? {} : { 'content-type': 'application/json' },
-      body: request.body === undefined ? null : JSON.stringify(request.body),
+  module: M,
+  action: A,
+  ...payloadArgs: HostApiPayloadArgs<M, A>
+): Promise<RawHostInvokeResponse<HostApiResult<M, A>>> {
+  const response = await page.evaluate(async (request) => {
+    const bridge = window.clawx?.hostInvoke;
+    if (!bridge) {
+      return {
+        id: request.id,
+        ok: false as const,
+        error: { code: 'UNAVAILABLE', message: 'Typed Host API is unavailable' },
+      };
+    }
+    return await bridge({
+      id: request.id,
+      module: request.module,
+      action: request.action,
+      ...(request.hasPayload ? { payload: request.payload } : {}),
     });
-  }, { path: requestPath, method, body }) as unknown;
-
-  const response = rawResponse && typeof rawResponse === 'object' && !Array.isArray(rawResponse)
-    ? rawResponse as Record<string, unknown>
-    : {};
-
-  const data = response?.data && typeof response.data === 'object'
-    ? response.data as Record<string, unknown>
-    : response;
-  const responseError = response?.error;
-  const status = typeof data?.status === 'number' ? data.status : 200;
-  const transportOk = response?.ok !== false && response?.success !== false;
-  const payloadError = data?.json && typeof data.json === 'object' && !Array.isArray(data.json)
-    ? data.json as Record<string, unknown>
-    : null;
-  return {
-    transportOk,
-    status,
-    ok: transportOk && data?.ok !== false && status >= 200 && status < 300,
-    json: data?.json,
-    text: typeof data?.text === 'string' ? data.text : '',
-    error: typeof responseError === 'string'
-      ? responseError
-      : responseError && typeof responseError === 'object' && typeof (responseError as Record<string, unknown>).message === 'string'
-        ? String((responseError as Record<string, unknown>).message)
-        : typeof payloadError?.error === 'string'
-          ? payloadError.error
-          : typeof payloadError?.message === 'string'
-            ? payloadError.message
-            : '',
-  };
+  }, {
+    id: `packaged-regression-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    module,
+    action,
+    hasPayload: payloadArgs.length > 0,
+    payload: payloadArgs[0],
+  });
+  return response as RawHostInvokeResponse<HostApiResult<M, A>>;
 }
 
-export async function hostApiJson<T>(
+export async function hostInvokeJson<
+  M extends HostApiModule,
+  A extends HostApiAction<M>,
+>(
   page: Page,
-  requestPath: string,
-  method = 'GET',
-  body?: unknown,
-): Promise<T> {
-  const response = await rawHostApi(page, requestPath, method, body);
-  if (!response.transportOk || !response.ok || response.status < 200 || response.status >= 300) {
-    throw new Error(`Host API ${method} ${requestPath} failed (${response.status}): ${response.error || response.text || JSON.stringify(response.json)}`);
+  module: M,
+  action: A,
+  ...payloadArgs: HostApiPayloadArgs<M, A>
+): Promise<HostApiResult<M, A>> {
+  const response = await rawHostInvoke(page, module, action, ...payloadArgs);
+  if (!response.ok) {
+    throw new Error(
+      `Host API ${module}.${action} failed: ${response.error?.message || response.error?.code || 'unknown error'}`,
+    );
   }
-  return response.json as T;
+  return response.data;
 }
 
 export async function waitForGateway(
@@ -339,12 +330,12 @@ export async function waitForGateway(
   let lastError = '';
   while (Date.now() < deadline) {
     try {
-      const response = await rawHostApi(page, '/api/gateway/status');
-      if (response.ok && response.json && typeof response.json === 'object') {
-        lastStatus = response.json as Record<string, unknown>;
+      const response = await rawHostInvoke(page, 'gateway', 'status');
+      if (response.ok && response.data && typeof response.data === 'object') {
+        lastStatus = response.data as Record<string, unknown>;
         if (predicate(lastStatus)) return lastStatus;
       } else {
-        lastError = response.error || response.text;
+        lastError = response.ok ? 'Gateway returned an empty status' : response.error?.message || '';
       }
     } catch (error) {
       lastError = String(error);

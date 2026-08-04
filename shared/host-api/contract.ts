@@ -924,6 +924,7 @@ export type DeliveryTargetsResult = HostSuccess & { targets: DeliveryChannelGrou
 
 export type HostApiContract = {
   app: {
+    quit: () => void;
     openClawDoctor: (payload: OpenClawDoctorPayload) => Omit<OpenClawDoctorResult, 'mode'>;
   };
   openclaw: {
