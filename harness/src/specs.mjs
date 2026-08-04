@@ -17,7 +17,7 @@ function parseScalar(value) {
 }
 
 export function parseFrontmatter(markdown) {
-  const match = markdown.match(/^---\n([\s\S]*?)\n---(?:\n|$)/);
+  const match = markdown.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
   if (!match) {
     throw new Error('Spec must start with Markdown frontmatter');
   }

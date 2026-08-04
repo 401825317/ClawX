@@ -285,6 +285,22 @@ Body`);
     expect(spec.data.docs).toEqual({ required: false });
   });
 
+  it('parses Markdown frontmatter with Windows line endings', () => {
+    const spec = parseFrontmatter([
+      '---',
+      'id: windows-example',
+      'requiredProfiles:',
+      '  - fast',
+      '---',
+      '',
+      'Body',
+    ].join('\r\n'));
+
+    expect(spec.data.id).toBe('windows-example');
+    expect(spec.data.requiredProfiles).toEqual(['fast']);
+    expect(spec.body).toBe('Body');
+  });
+
   it('matches repository glob paths', () => {
     expect(pathMatchesAny('src/stores/chat/history-actions.ts', ['src/stores/chat/**'])).toBe(true);
     expect(pathMatchesAny('src/lib/host-api.ts', ['src/lib/host-api.ts'])).toBe(true);
