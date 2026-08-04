@@ -607,16 +607,19 @@ export class AcpChatService {
 
   private async spawnConnection(): Promise<ClientSideConnection> {
     const gatewayPort = this.gateway?.getStatus?.().port;
-    const args = ['acp'];
-    if (typeof gatewayPort === 'number' && Number.isInteger(gatewayPort) && gatewayPort > 0 && gatewayPort <= 65_535) {
-      args.push('--url', `ws://127.0.0.1:${gatewayPort}`);
-    }
-    const spec = getOpenClawEmbeddedForkSpec(args);
+    const gatewayUrl = typeof gatewayPort === 'number'
+      && Number.isInteger(gatewayPort)
+      && gatewayPort > 0
+      && gatewayPort <= 65_535
+      ? `ws://127.0.0.1:${gatewayPort}`
+      : undefined;
+    const spec = getOpenClawEmbeddedForkSpec(['acp']);
     const gatewayToken = await this.gateway?.getGatewayToken?.();
-    if (gatewayToken) {
+    if (gatewayUrl || gatewayToken) {
       spec.options.env = {
         ...spec.options.env,
-        OPENCLAW_GATEWAY_TOKEN: gatewayToken,
+        ...(gatewayUrl ? { OPENCLAW_GATEWAY_URL: gatewayUrl } : {}),
+        ...(gatewayToken ? { OPENCLAW_GATEWAY_TOKEN: gatewayToken } : {}),
       };
     }
     const forked = fork(spec.modulePath, spec.args, spec.options);

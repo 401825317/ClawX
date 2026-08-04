@@ -205,9 +205,12 @@ describe('AcpChatService', () => {
 
     expect(childProcessMock.fork).toHaveBeenCalledWith(
       expect.stringContaining('openclaw.mjs'),
-      ['acp', '--url', 'ws://127.0.0.1:60792'],
+      ['acp'],
       expect.objectContaining({
-        env: expect.objectContaining({ OPENCLAW_GATEWAY_TOKEN: 'test-gateway-token' }),
+        env: expect.objectContaining({
+          OPENCLAW_GATEWAY_URL: 'ws://127.0.0.1:60792',
+          OPENCLAW_GATEWAY_TOKEN: 'test-gateway-token',
+        }),
       }),
     );
   });
