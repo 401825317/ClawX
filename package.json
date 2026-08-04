@@ -48,7 +48,7 @@
         "lint:check": "eslint .",
         "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
         "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
-        "typecheck": "pnpm run typecheck:node && pnpm run typecheck:web",
+        "typecheck": "node scripts/generate-ext-bridge.mjs && pnpm run typecheck:node && pnpm run typecheck:web",
         "test": "vitest run",
         "test:e2e": "pnpm run build:vite && playwright test",
         "test:e2e:headed": "pnpm run build:vite && playwright test --headed",
