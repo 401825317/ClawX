@@ -118,12 +118,14 @@ function AcpTurnDuration({ timing }: { timing: AcpTurnTiming }) {
 
 export function AcpAssistantTurn({
   group,
+  streamingSegmentIds,
   fileSummaries = [],
   workspaceRoot,
   timing,
   onPermissionSelect,
 }: {
   group: AcpAssistantTurnDisplayGroup;
+  streamingSegmentIds: ReadonlySet<string>;
   fileSummaries?: AcpTurnFileSummary[];
   workspaceRoot?: string;
   timing?: AcpTurnTiming;
@@ -156,9 +158,18 @@ export function AcpAssistantTurn({
           if (item.kind === 'message-segment') {
             if (item.role === 'user') return <AcpMessageSegment key={item.id} item={item} />;
             return (
-              <div key={item.id} data-acp-item-id={item.id} data-testid="acp-assistant-message" className="flex min-w-0 flex-col gap-2">
+              <div key={item.id} data-acp-item-id={item.id} data-testid="acp-assistant-message" className="flex min-w-0 flex-col gap-2 w-[calc(100%-3rem)]">
                 {item.parts.map((part, index) => (
-                  <AcpRenderPart key={`${part.kind}:${index}`} part={part} tone="assistant" />
+                  <AcpRenderPart
+                    key={`${part.kind}:${index}`}
+                    part={part}
+                    tone="assistant"
+                    {...(streamingSegmentIds.has(item.id)
+                      && index === item.parts.length - 1
+                      && part.kind === 'markdown'
+                      ? { isAnimating: true }
+                      : {})}
+                  />
                 ))}
               </div>
             );

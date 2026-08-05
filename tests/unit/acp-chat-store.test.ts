@@ -330,6 +330,50 @@ describe('ACP Chat store', () => {
     });
   });
 
+  it('commits each live streamed update immediately', async () => {
+    vi.stubEnv('MODE', 'production');
+    vi.useFakeTimers();
+    let unsubscribe = () => {};
+    try {
+      const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+      ensureAcpChatSubscriptions();
+      await useAcpChatSessionStore.getState().loadSession({
+        sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo',
+      });
+      const onStoreChange = vi.fn();
+      unsubscribe = useAcpChatSessionStore.subscribe(onStoreChange);
+      const liveUpdate = (text: string) => ({
+        sessionKey: 'agent:pi:s1',
+        generation: 1,
+        notification: {
+          sessionId: 'agent:pi:s1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            messageId: 'streamed-message',
+            content: { type: 'text', text },
+          },
+        },
+      });
+
+      hostEventsMock.updateListener?.(liveUpdate('one'));
+      expect(onStoreChange).toHaveBeenCalledTimes(1);
+      expect(useAcpChatSessionStore.getState().timeline.itemsById['streamed-message:0']).toMatchObject({
+        parts: [{ kind: 'markdown', text: 'one' }],
+      });
+
+      hostEventsMock.updateListener?.(liveUpdate(' two'));
+      expect(onStoreChange).toHaveBeenCalledTimes(2);
+      expect(useAcpChatSessionStore.getState().timeline.itemsById['streamed-message:0']).toMatchObject({
+        parts: [{ kind: 'markdown', text: 'one two' }],
+      });
+    } finally {
+      unsubscribe();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('keeps the complete replay after preparing a local chat and quickly loading history again', async () => {
     const historicalLoad = createDeferred<{
       success: boolean;

@@ -102,13 +102,13 @@ ClawX 直接基于官方 **OpenClaw** 核心构建。无需单独安装，我们
 从安装到第一次 AI 对话，全程通过直观的图形界面完成。无需终端命令，无需 YAML 文件，无需到处寻找环境变量。
 
 ### 💬 智能聊天界面
-通过现代化的聊天体验与 AI 智能体交互。支持多会话上下文、消息历史记录、以 Markdown 渲染智能体回复（包括 GitHub 风格表格以及由 KaTeX 渲染的 LaTeX 数学公式：`$行内$`、`$$块级$$`、`\(行内\)` 和 `\[块级\]`），用户输入则始终按原始文本显示；同时支持在多 Agent 场景下通过主输入框中的 `@agent` 直接路由到目标智能体。
+通过现代化的聊天体验与 AI 智能体交互。支持多会话上下文、消息历史记录，并以流式 Markdown 渲染智能体回复，支持带语法高亮的围栏代码块、面向中日韩文本的解析、GitHub 风格表格，以及由 KaTeX 渲染的 LaTeX 数学公式（`$行内$`、`$$块级$$`、`\(行内\)` 和 `\[块级\]`）；用户输入则始终按原始文本显示。同时支持在多 Agent 场景下通过主输入框中的 `@agent` 直接路由到目标智能体。围栏代码会保留源码换行、自动软换行，并在流式输出结束后提供本地化的复制操作。
 从输入框插入的技能会以 `/技能名` 卡片形式显示；点击卡片可在右侧预览栏打开并阅读该技能的 `SKILL.md`。
 当你使用 `@agent` 选择其他智能体时，ClawX 会直接切换到该智能体自己的对话上下文，而不是经过默认智能体转发。各 Agent 工作区默认彼此分离，但更强的运行时隔离仍取决于 OpenClaw 的 sandbox 配置。
-会话侧边栏现在以工作空间优先组织：默认工作空间固定在最上方，其它工作空间按自然顺序排列，每个工作空间都可折叠或继续加载更多会话。AI 回复期间，会话行显示加载指示器；未查看的回复完成后显示蓝点；打开会话后恢复显示相对活跃时间，悬停时仍会露出操作按钮。导入的工作空间可从侧边栏标题处重命名，新名称会同步显示在对话输入框下方，同时悬浮标题仍可查看文件系统路径。如果当前所选会话存在有效工作空间，新对话会继承该工作空间，并在首次发送前保持可编辑。对于可编辑的新对话或未绑定对话，输入框的工作空间卡片会打开一个小菜单，列出最近使用及现有会话中的工作空间，并可切回默认工作空间或选择其它目录。如果保存的工作空间文件夹已被移动或删除，Chat 会暂停创建会话并提示选择现有文件夹，而不会持续重试失效路径。不可用的非默认工作空间会在侧边栏显示标记，并可在确认后删除；该操作会永久删除分组中的全部会话。OpenClaw 生成的 UUID 加日期兜底标题只有在与该会话 ID 匹配时才会被视为缺失标题，随后改用会话的首条用户消息展示，而不会被持久化为会话名称。
+会话侧边栏现在以工作空间优先组织：默认工作空间固定在最上方，其它工作空间按自然顺序排列，每个工作空间都可折叠或继续加载更多会话。AI 回复期间，会话行显示加载指示器；未查看的回复完成后显示蓝点；打开会话后恢复显示相对活跃时间，悬停时仍会露出操作按钮。导入的工作空间可从侧边栏标题处重命名，新名称会同步显示在对话输入框下方，同时悬浮标题仍可查看文件系统路径。如果当前所选会话存在有效工作空间，新对话会继承该工作空间，并在首次发送前保持可编辑。对于可编辑的新对话或未绑定对话，输入框的工作空间卡片会打开一个小菜单，列出最近使用及现有会话中的工作空间，并可切回默认工作空间或选择其它目录。如果保存的工作空间文件夹已被移动或删除，Chat 会暂停创建会话并提示选择现有文件夹，而不会持续重试失效路径。不可用的非默认工作空间会在侧边栏显示标记，并可在确认后删除；该操作会永久删除分组中的全部会话。只有永久删除成功后，会话行才会移除且页面才会跳转；删除失败时会保留会话与确认框，方便重试。OpenClaw 生成的 UUID 加日期兜底标题只有在与该会话 ID 匹配时才会被视为缺失标题，随后改用会话的首条用户消息展示，而不会被持久化为会话名称。
 每个 Agent 还可以单独覆盖自己的 `provider/model` 运行时设置；未覆盖的 Agent 会继续继承全局默认模型。
 
-Chat 右侧面板的工作空间和预览选项卡支持以只读方式预览 `.docx` 和 `.pptx` 文件。预览栏顶部可将当前文件展开至 ClawX 的整个可视区域；再次点击该按钮或按 Esc 即可返回侧栏。旧版 `.doc` 和 `.ppt` 文件不会在应用内预览，而是继续通过操作系统打开。DOCX 的分页效果可能与 Microsoft Word 不同；PPTX 预览不支持动画、切换效果或媒体播放。超过 20 MB 的 Office 文件不会在应用内预览。
+Chat 右侧面板的工作空间和预览选项卡支持以只读方式预览 Markdown、`.docx` 和 `.pptx` 文件。Markdown 文件预览以静态渲染模式提供相同的围栏代码语法高亮、软换行与复制操作、面向中日韩文本的解析和 KaTeX 数学公式支持。预览栏顶部可将当前文件展开至 ClawX 的整个可视区域；再次点击该按钮或按 Esc 即可返回侧栏。旧版 `.doc` 和 `.ppt` 文件不会在应用内预览，而是继续通过操作系统打开。DOCX 的分页效果可能与 Microsoft Word 不同；PPTX 预览不支持动画、切换效果或媒体播放。超过 20 MB 的 Office 文件不会在应用内预览。
 
 ### 本地 HTML 预览
 Chat 右侧面板只包含工作空间、预览和变更，不再提供通用网页浏览器、主页或地址栏。已授权的本地 `.html` 和 `.htm` 附件、文件活动及工作空间文件默认在预览中打开。文件操作可以选择 ClawX 内置预览或系统应用，预览标题栏也可将当前 HTML 文件交给系统浏览器打开。
@@ -226,6 +226,8 @@ ClawX 内置了代理设置，适用于需要通过本地代理客户端访问�
 ## 系统架构
 
 ClawX 采用 **双进程 + Host API 统一接入架构**。渲染进程只调用统一客户端抽象，协议选择与进程生命周期由 Electron 主进程统一管理：
+
+OpenClaw 配置交付也统一由 Electron Main 管理。Gateway 运行时，ClawX 以 `config.get` 返回的权威快照为基线，并通过 `config.set` 提交修改；Gateway 停止或启动中时，同一个协调器只更新解析后的 JSON5 配置文件，不会因此启动 Gateway。因此，普通的 Provider、Agent、Channel、绑定、Skill 和模型修改不会替换 Gateway 进程。完整重启仅保留给代理等进程启动环境变化、用户显式操作以及健康检查或崩溃恢复。认证配置写入 SQLite 后，ClawX 会调用 OpenClaw 的 `secrets.reload`，让运行中的 Agent 无需重启即可读取新凭据。
 
 Chat 使用由 Electron Main 持有的 ACP stdio bridge。Renderer 接收类型化 host events，并渲染内存中的 ACP timeline。Gateway 仍负责 providers、models、skills、workspace、settings、diagnostics 和 media configuration 等非 Chat 能力。
 
@@ -384,6 +386,8 @@ pnpm typecheck            # TypeScript 类型检查
 pnpm test                 # 运行单元测试
 pnpm run test:e2e         # 运行 Electron E2E 冒烟测试
 pnpm run test:e2e:headed  # 以可见窗口运行 Electron E2E 测试
+pnpm run perf:chat        # 采集合成 Chat 场景的 Renderer/Main CPU Profile
+pnpm run profile:main     # 启动构建产物并在 9229 端口调试 Main
 pnpm run comms:replay     # 计算通信回放指标
 pnpm run comms:baseline   # 刷新通信基线快照
 pnpm run comms:compare    # 将回放指标与基线阈值对比
@@ -398,6 +402,14 @@ pnpm package:linux        # 为 Linux 打包
 ```
 
 在无头 Linux 环境下，Electron 测试需要显示服务；可使用 `xvfb-run -a pnpm run test:e2e`。
+
+### Electron 性能诊断
+
+`pnpm run perf:chat` 会运行隔离的合成 ACP 负载，分别覆盖流式响应，以及富 Markdown 静态会话中的侧栏和滚动交互，并在 Playwright 的 `test-results/` 目录输出版本化指标与 Renderer/Main CPU Profile。Renderer Profile 覆盖生产 store/render 路径和帧节奏；流式 Main Profile 测量 Main 到 Renderer 的 IPC fanout，交互 Main Profile 用于确认 Renderer 交互期间 Main 是否保持空闲。两者都不包含上游 OpenClaw/ACP 子进程或 GPU 进程路径。CPU Profile 可直接用 Chrome DevTools 打开；其中只包含生成的测试文本，不会上报为产品遥测。性能数据依赖硬件，应在同一机器上多次运行后对比，不应使用统一的跨平台绝对阈值。
+
+录制真实 Renderer 时，使用 `CLAWX_REMOTE_DEBUGGING_PORT=9223 pnpm dev` 启动开发环境，再让 Playwright 或 Chrome DevTools 连接 `localhost:9223`。录制真实 Electron Main 时，运行 `pnpm run profile:main`，在 `chrome://inspect` 中配置 `localhost:9229` 并选择 Electron Main target。除非正在测量 WebSocket trace 本身，否则不要设置 `CLAWX_GATEWAY_WS_TRACE`。
+
+ClawX 默认保留 Chromium 硬件加速，使长文档、滚动和布局动画能够使用 GPU 合成与光栅化。若某台机器的显卡驱动存在问题，仍可使用 Chromium 原生的 `--disable-gpu` 命令行参数作为排障回退。
 
 ### 通信回归检查
 

@@ -21,7 +21,7 @@ ownedPaths:
   - tests/unit/session-catalog.test.ts
   - tests/unit/gateway-events.test.ts
   - tests/unit/gateway-event-dispatch.test.ts
-  - tests/unit/chat-store-history-retry.test.ts
+  - tests/unit/chat-session-management.test.ts
   - tests/unit/chat-store-session-label-fetch.test.ts
   - tests/unit/session-label-hydration.test.ts
   - tests/e2e/chat-sidebar-session-attention.spec.ts
@@ -44,6 +44,7 @@ conditionalProfiles:
       - channels/agents/settings UI depends on new backend response shape
       - Web Browser guest, navigation, session, permission, or data policy changes
 requiredRules:
+  - openclaw-config-delivery
   - renderer-main-boundary
   - backend-communication-boundary
   - api-client-transport-policy
@@ -75,12 +76,16 @@ forbiddenPatterns:
 
 Gateway backend communication covers all ClawX paths that move data between the visual desktop UI and OpenClaw runtime/backend services.
 
+Coordinator-owned OpenClaw config mutations and their `config.get`/`config.set` transaction contract are documented in `harness/reference/openclaw-config-delivery.md`.
+
 Allowed flow:
 Renderer page/component -> `src/lib/host-api.ts` or `src/lib/api-client.ts` -> Electron Main typed host service or IPC handler -> Main-owned OpenClaw Gateway WebSocket -> runtime result -> store/UI.
 
 Renderer code must not own transport selection, direct IPC channels, direct Gateway HTTP calls, retry policy, or protocol fallback.
 
 Renderer code must not create direct Gateway WebSocket connections. Gateway frame diagnostics must be emitted by Main-process Gateway logging.
+
+Typed generic Gateway RPC requests are validated by `electron/services/gateway-api.ts` and delegated directly to `GatewayManager.rpc`, including an optional positive finite timeout. This path has no Renderer Chat history/send specialization, polling queue, coalescing, or backpressure layer. ACP `session/load`, `session/prompt`, and `session/cancel` own ordinary Chat history and composer behavior independently.
 
 Channel/plugin migration behavior is also part of this scenario when ClawX rewrites OpenClaw config before Gateway launch. Upgrades must preserve single-owner channel registration for migrated plugin-backed channels such as Feishu/Lark.
 
