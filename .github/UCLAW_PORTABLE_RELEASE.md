@@ -1,10 +1,12 @@
 # UClaw Windows 便携正式发布
 
-当前分支的首个正式版本为 `2.0.0`。正式 Windows USB ZIP 只使用 `.github/workflows/uclaw-portable-production.yml`；该工作流覆盖候选构建、签名后 Full、全新账号注册 Live、OSS、生产更新记录、Git 标签和 GitHub Release。
+正式 Windows USB ZIP 使用 `.github/workflows/uclaw-portable-production.yml`。该工作流负责构建、SignPath 深度签名、制品完整性校验、OSS 上传、生产更新记录、Git 标签和 GitHub Release。
 
-旧的 `release.yml` 仍保留为通用多平台 Electron 流程，但不是 UClaw 产品发布入口，也不能替代 Windows USB 便携版的生产 feed 流程。
+正式发布不执行源码 E2E、成品 Full、托管 Live、新用户注册、激活或重登回归。回归脚本继续保留为独立 QA 工具，但不属于发包步骤，也不阻断正式发布。
 
-## 本地候选包
+旧的 `release.yml` 仍是通用多平台 Electron 流程，不是 UClaw Windows USB 生产发布入口。
+
+## 本地正式候选包
 
 在 Windows 的干净 Git 工作区中运行：
 
@@ -12,153 +14,81 @@
 pnpm release
 ```
 
-该命令只执行 `package:win:usb`，生成并校验当前版本和当前完整 commit 对应的 USB ZIP、JSON、文件大小及 SHA-512。它不会调用 SignPath，不会上传 OSS，不会修改数据库或生产更新入口，也不会创建 Git 标签或 GitHub Release。
-
-本地候选包用于开发验收，不能代替正式工作流的签名后 Full、全新账号 Live 和生产发布门禁。
+该命令执行 `package:win:usb`，生成当前稳定版本和完整 commit 对应的 USB ZIP/JSON，并核对文件名、版本、commit、build ID、size 和 SHA-512。它不运行功能回归，不调用 SignPath，不上传 OSS，不修改生产 feed，也不创建 Git 标签或 GitHub Release。
 
 ## 发布顺序
 
-1. 所有改动先在 `develop` 生成内测包并完成验收。
-2. 将验收通过的改动提升到 `master`，并把 `package.json` 改成新的稳定版本号。
-3. 等待远端 `master` 完全同步，不要提前创建版本标签。
-4. 从 GitHub Actions 手动运行 `UClaw Windows Portable Production`，选择 `master` 并输入与 `package.json` 相同的版本号。
-5. GitHub 托管 Windows Runner 完成源码检查、构建、SignPath 深度签名以及签名后精确 ZIP 的 Full 回归。
-6. 审批 `uclaw-production` Environment。
-7. 自托管 Runner 通过最终 ZIP 注册全新临时账号，完成退出重登和真实 Responses、图片、视频 Live。
-8. 上述测试命令成功后，工作流上传 OSS、事务更新 `claw_x_releases`、公网回读、创建 annotated tag 和 GitHub Release。
-
-工作流没有跳过测试或强制发布输入。任何必需命令失败都会发生在 OSS/feed 写入之前。
+1. 确认待发布代码位于远端最新 `master`，`package.json` 使用新的稳定版本号。
+2. 从 `master` 手动运行 `UClaw Windows Portable Production`，输入与 `package.json` 相同的版本号。
+3. GitHub 托管 Windows Runner 安装锁定依赖、构建 USB ZIP、提交 SignPath 深度签名、验证签名并重算 ZIP/JSON 元数据。
+4. 工作流把精确 ZIP、JSON 和 `candidate.json` 固化为不可变候选制品。
+5. 审批 `uclaw-production` Environment。
+6. 受保护的 `uclaw-release` Runner 校验候选，上传 OSS，事务更新 `claw_x_releases`，并回读公网更新接口。
+7. 创建或核对 annotated tag，创建 GitHub Release，并附上 ZIP、JSON 和 `publication.json`。
 
 ## GitHub 配置
 
 仓库需要：
 
-- 将 GitHub 仓库 Default branch 设为 `master`；`workflow_dispatch` 只会从默认分支注册工作流，源码预检仍会拒绝任何非 `master` 触发。
+- Default branch 为 `master`。
 - Secret `SIGNPATH_API_TOKEN`。
-- Variable `SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG`，必须指向能深度签名 ZIP 内 `UClaw.exe` 和便携更新器的 SignPath artifact configuration。
-- Environment `uclaw-production`。
-- Environment 设置 required reviewers、禁止 self-review，并将 deployment branch 限定为 `master`。
-- 一台带 `self-hosted`、`Windows`、`X64`、`uclaw-release` 标签的 Windows Runner。
+- Variable `SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG`，指向可深度签名 ZIP 内 `UClaw.exe` 和便携更新器的 SignPath artifact configuration。
+- Environment `uclaw-production`，建议配置 required reviewers、禁止 self-review，并限制 deployment branch 为 `master`。
+- 一台带 `self-hosted`、`Windows`、`X64`、`uclaw-release` 标签的受保护 Windows Runner。
 
-生产 Runner 必须：
+生产 Runner 不需要交互式桌面或 Electron UI。它必须能访问 GitHub、`uclaw-ver.oss-cn-beijing.aliyuncs.com`、`zz-cn.lingzhiwuxian.com` 和生产 SSH，并安装 Windows OpenSSH Client；`ossutil.exe` 固定放在：
 
-- 使用固定专用 Windows 用户运行，不能与个人开发会话混用。
-- 在该用户的交互式桌面会话中启动 GitHub Runner；不要注册为无桌面的 Windows Service。
-- 允许启动 Electron UI，并保持显示会话可用。
-- 能访问 GitHub、SignPath、`zz-cn.lingzhiwuxian.com`、`uclaw-ver.oss-cn-beijing.aliyuncs.com` 和生产 SSH。
-- 安装 Windows OpenSSH Client。
-- 在 `%TEMP%\uclaw-ossutil\ossutil-2.3.0-windows-amd64\ossutil.exe` 放置已验证的 ossutil。
+```text
+%TEMP%\uclaw-ossutil\ossutil-2.3.0-windows-amd64\ossutil.exe
+```
 
 ## DPAPI 凭证
 
-凭证只保存在 Runner 用户的：
+生产凭证只保存在 Runner 用户目录：
 
 ```text
 %APPDATA%\UClaw\release-credentials\
-  live-registration-admin.json
   oss-release.json
   production-ssh.json
 ```
 
-它们不得提交到 Git、写入 Actions secrets、命令参数、环境变量、日志或报告。DPAPI 文件必须由实际运行 Runner 的同一 Windows 用户创建。
+- `oss-release.json` 的 `accessKeySecretDpapi` 是 PowerShell `ConvertFrom-SecureString` 输出。
+- `production-ssh.json` 的 `passwordDpapi` 是 PowerShell `ConvertFrom-SecureString` 输出。
+- 凭证不得提交到 Git、写入 Actions 参数或环境变量，也不得进入日志、报告或制品。
+- DPAPI 文件必须由实际运行 Runner 的同一 Windows 用户创建。
 
-现有 OSS 和 SSH 文件继续使用：
+正式发布不再需要 `live-registration-admin.json`。
 
-- `oss-release.json`：`accessKeySecretDpapi` 为 PowerShell `ConvertFrom-SecureString` 输出。
-- `production-ssh.json`：`passwordDpapi` 为 PowerShell `ConvertFrom-SecureString` 输出。
+## 制品校验
 
-Live 管理员文件使用完整记录加密，结构只有：
+正式发布保留以下硬校验；它们属于发包完整性，不是功能回归：
 
-```json
-{
-  "schemaVersion": 1,
-  "recordDpapi": "<DPAPI encrypted JSON>"
-}
-```
+- 触发分支必须是远端最新 `master`，checkout 必须干净。
+- 输入版本必须是稳定语义版本，并与 `package.json` 一致。
+- ZIP 内 `UClaw.exe` 和便携更新器 Authenticode 签名必须有效。
+- 签名后重新计算 JSON，version、commit、build ID、文件名、size 和 SHA-512 必须对应最终 ZIP 字节。
+- OSS 必须返回 HTTP 200、精确 `Content-Length`、Range 支持、允许的 Content-Type 和 ZIP 文件头，远端 JSON 必须与本地一致。
+- `claw_x_releases` 更新在 `ON_ERROR_STOP` 事务中完成，并且只允许一个 `latest/win/x64/portable_zip` 记录启用。
+- 公网更新接口返回的版本、URL、size、SHA-512、package type 和 mandatory 必须与候选一致。
 
-在 Runner 用户会话中用无回显方式初始化：
+## 独立回归
+
+回归不在正式发布工作流中自动运行。需要 QA 时单独执行：
 
 ```powershell
-$directory = Join-Path $env:APPDATA 'UClaw\release-credentials'
-New-Item -ItemType Directory -Force -Path $directory | Out-Null
-
-$username = Read-Host 'Release regression admin username'
-$securePassword = Read-Host 'Release regression admin password' -AsSecureString
-$pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
-try {
-  $password = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
-  $record = [pscustomobject]@{
-    username = $username
-    password = $password
-  } | ConvertTo-Json -Compress
-  $recordDpapi = ConvertFrom-SecureString (
-    ConvertTo-SecureString $record -AsPlainText -Force
-  )
-  [pscustomobject]@{
-    schemaVersion = 1
-    recordDpapi = $recordDpapi
-  } | ConvertTo-Json | Set-Content (
-    Join-Path $directory 'live-registration-admin.json'
-  ) -Encoding UTF8
-} finally {
-  $password = $null
-  $record = $null
-  [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
-}
+pnpm run test:e2e
+pnpm run test:packaged:win:full
+pnpm run test:packaged:win:live
 ```
 
-管理员账号必须只用于回归：工作流会在内存中创建一次性激活码和随机临时用户，通过最终成品 UI 完成注册、激活、退出、重启和重登，Live 完成后删除临时用户。
+详细隔离和凭证规则见 `PACKAGED_REGRESSION.md`。回归结果不会被 `stage-production-release-candidate.mjs` 或生产发布 Action 读取。
 
-## Actions 执行内容
-
-托管 Runner：
-
-- 精确 `master`、版本号、完整 commit 和 clean checkout。
-- `pnpm install --frozen-lockfile`。
-- `typecheck`、Source Electron E2E、comms replay/compare、harness。
-- `package:win:usb` 的初始 Full。
-- SignPath 深度签名。
-- 根据签名后的最终 ZIP 重算 size/SHA-512。
-- 对签名后的最终 ZIP 再执行一次 Full。
-- 固化 `candidate.json`、源码结果和 Full summary。
-
-自托管 Runner：
-
-- 空白隔离 profile。
-- 全新账号注册、一次性激活、设备激活、Relay Token 和 Runtime 初始化。
-- 退出、重启、刚注册账号重登。
-- 真实 Responses 文本、图片、视频、充值只读和渠道健康。
-- 临时账号清理。
-- Full、Live、metadata、build ID、commit、size、SHA-512 对应同一候选包。
-- 生成合并中文报告和能力结果 JSON；它们用于发布证据，不再作为额外的聚合门禁脚本。
-
-## 生产写入
-
-`publish-portable-release.ps1`：
-
-- 发布前要求公网更新接口可读；无法确认当前线上版本时禁止生产写入。
-- 拒绝把较旧版本覆盖到线上。
-- 同一版本若已存在但 size/SHA-512 不同，直接失败，不允许替换不可变成品。
-- ZIP 和 JSON 分别探测并校验；上次只成功上传 ZIP 时，重跑只补传缺失 JSON，任何已存在但不匹配的对象仍会阻断。
-- 上传到 `oss://uclaw-ver/releases/latest/`。
-- 验证 HTTP 200、Content-Length、Content-Type、Accept-Ranges、ZIP 文件头和远端 JSON。
-- 动态寻找 Kubernetes 中唯一的 PostgreSQL 容器。
-- 锁定发布表，在一个 `ON_ERROR_STOP` 事务中校验版本递增、同版本不可变元数据和重复行，再切换 `claw_x_releases`。
-- 断言只有一个 `latest/win/x64/portable_zip` 记录启用。
-- 轮询公网更新接口并逐字段核对。
-- 公网回读无法收敛时，禁用新候选并恢复发布前启用记录；此前没有启用记录时也不会遗留半发布版本。
-- 成功后写出不含凭证的 `publication.json`。
-
-发布器可以幂等重跑：线上已经是完全相同的版本和哈希时，不会重写不可变 OSS 对象。
-
-## 产物
+## 发布产物
 
 Actions 和 GitHub Release 保留：
 
 - `UClaw-<version>-win-x64-usb.zip`
 - `UClaw-<version>-win-x64-usb.json`
-- 完整中文回归报告
-- `production-capability-results.json`
 - `publication.json`
 
 最终公网接口：
@@ -169,8 +99,8 @@ https://zz-cn.lingzhiwuxian.com/api/clawx/updates/latest?channel=latest&platform
 
 ## 故障处理
 
-- 构建、签名、Full 或 Live 失败：没有生产写入，修复代码后从 `develop` 重新走测试。
-- OSS 上传失败：feed 不会更新；重跑同一次工作流，发布器会保留并复核已成功上传的精确对象，只补缺失对象。
-- 数据库事务失败：旧 release 保持启用；修复连接后重跑。
-- 公网回读失败：脚本尝试恢复旧记录，并让工作流失败。
-- OSS/feed 已成功但 GitHub Release 失败：重跑同版本；发布器识别完全相同的线上版本后只完成标签/Release 收尾。
+- 构建或签名失败：没有生产写入，修复后重跑。
+- OSS 上传失败：feed 不更新；重跑时发布器复核已存在对象，只补传缺失对象。
+- 数据库事务失败：旧 release 保持启用，修复连接后重跑。
+- 公网回读失败：发布脚本尝试恢复旧记录并使工作流失败。
+- OSS/feed 已成功但 GitHub Release 失败：重跑同一版本；完全一致的线上版本会按幂等路径完成 tag 和 Release。

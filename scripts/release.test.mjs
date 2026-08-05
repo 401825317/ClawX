@@ -68,6 +68,11 @@ test('package metadata exposes the local Windows USB release entry at version 2.
   assert.equal(pkg.scripts.release, 'node scripts/release.mjs');
   assert.match(pkg.scripts['test:release:pipeline'], /(?:^|\s)scripts\/release\.test\.mjs(?:\s|$)/u);
   assert.match(pkg.scripts['package:win:usb'], /--publish never/u);
+  assert.equal(
+    pkg.scripts['package:win:usb'].includes('run-packaged-regression'),
+    false,
+    'package:win:usb must build artifacts without running functional regression',
+  );
   for (const forbidden of [
     '--publish always',
     'ossutil',
@@ -199,7 +204,7 @@ test('builds only the Windows USB package and verifies its exact identity', asyn
       expectedCommit: COMMIT,
     }]);
     assert.equal(result.identity.buildId, 'local-build');
-    assert.ok(messages.some((message) => message.includes('未执行正式发布')));
+    assert.ok(messages.some((message) => message.includes('No signing or production publication')));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

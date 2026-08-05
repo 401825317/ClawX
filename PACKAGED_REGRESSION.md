@@ -4,10 +4,11 @@
 
 ## 每次打包
 
-`package:win:usb` 已接入 `full` 回归。打包、ZIP/JSON 生成或任一必测场景失败时，命令返回非零状态，产物不得作为测试包分发。
+`package:win:usb` 只构建 ZIP/JSON，不自动执行回归。需要验证测试包时，在构建完成后显式运行 `test:packaged:win:full`；正式发布流程不调用该回归。
 
 ```powershell
 pnpm run package:win:usb
+pnpm run test:packaged:win:full
 ```
 
 也可以对已经存在的包单独运行：

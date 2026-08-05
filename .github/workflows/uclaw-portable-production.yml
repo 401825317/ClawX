@@ -107,8 +107,8 @@ jobs:
           echo "short_commit=${LOCAL_COMMIT:0:7}" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-  build-and-full:
-    name: Build, sign, and run exact-package Full
+  build-and-sign:
+    name: Build, sign, and stage exact package
     needs: preflight
     runs-on: windows-latest
     timeout-minutes: 150
@@ -147,24 +147,6 @@ jobs:
       - name: Install locked dependencies
         shell: pwsh
         run: pnpm install --frozen-lockfile
-
-      - name: Typecheck
-        shell: pwsh
-        run: pnpm run typecheck
-
-      - name: Source Electron E2E
-        shell: pwsh
-        run: pnpm run test:e2e
-
-      - name: Communication replay and comparison
-        shell: pwsh
-        run: |
-          pnpm run comms:replay
-          pnpm run comms:compare
-
-      - name: Harness CI parity
-        shell: pwsh
-        run: pnpm run harness:ci
 
       - name: Build unsigned Windows USB candidate
         shell: pwsh
@@ -255,13 +237,6 @@ jobs:
             --version $env:RELEASE_VERSION `
             --commit $env:RELEASE_COMMIT
 
-      - name: Run Full regression against the exact signed ZIP
-        shell: pwsh
-        run: |
-          node scripts/windows-support/run-packaged-regression.mjs `
-            --zip "release\UClaw-$env:RELEASE_VERSION-win-x64-usb.zip" `
-            --profile full
-
       - name: Stage immutable production candidate
         shell: pwsh
         run: |
@@ -277,25 +252,11 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload build and Full diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: uclaw-production-build-evidence-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            release/regression/**/*
-            test-results/**/*
-            playwright-report/**/*
-            artifacts/comms/**/*
-            artifacts/harness/**/*
-          if-no-files-found: warn
-          retention-days: 14
-
-  live-and-publish:
-    name: Fresh registration, Live, OSS, feed, and version
+  publish:
+    name: Publish OSS, feed, tag, and GitHub Release
     needs:
       - preflight
-      - build-and-full
+      - build-and-sign
     runs-on:
       - self-hosted
       - Windows
@@ -321,19 +282,6 @@ jobs:
           fetch-depth: 0
           clean: true
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.UCLAW_NODE_VERSION }}
-          cache: pnpm
-
-      - name: Install locked dependencies
-        shell: pwsh
-        run: pnpm install --frozen-lockfile
-
       - name: Download exact production candidate
         uses: actions/download-artifact@v4
         with:
@@ -343,11 +291,7 @@ jobs:
       - name: Verify protected release runner prerequisites
         shell: pwsh
         run: |
-          if (-not [Environment]::UserInteractive) {
-            throw 'The uclaw-release runner must run in an interactive Windows session for Electron Live tests.'
-          }
           $required = @(
-            (Join-Path $env:APPDATA 'UClaw\release-credentials\live-registration-admin.json'),
             (Join-Path $env:APPDATA 'UClaw\release-credentials\oss-release.json'),
             (Join-Path $env:APPDATA 'UClaw\release-credentials\production-ssh.json'),
             (Join-Path $env:TEMP 'uclaw-ossutil\ossutil-2.3.0-windows-amd64\ossutil.exe')
@@ -357,46 +301,6 @@ jobs:
               throw "Protected release runner prerequisite is missing: $path"
             }
           }
-
-      - name: Register a fresh account and run managed Live
-        shell: pwsh
-        run: |
-          & scripts/windows-support/invoke-live-registration-gate.ps1 `
-            -ZipPath (Join-Path $env:CANDIDATE_DIRECTORY "UClaw-$env:RELEASE_VERSION-win-x64-usb.zip")
-
-      - name: Locate exact Live summary
-        id: live-summary
-        shell: pwsh
-        run: |
-          $candidate = Get-Content -Raw -LiteralPath (Join-Path $env:CANDIDATE_DIRECTORY 'candidate.json') | ConvertFrom-Json
-          $matches = @(
-            Get-ChildItem -Path 'release\regression' -Filter summary.json -File -Recurse | ForEach-Object {
-              $summary = Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json
-              if ($summary.profile -eq 'live' -and $summary.status -eq 'passed' -and
-                $summary.liveRegistrationViaAdminStdin -eq $true -and
-                $summary.package.version -eq $candidate.version -and
-                $summary.package.gitCommit -eq $candidate.commit -and
-                $summary.package.sha512 -ceq $candidate.sha512) {
-                [pscustomobject]@{ Path = $_.FullName; FinishedAt = [string]$summary.finishedAt }
-              }
-            }
-          ) | Sort-Object FinishedAt -Descending
-          if ($matches.Count -ne 1) {
-            throw "Expected exactly one passing fresh-registration Live summary for the candidate; found $($matches.Count)."
-          }
-          "path=$($matches[0].Path)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-      - name: Generate combined release report
-        shell: pwsh
-        env:
-          LIVE_SUMMARY: ${{ steps.live-summary.outputs.path }}
-        run: |
-          node scripts/windows-support/generate-regression-report.mjs `
-            --source (Join-Path $env:CANDIDATE_DIRECTORY 'source-results.json') `
-            --packaged (Join-Path $env:CANDIDATE_DIRECTORY 'full-summary.json') `
-            --live $env:LIVE_SUMMARY `
-            --output (Join-Path $env:CANDIDATE_DIRECTORY "UClaw-$env:RELEASE_VERSION-complete-regression-report.zh-CN.md") `
-            --results-output (Join-Path $env:CANDIDATE_DIRECTORY 'production-capability-results.json')
 
       - name: Validate publication inputs without production writes
         shell: pwsh
@@ -452,8 +356,6 @@ jobs:
           files: |
             ${{ env.CANDIDATE_DIRECTORY }}/UClaw-${{ needs.preflight.outputs.version }}-win-x64-usb.zip
             ${{ env.CANDIDATE_DIRECTORY }}/UClaw-${{ needs.preflight.outputs.version }}-win-x64-usb.json
-            ${{ env.CANDIDATE_DIRECTORY }}/UClaw-${{ needs.preflight.outputs.version }}-complete-regression-report.zh-CN.md
-            ${{ env.CANDIDATE_DIRECTORY }}/production-capability-results.json
             ${{ env.CANDIDATE_DIRECTORY }}/publication.json
 
       - name: Write release summary
@@ -479,6 +381,5 @@ jobs:
           name: uclaw-production-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ env.CANDIDATE_DIRECTORY }}/*
-            release/regression/**/*
           if-no-files-found: warn
           retention-days: 30

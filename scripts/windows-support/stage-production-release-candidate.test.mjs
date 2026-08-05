@@ -10,15 +10,13 @@ async function createFixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'uclaw-production-candidate-'));
   const releaseDir = path.join(root, 'release');
   const output = path.join(root, 'candidate');
-  const regressionDir = path.join(releaseDir, 'regression', 'full-run');
-  const source = path.join(root, 'source-results.json');
   const version = '1.2.3';
   const commit = 'a'.repeat(40);
   const buildId = 'test-build';
   const zipFileName = `UClaw-${version}-win-x64-usb.zip`;
   const zipPath = path.join(releaseDir, zipFileName);
   const metadataPath = zipPath.replace(/\.zip$/u, '.json');
-  await mkdir(regressionDir, { recursive: true });
+  await mkdir(releaseDir, { recursive: true });
   await writeFile(zipPath, Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x01, 0x02]));
   const zipSize = (await readFile(zipPath)).length;
   const sha512 = await sha512File(zipPath);
@@ -34,20 +32,10 @@ async function createFixture() {
     buildId,
     gitCommit: commit,
   }, null, 2)}\n`);
-  await writeFile(source, JSON.stringify({ suites: [{ specs: [{ tests: [{}] }] }] }));
-  await writeFile(path.join(regressionDir, 'summary.json'), JSON.stringify({
-    profile: 'full',
-    status: 'passed',
-    runId: 'full-test-run',
-    finishedAt: '2026-07-29T00:00:00.000Z',
-    package: identity,
-  }));
-  await writeFile(path.join(regressionDir, 'UClaw-complete-regression-report.zh-CN.md'), '# Full\n');
-  await writeFile(path.join(regressionDir, 'capability-results.json'), '{}\n');
-  return { root, releaseDir, output, source, version, commit, regressionDir, identity };
+  return { root, releaseDir, output, version, commit, identity };
 }
 
-test('stages only a passing Full summary for the exact final ZIP identity', async () => {
+test('stages the exact portable artifact without requiring regression evidence', async () => {
   const fixture = await createFixture();
   try {
     const result = await stageProductionReleaseCandidate(fixture);
@@ -58,21 +46,26 @@ test('stages only a passing Full summary for the exact final ZIP identity', asyn
     assert.equal(candidate.buildId, fixture.identity.buildId);
     assert.equal(candidate.size, fixture.identity.zipSize);
     assert.equal(candidate.sha512, fixture.identity.sha512);
+    assert.equal('fullRunId' in candidate, false);
+    assert.equal('sourceResults' in candidate, false);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
 
-test('rejects a passing Full summary from different ZIP bytes', async () => {
+test('rejects portable metadata from different ZIP bytes', async () => {
   const fixture = await createFixture();
   try {
-    const summaryPath = path.join(fixture.regressionDir, 'summary.json');
-    const summary = JSON.parse(await readFile(summaryPath, 'utf8'));
-    summary.package.sha512 = '0'.repeat(128);
-    await writeFile(summaryPath, JSON.stringify(summary));
+    const metadataPath = path.join(
+      fixture.releaseDir,
+      `UClaw-${fixture.version}-win-x64-usb.json`,
+    );
+    const metadata = JSON.parse(await readFile(metadataPath, 'utf8'));
+    metadata.sha512 = '0'.repeat(128);
+    await writeFile(metadataPath, JSON.stringify(metadata));
     await assert.rejects(
       stageProductionReleaseCandidate(fixture),
-      /No passing Full regression matches the final portable ZIP identity/u,
+      /Portable JSON does not match the final ZIP/u,
     );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });

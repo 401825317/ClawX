@@ -85,7 +85,7 @@ export async function runLocalRelease({
   log(`[local-release] Size: ${artifact.identity.zipSize}`);
   log(`[local-release] SHA-512: ${artifact.identity.sha512}`);
   log(`[local-release] Candidate: ${artifact.zipPath}`);
-  log('[local-release] 未执行正式发布；签名和生产发布请运行 UClaw Windows Portable Production 工作流。');
+  log('[local-release] No signing or production publication was performed.');
 
   return artifact;
 }

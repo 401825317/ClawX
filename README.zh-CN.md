@@ -417,7 +417,7 @@ pnpm release              # 构建并校验本地 Windows USB 候选包，不执
 pnpm package:linux        # 为 Linux 打包
 ```
 
-Windows USB 构建会输出 `UClaw-<version>-win-x64-usb.zip` 及同名 JSON 元数据。持久数据保存在 `UClawData`，高频状态使用本机隔离运行目录；便携更新只有在 ZIP 格式、文件大小和 SHA-512 全部校验通过后才会安装。`pnpm release` 仅作为 Windows 本地候选包门禁：它要求 Git 工作区干净，构建 USB 包、执行 Full 回归，并校验精确的版本、提交、文件大小和 SHA-512；不会签名、上传、修改生产更新记录、创建 Git 标签或 GitHub Release。正式签名、Live 回归和发布只通过 `.github/workflows/uclaw-portable-production.yml` 执行。
+Windows USB 构建会输出 `UClaw-<version>-win-x64-usb.zip` 及同名 JSON 元数据。持久数据保存在 `UClawData`，高频状态使用本机隔离运行目录；便携更新只有在 ZIP 格式、文件大小和 SHA-512 全部校验通过后才会安装。`pnpm release` 仅作为 Windows 本地候选包构建：它要求 Git 工作区干净，构建 USB 包，并校验精确的版本、提交、build ID、文件大小和 SHA-512，不执行功能回归；不会签名、上传、修改生产更新记录、创建 Git 标签或 GitHub Release。正式签名和发布通过 `.github/workflows/uclaw-portable-production.yml` 执行，该工作流同样不运行功能回归。
 
 在无头 Linux 环境下，Electron 测试需要显示服务；可使用 `xvfb-run -a pnpm run test:e2e`。
 

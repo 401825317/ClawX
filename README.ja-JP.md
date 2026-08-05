@@ -413,7 +413,7 @@ pnpm release              # ローカルWindows USB候補を作成・検証（�
 pnpm package:linux        # Linux向けにパッケージ化
 ```
 
-Windows USB ビルドは `UClaw-<version>-win-x64-usb.zip` と対応する JSON メタデータを生成します。永続データは `UClawData` に保存し、頻繁に更新される状態は分離されたローカル実行プロファイルを使用します。ポータブル更新は ZIP、サイズ、SHA-512 の検証後にのみインストールされます。`pnpm release` は Windows 専用のローカル候補ゲートです。クリーンな Git ワークスペースを要求し、USB パッケージを作成して Full 回帰を実行し、正確なバージョン、コミット、サイズ、SHA-512 を検証します。署名、アップロード、本番更新フィードの変更、Git タグ、GitHub Release の作成は行いません。正式な署名、Live 回帰、公開は `.github/workflows/uclaw-portable-production.yml` からのみ実行します。
+Windows USB ビルドは `UClaw-<version>-win-x64-usb.zip` と対応する JSON メタデータを生成します。永続データは `UClawData` に保存し、頻繁に更新される状態は分離されたローカル実行プロファイルを使用します。ポータブル更新は ZIP、サイズ、SHA-512 の検証後にのみインストールされます。`pnpm release` は Windows 専用のローカル候補ビルドです。クリーンな Git ワークスペースを要求し、USB パッケージを作成して正確なバージョン、コミット、build ID、サイズ、SHA-512 を検証しますが、機能回帰は実行しません。署名、アップロード、本番更新フィードの変更、Git タグ、GitHub Release の作成は行いません。正式な署名と公開は `.github/workflows/uclaw-portable-production.yml` から実行し、このワークフローも機能回帰を実行しません。
 
 ヘッドレス Linux では Electron テストに表示サーバーが必要です。`xvfb-run -a pnpm run test:e2e` を利用してください。
 
