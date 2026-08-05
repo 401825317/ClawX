@@ -92,6 +92,27 @@ test('package metadata exposes the local Windows USB release entry at version 2.
   }
 });
 
+test('production workflow signs portable executables without regression or an external configuration slug', async () => {
+  const workflow = await readFile(
+    path.join(ROOT, '.github', 'workflows', 'uclaw-portable-production.yml'),
+    'utf8',
+  );
+  assert.match(workflow, /signpath\/github-action-submit-signing-request@v2/u);
+  assert.match(workflow, /node scripts\/build-usb-release\.mjs --win --arch=x64/u);
+  for (const forbidden of [
+    'SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG',
+    'run-packaged-regression',
+    'pnpm run test:e2e',
+    'invoke-live-registration-gate',
+  ]) {
+    assert.equal(
+      workflow.includes(forbidden),
+      false,
+      `Unexpected production workflow dependency: ${forbidden}`,
+    );
+  }
+});
+
 test('Windows can execute the pnpm.cmd shim through the release shell strategy', {
   skip: process.platform !== 'win32',
 }, () => {

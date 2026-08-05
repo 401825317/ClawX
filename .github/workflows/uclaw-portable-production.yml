@@ -152,82 +152,62 @@ jobs:
         shell: pwsh
         run: pnpm run package:win:usb
 
-      - name: Require deep-signing configuration for a formal release
-        shell: pwsh
-        env:
-          USB_SIGNING_CONFIGURATION: ${{ vars.SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG }}
-        run: |
-          if (-not $env:USB_SIGNING_CONFIGURATION) {
-            throw 'Repository variable SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG is required.'
-          }
-
-      - name: Prepare Windows USB ZIP for SignPath
-        id: sign-input
+      - name: Prepare Windows USB executables for SignPath
         shell: pwsh
         run: |
-          $zip = Get-Item -LiteralPath "release\UClaw-$env:RELEASE_VERSION-win-x64-usb.zip"
           $inputDirectory = 'release\signpath-input'
           Remove-Item -LiteralPath $inputDirectory -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $inputDirectory -Force | Out-Null
-          $inputName = "$([IO.Path]::GetFileNameWithoutExtension($zip.Name)).signpath-${{ github.run_id }}-${{ github.run_attempt }}.zip"
-          Copy-Item -LiteralPath $zip.FullName -Destination (Join-Path $inputDirectory $inputName) -Force
-          "input_name=$inputName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $executables = @(
+            'release\win-unpacked\UClaw.exe',
+            'release\win-unpacked\resources\resources\updater\win32-x64\uclaw-portable-updater.exe'
+          )
+          foreach ($executable in $executables) {
+            if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+              throw "USB package is missing executable: $executable"
+            }
+            Copy-Item -LiteralPath $executable -Destination $inputDirectory -Force
+          }
 
-      - name: Upload unsigned USB ZIP for SignPath
+      - name: Upload unsigned USB executables for SignPath
         id: upload-sign-input
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
-          name: unsigned-uclaw-usb-${{ github.run_id }}-${{ github.run_attempt }}
-          path: release/signpath-input/*.zip
-          archive: false
+          name: unsigned-uclaw-usb-executables-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release/signpath-input/*.exe
           if-no-files-found: error
           retention-days: 1
 
-      - name: Deep-sign Windows USB ZIP
+      - name: Sign Windows USB executables
         uses: signpath/github-action-submit-signing-request@v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: 78e37079-23df-4800-b41c-33312ad7c1e3
           project-slug: ValueCell
           signing-policy-slug: ValueCell-sign
-          artifact-configuration-slug: ${{ vars.SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG }}
           github-artifact-id: ${{ steps.upload-sign-input.outputs.artifact-id }}
           wait-for-completion: true
-          output-artifact-directory: release/signed-usb
-          skip-decompress: true
+          output-artifact-directory: release/signed-executables
 
-      - name: Replace and verify deep-signed USB ZIP
+      - name: Replace signed executables and rebuild USB ZIP
         shell: pwsh
-        env:
-          SIGNED_INPUT_NAME: ${{ steps.sign-input.outputs.input_name }}
         run: |
-          $signed = @(Get-ChildItem -Path 'release\signed-usb' -Filter '*.zip' -File -Recurse)
-          if ($signed.Count -ne 1 -or $signed[0].Name -ne $env:SIGNED_INPUT_NAME) {
-            throw "Expected one signed ZIP named $env:SIGNED_INPUT_NAME; found $($signed.Count)."
+          $targets = @{
+            'UClaw.exe' = 'release\win-unpacked\UClaw.exe'
+            'uclaw-portable-updater.exe' = 'release\win-unpacked\resources\resources\updater\win32-x64\uclaw-portable-updater.exe'
           }
-          $target = "release\UClaw-$env:RELEASE_VERSION-win-x64-usb.zip"
-          Copy-Item -LiteralPath $signed[0].FullName -Destination $target -Force
-
-          $extractRoot = Join-Path $env:RUNNER_TEMP "uclaw-signed-usb-${{ github.run_id }}-${{ github.run_attempt }}"
-          Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
-          try {
-            Expand-Archive -LiteralPath $target -DestinationPath $extractRoot -Force
-            foreach ($relativePath in @(
-              'UClaw.exe',
-              'resources\resources\updater\win32-x64\uclaw-portable-updater.exe'
-            )) {
-              $executable = Join-Path $extractRoot $relativePath
-              if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
-                throw "Signed ZIP is missing $relativePath."
-              }
-              $signature = Get-AuthenticodeSignature -LiteralPath $executable
-              if ($signature.Status -ne 'Valid') {
-                throw "Invalid Authenticode signature for $relativePath: $($signature.Status)."
-              }
+          foreach ($name in $targets.Keys) {
+            $matches = @(Get-ChildItem -Path 'release\signed-executables' -Filter $name -File -Recurse)
+            if ($matches.Count -ne 1) {
+              throw "Expected one signed $name; found $($matches.Count)."
             }
-          } finally {
-            Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
+            $signature = Get-AuthenticodeSignature -LiteralPath $matches[0].FullName
+            if ($signature.Status -ne 'Valid') {
+              throw "Invalid Authenticode signature for $name: $($signature.Status)."
+            }
+            Copy-Item -LiteralPath $matches[0].FullName -Destination $targets[$name] -Force
           }
+          node scripts/build-usb-release.mjs --win --arch=x64
 
       - name: Refresh integrity metadata from signed ZIP
         shell: pwsh

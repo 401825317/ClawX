@@ -1,6 +1,6 @@
 # UClaw Windows 便携正式发布
 
-正式 Windows USB ZIP 使用 `.github/workflows/uclaw-portable-production.yml`。该工作流负责构建、SignPath 深度签名、制品完整性校验、OSS 上传、生产更新记录、Git 标签和 GitHub Release。
+正式 Windows USB ZIP 使用 `.github/workflows/uclaw-portable-production.yml`。该工作流负责构建、SignPath Authenticode 签名、制品完整性校验、OSS 上传、生产更新记录、Git 标签和 GitHub Release。
 
 正式发布不执行源码 E2E、成品 Full、托管 Live、新用户注册、激活或重登回归。回归脚本继续保留为独立 QA 工具，但不属于发包步骤，也不阻断正式发布。
 
@@ -20,7 +20,7 @@ pnpm release
 
 1. 确认待发布代码位于远端最新 `master`，`package.json` 使用新的稳定版本号。
 2. 从 `master` 手动运行 `UClaw Windows Portable Production`，输入与 `package.json` 相同的版本号。
-3. GitHub 托管 Windows Runner 安装锁定依赖、构建 USB ZIP、提交 SignPath 深度签名、验证签名并重算 ZIP/JSON 元数据。
+3. GitHub 托管 Windows Runner 安装锁定依赖、构建 USB ZIP、提交主程序和便携更新器给 SignPath、验证签名并重算 ZIP/JSON 元数据。
 4. 工作流把精确 ZIP、JSON 和 `candidate.json` 固化为不可变候选制品。
 5. 审批 `uclaw-production` Environment。
 6. 受保护的 `uclaw-release` Runner 校验候选，上传 OSS，事务更新 `claw_x_releases`，并回读公网更新接口。
@@ -32,7 +32,6 @@ pnpm release
 
 - Default branch 为 `master`。
 - Secret `SIGNPATH_API_TOKEN`。
-- Variable `SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG`，指向可深度签名 ZIP 内 `UClaw.exe` 和便携更新器的 SignPath artifact configuration。
 - Environment `uclaw-production`，建议配置 required reviewers、禁止 self-review，并限制 deployment branch 为 `master`。
 - 一台带 `self-hosted`、`Windows`、`X64`、`uclaw-release` 标签的受保护 Windows Runner。
 
@@ -65,7 +64,7 @@ pnpm release
 
 - 触发分支必须是远端最新 `master`，checkout 必须干净。
 - 输入版本必须是稳定语义版本，并与 `package.json` 一致。
-- ZIP 内 `UClaw.exe` 和便携更新器 Authenticode 签名必须有效。
+- 工作流从 `win-unpacked` 提交 `UClaw.exe` 和便携更新器给 SignPath，使用 `ValueCell` 项目的默认 artifact configuration；签名后放回原目录并重建 ZIP，两份 Authenticode 签名必须有效。
 - 签名后重新计算 JSON，version、commit、build ID、文件名、size 和 SHA-512 必须对应最终 ZIP 字节。
 - OSS 必须返回 HTTP 200、精确 `Content-Length`、Range 支持、允许的 Content-Type 和 ZIP 文件头，远端 JSON 必须与本地一致。
 - `claw_x_releases` 更新在 `ON_ERROR_STOP` 事务中完成，并且只允许一个 `latest/win/x64/portable_zip` 记录启用。
