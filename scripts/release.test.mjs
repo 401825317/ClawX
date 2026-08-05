@@ -98,6 +98,7 @@ test('production workflow signs portable executables without regression or an ex
     'utf8',
   );
   assert.match(workflow, /signpath\/github-action-submit-signing-request@v2/u);
+  assert.match(workflow, /Repository secret SIGNPATH_API_TOKEN is required/u);
   assert.match(workflow, /node scripts\/build-usb-release\.mjs --win --arch=x64/u);
   for (const forbidden of [
     'SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG',

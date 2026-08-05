@@ -123,6 +123,15 @@ jobs:
           ref: ${{ needs.preflight.outputs.commit }}
           fetch-depth: 0
 
+      - name: Require SignPath credential
+        shell: pwsh
+        env:
+          SIGNPATH_TOKEN_PRESENT: ${{ secrets.SIGNPATH_API_TOKEN }}
+        run: |
+          if (-not $env:SIGNPATH_TOKEN_PRESENT) {
+            throw 'Repository secret SIGNPATH_API_TOKEN is required for a formal signed release.'
+          }
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
