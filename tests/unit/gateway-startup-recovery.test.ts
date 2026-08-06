@@ -3,8 +3,10 @@ import {
   connectGatewayWithStartupRetry,
   getGatewayStartupRecoveryAction,
   hasInvalidConfigFailureSignal,
+  hasOpenClawFutureConfigGuardSignal,
   isGatewayStillStartingError,
   isInvalidConfigSignal,
+  isOpenClawFutureConfigGuardSignal,
   isTransientGatewayStartError,
   shouldAttemptConfigAutoRepair,
 } from '@electron/gateway/startup-recovery';
@@ -52,6 +54,18 @@ describe('gateway startup recovery heuristics', () => {
     expect(isInvalidConfigSignal('Run: openclaw doctor --fix')).toBe(true);
     expect(isInvalidConfigSignal('Gateway ready after 3 attempts')).toBe(false);
   });
+
+  it('detects the OpenClaw newer-config startup guard from stderr', () => {
+    const lines = [
+      'Your OpenClaw config was written by version 2026.6.11, but this command is running 2026.6.10.',
+      'Refusing to run automatic gateway startup migrations because this OpenClaw binary (2026.6.10) is older than the config last written by OpenClaw 2026.6.11.',
+      'Set OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS=1 only for an intentional downgrade or recovery action.',
+    ];
+
+    expect(lines.every(isOpenClawFutureConfigGuardSignal)).toBe(true);
+    expect(hasOpenClawFutureConfigGuardSignal(new Error('process exited'), lines)).toBe(true);
+    expect(isOpenClawFutureConfigGuardSignal('Config invalid')).toBe(false);
+  });
 });
 
 describe('getGatewayStartupRecoveryAction', () => {
@@ -67,6 +81,20 @@ describe('getGatewayStartupRecoveryAction', () => {
       maxAttempts: 3,
     });
     expect(action).toBe('repair');
+  });
+
+  it('fails without doctor or retry when OpenClaw rejects a newer config version', () => {
+    const action = getGatewayStartupRecoveryAction({
+      startupError: transientError,
+      startupStderrLines: [
+        'Refusing to run automatic gateway startup migrations because this OpenClaw binary (2026.6.10) is older than the config last written by OpenClaw 2026.6.11.',
+      ],
+      configRepairAttempted: false,
+      attempt: 1,
+      maxAttempts: 3,
+    });
+
+    expect(action).toBe('fail');
   });
 
   it('returns retry when repair was attempted but error is still transient', () => {

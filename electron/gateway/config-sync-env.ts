@@ -23,6 +23,14 @@ export type ManagedOpenAiProviderEnv = {
   loadedProviderKeyCount: number;
 };
 
+/** Removes environment keys case-insensitively without mutating the source object. */
+export function stripEnvironmentKeys(env: GatewayEnv, keys: readonly string[]): GatewayEnv {
+  const normalizedKeys = new Set(keys.map((key) => key.toUpperCase()));
+  return Object.fromEntries(
+    Object.entries(env).filter(([key]) => !normalizedKeys.has(key.toUpperCase())),
+  );
+}
+
 function isManagedProviderEnvKey(key: string): boolean {
   const normalized = key.toUpperCase();
   return UCLAW_MANAGED_PROVIDER_ENV_KEY_SET.has(normalized)

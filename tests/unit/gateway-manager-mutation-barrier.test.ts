@@ -17,6 +17,9 @@ const mocks = vi.hoisted(() => {
     runGatewayStartupSequence: vi.fn(),
     loadGatewayReloadPolicy: vi.fn(),
     loadOrCreateDeviceIdentity: vi.fn(),
+    prepareManagedOpenClawDowngrade: vi.fn(),
+    commitManagedOpenClawDowngrade: vi.fn(),
+    rollbackOpenClawDowngrade: vi.fn(),
     cancelLocalDeviceAutoApproval: vi.fn(),
     scheduleLocalDeviceAutoApproval: vi.fn(),
     providerStore: {
@@ -88,6 +91,18 @@ vi.mock('@electron/gateway/startup-orchestrator', () => ({
   runGatewayStartupSequence: mocks.runGatewayStartupSequence,
 }));
 
+vi.mock('@electron/gateway/openclaw-downgrade', () => ({
+  prepareManagedOpenClawDowngrade: mocks.prepareManagedOpenClawDowngrade,
+  commitManagedOpenClawDowngrade: mocks.commitManagedOpenClawDowngrade,
+  rollbackOpenClawDowngrade: mocks.rollbackOpenClawDowngrade,
+  isOpenClawDowngradeBlockedError: (error: unknown) => (
+    error instanceof Error && error.name === 'OpenClawDowngradeBlockedError'
+  ),
+  isOpenClawCommandTerminationUnconfirmedError: (error: unknown) => (
+    error instanceof Error && error.name === 'OpenClawCommandTerminationUnconfirmedError'
+  ),
+}));
+
 vi.mock('@electron/gateway/reload-policy', async () => {
   const actual = await vi.importActual<typeof import('@electron/gateway/reload-policy')>(
     '@electron/gateway/reload-policy',
@@ -118,6 +133,13 @@ function fakeChild(pid = 4242): Electron.UtilityProcess {
   return { pid } as Electron.UtilityProcess;
 }
 
+class TestOpenClawCommandTerminationUnconfirmedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'OpenClawCommandTerminationUnconfirmedError';
+  }
+}
+
 const originalManagedDistribution = process.env.CLAWX_MANAGED_PROVIDER;
 const originalPlatform = process.platform;
 
@@ -137,6 +159,9 @@ describe('GatewayManager managed runtime mutation barrier', () => {
     mocks.waitForPortFree.mockResolvedValue(undefined);
     mocks.loadGatewayReloadPolicy.mockResolvedValue({ mode: 'hybrid', debounceMs: 0 });
     mocks.loadOrCreateDeviceIdentity.mockResolvedValue({ deviceId: 'test-device' });
+    mocks.prepareManagedOpenClawDowngrade.mockResolvedValue(null);
+    mocks.commitManagedOpenClawDowngrade.mockResolvedValue(undefined);
+    mocks.rollbackOpenClawDowngrade.mockResolvedValue(undefined);
     mocks.runGatewayStartupSequence.mockImplementation(async (hooks: {
       assertLifecycle: (phase: string) => void;
       startProcess: () => Promise<void>;
@@ -169,6 +194,511 @@ describe('GatewayManager managed runtime mutation barrier', () => {
     } finally {
       manager.releaseManagedRuntimeMutationLease(lease);
     }
+  });
+
+  it('prepares and commits the 6.11 handoff around the first managed Gateway ready event', async () => {
+    const transaction = {
+      configPath: '/tmp/openclaw.json',
+      backupPath: '/tmp/openclaw.json.bak',
+      fromVersion: '2026.6.11',
+      toVersion: '2026.6.10',
+    };
+    const child = fakeChild(6110);
+    mocks.prepareManagedOpenClawDowngrade.mockResolvedValueOnce(transaction);
+    mocks.launchGatewayProcess.mockResolvedValueOnce({ child, lastSpawnSummary: 'downgrade-spawn' });
+    mocks.runGatewayStartupSequence.mockImplementationOnce(async (hooks: {
+      startProcess: () => Promise<void>;
+      afterManagedGatewayReady?: () => Promise<void>;
+      canRecoverStartup?: () => boolean;
+    }) => {
+      expect(hooks.canRecoverStartup?.()).toBe(false);
+      await hooks.startProcess();
+      await hooks.afterManagedGatewayReady?.();
+      expect(hooks.canRecoverStartup?.()).toBe(true);
+    });
+
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+    await manager.start();
+
+    expect(mocks.prepareManagedOpenClawDowngrade).toHaveBeenCalledTimes(1);
+    expect(mocks.prepareManagedOpenClawDowngrade.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.prepareGatewayLaunchContext.mock.invocationCallOrder[0]!,
+    );
+    expect(mocks.launchGatewayProcess).toHaveBeenCalledWith(expect.objectContaining({
+      allowOlderBinaryDestructiveActions: true,
+    }));
+    expect(mocks.commitManagedOpenClawDowngrade).toHaveBeenCalledWith(transaction);
+  });
+
+  it('terminates and rolls back a failed controlled handoff without reconnecting', async () => {
+    const transaction = {
+      configPath: '/tmp/openclaw.json',
+      backupPath: '/tmp/openclaw.json.bak',
+      fromVersion: '2026.6.11',
+      toVersion: '2026.6.10',
+    };
+    const child = fakeChild(6111);
+    mocks.prepareManagedOpenClawDowngrade.mockResolvedValueOnce(transaction);
+    mocks.launchGatewayProcess.mockResolvedValueOnce({ child, lastSpawnSummary: 'downgrade-spawn' });
+    mocks.commitManagedOpenClawDowngrade.mockRejectedValueOnce(new Error('stamp failed'));
+    mocks.runGatewayStartupSequence.mockImplementationOnce(async (hooks: {
+      startProcess: () => Promise<void>;
+      afterManagedGatewayReady?: () => Promise<void>;
+    }) => {
+      await hooks.startProcess();
+      await hooks.afterManagedGatewayReady?.();
+    });
+
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+    const reconnectSpy = vi.spyOn(
+      manager as unknown as { scheduleReconnect: () => void },
+      'scheduleReconnect',
+    );
+
+    await expect(manager.start()).rejects.toThrow('stamp failed');
+
+    expect(mocks.terminateOwnedGatewayProcess).toHaveBeenCalledWith(child);
+    expect(mocks.rollbackOpenClawDowngrade).toHaveBeenCalledWith(transaction);
+    expect(reconnectSpy).not.toHaveBeenCalled();
+    expect((manager as unknown as { shouldReconnect: boolean }).shouldReconnect).toBe(false);
+  });
+
+  it('isolates an unconfirmed CLI termination without restoring the config backup', async () => {
+    const transaction = {
+      configPath: '/tmp/openclaw.json',
+      backupPath: '/tmp/openclaw.json.bak',
+      fromVersion: '2026.6.11',
+      toVersion: '2026.6.10',
+    };
+    const child = fakeChild(6120);
+    const commitError = new TestOpenClawCommandTerminationUnconfirmedError(
+      'Bundled OpenClaw command termination could not be confirmed',
+    );
+    mocks.prepareManagedOpenClawDowngrade.mockResolvedValueOnce(transaction);
+    mocks.launchGatewayProcess.mockResolvedValueOnce({ child, lastSpawnSummary: 'downgrade-spawn' });
+    mocks.commitManagedOpenClawDowngrade.mockRejectedValueOnce(commitError);
+    mocks.runGatewayStartupSequence.mockImplementationOnce(async (hooks: {
+      startProcess: () => Promise<void>;
+      afterManagedGatewayReady?: () => Promise<void>;
+    }) => {
+      await hooks.startProcess();
+      await hooks.afterManagedGatewayReady?.();
+    });
+
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+    const internals = manager as unknown as {
+      openClawDowngradeTransaction: unknown;
+      ownsProcess: boolean;
+      process: Electron.UtilityProcess | null;
+      shouldReconnect: boolean;
+      scheduleReconnect: () => void;
+    };
+    const reconnectSpy = vi.spyOn(internals, 'scheduleReconnect');
+    mocks.terminateOwnedGatewayProcess.mockImplementationOnce(async () => {
+      expect(internals.openClawDowngradeTransaction).toBeNull();
+    });
+
+    const failure = await manager.start().catch((error: unknown) => error);
+
+    expect(failure).toBe(commitError);
+    expect(mocks.terminateOwnedGatewayProcess).toHaveBeenCalledWith(child);
+    expect(mocks.rollbackOpenClawDowngrade).not.toHaveBeenCalled();
+    expect(reconnectSpy).not.toHaveBeenCalled();
+    expect(internals.shouldReconnect).toBe(false);
+    expect(internals.openClawDowngradeTransaction).toBeNull();
+    expect(internals.process).toBeNull();
+    expect(internals.ownsProcess).toBe(false);
+  });
+
+  it('blocks later starts on the same manager after an unconfirmed CLI termination', async () => {
+    const transaction = {
+      configPath: '/tmp/openclaw.json',
+      backupPath: '/tmp/openclaw.json.bak',
+      fromVersion: '2026.6.11',
+      toVersion: '2026.6.10',
+    };
+    const child = fakeChild(6122);
+    const commitError = new TestOpenClawCommandTerminationUnconfirmedError(
+      'Bundled OpenClaw command termination could not be confirmed',
+    );
+    mocks.prepareManagedOpenClawDowngrade.mockResolvedValueOnce(transaction);
+    mocks.launchGatewayProcess.mockResolvedValueOnce({ child, lastSpawnSummary: 'downgrade-spawn' });
+    mocks.commitManagedOpenClawDowngrade.mockRejectedValueOnce(commitError);
+    mocks.runGatewayStartupSequence.mockImplementationOnce(async (hooks: {
+      startProcess: () => Promise<void>;
+      connect: (port: number) => Promise<void>;
+      afterManagedGatewayReady?: () => Promise<void>;
+    }) => {
+      await hooks.startProcess();
+      await hooks.connect(18789);
+      await hooks.afterManagedGatewayReady?.();
+    });
+
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+    const connectSpy = vi.spyOn(
+      manager as unknown as { connect: (port: number) => Promise<void> },
+      'connect',
+    ).mockResolvedValue(undefined);
+
+    await expect(manager.start()).rejects.toBe(commitError);
+    const callsAfterIsolation = {
+      prepare: mocks.prepareManagedOpenClawDowngrade.mock.calls.length,
+      startup: mocks.runGatewayStartupSequence.mock.calls.length,
+      launch: mocks.launchGatewayProcess.mock.calls.length,
+      connect: connectSpy.mock.calls.length,
+    };
+
+    const retryFailure = await manager.start().catch((error: unknown) => error);
+
+    expect(retryFailure).toEqual(expect.objectContaining({
+      name: 'GatewayProcessIsolationError',
+    }));
+    expect(mocks.prepareManagedOpenClawDowngrade).toHaveBeenCalledTimes(callsAfterIsolation.prepare);
+    expect(mocks.runGatewayStartupSequence).toHaveBeenCalledTimes(callsAfterIsolation.startup);
+    expect(mocks.launchGatewayProcess).toHaveBeenCalledTimes(callsAfterIsolation.launch);
+    expect(connectSpy).toHaveBeenCalledTimes(callsAfterIsolation.connect);
+    expect(mocks.rollbackOpenClawDowngrade).not.toHaveBeenCalled();
+
+    // A new manager represents a new application process lifecycle and is not isolated.
+    mocks.runGatewayStartupSequence.mockResolvedValueOnce(undefined);
+    const freshManager = new GatewayManager();
+    await expect(freshManager.start()).resolves.toBeUndefined();
+    expect(mocks.prepareManagedOpenClawDowngrade).toHaveBeenCalledTimes(
+      callsAfterIsolation.prepare + 1,
+    );
+  });
+
+  it('allows a manual retry after an ordinary commit failure is rolled back', async () => {
+    const transaction = {
+      configPath: '/tmp/openclaw.json',
+      backupPath: '/tmp/openclaw.json.bak',
+      fromVersion: '2026.6.11',
+      toVersion: '2026.6.10',
+    };
+    const firstChild = fakeChild(6123);
+    const secondChild = fakeChild(6124);
+    mocks.prepareManagedOpenClawDowngrade.mockResolvedValueOnce(transaction);
+    mocks.launchGatewayProcess
+      .mockResolvedValueOnce({ child: firstChild, lastSpawnSummary: 'first-spawn' })
+      .mockResolvedValueOnce({ child: secondChild, lastSpawnSummary: 'retry-spawn' });
+    mocks.commitManagedOpenClawDowngrade.mockRejectedValueOnce(new Error('stamp failed'));
+    mocks.runGatewayStartupSequence
+      .mockImplementationOnce(async (hooks: {
+        startProcess: () => Promise<void>;
+        afterManagedGatewayReady?: () => Promise<void>;
+      }) => {
+        await hooks.startProcess();
+        await hooks.afterManagedGatewayReady?.();
+      })
+      .mockImplementationOnce(async (hooks: { startProcess: () => Promise<void> }) => {
+        await hooks.startProcess();
+      });
+
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+
+    await expect(manager.start()).rejects.toThrow('stamp failed');
+    await expect(manager.start()).resolves.toBeUndefined();
+
+    expect(mocks.prepareManagedOpenClawDowngrade).toHaveBeenCalledTimes(2);
+    expect(mocks.launchGatewayProcess).toHaveBeenCalledTimes(2);
+    expect(mocks.rollbackOpenClawDowngrade).toHaveBeenCalledOnce();
+    expect(mocks.rollbackOpenClawDowngrade).toHaveBeenCalledWith(transaction);
+  });
+
+  it('preserves both failures when Gateway termination fails during CLI isolation', async () => {
+    const transaction = {
+      configPath: '/tmp/openclaw.json',
+      backupPath: '/tmp/openclaw.json.bak',
+      fromVersion: '2026.6.11',
+      toVersion: '2026.6.10',
+    };
+    const child = fakeChild(6121);
+    const commitError = new TestOpenClawCommandTerminationUnconfirmedError(
+      'Bundled OpenClaw command termination could not be confirmed',
+    );
+    const terminationError = new Error('Gateway termination failed');
+    mocks.prepareManagedOpenClawDowngrade.mockResolvedValueOnce(transaction);
+    mocks.launchGatewayProcess.mockResolvedValueOnce({ child, lastSpawnSummary: 'downgrade-spawn' });
+    mocks.commitManagedOpenClawDowngrade.mockRejectedValueOnce(commitError);
+    mocks.terminateOwnedGatewayProcess.mockRejectedValueOnce(terminationError);
+    mocks.runGatewayStartupSequence.mockImplementationOnce(async (hooks: {
+      startProcess: () => Promise<void>;
+      afterManagedGatewayReady?: () => Promise<void>;
+    }) => {
+      await hooks.startProcess();
+      await hooks.afterManagedGatewayReady?.();
+    });
+
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+    const internals = manager as unknown as {
+      openClawDowngradeTransaction: unknown;
+      process: Electron.UtilityProcess | null;
+      shouldReconnect: boolean;
+      scheduleReconnect: () => void;
+    };
+    const reconnectSpy = vi.spyOn(internals, 'scheduleReconnect');
+
+    const failure = await manager.start().catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors).toEqual([commitError, terminationError]);
+    expect(mocks.rollbackOpenClawDowngrade).not.toHaveBeenCalled();
+    expect(reconnectSpy).not.toHaveBeenCalled();
+    expect(internals.shouldReconnect).toBe(false);
+    expect(internals.openClawDowngradeTransaction).toBeNull();
+    expect(internals.process).toBe(child);
+  });
+
+  it('clears the exited child pid when isolation termination emits onExit first', async () => {
+    const transaction = {
+      configPath: '/tmp/openclaw.json',
+      backupPath: '/tmp/openclaw.json.bak',
+      fromVersion: '2026.6.11',
+      toVersion: '2026.6.10',
+    };
+    const child = fakeChild(6125);
+    const commitError = new TestOpenClawCommandTerminationUnconfirmedError(
+      'Bundled OpenClaw command termination could not be confirmed',
+    );
+    let launchOptions: {
+      onSpawn: (pid: number | undefined) => void;
+      onExit: (child: Electron.UtilityProcess, code: number | null) => void;
+    } | null = null;
+    mocks.prepareManagedOpenClawDowngrade.mockResolvedValueOnce(transaction);
+    mocks.launchGatewayProcess.mockImplementationOnce(async (options: typeof launchOptions) => {
+      launchOptions = options;
+      options!.onSpawn(child.pid);
+      return { child, lastSpawnSummary: 'downgrade-spawn' };
+    });
+    mocks.commitManagedOpenClawDowngrade.mockRejectedValueOnce(commitError);
+    mocks.runGatewayStartupSequence.mockImplementationOnce(async (hooks: {
+      startProcess: () => Promise<void>;
+      afterManagedGatewayReady?: () => Promise<void>;
+    }) => {
+      await hooks.startProcess();
+      await hooks.afterManagedGatewayReady?.();
+    });
+    mocks.terminateOwnedGatewayProcess.mockImplementationOnce(async () => {
+      launchOptions!.onExit(child, 1);
+    });
+
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+    const internals = manager as unknown as {
+      ownsProcess: boolean;
+      process: Electron.UtilityProcess | null;
+      reconnectTimer: NodeJS.Timeout | null;
+      shouldReconnect: boolean;
+    };
+
+    await expect(manager.start()).rejects.toBe(commitError);
+
+    expect(internals.process).toBeNull();
+    expect(internals.ownsProcess).toBe(false);
+    expect(manager.getStatus().pid).toBeUndefined();
+    expect(internals.shouldReconnect).toBe(false);
+    expect(internals.reconnectTimer).toBeNull();
+    expect(mocks.launchGatewayProcess).toHaveBeenCalledOnce();
+    expect(mocks.rollbackOpenClawDowngrade).not.toHaveBeenCalled();
+  });
+
+  it('does not clear a replacement child pid after the isolated child exits', async () => {
+    const transaction = {
+      configPath: '/tmp/openclaw.json',
+      backupPath: '/tmp/openclaw.json.bak',
+      fromVersion: '2026.6.11',
+      toVersion: '2026.6.10',
+    };
+    const child = fakeChild(6126);
+    const replacementChild = fakeChild(6127);
+    const commitError = new TestOpenClawCommandTerminationUnconfirmedError(
+      'Bundled OpenClaw command termination could not be confirmed',
+    );
+    let launchOptions: {
+      onSpawn: (pid: number | undefined) => void;
+      onExit: (child: Electron.UtilityProcess, code: number | null) => void;
+    } | null = null;
+    mocks.prepareManagedOpenClawDowngrade.mockResolvedValueOnce(transaction);
+    mocks.launchGatewayProcess.mockImplementationOnce(async (options: typeof launchOptions) => {
+      launchOptions = options;
+      options!.onSpawn(child.pid);
+      return { child, lastSpawnSummary: 'downgrade-spawn' };
+    });
+    mocks.commitManagedOpenClawDowngrade.mockRejectedValueOnce(commitError);
+    mocks.runGatewayStartupSequence.mockImplementationOnce(async (hooks: {
+      startProcess: () => Promise<void>;
+      afterManagedGatewayReady?: () => Promise<void>;
+    }) => {
+      await hooks.startProcess();
+      await hooks.afterManagedGatewayReady?.();
+    });
+
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+    const internals = manager as unknown as {
+      ownsProcess: boolean;
+      process: Electron.UtilityProcess | null;
+    };
+    mocks.terminateOwnedGatewayProcess.mockImplementationOnce(async () => {
+      launchOptions!.onExit(child, 1);
+      internals.process = replacementChild;
+      internals.ownsProcess = true;
+      launchOptions!.onSpawn(replacementChild.pid);
+    });
+
+    await expect(manager.start()).rejects.toBe(commitError);
+
+    expect(internals.process).toBe(replacementChild);
+    expect(internals.ownsProcess).toBe(true);
+    expect(manager.getStatus().pid).toBe(replacementChild.pid);
+    expect(mocks.rollbackOpenClawDowngrade).not.toHaveBeenCalled();
+  });
+
+  it('terminates and rolls back when owned-process finalization fails', async () => {
+    const transaction = {
+      configPath: '/tmp/openclaw.json',
+      backupPath: '/tmp/openclaw.json.bak',
+      fromVersion: '2026.6.11',
+      toVersion: '2026.6.10',
+    };
+    const child = fakeChild(6114);
+    mocks.prepareManagedOpenClawDowngrade.mockResolvedValueOnce(transaction);
+    mocks.commitManagedOpenClawDowngrade.mockRejectedValueOnce(new Error('stamp failed'));
+    mocks.runGatewayStartupSequence.mockImplementationOnce(async (hooks: {
+      afterManagedGatewayReady?: () => Promise<void>;
+    }) => {
+      await hooks.afterManagedGatewayReady?.();
+    });
+
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+    const internals = manager as unknown as {
+      process: Electron.UtilityProcess | null;
+      ownsProcess: boolean;
+      shouldReconnect: boolean;
+      scheduleReconnect: () => void;
+    };
+    internals.process = child;
+    internals.ownsProcess = true;
+    const reconnectSpy = vi.spyOn(internals, 'scheduleReconnect');
+
+    await expect(manager.start()).rejects.toThrow('stamp failed');
+
+    expect(mocks.launchGatewayProcess).not.toHaveBeenCalled();
+    expect(mocks.terminateOwnedGatewayProcess).toHaveBeenCalledWith(child);
+    expect(mocks.rollbackOpenClawDowngrade).toHaveBeenCalledWith(transaction);
+    expect(reconnectSpy).not.toHaveBeenCalled();
+    expect(internals.shouldReconnect).toBe(false);
+  });
+
+  it('does not restore the backup when the controlled Gateway cannot be terminated', async () => {
+    const transaction = {
+      configPath: '/tmp/openclaw.json',
+      backupPath: '/tmp/openclaw.json.bak',
+      fromVersion: '2026.6.11',
+      toVersion: '2026.6.10',
+    };
+    const child = fakeChild(6112);
+    mocks.prepareManagedOpenClawDowngrade.mockResolvedValueOnce(transaction);
+    mocks.launchGatewayProcess.mockResolvedValueOnce({ child, lastSpawnSummary: 'downgrade-spawn' });
+    mocks.commitManagedOpenClawDowngrade.mockRejectedValueOnce(new Error('stamp failed'));
+    mocks.terminateOwnedGatewayProcess.mockRejectedValueOnce(new Error('termination failed'));
+    mocks.runGatewayStartupSequence.mockImplementationOnce(async (hooks: {
+      startProcess: () => Promise<void>;
+      afterManagedGatewayReady?: () => Promise<void>;
+    }) => {
+      await hooks.startProcess();
+      await hooks.afterManagedGatewayReady?.();
+    });
+
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+    const reconnectSpy = vi.spyOn(
+      manager as unknown as { scheduleReconnect: () => void },
+      'scheduleReconnect',
+    );
+
+    const failure = await manager.start().catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors).toEqual([
+      expect.objectContaining({ message: 'stamp failed' }),
+      expect.objectContaining({ message: 'termination failed' }),
+    ]);
+    expect(mocks.rollbackOpenClawDowngrade).not.toHaveBeenCalled();
+    expect(reconnectSpy).not.toHaveBeenCalled();
+    expect((manager as unknown as { shouldReconnect: boolean }).shouldReconnect).toBe(false);
+    expect((manager as unknown as { process: Electron.UtilityProcess | null }).process).toBe(child);
+  });
+
+  it('stops every reconnect path when an unmanaged startup hits the future-config guard', async () => {
+    const child = fakeChild(6113);
+    let launchOptions: {
+      onStderrLine: (line: string) => void;
+      onExit: (child: Electron.UtilityProcess, code: number | null) => void;
+    } | null = null;
+    mocks.launchGatewayProcess.mockImplementationOnce(async (options: typeof launchOptions) => {
+      launchOptions = options;
+      return { child, lastSpawnSummary: 'future-config-spawn' };
+    });
+    mocks.runGatewayStartupSequence.mockImplementationOnce(async (hooks: {
+      startProcess: () => Promise<void>;
+    }) => {
+      await hooks.startProcess();
+      launchOptions!.onStderrLine(
+        'Your OpenClaw config was written by version 2026.6.11, but this command is running 2026.6.10.',
+      );
+      launchOptions!.onExit(child, 1);
+      throw new Error('Gateway process exited before becoming ready (code=1)');
+    });
+
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+    const reconnectSpy = vi.spyOn(
+      manager as unknown as { scheduleReconnect: () => void },
+      'scheduleReconnect',
+    );
+
+    await expect(manager.start()).rejects.toThrow('Gateway process exited before becoming ready');
+
+    expect(reconnectSpy).not.toHaveBeenCalled();
+    expect((manager as unknown as { shouldReconnect: boolean }).shouldReconnect).toBe(false);
+    expect(mocks.rollbackOpenClawDowngrade).not.toHaveBeenCalled();
+  });
+
+  it('does not restore a backup when handoff stops before managed config mutation begins', async () => {
+    const transaction = {
+      configPath: '/tmp/openclaw.json',
+      backupPath: '/tmp/openclaw.json.bak',
+      fromVersion: '2026.6.11',
+      toVersion: '2026.6.10',
+    };
+    mocks.prepareManagedOpenClawDowngrade.mockResolvedValueOnce(transaction);
+    mocks.findExistingGatewayProcess.mockResolvedValueOnce({ port: 18789 });
+    mocks.runGatewayStartupSequence.mockImplementationOnce(async (hooks: {
+      findExistingGateway: (port: number) => Promise<unknown>;
+    }) => {
+      await hooks.findExistingGateway(18789);
+    });
+
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+
+    await expect(manager.start()).rejects.toThrow(
+      'Cannot hand off OpenClaw config while another Gateway is running',
+    );
+
+    expect(mocks.rollbackOpenClawDowngrade).not.toHaveBeenCalled();
+    expect(mocks.launchGatewayProcess).not.toHaveBeenCalled();
+    expect((manager as unknown as { openClawDowngradeTransaction: unknown }).openClawDowngradeTransaction)
+      .toBeNull();
+    expect((manager as unknown as { shouldReconnect: boolean }).shouldReconnect).toBe(false);
   });
 
   it('checks the lifecycle immediately before forking', async () => {

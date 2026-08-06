@@ -23,10 +23,12 @@ type StartupHooks = {
   waitForPortFree: (port: number) => Promise<void>;
   startProcess: () => Promise<void>;
   waitForReady: (port: number) => Promise<void>;
+  afterManagedGatewayReady?: () => Promise<void>;
   onConnectedToManagedGateway: () => void;
   runDoctorRepair: () => Promise<boolean>;
   onDoctorRepairSuccess: () => void;
   delay: (ms: number) => Promise<void>;
+  canRecoverStartup?: () => boolean;
 };
 
 async function connectWithStartupRetry(
@@ -77,6 +79,8 @@ export async function runGatewayStartupSequence(hooks: StartupHooks): Promise<vo
         logger.info('Owned Gateway process still alive (likely in-process restart); waiting for it to become ready');
         await hooks.waitForReady(hooks.port);
         hooks.assertLifecycle('start/wait-ready-owned');
+        await hooks.afterManagedGatewayReady?.();
+        hooks.assertLifecycle('start/after-ready-owned');
         await connectWithStartupRetry(hooks, hooks.port);
         hooks.assertLifecycle('start/connect-owned');
         hooks.onConnectedToExistingGateway();
@@ -96,6 +100,9 @@ export async function runGatewayStartupSequence(hooks: StartupHooks): Promise<vo
       await hooks.waitForReady(hooks.port);
       hooks.assertLifecycle('start/wait-ready');
 
+      await hooks.afterManagedGatewayReady?.();
+      hooks.assertLifecycle('start/after-ready');
+
       await connectWithStartupRetry(hooks, hooks.port);
       hooks.assertLifecycle('start/connect');
 
@@ -103,6 +110,10 @@ export async function runGatewayStartupSequence(hooks: StartupHooks): Promise<vo
       return;
     } catch (error) {
       if (error instanceof LifecycleSupersededError) {
+        throw error;
+      }
+
+      if (hooks.canRecoverStartup?.() === false) {
         throw error;
       }
 

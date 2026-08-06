@@ -128,4 +128,35 @@ describe('GatewayManager restart recovery', () => {
     // (it may be called from other paths, but not the restart-recovery catch)
     expect(scheduleReconnectSpy).not.toHaveBeenCalled();
   });
+
+  it('does not override recovery disabled by a fatal startup failure', async () => {
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+    const internals = manager as unknown as {
+      automaticRecoveryDisabledForLaunch: boolean;
+      shouldReconnect: boolean;
+      status: { state: string; port: number };
+      startLock: boolean;
+      scheduleReconnect: () => void;
+    };
+    internals.status = { state: 'running', port: 18789 };
+    internals.startLock = false;
+    internals.shouldReconnect = true;
+
+    vi.spyOn(manager, 'stop').mockImplementation(async () => {
+      internals.shouldReconnect = false;
+      internals.status = { state: 'stopped', port: 18789 };
+    });
+    vi.spyOn(manager, 'start').mockImplementation(async () => {
+      internals.automaticRecoveryDisabledForLaunch = true;
+      internals.shouldReconnect = true;
+      throw new Error('OpenClaw config handoff failed');
+    });
+    const scheduleReconnectSpy = vi.spyOn(internals, 'scheduleReconnect');
+
+    await expect(manager.restart()).rejects.toThrow('OpenClaw config handoff failed');
+
+    expect(internals.shouldReconnect).toBe(false);
+    expect(scheduleReconnectSpy).not.toHaveBeenCalled();
+  });
 });

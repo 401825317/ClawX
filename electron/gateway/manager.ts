@@ -62,6 +62,15 @@ import {
 } from './startup-stderr';
 import { runGatewayStartupSequence } from './startup-orchestrator';
 import {
+  commitManagedOpenClawDowngrade,
+  isOpenClawCommandTerminationUnconfirmedError,
+  isOpenClawDowngradeBlockedError,
+  prepareManagedOpenClawDowngrade,
+  rollbackOpenClawDowngrade,
+  type OpenClawDowngradeTransaction,
+} from './openclaw-downgrade';
+import { hasOpenClawFutureConfigGuardSignal } from './startup-recovery';
+import {
   acquireManagedRuntimeMutationLease as acquireRuntimeMutationLease,
   assertManagedRuntimeLaunchAllowed,
   assertManagedRuntimeStartAllowed,
@@ -169,6 +178,17 @@ class GatewayLateChildTerminationError extends AggregateError {
   }
 }
 
+/** Blocks Gateway starts for this manager after an external config writer may have survived. */
+export class GatewayProcessIsolationError extends Error {
+  constructor(cause: unknown) {
+    super(
+      'Gateway start is isolated until the application restarts because OpenClaw command termination was not confirmed',
+      { cause },
+    );
+    this.name = 'GatewayProcessIsolationError';
+  }
+}
+
 /**
  * Gateway Manager Events
  */
@@ -204,6 +224,9 @@ export class GatewayManager extends EventEmitter {
   private startInFlight: Promise<void> | null = null;
   private lastSpawnSummary: string | null = null;
   private recentStartupStderrLines: string[] = [];
+  private openClawDowngradeTransaction: OpenClawDowngradeTransaction | null = null;
+  private processIsolationError: GatewayProcessIsolationError | null = null;
+  private automaticRecoveryDisabledForLaunch = false;
   private readonly startupTraceCollector = new GatewayStartupTraceCollector();
   private pendingRequests: Map<string, PendingGatewayRequest> = new Map();
   private deviceIdentity: DeviceIdentity | null = null;
@@ -366,6 +389,7 @@ export class GatewayManager extends EventEmitter {
    * Start Gateway process
    */
   async start(lease?: ManagedRuntimeMutationLease): Promise<void> {
+    if (this.processIsolationError) throw this.processIsolationError;
     await assertManagedRuntimeStartAllowed(lease);
     if (this.startInFlight) {
       await this.startInFlight;
@@ -396,6 +420,7 @@ export class GatewayManager extends EventEmitter {
     const startEpoch = this.lifecycleController.bump('start');
     logger.info(`Gateway start requested (port=${this.status.port})`);
     this.lastSpawnSummary = null;
+    this.automaticRecoveryDisabledForLaunch = false;
     this.shouldReconnect = true;
     await this.refreshReloadPolicy(true);
 
@@ -427,8 +452,18 @@ export class GatewayManager extends EventEmitter {
     const t0 = Date.now();
     let tSpawned = 0;
     let tReady = 0;
+    let downgradeMutationStarted = false;
 
     try {
+      // This must run before prepareGatewayLaunchContext performs any config synchronization.
+      this.openClawDowngradeTransaction = await prepareManagedOpenClawDowngrade();
+      if (this.openClawDowngradeTransaction) {
+        logger.info(
+          `Preparing managed OpenClaw config handoff `
+          + `(${this.openClawDowngradeTransaction.fromVersion} -> ${this.openClawDowngradeTransaction.toVersion})`,
+        );
+      }
+
       await runGatewayStartupSequence({
         port: this.status.port,
         shouldWaitForPortFree: process.platform === 'win32',
@@ -447,7 +482,11 @@ export class GatewayManager extends EventEmitter {
           // snapshot captured at start() entry is stale after startProcess()
           // replaces this.process — leading to the just-started pid being
           // immediately killed as a false orphan on the next retry iteration.
-          return await findExistingGatewayProcess({ port, ownedPid: this.process?.pid });
+          const existing = await findExistingGatewayProcess({ port, ownedPid: this.process?.pid });
+          if (existing && this.openClawDowngradeTransaction) {
+            throw new Error('Cannot hand off OpenClaw config while another Gateway is running');
+          }
+          return existing;
         },
         connect: async (port, externalToken) => {
           await this.connect(port, externalToken);
@@ -477,6 +516,8 @@ export class GatewayManager extends EventEmitter {
           await waitForPortFree(port);
         },
         startProcess: async () => {
+          // prepareGatewayLaunchContext may write managed config before it forks.
+          downgradeMutationStarted = this.openClawDowngradeTransaction !== null;
           await this.startProcess((phase) => {
             this.lifecycleController.assert(startEpoch, phase);
             assertManagedRuntimeLaunchAllowed(lease);
@@ -489,6 +530,19 @@ export class GatewayManager extends EventEmitter {
             getProcessExitCode: () => this.processExitCode,
           });
           tReady = Date.now();
+        },
+        afterManagedGatewayReady: async () => {
+          const transaction = this.openClawDowngradeTransaction;
+          if (!transaction) return;
+
+          // Finalization stamps managed ownership, so failures from this point require a controlled rollback.
+          downgradeMutationStarted = true;
+          await commitManagedOpenClawDowngrade(transaction);
+          this.openClawDowngradeTransaction = null;
+          logger.info(
+            `Managed OpenClaw config handoff completed `
+            + `(${transaction.fromVersion} -> ${transaction.toVersion})`,
+          );
         },
         onConnectedToManagedGateway: () => {
           this.startHealthCheck();
@@ -518,31 +572,77 @@ export class GatewayManager extends EventEmitter {
         delay: async (ms) => {
           await new Promise((resolve) => setTimeout(resolve, ms));
         },
+        canRecoverStartup: () => this.openClawDowngradeTransaction === null,
       });
     } catch (error) {
-      if (error instanceof LifecycleSupersededError) {
-        logger.debug(error.message);
+      let startupError = error;
+      const downgradeTransaction = this.openClawDowngradeTransaction;
+      const terminationUnconfirmed = isOpenClawCommandTerminationUnconfirmedError(error);
+      if (terminationUnconfirmed && !this.processIsolationError) {
+        this.processIsolationError = new GatewayProcessIsolationError(error);
+      }
+      const downgradeBlocked = terminationUnconfirmed
+        || downgradeTransaction !== null
+        || isOpenClawDowngradeBlockedError(error)
+        || hasOpenClawFutureConfigGuardSignal(error, this.recentStartupStderrLines);
+
+      if (downgradeBlocked) {
+        this.disableAutomaticRecovery('OpenClaw config handoff failed');
+      }
+
+      if (downgradeTransaction) {
+        if (terminationUnconfirmed) {
+          // The CLI may still own a config writer. Keep the backup untouched and
+          // clear handoff state before terminating Gateway can emit an exit event.
+          this.openClawDowngradeTransaction = null;
+          try {
+            await this.terminateGatewayForUnconfirmedOpenClawCommand();
+          } catch (terminationError) {
+            startupError = new AggregateError(
+              [error, terminationError],
+              'OpenClaw command termination was not confirmed and Gateway isolation failed',
+              { cause: terminationError },
+            );
+          }
+        } else if (!downgradeMutationStarted) {
+          this.openClawDowngradeTransaction = null;
+          logger.warn('Cancelled OpenClaw config handoff before managed config mutation began');
+        } else {
+          try {
+            await this.abortOpenClawDowngrade(downgradeTransaction);
+          } catch (rollbackError) {
+            startupError = new AggregateError(
+              [error, rollbackError],
+              'OpenClaw config handoff failed and could not be rolled back safely',
+              { cause: rollbackError },
+            );
+          }
+        }
+      }
+
+      if (startupError instanceof LifecycleSupersededError) {
+        logger.debug(startupError.message);
         return;
       }
-      if (error instanceof GatewayLateChildTerminationError) {
-        logger.error(error.message, error);
-        this.setStatus({ state: 'error', error: error.message });
-        throw error;
+      if (startupError instanceof GatewayLateChildTerminationError) {
+        logger.error(startupError.message, startupError);
+        this.setStatus({ state: 'error', error: startupError.message });
+        throw startupError;
       }
-      if (isManagedRuntimeStartBlockedError(error)) {
-        logger.debug(error.message);
-        throw error;
+      if (isManagedRuntimeStartBlockedError(startupError)) {
+        logger.debug(startupError.message);
+        throw startupError;
       }
       logger.error(
         `Gateway start failed (port=${this.status.port}, reconnectAttempts=${this.reconnectAttempts}, spawn=${this.lastSpawnSummary ?? 'n/a'})`,
-        error
+        startupError
       );
-      this.setStatus({ state: 'error', error: String(error) });
+      this.setStatus({ state: 'error', error: String(startupError) });
       if (this.shouldReconnect) {
         logger.warn('Gateway start failed; scheduling auto-reconnect recovery');
         this.scheduleReconnect();
       }
-      throw error;
+      throw startupError;
     } finally {
       this.startLock = false;
       if (isManagedRuntimeMutationActive()) {
@@ -563,6 +663,54 @@ export class GatewayManager extends EventEmitter {
         );
       }
     }
+  }
+
+  /** Stops the owned Gateway while preserving the backup for later recovery. */
+  private async terminateGatewayForUnconfirmedOpenClawCommand(): Promise<void> {
+    const child = this.process;
+    if (!child || !this.ownsProcess) return;
+    const childPid = child.pid;
+
+    await terminateOwnedGatewayProcess(child);
+    if (this.process === child) {
+      this.process = null;
+      this.ownsProcess = false;
+    }
+    if (childPid !== undefined && this.status.pid === childPid) {
+      this.setStatus({ pid: undefined });
+    }
+  }
+
+  /** Stops every automatic recovery path for a deterministic compatibility failure. */
+  private disableAutomaticRecovery(reason: string): void {
+    this.automaticRecoveryDisabledForLaunch = true;
+    this.shouldReconnect = false;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    logger.error(`${reason}; automatic Gateway recovery is disabled for this launch`);
+  }
+
+  /** Terminates the controlled child before restoring the pre-handoff config. */
+  private async abortOpenClawDowngrade(
+    transaction: OpenClawDowngradeTransaction,
+  ): Promise<void> {
+    const child = this.process;
+    if (child && this.ownsProcess) {
+      await terminateOwnedGatewayProcess(child);
+      if (this.process === child) {
+        this.process = null;
+        this.ownsProcess = false;
+        if (this.status.pid === child.pid) {
+          this.setStatus({ pid: undefined });
+        }
+      }
+    }
+
+    await rollbackOpenClawDowngrade(transaction);
+    this.openClawDowngradeTransaction = null;
+    logger.warn('Restored OpenClaw config backup after failed managed handoff');
   }
 
   /**
@@ -704,6 +852,12 @@ export class GatewayManager extends EventEmitter {
           this.shouldReconnect = false;
           this.restartController.resetDeferredRestart();
           logger.debug('Gateway restart stopped by managed credential mutation');
+          throw err;
+        }
+        if (this.automaticRecoveryDisabledForLaunch) {
+          this.shouldReconnect = false;
+          this.restartController.resetDeferredRestart();
+          logger.debug('Gateway restart stopped because startup disabled automatic recovery');
           throw err;
         }
         // stop() set shouldReconnect=false. Restore it so the gateway
@@ -1242,6 +1396,14 @@ export class GatewayManager extends EventEmitter {
           this.setStatus({ state: 'stopped' });
         }
 
+        if (
+          this.openClawDowngradeTransaction
+          || hasOpenClawFutureConfigGuardSignal(undefined, this.recentStartupStderrLines)
+        ) {
+          this.disableAutomaticRecovery('OpenClaw config handoff child exited');
+          return;
+        }
+
         // Always attempt reconnect from process exit.  scheduleReconnect()
         // internally checks shouldReconnect and reconnect-timer guards, so
         // calling it unconditionally is safe — intentional stop() calls set
@@ -1260,6 +1422,7 @@ export class GatewayManager extends EventEmitter {
           this.process = null;
         }
       },
+      allowOlderBinaryDestructiveActions: this.openClawDowngradeTransaction !== null,
     });
 
     this.process = child;

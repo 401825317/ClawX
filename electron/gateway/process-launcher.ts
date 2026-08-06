@@ -2,9 +2,13 @@ import { app, utilityProcess } from 'electron';
 import { existsSync, writeFileSync } from 'fs';
 import path from 'path';
 import type { GatewayLaunchContext } from './config-sync';
+import { stripEnvironmentKeys } from './config-sync-env';
 import type { GatewayLifecycleState } from './process-policy';
 import { logger } from '../utils/logger';
 import { appendNodeRequireToNodeOptions } from '../utils/paths';
+
+export const OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS =
+  'OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS';
 
 const GATEWAY_CHILD_PROCESS_PATCH_SOURCE = `
 (function () {
@@ -173,8 +177,9 @@ ${GATEWAY_CHILD_PROCESS_PATCH_SOURCE}
 
 export function buildGatewayRuntimeEnv(
   forkEnv: Record<string, string | undefined>,
+  allowOlderBinaryDestructiveActions = false,
 ): Record<string, string | undefined> {
-  return {
+  const runtimeEnv = stripEnvironmentKeys({
     ...forkEnv,
     // ClawX does not expose LAN discovery, so keep Bonjour disabled even if
     // the parent process inherited an explicit opt-in value.
@@ -182,7 +187,13 @@ export function buildGatewayRuntimeEnv(
     // OpenClaw's built-in trace contains stage names and timings only. Keep it
     // enabled so packaged startup incidents are diagnosable from normal logs.
     OPENCLAW_GATEWAY_STARTUP_TRACE: '1',
-  };
+  }, [OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS]);
+
+  // Never inherit this destructive override from the parent process.
+  if (allowOlderBinaryDestructiveActions) {
+    runtimeEnv[OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS] = '1';
+  }
+  return runtimeEnv;
 }
 
 function ensureGatewayFetchPreload(): string {
@@ -215,6 +226,7 @@ export async function launchGatewayProcess(options: {
   onSpawn: (pid: number | undefined) => void;
   onExit: (child: Electron.UtilityProcess, code: number | null) => void;
   onError: (error: Error) => void;
+  allowOlderBinaryDestructiveActions?: boolean;
 }): Promise<{ child: Electron.UtilityProcess; lastSpawnSummary: string }> {
   const {
     openclawDir,
@@ -233,7 +245,10 @@ export async function launchGatewayProcess(options: {
   );
   const lastSpawnSummary = `mode=${mode}, entry="${entryScript}", args="${options.sanitizeSpawnArgs(gatewayArgs).join(' ')}", cwd="${openclawDir}"`;
 
-  const runtimeEnv = buildGatewayRuntimeEnv(forkEnv);
+  const runtimeEnv = buildGatewayRuntimeEnv(
+    forkEnv,
+    options.allowOlderBinaryDestructiveActions,
+  );
   runtimeEnv.CLAWX_OPENCLAW_ENTRY = entryScript;
   const gatewayEntryScript = ensureGatewayEntryWrapper();
 

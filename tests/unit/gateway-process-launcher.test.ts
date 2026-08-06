@@ -126,4 +126,27 @@ describe('Gateway process launcher environment', () => {
       OPENCLAW_GATEWAY_STARTUP_TRACE: '0',
     });
   });
+
+  it('removes inherited downgrade permission unless this child is explicitly authorized', () => {
+    const source = {
+      PATH: '/usr/bin',
+      OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS: '1',
+      OpenClaw_Allow_Older_Binary_Destructive_Actions: '1',
+    };
+
+    const normalEnv = buildGatewayRuntimeEnv(source);
+    expect(Object.keys(normalEnv).some(
+      (key) => key.toUpperCase() === 'OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS',
+    )).toBe(false);
+
+    const authorizedEnv = buildGatewayRuntimeEnv(source, true);
+    expect(authorizedEnv).toMatchObject({
+      OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS: '1',
+    });
+    expect(Object.keys(authorizedEnv).filter(
+      (key) => key.toUpperCase() === 'OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS',
+    )).toEqual(['OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS']);
+    expect(source.OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS).toBe('1');
+    expect(source.OpenClaw_Allow_Older_Binary_Destructive_Actions).toBe('1');
+  });
 });

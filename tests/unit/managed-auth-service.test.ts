@@ -2223,6 +2223,38 @@ describe('managed auth service transaction and compatibility behavior', () => {
     expect(status.hasRelayToken).toBe(false);
   });
 
+  it('keeps the cached account name in local status when the OAuth Secret only stores identity fields', async () => {
+    secrets.set('uclaw-auth', {
+      type: 'oauth',
+      accountId: 'uclaw-auth',
+      accessToken: 'access-secret',
+      refreshToken: 'refresh-secret',
+      expiresAt: Date.now() + 3_600_000,
+      subject: 'user-1',
+      email: 'test@example.com',
+    });
+    verificationCache = {
+      verifiedAt: Date.now(),
+      verifyAfter: Date.now() + 60_000,
+      expiresAt: Date.now() + 3_600_000,
+      user: {
+        id: 'user-1',
+        username: 'tester',
+        displayName: '测试用户',
+        email: 'test@example.com',
+      },
+    };
+
+    const status = await getManagedAuthLocalStatus();
+
+    expect(status.user).toEqual({
+      id: 'user-1',
+      username: 'tester',
+      displayName: '测试用户',
+      email: 'test@example.com',
+    });
+  });
+
   it('single-flights two concurrent remote status requests', async () => {
     secrets.set('uclaw-auth', {
       type: 'oauth',

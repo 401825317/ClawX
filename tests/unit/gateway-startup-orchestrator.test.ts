@@ -34,6 +34,7 @@ function createMockHooks(overrides: Partial<Parameters<typeof runGatewayStartupS
     waitForPortFree: vi.fn().mockResolvedValue(undefined),
     startProcess: vi.fn().mockResolvedValue(undefined),
     waitForReady: vi.fn().mockResolvedValue(undefined),
+    afterManagedGatewayReady: vi.fn().mockResolvedValue(undefined),
     onConnectedToManagedGateway: vi.fn(),
     runDoctorRepair: vi.fn().mockResolvedValue(false),
     onDoctorRepairSuccess: vi.fn(),
@@ -65,9 +66,19 @@ describe('runGatewayStartupSequence', () => {
   });
 
   it('waits for owned process when hasOwnedProcess returns true (in-process restart path)', async () => {
+    const order: string[] = [];
     const hooks = createMockHooks({
       findExistingGateway: vi.fn().mockResolvedValue(null),
       hasOwnedProcess: vi.fn().mockReturnValue(true),
+      waitForReady: vi.fn().mockImplementation(async () => {
+        order.push('ready');
+      }),
+      afterManagedGatewayReady: vi.fn().mockImplementation(async () => {
+        order.push('finalize');
+      }),
+      connect: vi.fn().mockImplementation(async () => {
+        order.push('connect');
+      }),
     });
 
     await runGatewayStartupSequence(hooks);
@@ -75,8 +86,10 @@ describe('runGatewayStartupSequence', () => {
     expect(hooks.findExistingGateway).toHaveBeenCalledWith(18789);
     expect(hooks.hasOwnedProcess).toHaveBeenCalled();
     expect(hooks.waitForReady).toHaveBeenCalledWith(18789);
+    expect(hooks.afterManagedGatewayReady).toHaveBeenCalledTimes(1);
     expect(hooks.connect).toHaveBeenCalledWith(18789, undefined);
     expect(hooks.onConnectedToExistingGateway).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(['ready', 'finalize', 'connect']);
 
     // Must NOT start a new process or wait for port free
     expect(hooks.startProcess).not.toHaveBeenCalled();
@@ -85,7 +98,45 @@ describe('runGatewayStartupSequence', () => {
 
     // Verify lifecycle assertions for the owned-process path
     expect(hooks.assertLifecycle).toHaveBeenCalledWith('start/wait-ready-owned');
+    expect(hooks.assertLifecycle).toHaveBeenCalledWith('start/after-ready-owned');
     expect(hooks.assertLifecycle).toHaveBeenCalledWith('start/connect-owned');
+  });
+
+  it('does not connect an owned process when managed post-ready work fails', async () => {
+    const hooks = createMockHooks({
+      findExistingGateway: vi.fn().mockResolvedValue(null),
+      hasOwnedProcess: vi.fn().mockReturnValue(true),
+      afterManagedGatewayReady: vi.fn().mockRejectedValue(new Error('stamp failed')),
+    });
+
+    await expect(runGatewayStartupSequence(hooks)).rejects.toThrow('stamp failed');
+
+    expect(hooks.connect).not.toHaveBeenCalled();
+    expect(hooks.onConnectedToExistingGateway).not.toHaveBeenCalled();
+  });
+
+  it('does not connect an owned process when lifecycle is superseded after managed post-ready work', async () => {
+    let finalizeCompleted = false;
+    const hooks = createMockHooks({
+      findExistingGateway: vi.fn().mockResolvedValue(null),
+      hasOwnedProcess: vi.fn().mockReturnValue(true),
+      afterManagedGatewayReady: vi.fn().mockImplementation(async () => {
+        await Promise.resolve();
+        finalizeCompleted = true;
+      }),
+      assertLifecycle: vi.fn((phase: string) => {
+        if (phase === 'start/after-ready-owned') {
+          throw new LifecycleSupersededError('Lifecycle superseded after owned process finalization');
+        }
+      }),
+    });
+
+    await expect(runGatewayStartupSequence(hooks)).rejects.toThrow(LifecycleSupersededError);
+
+    expect(finalizeCompleted).toBe(true);
+    expect(hooks.afterManagedGatewayReady).toHaveBeenCalledTimes(1);
+    expect(hooks.connect).not.toHaveBeenCalled();
+    expect(hooks.onConnectedToExistingGateway).not.toHaveBeenCalled();
   });
 
   it('starts new process when no existing gateway and no owned process', async () => {
@@ -102,6 +153,7 @@ describe('runGatewayStartupSequence', () => {
     expect(hooks.waitForPortFree).toHaveBeenCalledWith(18789);
     expect(hooks.startProcess).toHaveBeenCalledTimes(1);
     expect(hooks.waitForReady).toHaveBeenCalledWith(18789);
+    expect(hooks.afterManagedGatewayReady).toHaveBeenCalledTimes(1);
     expect(hooks.connect).toHaveBeenCalledWith(18789, undefined);
     expect(hooks.onConnectedToManagedGateway).toHaveBeenCalledTimes(1);
     expect(hooks.onConnectedToExistingGateway).not.toHaveBeenCalled();
@@ -109,7 +161,27 @@ describe('runGatewayStartupSequence', () => {
     expect(hooks.assertLifecycle).toHaveBeenCalledWith('start/wait-port');
     expect(hooks.assertLifecycle).toHaveBeenCalledWith('start/start-process');
     expect(hooks.assertLifecycle).toHaveBeenCalledWith('start/wait-ready');
+    expect(hooks.assertLifecycle).toHaveBeenCalledWith('start/after-ready');
     expect(hooks.assertLifecycle).toHaveBeenCalledWith('start/connect');
+  });
+
+  it('finishes managed post-ready work before connecting', async () => {
+    const order: string[] = [];
+    const hooks = createMockHooks({
+      waitForReady: vi.fn().mockImplementation(async () => {
+        order.push('ready');
+      }),
+      afterManagedGatewayReady: vi.fn().mockImplementation(async () => {
+        order.push('finalize');
+      }),
+      connect: vi.fn().mockImplementation(async () => {
+        order.push('connect');
+      }),
+    });
+
+    await runGatewayStartupSequence(hooks);
+
+    expect(order).toEqual(['ready', 'finalize', 'connect']);
   });
 
   it('skips waitForPortFree when shouldWaitForPortFree is false', async () => {
@@ -189,6 +261,28 @@ describe('runGatewayStartupSequence', () => {
     // Should have attempted 3 times total
     expect(hooks.connect).toHaveBeenCalledTimes(3);
     expect(hooks.delay).toHaveBeenCalledTimes(2); // delays between retries 1→2, 2→3
+  });
+
+  it('does not retry or run doctor when startup recovery is disabled', async () => {
+    const hooks = createMockHooks({
+      startProcess: vi.fn().mockRejectedValue(
+        new Error('Gateway process exited before becoming ready (code=1)'),
+      ),
+      getStartupStderrLines: vi.fn().mockReturnValue([
+        'Config invalid',
+        'Run: openclaw doctor --fix',
+      ]),
+      canRecoverStartup: vi.fn().mockReturnValue(false),
+      maxStartAttempts: 3,
+    });
+
+    await expect(runGatewayStartupSequence(hooks)).rejects.toThrow(
+      'Gateway process exited before becoming ready',
+    );
+
+    expect(hooks.startProcess).toHaveBeenCalledTimes(1);
+    expect(hooks.runDoctorRepair).not.toHaveBeenCalled();
+    expect(hooks.delay).not.toHaveBeenCalled();
   });
 
   it('owned process path falls back to retry when waitForReady throws a transient error', async () => {

@@ -405,6 +405,7 @@ test.describe('UClaw managed account flows', () => {
       await expect(page.getByTestId('settings-managed-auth-section')).toBeVisible();
       await expect(page.getByTestId('settings-managed-auth-status')).toHaveText('Signed in');
       await expect(page.getByText('UClaw account', { exact: true })).toBeVisible();
+      await expect(page.getByText('UClaw User', { exact: true })).toBeVisible();
       await expectNoLegacyBrand(page);
 
       await page.getByRole('button', { name: 'Sign out', exact: true }).click();

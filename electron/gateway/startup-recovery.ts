@@ -12,6 +12,12 @@ const INVALID_CONFIG_PATTERNS: RegExp[] = [
   /\brun:\s*openclaw doctor --fix\b/i,
 ];
 
+const OPENCLAW_FUTURE_CONFIG_GUARD_PATTERNS: RegExp[] = [
+  /Your OpenClaw config was written by version .+ but this command is running .+/i,
+  /Refusing to run automatic gateway startup migrations because this OpenClaw binary .+ is older than the config last written by OpenClaw/i,
+  /OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS=1 only for an intentional downgrade or recovery action/i,
+];
+
 const TRANSIENT_START_ERROR_PATTERNS: RegExp[] = [
   /WebSocket closed before handshake/i,
   /ECONNREFUSED/i,
@@ -38,6 +44,26 @@ export function isInvalidConfigSignal(text: string): boolean {
   const normalized = normalizeLogLine(text);
   if (!normalized) return false;
   return INVALID_CONFIG_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+/** Returns true for OpenClaw's explicit newer-config version guard. */
+export function isOpenClawFutureConfigGuardSignal(text: string): boolean {
+  const normalized = normalizeLogLine(text);
+  if (!normalized) return false;
+  return OPENCLAW_FUTURE_CONFIG_GUARD_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+/** Checks startup stderr and the thrown error for the newer-config guard. */
+export function hasOpenClawFutureConfigGuardSignal(
+  startupError: unknown,
+  startupStderrLines: string[],
+): boolean {
+  if (startupStderrLines.some(isOpenClawFutureConfigGuardSignal)) return true;
+
+  const errorText = startupError instanceof Error
+    ? `${startupError.name}: ${startupError.message}`
+    : String(startupError ?? '');
+  return isOpenClawFutureConfigGuardSignal(errorText);
 }
 
 /**
@@ -136,6 +162,11 @@ export function getGatewayStartupRecoveryAction(options: {
   attempt: number;
   maxAttempts: number;
 }): GatewayStartupRecoveryAction {
+  // Doctor and retries cannot repair a deliberate binary/config version guard.
+  if (hasOpenClawFutureConfigGuardSignal(options.startupError, options.startupStderrLines)) {
+    return 'fail';
+  }
+
   if (shouldAttemptConfigAutoRepair(
     options.startupError,
     options.startupStderrLines,
@@ -150,4 +181,3 @@ export function getGatewayStartupRecoveryAction(options: {
 
   return 'fail';
 }
-

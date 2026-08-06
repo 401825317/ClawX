@@ -534,6 +534,23 @@ function ownerMatchesUser(
   return false;
 }
 
+/** Restores cached display fields only when they belong to the active OAuth identity. */
+function mergeLocalUserIdentity(
+  secretUser: ManagedAuthUser | undefined,
+  cachedUser: ManagedAuthUser | undefined,
+): ManagedAuthUser | undefined {
+  if (!secretUser) return cachedUser;
+  if (!cachedUser) return secretUser;
+  if (!ownerMatchesUser({
+    userId: secretUser.id,
+    email: secretUser.email,
+    username: secretUser.username,
+  }, cachedUser)) {
+    return secretUser;
+  }
+  return { ...cachedUser, ...secretUser };
+}
+
 function relayBelongsToUser(secret: RelaySecret | null, user: ManagedAuthUser | undefined): boolean {
   if (!secret || isExpired(secret.expiresAt)) return false;
   return ownerMatchesUser({
@@ -861,7 +878,7 @@ function statusFromLocal(
   activation: Awaited<ReturnType<typeof readManagedDeviceActivationState>>,
   cache: VerificationCache | null,
 ): ManagedAuthStatus {
-  const user = userFromSecret(authSecret) ?? cache?.user;
+  const user = mergeLocalUserIdentity(userFromSecret(authSecret), cache?.user);
   const hasAuthToken = Boolean(authSecret?.accessToken?.trim());
   const hasRefreshToken = Boolean(authSecret?.refreshToken?.trim());
   const hasRelayToken = relayBelongsToUser(relaySecret, user);
