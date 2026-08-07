@@ -4,6 +4,7 @@ import {
   copyFileSync,
   createReadStream,
   existsSync,
+  fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -23,10 +24,12 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
+import { backup as backupSqlite, DatabaseSync } from 'node:sqlite';
 
 export const PORTABLE_SNAPSHOT_V2_SCHEMA = 'uclaw.portable-runtime-snapshot/v2' as const;
 
 const OBJECT_HASH_PATTERN = /^[a-f0-9]{64}$/u;
+const SNAPSHOT_ID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const ROOT_SKIPPED_DIRECTORIES = new Set([
   'plugin-skills',
   'logs',
@@ -46,11 +49,15 @@ export type PortableSnapshotV2Entry = {
   object: string;
   size: number;
   mtimeMs: number;
+  sourceFiles?: Record<string, { size: number; mtimeMs: number }>;
 };
 
 export type PortableSnapshotV2Manifest = {
   schema: typeof PORTABLE_SNAPSHOT_V2_SCHEMA;
   portableId: string;
+  snapshotId?: string;
+  generation?: number;
+  parentSnapshotId?: string;
   createdAt: string;
   reason: string;
   entries: Record<string, PortableSnapshotV2Entry>;
@@ -59,6 +66,8 @@ export type PortableSnapshotV2Manifest = {
 export type PortableSnapshotV2SyncResult = {
   skipped: boolean;
   snapshotPath?: string;
+  snapshotId?: string;
+  generation?: number;
   scannedFiles: number;
   changedFiles: number;
   reusedFiles: number;
@@ -72,6 +81,13 @@ export type PortableSnapshotV2SyncResult = {
 
 export type PortableSnapshotV2SyncOptions = {
   signal?: AbortSignal;
+  minimumGeneration?: number;
+  verifyExistingObjects?: boolean;
+};
+
+export type PortableSnapshotV2RestoreResult = {
+  snapshotPath: string;
+  manifest: PortableSnapshotV2Manifest;
 };
 
 type ScannedFile = {
@@ -110,11 +126,14 @@ function isSafeRelativePath(value: string): boolean {
 function manifestObjectsAvailableSync(
   layout: PortableSnapshotV2Layout,
   manifest: PortableSnapshotV2Manifest,
+  verifyHashes = false,
 ): boolean {
   return Object.values(manifest.entries).every((entry) => {
     try {
       const metadata = statSync(objectPath(layout, entry.object));
-      return metadata.isFile() && metadata.size === entry.size;
+      return metadata.isFile()
+        && metadata.size === entry.size
+        && (!verifyHashes || hashFileSync(objectPath(layout, entry.object)) === entry.object);
     } catch {
       return false;
     }
@@ -131,6 +150,9 @@ function parseManifest(
     if (typeof parsed.createdAt !== 'string' || !Number.isFinite(Date.parse(parsed.createdAt))) return undefined;
     if (typeof parsed.reason !== 'string' || !parsed.reason.trim()) return undefined;
     if (!parsed.entries || typeof parsed.entries !== 'object' || Array.isArray(parsed.entries)) return undefined;
+    if (parsed.snapshotId !== undefined && !SNAPSHOT_ID_PATTERN.test(parsed.snapshotId)) return undefined;
+    if (parsed.generation !== undefined && (!Number.isSafeInteger(parsed.generation) || parsed.generation < 1)) return undefined;
+    if (parsed.parentSnapshotId !== undefined && !SNAPSHOT_ID_PATTERN.test(parsed.parentSnapshotId)) return undefined;
 
     for (const [relativePath, entry] of Object.entries(parsed.entries)) {
       if (!isSafeRelativePath(relativePath)) return undefined;
@@ -138,6 +160,14 @@ function parseManifest(
       if (!OBJECT_HASH_PATTERN.test(entry.object)) return undefined;
       if (!Number.isSafeInteger(entry.size) || entry.size < 0) return undefined;
       if (!Number.isFinite(entry.mtimeMs) || entry.mtimeMs < 0) return undefined;
+      if (entry.sourceFiles !== undefined) {
+        if (!entry.sourceFiles || typeof entry.sourceFiles !== 'object' || Array.isArray(entry.sourceFiles)) return undefined;
+        for (const [sourcePath, version] of Object.entries(entry.sourceFiles)) {
+          if (!isSafeRelativePath(sourcePath) || !version || typeof version !== 'object') return undefined;
+          if (!Number.isSafeInteger(version.size) || version.size < 0) return undefined;
+          if (!Number.isFinite(version.mtimeMs) || version.mtimeMs < 0) return undefined;
+        }
+      }
     }
     return parsed as PortableSnapshotV2Manifest;
   } catch {
@@ -153,6 +183,7 @@ export function readLatestPortableSnapshotV2Sync(
 
 function readValidManifestCandidatesSync(
   layout: PortableSnapshotV2Layout,
+  verifyHashes = false,
 ): Array<{ path: string; manifest: PortableSnapshotV2Manifest }> {
   const manifestDir = path.join(layout.snapshotDir, 'manifests');
   if (!existsSync(manifestDir)) return [];
@@ -170,14 +201,36 @@ function readValidManifestCandidatesSync(
     try {
       const manifestPath = path.join(manifestDir, name);
       const manifest = parseManifest(readFileSync(manifestPath, 'utf8'), layout.portableId);
-      if (manifest && manifestObjectsAvailableSync(layout, manifest)) {
+      if (manifest && manifestObjectsAvailableSync(layout, manifest, verifyHashes)) {
         candidates.push({ path: manifestPath, manifest });
       }
     } catch {
       // Ignore incomplete or unreadable snapshots.
     }
   }
-  return candidates;
+  return candidates.sort((left, right) => {
+    const generationOrder = (right.manifest.generation ?? 0) - (left.manifest.generation ?? 0);
+    if (generationOrder !== 0) return generationOrder;
+    return path.basename(right.path).localeCompare(path.basename(left.path));
+  });
+}
+
+function readMaximumManifestGenerationSync(layout: PortableSnapshotV2Layout): number {
+  const manifestDir = path.join(layout.snapshotDir, 'manifests');
+  try {
+    return readdirSync(manifestDir)
+      .filter((name) => name.startsWith('snapshot-') && name.endsWith('.json'))
+      .reduce((maximum, name) => {
+        try {
+          const manifest = parseManifest(readFileSync(path.join(manifestDir, name), 'utf8'), layout.portableId);
+          return Math.max(maximum, manifest?.generation ?? 0);
+        } catch {
+          return maximum;
+        }
+      }, 0);
+  } catch {
+    return 0;
+  }
 }
 
 function hashFileSync(filePath: string): string {
@@ -196,13 +249,17 @@ function hashFileSync(filePath: string): string {
   return hash.digest('hex');
 }
 
-export function restorePortableRuntimeSnapshotV2Sync(
+/** Restore the newest complete snapshot and report the exact generation applied. */
+export function restorePortableRuntimeSnapshotV2WithResultSync(
   layout: PortableSnapshotV2Layout,
   targetDir: string,
-): boolean {
+): PortableSnapshotV2RestoreResult | undefined {
   const candidates = readValidManifestCandidatesSync(layout);
-  for (const { manifest } of candidates) {
+  for (const candidate of candidates) {
+    const { manifest } = candidate;
     const stagingDir = `${targetDir}.restore.${process.pid}.${randomUUID()}.tmp`;
+    const previousDir = `${targetDir}.previous.${process.pid}.${randomUUID()}.tmp`;
+    let movedTarget = false;
     try {
       mkdirSync(stagingDir, { recursive: true });
       let complete = true;
@@ -223,16 +280,46 @@ export function restorePortableRuntimeSnapshotV2Sync(
         }
       }
       if (!complete) continue;
-      rmSync(targetDir, { recursive: true, force: true });
+
+      // Publish by directory exchange so a failed rename cannot erase the old local state.
+      if (existsSync(targetDir)) {
+        renameSync(targetDir, previousDir);
+        movedTarget = true;
+      }
       renameSync(stagingDir, targetDir);
-      return true;
+      if (movedTarget) {
+        try {
+          rmSync(previousDir, { recursive: true, force: true });
+          movedTarget = false;
+        } catch {
+          // The restored target is complete; a locked stale directory can be cleaned later.
+        }
+      }
+      return { snapshotPath: candidate.path, manifest };
     } catch {
+      if (movedTarget && !existsSync(targetDir) && existsSync(previousDir)) {
+        try {
+          renameSync(previousDir, targetDir);
+          movedTarget = false;
+        } catch {
+          // Keep the previous directory for manual recovery when the volume rejects rollback.
+          return undefined;
+        }
+      }
       // Try an older complete manifest.
     } finally {
       rmSync(stagingDir, { recursive: true, force: true });
+      if (!movedTarget) rmSync(previousDir, { recursive: true, force: true });
     }
   }
-  return false;
+  return undefined;
+}
+
+export function restorePortableRuntimeSnapshotV2Sync(
+  layout: PortableSnapshotV2Layout,
+  targetDir: string,
+): boolean {
+  return Boolean(restorePortableRuntimeSnapshotV2WithResultSync(layout, targetDir));
 }
 
 function shouldSkipEntry(relativePath: string, isDirectory: boolean): boolean {
@@ -344,6 +431,25 @@ function objectPath(layout: PortableSnapshotV2Layout, object: string): string {
   return path.join(layout.snapshotDir, 'objects', object.slice(0, 2), object);
 }
 
+/** Flush file contents before publication; directory flush is best-effort on Windows filesystems. */
+function syncPublishedPath(filePath: string): void {
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(filePath, 'r');
+    fsyncSync(descriptor);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function syncDirectoryBestEffort(directory: string): void {
+  try {
+    syncPublishedPath(directory);
+  } catch {
+    // Windows may reject opening a directory handle through node:fs.
+  }
+}
+
 async function persistStableObject(
   layout: PortableSnapshotV2Layout,
   file: ScannedFile,
@@ -372,8 +478,10 @@ async function persistStableObject(
     signal?.throwIfAborted();
     const after = await stat(file.sourcePath);
     if (after.size !== stable.size || after.mtimeMs !== stable.mtimeMs) return false;
+    syncPublishedPath(temporary);
     if (existsSync(destination)) return false;
     await rename(temporary, destination);
+    syncDirectoryBestEffort(path.dirname(destination));
     return true;
   } finally {
     await rm(temporary, { force: true }).catch(() => undefined);
@@ -410,6 +518,11 @@ async function cleanupSnapshots(layout: PortableSnapshotV2Layout): Promise<void>
     }
   }
 
+  valid.sort((left, right) => {
+    const generationOrder = (right.manifest.generation ?? 0) - (left.manifest.generation ?? 0);
+    return generationOrder !== 0 ? generationOrder : right.name.localeCompare(left.name);
+  });
+
   for (const stale of valid.slice(3)) {
     await rm(path.join(manifestDir, stale.name), { force: true }).catch(() => undefined);
   }
@@ -439,6 +552,92 @@ async function cleanupSnapshots(layout: PortableSnapshotV2Layout): Promise<void>
 function databaseBasePath(relativePath: string): string | undefined {
   const match = relativePath.match(/^(.*)-(wal|shm|journal)$/u);
   return match?.[1];
+}
+
+function isSqliteDatabase(filePath: string): boolean {
+  const header = Buffer.alloc(16);
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(filePath, 'r');
+    return readSync(descriptor, header, 0, header.length, 0) === header.length
+      && header.toString('utf8') === 'SQLite format 3\0';
+  } catch {
+    return false;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function sqliteDatabaseFile(group: SnapshotFileGroup): ScannedFile | undefined {
+  const companionBases = new Set(
+    group.files.map((file) => databaseBasePath(file.relativePath)).filter((value): value is string => Boolean(value)),
+  );
+  return group.files.find((file) => (
+    (companionBases.has(file.relativePath) || /\.(?:db|sqlite|sqlite3)$/iu.test(file.relativePath))
+    && isSqliteDatabase(file.sourcePath)
+  ));
+}
+
+function sourceFileVersions(files: ScannedFile[]): Record<string, { size: number; mtimeMs: number }> {
+  return Object.fromEntries(files.map((file) => [file.relativePath, {
+    size: file.size,
+    mtimeMs: file.mtimeMs,
+  }]));
+}
+
+function sameSourceFileVersions(
+  entry: PortableSnapshotV2Entry | undefined,
+  files: ScannedFile[],
+): boolean {
+  return Boolean(entry?.sourceFiles)
+    && JSON.stringify(entry?.sourceFiles) === JSON.stringify(sourceFileVersions(files));
+}
+
+async function captureSqliteDatabase(
+  layout: PortableSnapshotV2Layout,
+  databaseFile: ScannedFile,
+  files: ScannedFile[],
+  signal?: AbortSignal,
+): Promise<{
+  stable: StableFile;
+  sourceFiles: Record<string, { size: number; mtimeMs: number }>;
+  written: boolean;
+} | undefined> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    signal?.throwIfAborted();
+    const temporary = `${layout.stateDir}.sqlite-backup.${process.pid}.${randomUUID()}.tmp`;
+    let database: DatabaseSync | undefined;
+    try {
+      database = new DatabaseSync(databaseFile.sourcePath, { readOnly: true });
+      await backupSqlite(database, temporary);
+      database.close();
+      database = undefined;
+      const metadata = await stat(temporary);
+      const backupFile: ScannedFile = {
+        relativePath: databaseFile.relativePath,
+        sourcePath: temporary,
+        size: metadata.size,
+        mtimeMs: metadata.mtimeMs,
+      };
+      const stable = await hashStableFile(backupFile, signal);
+      if (!stable) continue;
+
+      // Record source versions after SQLite has completed its consistent online backup.
+      const refreshed = await Promise.all(files.map(async (file) => {
+        const source = await stat(file.sourcePath);
+        return { ...file, size: source.size, mtimeMs: source.mtimeMs };
+      }));
+      const written = await persistStableObject(layout, backupFile, stable, signal);
+      if (!written && !existsSync(objectPath(layout, stable.object))) continue;
+      return { stable, sourceFiles: sourceFileVersions(refreshed), written };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).name === 'AbortError') throw error;
+    } finally {
+      database?.close();
+      await rm(temporary, { force: true }).catch(() => undefined);
+    }
+  }
+  return undefined;
 }
 
 function buildSnapshotFileGroups(
@@ -480,10 +679,11 @@ export async function syncPortableRuntimeSnapshotV2(
   reason = 'periodic',
   options: PortableSnapshotV2SyncOptions = {},
 ): Promise<PortableSnapshotV2SyncResult> {
-  const { signal } = options;
+  const { signal, minimumGeneration = 0, verifyExistingObjects = false } = options;
   signal?.throwIfAborted();
   const startedAt = Date.now();
-  const previous = readLatestPortableSnapshotV2Sync(layout);
+  const previous = readValidManifestCandidatesSync(layout, verifyExistingObjects)[0]?.manifest;
+  const maximumKnownGeneration = readMaximumManifestGenerationSync(layout);
   const scanStartedAt = Date.now();
   const files = await scanStateFiles(layout.stateDir, signal);
   const scanDurationMs = Date.now() - scanStartedAt;
@@ -499,13 +699,20 @@ export async function syncPortableRuntimeSnapshotV2(
   const groups = buildSnapshotFileGroups(files, previousEntries);
   for (const group of groups) {
     signal?.throwIfAborted();
-    const unchanged = group.files.length === group.previousPaths.length
-      && group.files.every((file) => {
-        const existing = previousEntries[file.relativePath];
-        return existing?.size === file.size && existing.mtimeMs === file.mtimeMs;
-      });
+    const sqliteFile = sqliteDatabaseFile(group);
+    const unchanged = sqliteFile
+      ? sameSourceFileVersions(previousEntries[sqliteFile.relativePath], group.files)
+      : group.files.length === group.previousPaths.length
+        && group.files.every((file) => {
+          const existing = previousEntries[file.relativePath];
+          return existing?.size === file.size && existing.mtimeMs === file.mtimeMs;
+        });
     if (unchanged) {
-      for (const file of group.files) entries[file.relativePath] = previousEntries[file.relativePath];
+      if (sqliteFile) {
+        entries[sqliteFile.relativePath] = previousEntries[sqliteFile.relativePath];
+      } else {
+        for (const file of group.files) entries[file.relativePath] = previousEntries[file.relativePath];
+      }
       reusedFiles += group.files.length;
       continue;
     }
@@ -514,6 +721,30 @@ export async function syncPortableRuntimeSnapshotV2(
       const existing = previousEntries[file.relativePath];
       return !existing || existing.size !== file.size || existing.mtimeMs !== file.mtimeMs;
     }).length;
+
+    if (sqliteFile) {
+      const captured = await captureSqliteDatabase(layout, sqliteFile, group.files, signal);
+      if (!captured) {
+        if (group.previousPaths.length === 0) {
+          throw new Error(`Portable Runtime v2 baseline deferred because a SQLite database is unstable: ${sqliteFile.relativePath}`);
+        }
+        for (const relativePath of group.previousPaths) entries[relativePath] = previousEntries[relativePath];
+        reusedFiles += group.previousPaths.length;
+        unstableFiles += 1;
+        continue;
+      }
+      entries[sqliteFile.relativePath] = {
+        ...captured.stable,
+        sourceFiles: captured.sourceFiles,
+      };
+      if (captured.written) {
+        writtenObjects += 1;
+        writtenBytes += captured.stable.size;
+      } else {
+        reusedFiles += 1;
+      }
+      continue;
+    }
 
     const captured = new Map<string, StableFile>();
     for (const file of group.files) {
@@ -566,9 +797,17 @@ export async function syncPortableRuntimeSnapshotV2(
   }
 
   const writeDurationMs = Date.now() - writeStartedAt;
-  if (previous && sameEntries(previous.entries, entries)) {
+  if (
+    previous
+    && previous.snapshotId
+    && previous.generation !== undefined
+    && (previous.generation ?? 0) >= minimumGeneration
+    && sameEntries(previous.entries, entries)
+  ) {
     return {
       skipped: true,
+      snapshotId: previous.snapshotId,
+      generation: previous.generation,
       scannedFiles: files.length,
       changedFiles: 0,
       reusedFiles: files.length,
@@ -584,6 +823,9 @@ export async function syncPortableRuntimeSnapshotV2(
   const manifest: PortableSnapshotV2Manifest = {
     schema: PORTABLE_SNAPSHOT_V2_SCHEMA,
     portableId: layout.portableId,
+    snapshotId: randomUUID(),
+    generation: Math.max(maximumKnownGeneration, previous?.generation ?? 0, minimumGeneration) + 1,
+    ...(previous?.snapshotId ? { parentSnapshotId: previous.snapshotId } : {}),
     createdAt: new Date().toISOString(),
     reason: reason.slice(0, 80),
     entries,
@@ -598,7 +840,9 @@ export async function syncPortableRuntimeSnapshotV2(
   try {
     await writeFile(temporary, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
     signal?.throwIfAborted();
+    syncPublishedPath(temporary);
     await rename(temporary, snapshotPath);
+    syncDirectoryBestEffort(manifestDir);
   } finally {
     await rm(temporary, { force: true }).catch(() => undefined);
   }
@@ -607,6 +851,8 @@ export async function syncPortableRuntimeSnapshotV2(
   return {
     skipped: false,
     snapshotPath,
+    snapshotId: manifest.snapshotId,
+    generation: manifest.generation,
     scannedFiles: files.length,
     changedFiles,
     reusedFiles,

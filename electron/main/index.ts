@@ -744,7 +744,9 @@ if (gotTheLock) {
       portableRuntimeSnapshotService?.stop();
       if (portableRuntimeSnapshotService) {
         const snapshotResult = await runAbortableQuitTask(
-          (signal) => portableRuntimeSnapshotService.sync('shutdown', signal),
+          async (signal) => {
+            await portableRuntimeSnapshotService.sync('shutdown', signal);
+          },
           10_000,
         );
         if (snapshotResult === 'timeout') {

@@ -7,6 +7,7 @@ import {
   resolvePortableRuntimeLayout,
   type PortableRuntimeLayout,
 } from './portable-runtime-state';
+import { preparePortableClawXStateSync } from './portable-clawx-state';
 
 const PORTABLE_DATA_DIR_NAME = 'UClawData';
 const PORTABLE_FLAG_FILE = 'portable.flag';
@@ -241,6 +242,12 @@ export function applyPortableEnvironment(): PortableModeInfo {
 
   if (info.portableRuntimeLayout) {
     preparePortableRuntimeState(info.portableRuntimeLayout);
+    if (info.clawxDataDir && info.runtimeProfileDir) {
+      preparePortableClawXStateSync({
+        sourceDir: info.clawxDataDir,
+        backupDir: pathApi().join(info.runtimeProfileDir, 'clawx-core-state'),
+      });
+    }
   }
 
   process.env.CLAWX_PORTABLE = '1';

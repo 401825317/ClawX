@@ -48,6 +48,63 @@ describe('portable runtime state', () => {
     expect(first.stateDir).toContain(join('profiles', first.portableId));
   });
 
+  it('recovers a missing data-directory portable ID from the portable-root mirror', async () => {
+    const first = await createLayout();
+    const rootMirrorPath = join(first.rootDir, '.uclaw-portable-id');
+    await expect(readFile(rootMirrorPath, 'utf8')).resolves.toContain(first.portableId);
+    await rm(first.portableIdPath, { force: true });
+
+    const recovered = resolvePortableRuntimeLayout({
+      rootDir: first.rootDir,
+      dataDir: first.dataDir,
+      legacyStateDir: first.legacyStateDir,
+      runtimeRootDir: first.runtimeRootDir,
+    });
+
+    expect(recovered.portableId).toBe(first.portableId);
+    await expect(readFile(recovered.portableIdPath, 'utf8')).resolves.toContain(first.portableId);
+  });
+
+  it('repairs a conflicting portable-root mirror from the data-directory identity', async () => {
+    const first = await createLayout();
+    const rootMirrorPath = join(first.rootDir, '.uclaw-portable-id');
+    await writeFile(rootMirrorPath, 'conflicting-portable-id\n', 'utf8');
+
+    const repaired = resolvePortableRuntimeLayout({
+      rootDir: first.rootDir,
+      dataDir: first.dataDir,
+      legacyStateDir: first.legacyStateDir,
+      runtimeRootDir: first.runtimeRootDir,
+    });
+
+    expect(repaired.portableId).toBe(first.portableId);
+    await expect(readFile(rootMirrorPath, 'utf8')).resolves.toBe(`${first.portableId}\n`);
+  });
+
+  it('recovers a missing portable ID from the only snapshot identity', async () => {
+    const first = await createLayout();
+    await mkdir(first.stateDir, { recursive: true });
+    await writeFile(join(first.stateDir, 'openclaw.json'), '{"portable":true}\n', 'utf8');
+    await syncPortableRuntimeSnapshotV2({
+      stateDir: first.stateDir,
+      snapshotDir: first.snapshotV2Dir,
+      portableId: first.portableId,
+    }, 'identity-source');
+    await rm(first.portableIdPath, { force: true });
+    await rm(join(first.rootDir, '.uclaw-portable-id'), { force: true });
+
+    const recovered = resolvePortableRuntimeLayout({
+      rootDir: first.rootDir,
+      dataDir: first.dataDir,
+      legacyStateDir: first.legacyStateDir,
+      runtimeRootDir: first.runtimeRootDir,
+    });
+
+    expect(recovered.portableId).toBe(first.portableId);
+    await expect(readFile(recovered.portableIdPath, 'utf8')).resolves.toContain(first.portableId);
+    await expect(readFile(join(first.rootDir, '.uclaw-portable-id'), 'utf8')).resolves.toContain(first.portableId);
+  });
+
   it('restores legacy state when no complete snapshot exists', async () => {
     const layout = await createLayout();
     await mkdir(layout.legacyStateDir, { recursive: true });
@@ -106,6 +163,85 @@ describe('portable runtime state', () => {
     await expect(readFile(join(layout.stateDir, 'openclaw.json'), 'utf8')).resolves.toContain('v2');
   });
 
+  it('replaces a clean stale local state when the USB has a newer generation', async () => {
+    const layout = await createLayout();
+    await mkdir(layout.stateDir, { recursive: true });
+    await writeFile(join(layout.stateDir, 'openclaw.json'), '{"source":"generation-1"}\n', 'utf8');
+    await syncPortableRuntimeSnapshotV2({
+      stateDir: layout.stateDir,
+      snapshotDir: layout.snapshotV2Dir,
+      portableId: layout.portableId,
+    }, 'generation-1');
+    const first = readLatestPortableSnapshotV2Sync({
+      stateDir: layout.stateDir,
+      snapshotDir: layout.snapshotV2Dir,
+      portableId: layout.portableId,
+    })!;
+
+    await writeFile(join(layout.stateDir, 'openclaw.json'), '{"source":"generation-2"}\n', 'utf8');
+    await syncPortableRuntimeSnapshotV2({
+      stateDir: layout.stateDir,
+      snapshotDir: layout.snapshotV2Dir,
+      portableId: layout.portableId,
+    }, 'generation-2');
+    await writeFile(join(layout.stateDir, 'openclaw.json'), '{"source":"stale-local"}\n', 'utf8');
+    await writeFile(layout.markerPath, `${JSON.stringify({
+      schema: 'uclaw.portable-runtime-state/v1',
+      portableId: layout.portableId,
+      preparedAt: new Date().toISOString(),
+      lastAppliedSnapshotId: first.snapshotId,
+      lastAppliedGeneration: first.generation,
+      lifecycle: 'clean',
+    })}\n`, 'utf8');
+
+    preparePortableRuntimeState(layout);
+
+    await expect(readFile(join(layout.stateDir, 'openclaw.json'), 'utf8')).resolves.toContain('generation-2');
+    await expect(readdir(join(layout.profileDir, 'recovery'))).resolves.toEqual([]);
+  });
+
+  it('preserves an unclean stale local state before applying a newer USB generation', async () => {
+    const layout = await createLayout();
+    await mkdir(layout.stateDir, { recursive: true });
+    await writeFile(join(layout.stateDir, 'openclaw.json'), '{"source":"generation-1"}\n', 'utf8');
+    await syncPortableRuntimeSnapshotV2({
+      stateDir: layout.stateDir,
+      snapshotDir: layout.snapshotV2Dir,
+      portableId: layout.portableId,
+    }, 'generation-1');
+    const first = readLatestPortableSnapshotV2Sync({
+      stateDir: layout.stateDir,
+      snapshotDir: layout.snapshotV2Dir,
+      portableId: layout.portableId,
+    })!;
+
+    await writeFile(join(layout.stateDir, 'openclaw.json'), '{"source":"generation-2"}\n', 'utf8');
+    await syncPortableRuntimeSnapshotV2({
+      stateDir: layout.stateDir,
+      snapshotDir: layout.snapshotV2Dir,
+      portableId: layout.portableId,
+    }, 'generation-2');
+    await writeFile(join(layout.stateDir, 'openclaw.json'), '{"source":"unsynced-local"}\n', 'utf8');
+    await writeFile(layout.markerPath, `${JSON.stringify({
+      schema: 'uclaw.portable-runtime-state/v1',
+      portableId: layout.portableId,
+      preparedAt: new Date().toISOString(),
+      lastAppliedSnapshotId: first.snapshotId,
+      lastAppliedGeneration: first.generation,
+      lifecycle: 'active',
+    })}\n`, 'utf8');
+
+    preparePortableRuntimeState(layout);
+
+    await expect(readFile(join(layout.stateDir, 'openclaw.json'), 'utf8')).resolves.toContain('generation-2');
+    const recoveryEntries = await readdir(join(layout.profileDir, 'recovery'));
+    expect(recoveryEntries).toHaveLength(1);
+    await expect(readFile(
+      join(layout.profileDir, 'recovery', recoveryEntries[0], 'openclaw.json'),
+      'utf8',
+    )).resolves.toContain('unsynced-local');
+  });
+
   it('falls back to v1 when the latest v2 snapshot is corrupt', async () => {
     const layout = await createLayout();
     await mkdir(layout.stateDir, { recursive: true });
@@ -151,5 +287,86 @@ describe('portable runtime state', () => {
       message: 'Portable Runtime snapshot completed',
       details: expect.objectContaining({ writtenObjects: 1, changedFiles: 1 }),
     }));
+  });
+
+  it('mirrors portable ClawX core JSON during a snapshot service sync', async () => {
+    const layout = await createLayout();
+    await mkdir(layout.stateDir, { recursive: true });
+    await writeFile(join(layout.stateDir, 'openclaw.json'), '{"managed":true}\n', 'utf8');
+    const clawxDataDir = join(layout.dataDir, 'clawx');
+    await mkdir(clawxDataDir, { recursive: true });
+    await writeFile(join(clawxDataDir, 'settings.json'), '{"language":"zh"}\n', 'utf8');
+    await mkdir(join(clawxDataDir, 'electron-session'), { recursive: true });
+    await writeFile(join(clawxDataDir, 'electron-session', 'Cookies'), 'skip', 'utf8');
+    const service = new PortableRuntimeSnapshotService(layout);
+
+    await service.sync('test');
+
+    await expect(readFile(
+      join(layout.profileDir, 'clawx-core-state', 'current', 'settings.json'),
+      'utf8',
+    )).resolves.toContain('zh');
+    await expect(readFile(
+      join(layout.profileDir, 'clawx-core-state', 'current', 'electron-session', 'Cookies'),
+    )).rejects.toThrow();
+  });
+
+  it('skips clean periodic ticks and scans again after being marked dirty', async () => {
+    const layout = await createLayout();
+    await mkdir(layout.stateDir, { recursive: true });
+    await writeFile(join(layout.stateDir, 'openclaw.json'), '{"version":1}\n', 'utf8');
+    const logs: Array<{ message: string; details?: unknown }> = [];
+    const service = new PortableRuntimeSnapshotService(
+      layout,
+      (message, details) => logs.push({ message, details }),
+      5 * 60_000,
+      { watch: false, integrityIntervalMs: 1_000 },
+    );
+
+    await service.syncIfNeeded();
+    expect(logs.filter((entry) => entry.message === 'Portable Runtime snapshot completed')).toHaveLength(1);
+
+    await service.syncIfNeeded();
+    expect(logs.filter((entry) => entry.message === 'Portable Runtime snapshot completed')).toHaveLength(1);
+
+    service.markDirty();
+    await service.syncIfNeeded();
+    expect(logs.filter((entry) => entry.message === 'Portable Runtime snapshot completed')).toHaveLength(2);
+  });
+
+  it('marks the runtime clean only after a successful shutdown snapshot', async () => {
+    const layout = await createLayout();
+    await mkdir(layout.stateDir, { recursive: true });
+    await writeFile(join(layout.stateDir, 'openclaw.json'), '{"shutdown":true}\n', 'utf8');
+    preparePortableRuntimeState(layout);
+    const service = new PortableRuntimeSnapshotService(layout);
+
+    await service.sync('shutdown');
+
+    const marker = JSON.parse(await readFile(layout.markerPath, 'utf8')) as {
+      lifecycle?: string;
+      lastAppliedGeneration?: number;
+      lastAppliedSnapshotId?: string;
+    };
+    expect(marker.lifecycle).toBe('clean');
+    expect(marker.lastAppliedGeneration).toBe(1);
+    expect(marker.lastAppliedSnapshotId).toMatch(/^[a-f0-9-]{36}$/u);
+  });
+
+  it('marks the runtime clean when shutdown waits for an in-flight periodic snapshot', async () => {
+    const layout = await createLayout();
+    await mkdir(layout.stateDir, { recursive: true });
+    for (let index = 0; index < 200; index += 1) {
+      await writeFile(join(layout.stateDir, `state-${index}.json`), `${JSON.stringify({ index })}\n`, 'utf8');
+    }
+    preparePortableRuntimeState(layout);
+    const service = new PortableRuntimeSnapshotService(layout);
+
+    const periodic = service.sync('periodic');
+    const shutdown = service.sync('shutdown');
+    await Promise.all([periodic, shutdown]);
+
+    const marker = JSON.parse(await readFile(layout.markerPath, 'utf8')) as { lifecycle?: string };
+    expect(marker.lifecycle).toBe('clean');
   });
 });

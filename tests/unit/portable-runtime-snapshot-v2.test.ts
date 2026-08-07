@@ -3,14 +3,41 @@
 import { mkdtemp, mkdir, readFile, readdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const unstableFiles = vi.hoisted(() => new Set<string>());
+const durableSyncCount = vi.hoisted(() => ({ value: 0 }));
+const restorePublishFailureTargets = vi.hoisted(() => new Set<string>());
+const restoreCleanupFailureTargets = vi.hoisted(() => new Set<string>());
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
+    fsyncSync(descriptor: number) {
+      durableSyncCount.value += 1;
+      return actual.fsyncSync(descriptor);
+    },
+    renameSync(source: import('node:fs').PathLike, target: import('node:fs').PathLike) {
+      if (
+        restorePublishFailureTargets.has(String(target))
+        && String(source).includes('.restore.')
+      ) {
+        const error = new Error('Injected restore publish failure') as NodeJS.ErrnoException;
+        error.code = 'EACCES';
+        throw error;
+      }
+      return actual.renameSync(source, target);
+    },
+    rmSync(target: import('node:fs').PathLike, options?: import('node:fs').RmDirOptions) {
+      if ([...restoreCleanupFailureTargets].some((prefix) => String(target).startsWith(`${prefix}.previous.`))) {
+        const error = new Error('Injected restore cleanup failure') as NodeJS.ErrnoException;
+        error.code = 'EBUSY';
+        throw error;
+      }
+      return actual.rmSync(target, options);
+    },
     createReadStream(filePath: import('node:fs').PathLike, options?: Parameters<typeof actual.createReadStream>[1]) {
       const stream = actual.createReadStream(filePath, options);
       if (unstableFiles.has(String(filePath))) {
@@ -33,6 +60,9 @@ const tempDirs: string[] = [];
 
 afterEach(async () => {
   unstableFiles.clear();
+  durableSyncCount.value = 0;
+  restorePublishFailureTargets.clear();
+  restoreCleanupFailureTargets.clear();
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -197,6 +227,73 @@ describe('portable runtime snapshot v2 sync', () => {
     expect(Object.keys(latest?.entries ?? {}).sort()).toEqual(['a.json', 'c.json']);
   });
 
+  it('assigns monotonic generations and parent ids to snapshots', async () => {
+    const layout = await createLayout();
+    await writeFile(join(layout.stateDir, 'state.json'), '{"version":1}\n', 'utf8');
+    await syncPortableRuntimeSnapshotV2(layout, 'version-1');
+    const first = readLatestPortableSnapshotV2Sync(layout) as PortableSnapshotV2Manifest & {
+      snapshotId?: string;
+      generation?: number;
+      parentSnapshotId?: string;
+    };
+
+    await writeFile(join(layout.stateDir, 'state.json'), '{"version":2}\n', 'utf8');
+    await syncPortableRuntimeSnapshotV2(layout, 'version-2');
+    const second = readLatestPortableSnapshotV2Sync(layout) as PortableSnapshotV2Manifest & {
+      snapshotId?: string;
+      generation?: number;
+      parentSnapshotId?: string;
+    };
+
+    expect(first.snapshotId).toMatch(/^[a-f0-9-]{36}$/u);
+    expect(first.generation).toBe(1);
+    expect(first.parentSnapshotId).toBeUndefined();
+    expect(second.snapshotId).toMatch(/^[a-f0-9-]{36}$/u);
+    expect(second.generation).toBe(2);
+    expect(second.parentSnapshotId).toBe(first.snapshotId);
+  });
+
+  it('syncs changed objects and the manifest before publishing them', async () => {
+    const layout = await createLayout();
+    await writeFile(join(layout.stateDir, 'state.json'), '{"durable":true}\n', 'utf8');
+
+    await syncPortableRuntimeSnapshotV2(layout, 'durability');
+
+    expect(durableSyncCount.value).toBeGreaterThanOrEqual(2);
+  });
+
+  it('captures a WAL-mode SQLite database as one consistent database object', async () => {
+    const layout = await createLayout();
+    const databasePath = join(layout.stateDir, 'history.db');
+    const database = new DatabaseSync(databasePath);
+    try {
+      database.exec(`
+        PRAGMA journal_mode = WAL;
+        CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT NOT NULL);
+        INSERT INTO messages (body) VALUES ('first'), ('second');
+      `);
+
+      await syncPortableRuntimeSnapshotV2(layout, 'sqlite-online-backup');
+    } finally {
+      database.close();
+    }
+
+    const manifest = readLatestPortableSnapshotV2Sync(layout)!;
+    expect(manifest.entries['history.db']).toBeTruthy();
+    expect(manifest.entries['history.db-wal']).toBeUndefined();
+    expect(manifest.entries['history.db-shm']).toBeUndefined();
+
+    await rm(layout.stateDir, { recursive: true, force: true });
+    expect(restorePortableRuntimeSnapshotV2Sync(layout, layout.stateDir)).toBe(true);
+    const restored = new DatabaseSync(join(layout.stateDir, 'history.db'), { readOnly: true });
+    try {
+      const row = restored.prepare('SELECT COUNT(*) AS count FROM messages').get() as { count: number };
+      expect(row.count).toBe(2);
+    } finally {
+      restored.close();
+    }
+  });
+
   it('excludes reconstructable Chromium caches but preserves browser login state', async () => {
     const layout = await createLayout();
     const profile = join(layout.stateDir, 'browser', 'openclaw', 'user-data', 'Default');
@@ -258,6 +355,28 @@ describe('portable runtime snapshot v2 sync', () => {
 
     expect(restorePortableRuntimeSnapshotV2Sync(layout, layout.stateDir)).toBe(true);
     await expect(readFile(join(layout.stateDir, 'state.json'), 'utf8')).resolves.toBe('{"version":1}\n');
+  });
+
+  it('keeps the existing target when publishing a restored directory fails', async () => {
+    const layout = await createLayout();
+    await writeFile(join(layout.stateDir, 'state.json'), '{"source":"usb"}\n');
+    await syncPortableRuntimeSnapshotV2(layout, 'usb-snapshot');
+    await writeFile(join(layout.stateDir, 'state.json'), '{"source":"local"}\n');
+    restorePublishFailureTargets.add(layout.stateDir);
+
+    expect(restorePortableRuntimeSnapshotV2Sync(layout, layout.stateDir)).toBe(false);
+    await expect(readFile(join(layout.stateDir, 'state.json'), 'utf8')).resolves.toBe('{"source":"local"}\n');
+  });
+
+  it('accepts a published restore when only previous-directory cleanup fails', async () => {
+    const layout = await createLayout();
+    await writeFile(join(layout.stateDir, 'state.json'), '{"source":"usb"}\n');
+    await syncPortableRuntimeSnapshotV2(layout, 'usb-snapshot');
+    await writeFile(join(layout.stateDir, 'state.json'), '{"source":"local"}\n');
+    restoreCleanupFailureTargets.add(layout.stateDir);
+
+    expect(restorePortableRuntimeSnapshotV2Sync(layout, layout.stateDir)).toBe(true);
+    await expect(readFile(join(layout.stateDir, 'state.json'), 'utf8')).resolves.toBe('{"source":"usb"}\n');
   });
 
   it('keeps an entire SQLite file group on its previous stable version', async () => {
@@ -341,6 +460,43 @@ describe('portable runtime snapshot v2 sync', () => {
 
     expect(restorePortableRuntimeSnapshotV2Sync(layout, layout.stateDir)).toBe(true);
     await expect(readFile(stateFile, 'utf8')).resolves.toBe('{"version":1}\n');
+  });
+
+  it('repairs a same-size corrupt object during a scheduled integrity verification', async () => {
+    const layout = await createLayout();
+    const stateFile = join(layout.stateDir, 'state.json');
+    await writeFile(stateFile, '{"version":1}\n');
+    await syncPortableRuntimeSnapshotV2(layout, 'baseline');
+    const manifest = readLatestPortableSnapshotV2Sync(layout)!;
+    const entry = manifest.entries['state.json'];
+    const storedObject = join(layout.snapshotDir, 'objects', entry.object.slice(0, 2), entry.object);
+    await writeFile(storedObject, 'x'.repeat(entry.size));
+
+    const result = await syncPortableRuntimeSnapshotV2(layout, 'integrity', {
+      verifyExistingObjects: true,
+    } as Parameters<typeof syncPortableRuntimeSnapshotV2>[2]);
+    await rm(layout.stateDir, { recursive: true, force: true });
+
+    expect(result.skipped).toBe(false);
+    expect(restorePortableRuntimeSnapshotV2Sync(layout, layout.stateDir)).toBe(true);
+    await expect(readFile(stateFile, 'utf8')).resolves.toBe('{"version":1}\n');
+  });
+
+  it('retains the latest three generations when the system clock moves backwards', async () => {
+    vi.useFakeTimers();
+    const layout = await createLayout();
+    for (let generation = 1; generation <= 4; generation += 1) {
+      vi.setSystemTime(new Date(Date.UTC(2026, 7, 10 - generation)));
+      await writeFile(join(layout.stateDir, 'state.json'), `${JSON.stringify({ generation })}\n`, 'utf8');
+      await syncPortableRuntimeSnapshotV2(layout, `generation-${generation}`);
+    }
+
+    const manifestDir = join(layout.snapshotDir, 'manifests');
+    const generations = await Promise.all((await readdir(manifestDir)).map(async (name) => {
+      const manifest = JSON.parse(await readFile(join(manifestDir, name), 'utf8')) as { generation: number };
+      return manifest.generation;
+    }));
+    expect(generations.sort((left, right) => right - left)).toEqual([4, 3, 2]);
   });
 
   it('performs zero USB writes for an unchanged 5000-file state', async () => {
