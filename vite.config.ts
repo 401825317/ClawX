@@ -27,16 +27,21 @@ function getExtensionPackages(): Set<string> {
 }
 
 const extensionPackages = getExtensionPackages();
+const mainProcessBundledPackages = new Set(['json5']);
 const alias = {
   '@': resolve(__dirname, 'src'),
   '@electron': resolve(__dirname, 'electron'),
   '@shared': resolve(__dirname, 'shared'),
 };
 
-function isMainProcessExternal(id: string): boolean {
+export function isMainProcessExternal(id: string): boolean {
   if (!id || id.startsWith('\0')) return false;
   if (id.startsWith('.') || id.startsWith('/') || /^[A-Za-z]:[\\/]/.test(id)) return false;
   if (id.startsWith('@/') || id.startsWith('@electron/') || id.startsWith('@shared/')) return false;
+  // Keep config parsing available before Electron can resolve packaged runtime dependencies.
+  for (const pkg of mainProcessBundledPackages) {
+    if (id === pkg || id.startsWith(pkg + '/')) return false;
+  }
   for (const pkg of extensionPackages) {
     if (id === pkg || id.startsWith(pkg + '/')) return false;
   }
