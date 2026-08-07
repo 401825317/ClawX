@@ -14,6 +14,8 @@ const VIDEO_PLUGIN_CONFIG = {
   defaultResolution: '480P',
   defaultDurationSeconds: 6,
   pollIntervalMs: 1,
+  requestTimeoutMs: 100,
+  contentDownloadAttemptTimeoutMs: 100,
   contentDownloadMaxAttempts: 2,
   timeoutMs: 10_000,
   maxDownloadBytes: 1024 * 1024,
@@ -336,6 +338,315 @@ describe('UClaw video plugin', () => {
       expect(statusRequestCount).toBe(1);
       expect(contentRequestCount).toBe(2);
       expect(result?.videos[0]?.buffer).toEqual(completeVideo);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('retries a transient video status failure without resubmitting the generation task', async () => {
+    const videoBytes = completeMp4Bytes();
+    let submitRequestCount = 0;
+    let statusRequestCount = 0;
+    const server = http.createServer((req, res) => {
+      if (req.method === 'POST') {
+        submitRequestCount += 1;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ id: 'task-video-status-retry', status: 'queued' }));
+        return;
+      }
+      if (req.url === '/v1/videos/task-video-status-retry') {
+        statusRequestCount += 1;
+        if (statusRequestCount === 1) {
+          res.writeHead(503, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: 'temporary status outage' } }));
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ id: 'task-video-status-retry', status: 'completed' }));
+        return;
+      }
+      if (req.url === '/v1/videos/task-video-status-retry/content') {
+        res.writeHead(200, {
+          'content-type': 'video/mp4',
+          'content-length': String(videoBytes.length),
+        });
+        res.end(videoBytes);
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('Test server did not bind');
+      const plugin = await import('../../resources/openclaw-plugins/uclaw-video/index.mjs');
+      let provider: { generateVideo: (request: Record<string, unknown>) => Promise<{
+        videos: Array<{ buffer?: Buffer }>;
+      }> } | undefined;
+      plugin.default.register({
+        pluginConfig: VIDEO_PLUGIN_CONFIG,
+        registerVideoGenerationProvider(nextProvider: typeof provider) {
+          provider = nextProvider;
+        },
+      });
+
+      const result = await provider?.generateVideo({
+        provider: 'uclaw-video',
+        model: 'grok-image-video',
+        prompt: 'Generate after a transient status failure.',
+        cfg: {
+          models: {
+            providers: {
+              'uclaw-video': {
+                baseUrl: `http://127.0.0.1:${address.port}/v1`,
+                apiKey: 'video-test-key',
+              },
+            },
+          },
+        },
+      });
+
+      expect(submitRequestCount).toBe(1);
+      expect(statusRequestCount).toBe(2);
+      expect(result?.videos[0]?.buffer).toEqual(videoBytes);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('resumes an interrupted video download with a validated byte range', async () => {
+    const videoBytes = completeMp4Bytes(Buffer.alloc(256, 9));
+    const splitAt = Math.floor(videoBytes.length / 2);
+    const requestedRanges: Array<string | undefined> = [];
+    const requestedIfRanges: Array<string | undefined> = [];
+    let contentRequestCount = 0;
+    const server = http.createServer((req, res) => {
+      if (req.method === 'POST') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ id: 'task-video-resume', status: 'completed' }));
+        return;
+      }
+      if (req.url === '/v1/videos/task-video-resume/content') {
+        contentRequestCount += 1;
+        requestedRanges.push(typeof req.headers.range === 'string' ? req.headers.range : undefined);
+        requestedIfRanges.push(typeof req.headers['if-range'] === 'string' ? req.headers['if-range'] : undefined);
+        if (contentRequestCount === 1) {
+          res.writeHead(200, {
+            'accept-ranges': 'bytes',
+            'content-type': 'video/mp4',
+            'content-length': String(videoBytes.length),
+            etag: '"video-resume-v1"',
+          });
+          res.write(videoBytes.subarray(0, splitAt));
+          setImmediate(() => res.destroy());
+          return;
+        }
+        res.writeHead(206, {
+          'accept-ranges': 'bytes',
+          'content-type': 'video/mp4',
+          'content-length': String(videoBytes.length - splitAt),
+          'content-range': `bytes ${splitAt}-${videoBytes.length - 1}/${videoBytes.length}`,
+          etag: '"video-resume-v1"',
+        });
+        res.end(videoBytes.subarray(splitAt));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('Test server did not bind');
+      const plugin = await import('../../resources/openclaw-plugins/uclaw-video/index.mjs');
+      let provider: { generateVideo: (request: Record<string, unknown>) => Promise<{
+        videos: Array<{ buffer?: Buffer }>;
+      }> } | undefined;
+      plugin.default.register({
+        pluginConfig: { ...VIDEO_PLUGIN_CONFIG, contentDownloadMaxAttempts: 2 },
+        registerVideoGenerationProvider(nextProvider: typeof provider) {
+          provider = nextProvider;
+        },
+      });
+
+      const result = await provider?.generateVideo({
+        provider: 'uclaw-video',
+        model: 'grok-image-video',
+        prompt: 'Resume this generated video download.',
+        cfg: {
+          models: {
+            providers: {
+              'uclaw-video': {
+                baseUrl: `http://127.0.0.1:${address.port}/v1`,
+                apiKey: 'video-test-key',
+              },
+            },
+          },
+        },
+      });
+
+      expect(contentRequestCount).toBe(2);
+      expect(requestedRanges).toEqual([undefined, `bytes=${splitAt}-`]);
+      expect(requestedIfRanges).toEqual([undefined, '"video-resume-v1"']);
+      expect(result?.videos[0]?.buffer).toEqual(videoBytes);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('resumes from received bytes after a video download attempt times out', async () => {
+    const videoBytes = completeMp4Bytes(Buffer.alloc(256, 5));
+    const splitAt = Math.floor(videoBytes.length / 2);
+    const requestedRanges: Array<string | undefined> = [];
+    const requestedIfRanges: Array<string | undefined> = [];
+    let contentRequestCount = 0;
+    const server = http.createServer((req, res) => {
+      if (req.method === 'POST') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ id: 'task-video-timeout-resume', status: 'completed' }));
+        return;
+      }
+      if (req.url === '/v1/videos/task-video-timeout-resume/content') {
+        contentRequestCount += 1;
+        requestedRanges.push(typeof req.headers.range === 'string' ? req.headers.range : undefined);
+        requestedIfRanges.push(typeof req.headers['if-range'] === 'string' ? req.headers['if-range'] : undefined);
+        if (contentRequestCount === 1) {
+          res.writeHead(200, {
+            'accept-ranges': 'bytes',
+            'content-type': 'video/mp4',
+            'content-length': String(videoBytes.length),
+            etag: '"video-timeout-v1"',
+          });
+          res.write(videoBytes.subarray(0, splitAt));
+          return;
+        }
+        res.writeHead(206, {
+          'accept-ranges': 'bytes',
+          'content-type': 'video/mp4',
+          'content-length': String(videoBytes.length - splitAt),
+          'content-range': `bytes ${splitAt}-${videoBytes.length - 1}/${videoBytes.length}`,
+          etag: '"video-timeout-v1"',
+        });
+        res.end(videoBytes.subarray(splitAt));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('Test server did not bind');
+      const plugin = await import('../../resources/openclaw-plugins/uclaw-video/index.mjs');
+      let provider: { generateVideo: (request: Record<string, unknown>) => Promise<{
+        videos: Array<{ buffer?: Buffer }>;
+      }> } | undefined;
+      plugin.default.register({
+        pluginConfig: {
+          ...VIDEO_PLUGIN_CONFIG,
+          contentDownloadAttemptTimeoutMs: 30,
+          contentDownloadMaxAttempts: 2,
+        },
+        registerVideoGenerationProvider(nextProvider: typeof provider) {
+          provider = nextProvider;
+        },
+      });
+
+      const result = await provider?.generateVideo({
+        provider: 'uclaw-video',
+        model: 'grok-image-video',
+        prompt: 'Resume after the content request times out.',
+        cfg: {
+          models: {
+            providers: {
+              'uclaw-video': {
+                baseUrl: `http://127.0.0.1:${address.port}/v1`,
+                apiKey: 'video-test-key',
+              },
+            },
+          },
+        },
+      });
+
+      expect(contentRequestCount).toBe(2);
+      expect(requestedRanges).toEqual([undefined, `bytes=${splitAt}-`]);
+      expect(requestedIfRanges).toEqual([undefined, '"video-timeout-v1"']);
+      expect(result?.videos[0]?.buffer).toEqual(videoBytes);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('returns the provider result URL after all local download attempts fail', async () => {
+    let contentRequestCount = 0;
+    let fallbackAuthorization: string | undefined;
+    const server = http.createServer((req, res) => {
+      if (req.method === 'POST') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          id: 'task-video-url-fallback',
+          status: 'completed',
+          result_url: `http://127.0.0.1:${(server.address() as { port: number }).port}/fallback/video.mp4`,
+        }));
+        return;
+      }
+      if (req.url === '/v1/videos/task-video-url-fallback/content') {
+        contentRequestCount += 1;
+        res.writeHead(503, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'content is temporarily unavailable' } }));
+        return;
+      }
+      if (req.url === '/fallback/video.mp4') {
+        fallbackAuthorization = typeof req.headers.authorization === 'string'
+          ? req.headers.authorization
+          : undefined;
+        res.writeHead(500).end();
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('Test server did not bind');
+      const resultUrl = `http://127.0.0.1:${address.port}/fallback/video.mp4`;
+      const plugin = await import('../../resources/openclaw-plugins/uclaw-video/index.mjs');
+      let provider: { generateVideo: (request: Record<string, unknown>) => Promise<{
+        videos: Array<{ buffer?: Buffer; url?: string; metadata?: Record<string, unknown> }>;
+      }> } | undefined;
+      plugin.default.register({
+        pluginConfig: { ...VIDEO_PLUGIN_CONFIG, contentDownloadMaxAttempts: 4 },
+        registerVideoGenerationProvider(nextProvider: typeof provider) {
+          provider = nextProvider;
+        },
+      });
+
+      const result = await provider?.generateVideo({
+        provider: 'uclaw-video',
+        model: 'grok-image-video',
+        prompt: 'Fall back to the completed provider URL.',
+        cfg: {
+          models: {
+            providers: {
+              'uclaw-video': {
+                baseUrl: `http://127.0.0.1:${address.port}/v1`,
+                apiKey: 'video-test-key',
+              },
+            },
+          },
+        },
+      });
+
+      expect(contentRequestCount).toBe(4);
+      expect(fallbackAuthorization).toBeUndefined();
+      expect(result?.videos).toEqual([expect.objectContaining({
+        url: resultUrl,
+        metadata: expect.objectContaining({ localDownloadFailed: true }),
+      })]);
+      expect(result?.videos[0]).not.toHaveProperty('buffer');
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

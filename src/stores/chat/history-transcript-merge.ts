@@ -7,6 +7,8 @@ const TRUNCATION_SUFFIXES = [
   /\n?\[chat\.history omitted: message too large\]$/,
 ];
 
+const MINIMUM_SAFE_PREFIX_LENGTH = 16;
+
 export function isTruncatedHistoryText(text: string): boolean {
   if (!text) return false;
   return TRUNCATION_SUFFIXES.some((pattern) => pattern.test(text));
@@ -30,7 +32,7 @@ function replaceTruncatedContent(
     const gatewayPrefix = stripTruncationSuffix(gatewayContent);
     if (
       transcriptContent.length > gatewayPrefix.length
-      && (transcriptContent.startsWith(gatewayPrefix) || gatewayPrefix.length >= 64)
+      && transcriptContent.startsWith(gatewayPrefix)
     ) {
       return transcriptContent;
     }
@@ -50,7 +52,7 @@ function replaceTruncatedContent(
       const gatewayPrefix = stripTruncationSuffix(gatewayText);
       if (
         transcriptText.length > gatewayPrefix.length
-        && (transcriptText.startsWith(gatewayPrefix) || gatewayPrefix.length >= 64)
+        && transcriptText.startsWith(gatewayPrefix)
       ) {
         return transcriptContent;
       }
@@ -76,17 +78,78 @@ function replaceTruncatedContent(
   return changed ? mergedBlocks : gatewayContent;
 }
 
-function messageMatchKey(message: RawMessage): string {
-  if (message.id) return `id:${message.id}`;
-  return `rt:${message.role}|${message.timestamp ?? ''}`;
+function roleTimestampMatchKey(message: RawMessage): string {
+  return `${message.role}|${message.timestamp ?? ''}`;
 }
 
-function buildTranscriptLookup(transcriptMessages: RawMessage[]): Map<string, RawMessage> {
-  const lookup = new Map<string, RawMessage>();
-  for (const message of transcriptMessages) {
-    lookup.set(messageMatchKey(message), message);
+type TranscriptLookup = {
+  byId: Map<string, RawMessage | null>;
+  byRoleTimestamp: Map<string, RawMessage | null>;
+};
+
+function addUniqueTranscriptMatch(
+  lookup: Map<string, RawMessage | null>,
+  key: string,
+  message: RawMessage,
+): void {
+  if (lookup.has(key)) {
+    lookup.set(key, null);
+    return;
   }
-  return lookup;
+  lookup.set(key, message);
+}
+
+function buildTranscriptLookup(transcriptMessages: RawMessage[]): TranscriptLookup {
+  const byId = new Map<string, RawMessage | null>();
+  const byRoleTimestamp = new Map<string, RawMessage | null>();
+  for (const message of transcriptMessages) {
+    if (message.id) {
+      addUniqueTranscriptMatch(byId, message.id, message);
+    }
+    addUniqueTranscriptMatch(byRoleTimestamp, roleTimestampMatchKey(message), message);
+  }
+  return { byId, byRoleTimestamp };
+}
+
+function findUniquePrefixMatch(
+  message: RawMessage,
+  transcriptMessages: RawMessage[],
+): RawMessage | undefined {
+  // Large media can make the Gateway omit whole records, so array positions
+  // are not a reliable identity. Only a unique visible prefix may bridge IDs
+  // and timestamps that changed across an OpenClaw upgrade.
+  const gatewayText = getMessageText(message.content);
+  const prefix = stripTruncationSuffix(gatewayText);
+  if (!isTruncatedHistoryText(gatewayText) || prefix.length < MINIMUM_SAFE_PREFIX_LENGTH) {
+    return undefined;
+  }
+
+  let match: RawMessage | undefined;
+  for (const transcriptMessage of transcriptMessages) {
+    if (transcriptMessage.role !== message.role) continue;
+    if (!getMessageText(transcriptMessage.content).startsWith(prefix)) continue;
+    if (match) return undefined;
+    match = transcriptMessage;
+  }
+  return match;
+}
+
+function findTranscriptMatch(
+  message: RawMessage,
+  lookup: TranscriptLookup,
+  transcriptMessages: RawMessage[],
+): RawMessage | undefined {
+  if (message.id) {
+    const idMatch = lookup.byId.get(message.id);
+    if (idMatch) return idMatch;
+  }
+
+  const roleTimestampMatch = lookup.byRoleTimestamp.get(roleTimestampMatchKey(message));
+  if (roleTimestampMatch) return roleTimestampMatch;
+
+  // Do not fall back to the absolute message index: the two sources can have
+  // different record counts around omitted images and tool results.
+  return findUniquePrefixMatch(message, transcriptMessages);
 }
 
 export function gatewayHistoryNeedsTranscriptHydration(messages: RawMessage[]): boolean {
@@ -102,9 +165,8 @@ export function mergeGatewayHistoryWithTranscript(
   }
 
   const lookup = buildTranscriptLookup(transcriptMessages);
-  return gatewayMessages.map((message, index) => {
-    const transcriptMatch = lookup.get(messageMatchKey(message))
-      ?? transcriptMessages[index];
+  return gatewayMessages.map((message) => {
+    const transcriptMatch = findTranscriptMatch(message, lookup, transcriptMessages);
     if (!transcriptMatch) return message;
 
     const nextContent = replaceTruncatedContent(message.content, transcriptMatch.content);

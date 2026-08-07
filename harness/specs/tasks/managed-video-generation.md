@@ -61,14 +61,14 @@ touchedAreas:
   - tests/e2e/chat-video-generation-options.spec.ts
   - tests/e2e/chat-acp-attachments.spec.ts
 expectedUserBehavior:
-  - The managed account supplies the enabled video models, modes, aspect ratios, resolutions, durations, defaults, and bounded content-download attempts used by the video flow.
+  - The managed account supplies the enabled video models, modes, aspect ratios, resolutions, durations, defaults, bounded request timeouts, and content-download attempts used by the video flow.
   - Video mode is mutually exclusive with image mode and defaults to grok-image-video, 16:9, 480P, and 6 seconds when those values are allowed by the managed policy.
   - The Composer does not expose a video model selector. A video_generate call with no reference image routes to grok-image-video; exactly one reference image routes to grok-video-1.5; more than one reference image is rejected.
   - Sending in video mode records only this ACP turn's selected aspect ratio, resolution, and duration. The model still decides whether to call OpenClaw's native video_generate tool.
   - A video-mode ACP reference image above the managed 1 MiB limit is compressed in memory before prompt delivery; the user source file and attachment identity are never modified, and a still-oversized result fails clearly.
   - A model-selected video_generate call receives the automatically routed model plus the current turn's aspect ratio, resolution, and duration without changing chat ordering, streaming, history replay, or subsequent turns.
   - After OpenClaw returns an asynchronous video task id, the composer shows a localized video-generation status and blocks another send until that task completes, fails, or reaches the bounded timeout; draft editing remains available.
-  - A completed video is downloaded into OpenClaw's managed media directory. Its matching terminal event performs a bounded supplement of only the original live Turn, then renders one local in-chat player with seek, system-open, and reveal-in-folder actions. A provider URL is not used as the normal playback source.
+  - A completed video is downloaded into OpenClaw's managed media directory. Interrupted or timed-out content requests resume from validated byte ranges without resubmitting the generation task. Its matching terminal event performs a bounded supplement of only the original live Turn, then renders one local in-chat player with seek, system-open, and reveal-in-folder actions. The provider URL is delivered only after every configured local download attempt fails.
   - Startup and managed-login synchronization install and trust the uclaw-video plugin, configure the managed provider and default video model, and synchronize its API key without modifying OpenClaw core files.
 requiredProfiles:
   - fast
@@ -87,7 +87,7 @@ requiredRules:
   - comms-regression
   - docs-sync
 requiredTests:
-  - pnpm exec vitest run tests/unit/junfeiai-endpoints.test.ts tests/unit/managed-client-config-service.test.ts tests/unit/managed-runtime-config.test.ts tests/unit/acp-turn-video-preference-store.test.ts tests/unit/video-reference-image.test.ts tests/unit/video-generation-status.test.ts tests/unit/acp-chat-service.test.ts tests/unit/acp-chat-store.test.ts tests/unit/uclaw-video-plugin.test.ts tests/unit/provider-runtime-sync.test.ts tests/unit/openclaw-auth.test.ts tests/unit/plugin-install.test.ts tests/unit/chat-input.test.tsx tests/unit/attachment-access.test.ts tests/unit/attachment-video-stream.test.ts tests/unit/acp-chat-components.test.tsx
+  - pnpm exec vitest run tests/unit/junfeiai-endpoints.test.ts tests/unit/managed-client-config-service.test.ts tests/unit/managed-runtime-config.test.ts tests/unit/acp-turn-video-preference-store.test.ts tests/unit/video-reference-image.test.ts tests/unit/video-generation-status.test.ts tests/unit/acp-chat-service.test.ts tests/unit/acp-chat-store.test.ts tests/unit/uclaw-video-plugin.test.ts tests/unit/provider-runtime-sync.test.ts tests/unit/openclaw-auth.test.ts tests/unit/plugin-install.test.ts tests/unit/openclaw-bundle-config.test.ts tests/unit/chat-input.test.tsx tests/unit/attachment-access.test.ts tests/unit/attachment-video-stream.test.ts tests/unit/acp-chat-components.test.tsx
   - pnpm run typecheck
   - pnpm run build:vite
   - pnpm exec playwright test tests/e2e/chat-video-generation-options.spec.ts
@@ -96,8 +96,8 @@ requiredTests:
   - pnpm run comms:compare
 acceptance:
   - Renderer reads managed video policy through the typed Host API and never calls the Gateway or provider endpoint directly.
-  - The local endpoint manifest owns provider ID, supported models, modes, aspect ratios, resolutions, durations, defaults, polling interval, content-download attempt limit, timeout, download limit, and maximum reference-image bytes; secrets remain in managed auth storage and OpenClaw auth profiles.
-  - The provider uses OpenAI-compatible POST /videos and GET /videos/{taskId} polling, treats an explicit non-terminal status as authoritative even when a result URL is present, and downloads GET /videos/{taskId}/content within the managed size and timeout bounds. Empty, truncated, or structurally incomplete MP4 content is retried without resubmitting the generation task and is never returned to OpenClaw. A result URL is retained only as OpenClaw's fallback metadata.
+  - The local endpoint manifest owns provider ID, supported models, modes, aspect ratios, resolutions, durations, defaults, polling interval, request timeout, per-download timeout, content-download attempt limit, generation timeout, download limit, and maximum reference-image bytes; secrets remain in managed auth storage and OpenClaw auth profiles.
+  - The provider uses OpenAI-compatible POST /videos and GET /videos/{taskId} polling, treats an explicit non-terminal status as authoritative even when a result URL is present, and downloads GET /videos/{taskId}/content within the managed size and timeout bounds. Temporary status-query failures continue polling without resubmitting the generation task. Empty, truncated, timed-out, or interrupted MP4 content is retried; when the server returns a valid 206 Content-Range, the next attempt resumes with Range and If-Range. Invalid ranges are never appended, and a server that ignores Range causes a clean full download. After all configured content attempts fail, a completed task with result_url returns that URL-only asset to OpenClaw so the task can finish and the user receives a usable link.
   - Runtime capabilities expose 2:3, 3:2, 1:1, 9:16, and 16:9, 480P and 720P, plus 6, 10, and 15 seconds, defaulting to 16:9, 480P, and 6 seconds. grok-image-video is text-to-video only; grok-video-1.5 is image-to-video only and receives exactly one reference image.
   - Startup repairs plugins.allow and plugins.entries.uclaw-video.enabled without removing unrelated trusted plugins, and writes agents.defaults.videoGenerationModel.primary as uclaw-video/grok-image-video.
   - ACP preference files store session/run correlation, normalized aspect ratio, resolution, duration, and an optional path to the bounded current-turn reference copy. They are consumed once; the managed copy is removed after successful tool acceptance, run completion, prompt failure, or expiry.

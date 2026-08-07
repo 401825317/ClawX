@@ -88,6 +88,8 @@
       "apiProtocol": "openai-completions",
       "timeoutMs": 900000,
       "pollIntervalMs": 5000,
+      "requestTimeoutMs": 15000,
+      "contentDownloadAttemptTimeoutMs": 60000,
       "contentDownloadMaxAttempts": 4,
       "maxDownloadBytes": 134217728,
       "maxInputImageBytes": 1048576,

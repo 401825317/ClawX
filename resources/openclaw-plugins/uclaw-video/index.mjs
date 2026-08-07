@@ -16,6 +16,8 @@ const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_RESOLUTION = '480P';
 const DEFAULT_DURATION_SECONDS = 6;
 const DEFAULT_POLL_INTERVAL_MS = 5000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 15 * 1000;
+const DEFAULT_CONTENT_DOWNLOAD_ATTEMPT_TIMEOUT_MS = 60 * 1000;
 const DEFAULT_CONTENT_DOWNLOAD_MAX_ATTEMPTS = 4;
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024;
@@ -172,6 +174,11 @@ function resolvePluginConfig(value) {
     defaultDurationSeconds,
     resolutionSizes,
     pollIntervalMs: normalizePositiveInteger(value?.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS),
+    requestTimeoutMs: normalizePositiveInteger(value?.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS),
+    contentDownloadAttemptTimeoutMs: normalizePositiveInteger(
+      value?.contentDownloadAttemptTimeoutMs,
+      DEFAULT_CONTENT_DOWNLOAD_ATTEMPT_TIMEOUT_MS,
+    ),
     contentDownloadMaxAttempts: normalizePositiveInteger(
       value?.contentDownloadMaxAttempts,
       DEFAULT_CONTENT_DOWNLOAD_MAX_ATTEMPTS,
@@ -308,10 +315,19 @@ function remainingTimeout(deadline) {
   return Math.max(1, deadline - Date.now());
 }
 
+class HttpResponseError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.name = 'HttpResponseError';
+    this.status = status;
+  }
+}
+
 class IncompleteVideoContentError extends Error {
-  constructor(message) {
+  constructor(message, resumeState) {
     super(message);
     this.name = 'IncompleteVideoContentError';
+    this.resumeState = resumeState;
   }
 }
 
@@ -323,12 +339,19 @@ class GeneratedVideoTooLargeError extends Error {
 }
 
 /** Reads a response incrementally so an absent Content-Length cannot bypass the managed limit. */
-async function readResponseBuffer(response, maxDownloadBytes, expectedBytes) {
+async function readResponseBuffer(response, maxDownloadBytes, options = {}) {
   if (!response.body) throw new IncompleteVideoContentError('Video content response has no body');
   const reader = response.body.getReader();
-  const target = Number.isSafeInteger(expectedBytes) ? Buffer.allocUnsafe(expectedBytes) : undefined;
+  const resumeState = options.resumeState;
+  const expectedBytes = options.expectedBytes;
+  const target = Number.isSafeInteger(expectedBytes)
+    ? resumeState?.buffer?.length === expectedBytes
+      ? resumeState.buffer
+      : Buffer.allocUnsafe(expectedBytes)
+    : undefined;
   const chunks = target ? undefined : [];
-  let totalBytes = 0;
+  const startOffset = target && resumeState ? resumeState.receivedBytes : 0;
+  let totalBytes = startOffset;
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -354,21 +377,36 @@ async function readResponseBuffer(response, maxDownloadBytes, expectedBytes) {
     if (
       error instanceof GeneratedVideoTooLargeError
       || error instanceof IncompleteVideoContentError
-      || (error instanceof Error && error.name === 'AbortError')
     ) {
       throw error;
     }
-    throw new IncompleteVideoContentError('Video content response ended before the body was complete');
+    const nextResumeState = target && totalBytes > startOffset
+      ? {
+        buffer: target,
+        receivedBytes: totalBytes,
+        totalBytes: target.length,
+        validator: options.validator,
+      }
+      : undefined;
+    throw new IncompleteVideoContentError(
+      error instanceof Error && error.name === 'AbortError'
+        ? 'Video content download timed out before the body was complete'
+        : 'Video content response ended before the body was complete',
+      nextResumeState,
+    );
   } finally {
     reader.releaseLock();
   }
   if (totalBytes === 0) throw new IncompleteVideoContentError('Video content response is empty');
   if (target && totalBytes !== target.length) {
-    throw new IncompleteVideoContentError(
-      `Video content declared ${target.length} bytes but returned ${totalBytes}`,
-    );
+    throw new IncompleteVideoContentError(`Video content declared ${target.length} bytes but returned ${totalBytes}`, {
+      buffer: target,
+      receivedBytes: totalBytes,
+      totalBytes: target.length,
+      validator: options.validator,
+    });
   }
-  return target ?? Buffer.concat(chunks, totalBytes);
+  return target ?? Buffer.concat(chunks, totalBytes - startOffset);
 }
 
 /** Validates enough of ISO-BMFF to reject a file whose declared top-level box is truncated. */
@@ -427,9 +465,46 @@ function assertCompleteMp4(buffer) {
 }
 
 /** Performs one authenticated JSON request within the shared generation deadline. */
-async function fetchJson(url, init, deadline, label) {
+function requestTimeout(deadline, timeoutMs) {
+  return Math.min(remainingTimeout(deadline), timeoutMs);
+}
+
+function isTransientHttpStatus(status) {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function errorCode(error) {
+  let current = error;
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    if (typeof current.code === 'string' && current.code) return current.code.toUpperCase();
+    current = current.cause;
+  }
+  return undefined;
+}
+
+function isRetryableNetworkError(error) {
+  if (error instanceof HttpResponseError) return isTransientHttpStatus(error.status);
+  if (error instanceof IncompleteVideoContentError) return true;
+  const code = errorCode(error);
+  if (code && new Set([
+    'ECONNRESET',
+    'ECONNREFUSED',
+    'EHOSTUNREACH',
+    'ENETUNREACH',
+    'ETIMEDOUT',
+    'UND_ERR_BODY_TIMEOUT',
+    'UND_ERR_CONNECT_TIMEOUT',
+    'UND_ERR_HEADERS_TIMEOUT',
+    'UND_ERR_SOCKET',
+  ]).has(code)) return true;
+  const message = error instanceof Error ? error.message.toLowerCase() : '';
+  return message.includes('timed out') || message.includes('fetch failed');
+}
+
+/** Performs one JSON request with an operation timeout inside the generation deadline. */
+async function fetchJson(url, init, deadline, timeoutMs, label) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), remainingTimeout(deadline));
+  const timer = setTimeout(() => controller.abort(), requestTimeout(deadline, timeoutMs));
   try {
     const response = await fetch(url, { ...init, signal: controller.signal });
     const text = await response.text();
@@ -440,7 +515,10 @@ async function fetchJson(url, init, deadline, label) {
       if (response.ok) throw new Error(`${label} returned invalid JSON`);
     }
     if (!response.ok) {
-      throw new Error(readResponseError(payload, `${label} failed with HTTP ${response.status}`));
+      throw new HttpResponseError(
+        readResponseError(payload, `${label} failed with HTTP ${response.status}`),
+        response.status,
+      );
     }
     return payload;
   } catch (error) {
@@ -458,18 +536,30 @@ function sleep(ms) {
 }
 
 /** Polls the OpenAI-compatible task endpoint until a terminal response arrives. */
-async function pollVideoTask({ baseUrl, apiKey, taskId, deadline, pollIntervalMs }) {
+async function pollVideoTask({ baseUrl, apiKey, taskId, deadline, pollIntervalMs, requestTimeoutMs, logger }) {
   let lastStatus;
   while (Date.now() < deadline) {
-    const payload = await fetchJson(
-      `${baseUrl}/videos/${encodeURIComponent(taskId)}`,
-      {
-        method: 'GET',
-        headers: { Accept: 'application/json', Authorization: `Bearer ${apiKey}` },
-      },
-      deadline,
-      'Video status request',
-    );
+    let payload;
+    try {
+      payload = await fetchJson(
+        `${baseUrl}/videos/${encodeURIComponent(taskId)}`,
+        {
+          method: 'GET',
+          headers: { Accept: 'application/json', Authorization: `Bearer ${apiKey}` },
+        },
+        deadline,
+        requestTimeoutMs,
+        'Video status request',
+      );
+    } catch (error) {
+      if (!isRetryableNetworkError(error)) throw error;
+      logger?.warn?.('Video status request failed temporarily; polling will continue', {
+        taskId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await sleep(Math.min(pollIntervalMs, remainingTimeout(deadline)));
+      continue;
+    }
     const failureMessage = extractFailureMessage(payload);
     if (failureMessage) throw new Error(failureMessage);
     if (isComplete(payload)) return payload;
@@ -482,37 +572,87 @@ async function pollVideoTask({ baseUrl, apiKey, taskId, deadline, pollIntervalMs
 }
 
 /** Performs one authenticated download and accepts only a structurally complete MP4. */
-async function downloadVideoContentAttempt({ baseUrl, apiKey, taskId, deadline, maxDownloadBytes }) {
+function parseContentRange(value) {
+  const match = normalizeOptionalString(value)?.match(/^bytes (\d+)-(\d+)\/(\d+)$/iu);
+  if (!match) return undefined;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  const total = Number(match[3]);
+  if (![start, end, total].every(Number.isSafeInteger) || start < 0 || end < start || total <= end) {
+    return undefined;
+  }
+  return { start, end, total };
+}
+
+function responseValidator(response) {
+  return normalizeOptionalString(response.headers.get('etag'))
+    ?? normalizeOptionalString(response.headers.get('last-modified'));
+}
+
+/** Performs one authenticated download and accepts only a structurally complete MP4. */
+async function downloadVideoContentAttempt({
+  baseUrl,
+  apiKey,
+  taskId,
+  deadline,
+  attemptTimeoutMs,
+  maxDownloadBytes,
+  resumeState,
+}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), remainingTimeout(deadline));
+  const timer = setTimeout(() => controller.abort(), requestTimeout(deadline, attemptTimeoutMs));
   try {
+    const headers = {
+      Accept: 'video/*,application/octet-stream',
+      'Accept-Encoding': 'identity',
+      Authorization: `Bearer ${apiKey}`,
+    };
+    if (resumeState && resumeState.receivedBytes < resumeState.totalBytes) {
+      headers.Range = `bytes=${resumeState.receivedBytes}-`;
+      if (resumeState.validator) headers['If-Range'] = resumeState.validator;
+    }
     const response = await fetch(`${baseUrl}/videos/${encodeURIComponent(taskId)}/content`, {
       method: 'GET',
-      headers: {
-        Accept: 'video/*,application/octet-stream',
-        'Accept-Encoding': 'identity',
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers,
       signal: controller.signal,
     });
-    if (response.status !== 200) {
+    if (response.status !== 200 && response.status !== 206) {
       await response.body?.cancel().catch(() => undefined);
-      throw new Error(`Video content download failed with HTTP ${response.status}`);
+      throw new HttpResponseError(`Video content download failed with HTTP ${response.status}`, response.status);
+    }
+    const contentRange = response.status === 206
+      ? parseContentRange(response.headers.get('content-range'))
+      : undefined;
+    let acceptedResumeState = resumeState;
+    if (resumeState) {
+      const validRange = response.status === 206
+        && contentRange?.start === resumeState.receivedBytes
+        && contentRange.total === resumeState.totalBytes;
+      if (!validRange) acceptedResumeState = undefined;
+    }
+    if (response.status === 206 && !contentRange) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new IncompleteVideoContentError('Video content response has an invalid Content-Range header');
     }
     const contentLengthHeader = normalizeOptionalString(response.headers.get('content-length'));
     const contentLength = contentLengthHeader && /^\d+$/u.test(contentLengthHeader)
       ? Number(contentLengthHeader)
       : undefined;
-    if (Number.isSafeInteger(contentLength) && contentLength > maxDownloadBytes) {
+    const totalBytes = contentRange?.total ?? contentLength;
+    if (Number.isSafeInteger(totalBytes) && totalBytes > maxDownloadBytes) {
       await response.body?.cancel().catch(() => undefined);
       throw new GeneratedVideoTooLargeError(maxDownloadBytes);
     }
     const contentEncoding = normalizeOptionalString(response.headers.get('content-encoding'))?.toLowerCase();
-    const expectedBytes = Number.isSafeInteger(contentLength)
+    const expectedBytes = Number.isSafeInteger(totalBytes)
       && (!contentEncoding || contentEncoding === 'identity')
-      ? contentLength
+      ? totalBytes
       : undefined;
-    const buffer = await readResponseBuffer(response, maxDownloadBytes, expectedBytes);
+    const buffer = await readResponseBuffer(response, maxDownloadBytes, {
+      expectedBytes,
+      resumeState: acceptedResumeState,
+      validator: responseValidator(response) ?? acceptedResumeState?.validator,
+    });
     assertCompleteMp4(buffer);
     return {
       buffer,
@@ -530,25 +670,36 @@ async function downloadVideoContentAttempt({ baseUrl, apiKey, taskId, deadline, 
   }
 }
 
-/** Retries only a completed task whose content object has not finished materializing. */
+/** Retries recoverable content downloads without resubmitting the completed generation task. */
 async function downloadVideoContent({
   baseUrl,
   apiKey,
   taskId,
   deadline,
+  attemptTimeoutMs,
   maxDownloadBytes,
   pollIntervalMs,
   contentDownloadMaxAttempts,
 }) {
   let attempts = 0;
   let lastError;
+  let resumeState;
   while (attempts < contentDownloadMaxAttempts && Date.now() < deadline) {
     attempts += 1;
     try {
-      return await downloadVideoContentAttempt({ baseUrl, apiKey, taskId, deadline, maxDownloadBytes });
+      return await downloadVideoContentAttempt({
+        baseUrl,
+        apiKey,
+        taskId,
+        deadline,
+        attemptTimeoutMs,
+        maxDownloadBytes,
+        resumeState,
+      });
     } catch (error) {
-      if (!(error instanceof IncompleteVideoContentError)) throw error;
+      if (!isRetryableNetworkError(error)) throw error;
       lastError = error;
+      resumeState = error instanceof IncompleteVideoContentError ? error.resumeState : undefined;
     }
     if (attempts >= contentDownloadMaxAttempts) break;
     const delayMs = Math.min(pollIntervalMs, remainingTimeout(deadline));
@@ -751,7 +902,7 @@ function providerCapabilities(config) {
 }
 
 /** Builds the provider registered against OpenClaw's native video_generate tool. */
-function buildProvider(config) {
+function buildProvider(config, logger) {
   const defaultModel = config.models.find((model) => model.id === config.defaultModel) ?? config.models[0];
   return {
     id: PROVIDER_ID,
@@ -794,12 +945,14 @@ function buildProvider(config) {
           body: JSON.stringify(body),
         },
         deadline,
+        config.requestTimeoutMs,
         'Video generation request',
       );
       const failureMessage = extractFailureMessage(submitted);
       if (failureMessage) throw new Error(failureMessage);
       const taskId = extractTaskId(submitted);
       if (!taskId) throw new Error('Video generation response missing task id');
+      logger?.info?.('Video generation task submitted', { taskId, model: request.model.id });
       const completed = isComplete(submitted)
         ? submitted
         : await pollVideoTask({
@@ -808,6 +961,8 @@ function buildProvider(config) {
           taskId,
           deadline,
           pollIntervalMs: config.pollIntervalMs,
+          requestTimeoutMs: config.requestTimeoutMs,
+          logger,
         });
       const resultUrl = extractVideoUrl(completed);
       const metadata = {
@@ -818,21 +973,43 @@ function buildProvider(config) {
         size: request.size,
         durationSeconds: request.durationSeconds,
       };
-      // Always materialize the completed asset. OpenClaw persists provider buffers
-      // in its managed media store and keeps resultUrl only as an oversize fallback.
-      const video = {
-        ...await downloadVideoContent({
-          baseUrl,
-          apiKey,
+      // Prefer a local managed-media asset; URL-only delivery is reserved for
+      // completed tasks whose bounded local download attempts all fail.
+      logger?.info?.('Video generation completed; downloading content', { taskId });
+      let video;
+      try {
+        video = {
+          ...await downloadVideoContent({
+            baseUrl,
+            apiKey,
+            taskId,
+            deadline,
+            attemptTimeoutMs: config.contentDownloadAttemptTimeoutMs,
+            maxDownloadBytes: config.maxDownloadBytes,
+            pollIntervalMs: config.pollIntervalMs,
+            contentDownloadMaxAttempts: config.contentDownloadMaxAttempts,
+          }),
+          ...(resultUrl ? { url: resultUrl } : {}),
+          metadata,
+        };
+      } catch (error) {
+        if (!resultUrl) throw error;
+        const downloadError = error instanceof Error ? error.message : String(error);
+        logger?.warn?.('Video content download failed; delivering provider result URL', {
           taskId,
-          deadline,
-          maxDownloadBytes: config.maxDownloadBytes,
-          pollIntervalMs: config.pollIntervalMs,
-          contentDownloadMaxAttempts: config.contentDownloadMaxAttempts,
-        }),
-        ...(resultUrl ? { url: resultUrl } : {}),
-        metadata,
-      };
+          error: downloadError,
+        });
+        video = {
+          url: resultUrl,
+          mimeType: DEFAULT_MIME_TYPE,
+          fileName: `${taskId}.mp4`,
+          metadata: {
+            ...metadata,
+            localDownloadFailed: true,
+            downloadError,
+          },
+        };
+      }
       return { videos: [video], model: request.model.id, metadata };
     },
   };
@@ -1080,7 +1257,7 @@ export const pluginEntry = definePluginEntry({
   description: 'OpenAI-compatible video generation provider managed by UClaw.',
   register(api) {
     const config = resolvePluginConfig(api.pluginConfig);
-    api.registerVideoGenerationProvider(buildProvider(config));
+    api.registerVideoGenerationProvider(buildProvider(config, api.logger));
     registerTurnPreferenceHooks(api, config);
   },
 });

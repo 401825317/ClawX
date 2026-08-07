@@ -48,4 +48,42 @@ describe('history-transcript-merge', () => {
 
     expect(mergeGatewayHistoryWithTranscript(gatewayMessages, transcriptMessages)).toEqual(gatewayMessages);
   });
+
+  it('hydrates from a unique matching prefix after a large media record is omitted', () => {
+    const gatewayReply = `${'a'.repeat(64)}\n[chat.history omitted: message too large]`;
+    const gatewayMessages: RawMessage[] = [
+      { role: 'user', content: 'generate an image', timestamp: 1_000 },
+      { role: 'assistant', content: gatewayReply, timestamp: 3_000 },
+    ];
+    const transcriptMessages: RawMessage[] = [
+      { role: 'user', content: 'generate an image', timestamp: 1_000 },
+      {
+        role: 'toolresult',
+        content: `${'image tool result '.repeat(12)}with an embedded image`,
+        timestamp: 2_000,
+      },
+      { role: 'assistant', content: `${'a'.repeat(64)} complete reply`, timestamp: 3_100 },
+    ];
+
+    const merged = mergeGatewayHistoryWithTranscript(gatewayMessages, transcriptMessages);
+
+    expect(merged[1]?.content).toBe(`${'a'.repeat(64)} complete reply`);
+  });
+
+  it('does not guess the transcript match when an omitted message has no visible prefix', () => {
+    const gatewayReply = '[chat.history omitted: message too large]';
+    const gatewayMessages: RawMessage[] = [
+      { role: 'user', content: 'generate an image', timestamp: 1_000 },
+      { role: 'assistant', content: gatewayReply, timestamp: 3_000 },
+    ];
+    const transcriptMessages: RawMessage[] = [
+      { role: 'user', content: 'generate an image', timestamp: 1_000 },
+      { role: 'toolresult', content: 'image tool result with an embedded image', timestamp: 2_000 },
+      { role: 'assistant', content: 'complete image generation reply', timestamp: 3_100 },
+    ];
+
+    const merged = mergeGatewayHistoryWithTranscript(gatewayMessages, transcriptMessages);
+
+    expect(merged[1]?.content).toBe(gatewayReply);
+  });
 });

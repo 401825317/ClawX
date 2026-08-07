@@ -114,6 +114,8 @@ export type UclawEndpointsConfig = {
       apiProtocol: string;
       timeoutMs: number;
       pollIntervalMs: number;
+      requestTimeoutMs: number;
+      contentDownloadAttemptTimeoutMs: number;
       contentDownloadMaxAttempts: number;
       maxDownloadBytes: number;
       maxInputImageBytes: number;
@@ -564,6 +566,14 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
         apiProtocol: readNonEmptyString(video.apiProtocol, 'media.video.apiProtocol'),
         timeoutMs: readPositiveInteger(video.timeoutMs, 'media.video.timeoutMs'),
         pollIntervalMs: readPositiveInteger(video.pollIntervalMs, 'media.video.pollIntervalMs'),
+        requestTimeoutMs: readPositiveInteger(
+          video.requestTimeoutMs,
+          'media.video.requestTimeoutMs',
+        ),
+        contentDownloadAttemptTimeoutMs: readPositiveInteger(
+          video.contentDownloadAttemptTimeoutMs,
+          'media.video.contentDownloadAttemptTimeoutMs',
+        ),
         contentDownloadMaxAttempts: readPositiveInteger(
           video.contentDownloadMaxAttempts,
           'media.video.contentDownloadMaxAttempts',
@@ -644,6 +654,8 @@ export const UCLAW_COMPACTION_RESERVE_TOKENS_FLOOR = UCLAW_ENDPOINTS_CONFIG.runt
 export const UCLAW_IMAGE_GENERATION_TIMEOUT_MS = UCLAW_ENDPOINTS_CONFIG.media.image.timeoutMs;
 export const UCLAW_IMAGE_GENERATION_DEFAULT_SIZE = UCLAW_ENDPOINTS_CONFIG.media.image.defaultSize;
 export const UCLAW_VIDEO_GENERATION_TIMEOUT_MS = UCLAW_ENDPOINTS_CONFIG.media.video.timeoutMs;
+export const UCLAW_VIDEO_REQUEST_TIMEOUT_MS = UCLAW_ENDPOINTS_CONFIG.media.video.requestTimeoutMs;
+export const UCLAW_VIDEO_CONTENT_DOWNLOAD_ATTEMPT_TIMEOUT_MS = UCLAW_ENDPOINTS_CONFIG.media.video.contentDownloadAttemptTimeoutMs;
 export const UCLAW_VIDEO_CONTENT_DOWNLOAD_MAX_ATTEMPTS = UCLAW_ENDPOINTS_CONFIG.media.video.contentDownloadMaxAttempts;
 export const UCLAW_VIDEO_GENERATION_MAX_DOWNLOAD_BYTES = UCLAW_ENDPOINTS_CONFIG.media.video.maxDownloadBytes;
 export const UCLAW_VIDEO_GENERATION_MAX_INPUT_IMAGE_BYTES = UCLAW_ENDPOINTS_CONFIG.media.video.maxInputImageBytes;

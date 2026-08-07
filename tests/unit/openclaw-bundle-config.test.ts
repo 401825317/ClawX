@@ -71,6 +71,21 @@ describe('openclaw bundle config', () => {
     ]));
   });
 
+  it('declares every managed video request timeout in the plugin config schema', () => {
+    const manifest = JSON.parse(readFileSync(
+      resolve(process.cwd(), 'resources/openclaw-plugins/uclaw-video/openclaw.plugin.json'),
+      'utf8',
+    )) as {
+      configSchema?: { properties?: Record<string, unknown> };
+    };
+
+    expect(manifest.configSchema?.properties).toMatchObject({
+      requestTimeoutMs: { type: 'integer', minimum: 1 },
+      contentDownloadAttemptTimeoutMs: { type: 'integer', minimum: 1 },
+      contentDownloadMaxAttempts: { type: 'integer', minimum: 1 },
+    });
+  });
+
   it('writes the build identity schema required by the USB self-check', () => {
     const afterPackSource = readFileSync(
       resolve(process.cwd(), 'scripts/after-pack.cjs'),

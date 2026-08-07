@@ -9,7 +9,9 @@ import {
   UCLAW_MEDIA_GENERATION_TEST_TIMEOUT_MS,
   UCLAW_PROVIDER_REQUEST_TIMEOUT_SECONDS,
   UCLAW_VIDEO_CONTENT_DOWNLOAD_MAX_ATTEMPTS,
+  UCLAW_VIDEO_CONTENT_DOWNLOAD_ATTEMPT_TIMEOUT_MS,
   UCLAW_VIDEO_GENERATION_MAX_INPUT_IMAGE_BYTES,
+  UCLAW_VIDEO_REQUEST_TIMEOUT_MS,
   UCLAW_VIDEO_GENERATION_TIMEOUT_MS,
   UCLAW_VIDEO_PROVIDER_ID,
 } from '@shared/junfeiai-endpoints';
@@ -47,6 +49,12 @@ describe('managed runtime config transaction', () => {
     expect(UCLAW_IMAGE_GENERATION_TIMEOUT_MS).toBe(900_000);
     expect(UCLAW_VIDEO_GENERATION_TIMEOUT_MS).toBe(900_000);
     expect(UCLAW_MEDIA_GENERATION_TEST_TIMEOUT_MS).toBe(900_000);
+  });
+
+  it('bounds each managed video status and content request independently', () => {
+    expect(UCLAW_VIDEO_REQUEST_TIMEOUT_MS).toBe(15_000);
+    expect(UCLAW_VIDEO_CONTENT_DOWNLOAD_ATTEMPT_TIMEOUT_MS).toBe(60_000);
+    expect(UCLAW_VIDEO_CONTENT_DOWNLOAD_MAX_ATTEMPTS).toBe(4);
   });
 
   beforeEach(async () => {
@@ -223,6 +231,8 @@ describe('managed runtime config transaction', () => {
         defaultAspectRatio: '16:9',
         defaultResolution: '480P',
         defaultDurationSeconds: 6,
+        requestTimeoutMs: UCLAW_VIDEO_REQUEST_TIMEOUT_MS,
+        contentDownloadAttemptTimeoutMs: UCLAW_VIDEO_CONTENT_DOWNLOAD_ATTEMPT_TIMEOUT_MS,
         contentDownloadMaxAttempts: UCLAW_VIDEO_CONTENT_DOWNLOAD_MAX_ATTEMPTS,
         maxInputImageBytes: UCLAW_VIDEO_GENERATION_MAX_INPUT_IMAGE_BYTES,
       }),
