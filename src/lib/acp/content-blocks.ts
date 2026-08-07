@@ -1,4 +1,5 @@
 import type { ContentBlock, ToolCallContent } from '@agentclientprotocol/sdk';
+import { stripAcpWorkingDirectoryPrefix } from '@shared/chat/session-title';
 import { createPendingAttachment } from './attachments';
 import type { RenderPart } from './timeline-types';
 
@@ -88,7 +89,12 @@ function attachmentPart(input: {
 export function contentBlockToRenderPart(block: ContentBlock, context: ContentBlockRenderContext): RenderPart {
   switch (block.type) {
     case 'text':
-      return { kind: 'markdown', text: block.text };
+      return {
+        kind: 'markdown',
+        text: context.role === 'user' && context.blockIndex === 0
+          ? stripAcpWorkingDirectoryPrefix(block.text)
+          : block.text,
+      };
     case 'image': {
       const uri = optionalString(block.uri);
       const clawx = clawxUserMetadata(block, context.role);

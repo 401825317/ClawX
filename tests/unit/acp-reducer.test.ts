@@ -419,6 +419,26 @@ describe('ACP timeline reducer', () => {
     }
   });
 
+  it('hides the ACP working directory envelope from a user message bubble', () => {
+    let state = createEmptyAcpTimeline('agent:pi:s1', 1);
+    const text = '[Working directory: ~/.openclaw/workspace]\n\nhello bro';
+
+    state = applyAcpSessionUpdate(state, {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'user_message',
+        messageId: 'user-msg',
+        content: [{ type: 'text', text }],
+      } as never,
+    });
+
+    expect(state.itemsById['user-msg:0']).toMatchObject({
+      kind: 'message-segment',
+      parts: [{ kind: 'markdown', text: 'hello bro' }],
+      userPromptTextBlocks: [text],
+    });
+  });
+
   it('keeps an ordered binary-free OpenClaw prompt text projection for user content', () => {
     let state = createEmptyAcpTimeline('agent:pi:s1', 1);
 
