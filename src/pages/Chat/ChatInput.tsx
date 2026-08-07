@@ -62,6 +62,7 @@ interface ChatInputProps {
   ) => void;
   onStop?: () => void;
   disabled?: boolean;
+  disabledPlaceholder?: string;
   sending?: boolean;
   imageGenerating?: boolean;
   videoGenerating?: boolean;
@@ -408,6 +409,7 @@ export function ChatInput({
   onSend,
   onStop,
   disabled = false,
+  disabledPlaceholder = '',
   sending = false,
   imageGenerating = false,
   videoGenerating = false,
@@ -1506,7 +1508,7 @@ export function ChatInput({
                 isComposingRef.current = false;
               }}
               onPaste={handlePaste}
-              placeholder={inputDisabled ? t('composer.gatewayDisconnectedPlaceholder') : ''}
+              placeholder={inputDisabled ? disabledPlaceholder : ''}
               disabled={inputDisabled}
               data-testid="chat-composer-input"
               className={cn(

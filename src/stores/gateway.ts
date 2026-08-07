@@ -190,6 +190,12 @@ function getGatewayRuntimeIdentity(status: GatewayStatus): string {
   return `${status.pid ?? 'none'}:${status.connectedAt ?? 'none'}:${status.port}`;
 }
 
+function hasGatewayStatusChanged(current: GatewayStatus, latest: GatewayStatus): boolean {
+  return latest.state !== current.state
+    || getGatewayRuntimeIdentity(latest) !== getGatewayRuntimeIdentity(current)
+    || latest.gatewayReady !== current.gatewayReady;
+}
+
 function synchronizeGatewaySessionCatalog(status: GatewayStatus): void {
   if (status.state !== 'running' || status.gatewayReady === false) {
     lastSynchronizedRuntimeIdentity = null;
@@ -465,14 +471,12 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
               .then((latest) => {
                 const current = get().status;
                 const stateChanged = latest.state !== current.state;
-                const runtimeChanged = getGatewayRuntimeIdentity(latest) !== getGatewayRuntimeIdentity(current);
-                const readinessChanged = latest.gatewayReady !== current.gatewayReady;
                 if (stateChanged) {
                   console.info(
                     `[gateway-store] reconciled stale state: ${current.state} → ${latest.state}`,
                   );
                 }
-                if (stateChanged || runtimeChanged || readinessChanged) {
+                if (hasGatewayStatusChanged(current, latest)) {
                   set({ status: latest });
                 }
                 synchronizeGatewaySessionCatalog(latest);
@@ -488,7 +492,7 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
         try {
           const refreshed = await hostApi.gateway.status();
           const current = get().status;
-          if (refreshed.state !== current.state) {
+          if (hasGatewayStatusChanged(current, refreshed)) {
             set({ status: refreshed });
           }
           synchronizeGatewaySessionCatalog(refreshed);

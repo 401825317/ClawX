@@ -381,6 +381,15 @@ export function Chat() {
   const isMac = platform === 'darwin';
   const isWindows = platform === 'win32';
   const composerBusy = acpSending || acpCancelling;
+  const composerDisabledPlaceholder = acpLoading
+    ? t('composer.sessionLoadingPlaceholder')
+    : acpCancelling
+      ? t('composer.sessionCancellingPlaceholder')
+      : !cwd || workspaceUnavailable
+        ? t('composer.workspaceUnavailablePlaceholder')
+        : !workspaceContextAvailable
+          ? t('composer.workspacePreparingPlaceholder')
+          : '';
   const showScrollToLatest = acpTimeline.itemOrder.length > 0 && !isAtBottom;
   const hasAttemptedAcpPromptForCurrentSession = lastPromptAttemptSessionKey === currentSessionKey;
   const visibleAcpError = !workspaceUnavailable && acpError
@@ -592,6 +601,7 @@ export function Chat() {
           }}
           onStop={() => void cancelAcp()}
           disabled={acpLoading || acpCancelling || !cwd || !workspaceContextAvailable}
+          disabledPlaceholder={composerDisabledPlaceholder}
           sending={composerBusy}
           imageGenerating={imageGenerationPending}
           videoGenerating={videoGenerationPending}

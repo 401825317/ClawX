@@ -97,7 +97,7 @@ describe('gateway store event wiring', () => {
   });
 
   it('propagates gatewayReady field from status events', async () => {
-    hostApiMock.gateway.status.mockResolvedValueOnce({ state: 'running', port: 18789, gatewayReady: false });
+    hostApiMock.gateway.status.mockResolvedValue({ state: 'running', port: 18789, gatewayReady: false });
 
     const handlers = new Map<string, (payload: unknown) => void>();
     hostEventSubscriptionMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
@@ -113,6 +113,19 @@ describe('gateway store event wiring', () => {
 
     // Simulate gateway.ready event setting gatewayReady=true
     handlers.get('gateway:status')?.({ state: 'running', port: 18789, gatewayReady: true });
+    expect(useGatewayStore.getState().status.gatewayReady).toBe(true);
+  });
+
+  it('applies readiness changes from the post-subscription status refresh', async () => {
+    hostApiMock.gateway.status
+      .mockResolvedValueOnce({ state: 'running', port: 18789, gatewayReady: false })
+      .mockResolvedValueOnce({ state: 'running', port: 18789, gatewayReady: true });
+
+    hostEventSubscriptionMock.mockImplementation(() => () => {});
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
     expect(useGatewayStore.getState().status.gatewayReady).toBe(true);
   });
 

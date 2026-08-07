@@ -219,8 +219,6 @@ function translate(key: string, vars?: Record<string, unknown>): string {
       return `@${String(vars?.agent ?? '')}`;
     case 'composer.agentPickerTitle':
       return 'Route the next message to another agent';
-    case 'composer.gatewayDisconnectedPlaceholder':
-      return 'Gateway not connected...';
     case 'composer.send':
       return 'Send';
     case 'composer.stop':
@@ -428,6 +426,22 @@ describe('ChatInput agent targeting', () => {
     expect(indicator).toHaveAttribute('aria-live', 'polite');
     expect(screen.getByTestId('chat-composer-dot-pulse')).toBeInTheDocument();
     expect(screen.queryByTestId('chat-composer-zoomies')).not.toBeInTheDocument();
+  });
+
+  it('shows the actual disabled reason instead of claiming the gateway is disconnected', () => {
+    render(
+      <TooltipProvider>
+        <ChatInput
+          onSend={vi.fn()}
+          disabled
+          disabledPlaceholder="Loading conversation..."
+        />
+      </TooltipProvider>,
+    );
+
+    const input = screen.getByTestId('chat-composer-input');
+    expect(input).toBeDisabled();
+    expect(input).toHaveAttribute('placeholder', 'Loading conversation...');
   });
 
   it('shows an image-generation indicator without locking the composer for background work', () => {
