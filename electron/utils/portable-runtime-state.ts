@@ -20,6 +20,10 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import {
+  restorePortableRuntimeSnapshotV2Sync,
+  syncPortableRuntimeSnapshotV2,
+} from './portable-runtime-snapshot-v2';
 
 const PORTABLE_ID_FILE = '.uclaw-portable-id';
 const RUNTIME_MARKER_FILE = '.uclaw-runtime-state.json';
@@ -37,6 +41,7 @@ export type PortableRuntimeLayout = {
   profileDir: string;
   stateDir: string;
   snapshotDir: string;
+  snapshotV2Dir: string;
   markerPath: string;
   portableIdPath: string;
 };
@@ -135,6 +140,7 @@ export function resolvePortableRuntimeLayout(params: {
     profileDir,
     stateDir: path.join(profileDir, 'openclaw-state'),
     snapshotDir: path.join(dataDir, 'runtime-snapshots'),
+    snapshotV2Dir: path.join(dataDir, 'runtime-snapshots-v2'),
     markerPath: path.join(profileDir, RUNTIME_MARKER_FILE),
     portableIdPath: identity.path,
   };
@@ -218,11 +224,18 @@ export function preparePortableRuntimeState(layout: PortableRuntimeLayout): void
   mkdirSync(layout.stateDir, { recursive: true });
   if (!isDirectoryEffectivelyEmpty(layout.stateDir)) return;
 
-  const latestSnapshot = findLatestSnapshotSync(layout);
-  if (latestSnapshot) {
-    copyTreeSync(path.join(latestSnapshot, 'state'), layout.stateDir);
-  } else if (existsSync(layout.legacyStateDir)) {
-    copyTreeSync(layout.legacyStateDir, layout.stateDir);
+  const restoredV2 = restorePortableRuntimeSnapshotV2Sync({
+    stateDir: layout.stateDir,
+    snapshotDir: layout.snapshotV2Dir,
+    portableId: layout.portableId,
+  }, layout.stateDir);
+  if (!restoredV2) {
+    const latestSnapshot = findLatestSnapshotSync(layout);
+    if (latestSnapshot) {
+      copyTreeSync(path.join(latestSnapshot, 'state'), layout.stateDir);
+    } else if (existsSync(layout.legacyStateDir)) {
+      copyTreeSync(layout.legacyStateDir, layout.stateDir);
+    }
   }
 
   writeRuntimeMarkerSync(layout, {
@@ -379,6 +392,7 @@ export async function syncPortableRuntimeSnapshot(
 export class PortableRuntimeSnapshotService {
   private timer?: ReturnType<typeof setInterval>;
   private inFlight?: Promise<unknown>;
+  private inFlightController?: AbortController;
 
   constructor(
     private readonly layout: PortableRuntimeLayout,
@@ -402,16 +416,37 @@ export class PortableRuntimeSnapshotService {
     this.timer = undefined;
   }
 
-  async sync(reason = 'manual'): Promise<void> {
+  async sync(reason = 'manual', signal?: AbortSignal): Promise<void> {
     if (this.inFlight) {
+      const abortInFlight = () => this.inFlightController?.abort(signal?.reason);
+      signal?.addEventListener('abort', abortInFlight, { once: true });
       await this.inFlight;
+      signal?.removeEventListener('abort', abortInFlight);
       return;
     }
-    this.inFlight = syncPortableRuntimeSnapshot(this.layout, reason)
+    const controller = new AbortController();
+    this.inFlightController = controller;
+    const forwardAbort = () => controller.abort(signal?.reason);
+    signal?.addEventListener('abort', forwardAbort, { once: true });
+    if (signal?.aborted) forwardAbort();
+    this.inFlight = syncPortableRuntimeSnapshotV2({
+      stateDir: this.layout.stateDir,
+      snapshotDir: this.layout.snapshotV2Dir,
+      portableId: this.layout.portableId,
+    }, reason, { signal: controller.signal })
       .then((result) => {
         this.log('Portable Runtime snapshot completed', {
           reason,
-          fileCount: result.fileCount,
+          skipped: result.skipped,
+          scannedFiles: result.scannedFiles,
+          changedFiles: result.changedFiles,
+          reusedFiles: result.reusedFiles,
+          writtenObjects: result.writtenObjects,
+          writtenBytes: result.writtenBytes,
+          unstableFiles: result.unstableFiles,
+          scanDurationMs: result.scanDurationMs,
+          writeDurationMs: result.writeDurationMs,
+          totalDurationMs: result.totalDurationMs,
           snapshotPath: result.snapshotPath,
         });
       })
@@ -422,6 +457,8 @@ export class PortableRuntimeSnapshotService {
         });
       })
       .finally(() => {
+        signal?.removeEventListener('abort', forwardAbort);
+        this.inFlightController = undefined;
         this.inFlight = undefined;
       });
     await this.inFlight;

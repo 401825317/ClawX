@@ -5,10 +5,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  PortableRuntimeSnapshotService,
   preparePortableRuntimeState,
   resolvePortableRuntimeLayout,
   syncPortableRuntimeSnapshot,
 } from '@electron/utils/portable-runtime-state';
+import {
+  readLatestPortableSnapshotV2Sync,
+  syncPortableRuntimeSnapshotV2,
+} from '@electron/utils/portable-runtime-snapshot-v2';
 
 const tempDirs: string[] = [];
 
@@ -80,5 +85,71 @@ describe('portable runtime state', () => {
       await expect(readFile(join(snapshotRoot, 'state', 'openclaw.json'), 'utf8')).resolves.toContain('ok');
       await expect(readFile(join(snapshotRoot, 'state', 'active.lock'), 'utf8')).rejects.toThrow();
     }
+  });
+
+  it('restores v2 before v1 when both portable snapshot formats exist', async () => {
+    const layout = await createLayout();
+    await mkdir(layout.stateDir, { recursive: true });
+    await writeFile(join(layout.stateDir, 'openclaw.json'), '{"source":"v1"}\n', 'utf8');
+    await syncPortableRuntimeSnapshot(layout, 'v1');
+
+    await writeFile(join(layout.stateDir, 'openclaw.json'), '{"source":"v2"}\n', 'utf8');
+    await syncPortableRuntimeSnapshotV2({
+      stateDir: layout.stateDir,
+      snapshotDir: layout.snapshotV2Dir,
+      portableId: layout.portableId,
+    }, 'v2');
+    await rm(layout.stateDir, { recursive: true, force: true });
+
+    preparePortableRuntimeState(layout);
+
+    await expect(readFile(join(layout.stateDir, 'openclaw.json'), 'utf8')).resolves.toContain('v2');
+  });
+
+  it('falls back to v1 when the latest v2 snapshot is corrupt', async () => {
+    const layout = await createLayout();
+    await mkdir(layout.stateDir, { recursive: true });
+    await writeFile(join(layout.stateDir, 'openclaw.json'), '{"source":"v1"}\n', 'utf8');
+    await syncPortableRuntimeSnapshot(layout, 'v1');
+
+    await writeFile(join(layout.stateDir, 'openclaw.json'), '{"source":"v2"}\n', 'utf8');
+    const v2Layout = {
+      stateDir: layout.stateDir,
+      snapshotDir: layout.snapshotV2Dir,
+      portableId: layout.portableId,
+    };
+    await syncPortableRuntimeSnapshotV2(v2Layout, 'v2');
+    const object = readLatestPortableSnapshotV2Sync(v2Layout)?.entries['openclaw.json'].object;
+    expect(object).toBeTruthy();
+    await writeFile(join(layout.snapshotV2Dir, 'objects', object!.slice(0, 2), object!), 'corrupt');
+    await rm(layout.stateDir, { recursive: true, force: true });
+
+    preparePortableRuntimeState(layout);
+
+    await expect(readFile(join(layout.stateDir, 'openclaw.json'), 'utf8')).resolves.toContain('v1');
+  });
+
+  it('uses incremental v2 snapshots for the periodic snapshot service', async () => {
+    const layout = await createLayout();
+    const logs: Array<{ message: string; details?: unknown }> = [];
+    await mkdir(layout.stateDir, { recursive: true });
+    await writeFile(join(layout.stateDir, 'openclaw.json'), '{"managed":true}\n', 'utf8');
+    const service = new PortableRuntimeSnapshotService(
+      layout,
+      (message, details) => logs.push({ message, details }),
+    );
+
+    await service.sync('test');
+
+    expect(readLatestPortableSnapshotV2Sync({
+      stateDir: layout.stateDir,
+      snapshotDir: layout.snapshotV2Dir,
+      portableId: layout.portableId,
+    })).toBeTruthy();
+    await expect(readdir(layout.snapshotDir)).rejects.toThrow();
+    expect(logs).toContainEqual(expect.objectContaining({
+      message: 'Portable Runtime snapshot completed',
+      details: expect.objectContaining({ writtenObjects: 1, changedFiles: 1 }),
+    }));
   });
 });

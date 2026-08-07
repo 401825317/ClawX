@@ -4,6 +4,7 @@ export interface QuitLifecycleState {
 }
 
 export type QuitLifecycleAction = 'start-cleanup' | 'cleanup-in-progress' | 'allow-quit';
+export type AbortableQuitTaskResult = 'completed' | 'timeout';
 
 export function createQuitLifecycleState(): QuitLifecycleState {
   return {
@@ -27,4 +28,29 @@ export function requestQuitLifecycleAction(state: QuitLifecycleState): QuitLifec
 
 export function markQuitCleanupCompleted(state: QuitLifecycleState): void {
   state.cleanupCompleted = true;
+}
+
+export async function runAbortableQuitTask(
+  task: (signal: AbortSignal) => Promise<void>,
+  timeoutMs: number,
+): Promise<AbortableQuitTaskResult> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const taskResult: Promise<AbortableQuitTaskResult> = task(controller.signal)
+    .then(() => 'completed' as const)
+    .catch((error): AbortableQuitTaskResult => {
+      if (controller.signal.aborted) return 'timeout';
+      throw error;
+    });
+  const timeoutResult = new Promise<AbortableQuitTaskResult>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve('timeout');
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([taskResult, timeoutResult]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }

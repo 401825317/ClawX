@@ -48,6 +48,7 @@ import {
   createQuitLifecycleState,
   markQuitCleanupCompleted,
   requestQuitLifecycleAction,
+  runAbortableQuitTask,
 } from './quit-lifecycle';
 import { createSignalQuitHandler } from './signal-quit';
 import { acquireProcessInstanceFileLock } from './process-instance-lock';
@@ -741,7 +742,15 @@ if (gotTheLock) {
 
     const finalizeShutdown = async (): Promise<void> => {
       portableRuntimeSnapshotService?.stop();
-      await portableRuntimeSnapshotService?.sync('shutdown');
+      if (portableRuntimeSnapshotService) {
+        const snapshotResult = await runAbortableQuitTask(
+          (signal) => portableRuntimeSnapshotService.sync('shutdown', signal),
+          10_000,
+        );
+        if (snapshotResult === 'timeout') {
+          logger.warn('Portable Runtime final snapshot timed out during app quit');
+        }
+      }
       markQuitCleanupCompleted(quitLifecycleState);
       app.quit();
     };

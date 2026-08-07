@@ -1989,25 +1989,37 @@ test('runs the packaged UClaw regression matrix', async () => {
       const previous = contextOrThrow(context);
       await closePackagedApp(previous);
       context = null;
-      const snapshotRoot = path.join(appRoot, 'UClawData', 'runtime-snapshots');
-      const snapshotEntries = await readdir(snapshotRoot, { withFileTypes: true });
-      const completeSnapshots = [];
-      for (const entry of snapshotEntries) {
-        if (!entry.isDirectory() || !entry.name.startsWith('snapshot-')) continue;
-        const complete = await access(path.join(snapshotRoot, entry.name, 'snapshot-complete.json'))
-          .then(() => true)
-          .catch(() => false);
-        if (complete) completeSnapshots.push(entry);
-      }
+      const snapshotRoot = path.join(appRoot, 'UClawData', 'runtime-snapshots-v2');
+      const manifestRoot = path.join(snapshotRoot, 'manifests');
+      const completeSnapshots = (await readdir(manifestRoot, { withFileTypes: true }))
+        .filter((entry) => entry.isFile() && entry.name.startsWith('snapshot-') && entry.name.endsWith('.json'));
       expect(completeSnapshots.length).toBeGreaterThan(0);
       const latestSnapshot = completeSnapshots.sort((left, right) => right.name.localeCompare(left.name))[0];
-      const snapshotManifest = JSON.parse(await readFile(path.join(snapshotRoot, latestSnapshot.name, 'snapshot-complete.json'), 'utf8')) as Record<string, unknown>;
-      expect(snapshotManifest.schema).toBe('uclaw.portable-runtime-snapshot/v1');
+      const snapshotManifest = JSON.parse(await readFile(path.join(manifestRoot, latestSnapshot.name), 'utf8')) as Record<string, unknown>;
+      expect(snapshotManifest.schema).toBe('uclaw.portable-runtime-snapshot/v2');
       expect(snapshotManifest.portableId).toBe(portableId);
-      expect(Number(snapshotManifest.fileCount)).toBeGreaterThanOrEqual(0);
-      const incompleteSnapshot = path.join(snapshotRoot, 'snapshot-' + (Date.now() + 60_000) + '-incomplete');
-      await mkdir(path.join(incompleteSnapshot, 'state'), { recursive: true });
-      await writeFile(path.join(incompleteSnapshot, 'state', 'openclaw.json'), '{ invalid snapshot');
+      const snapshotEntries = snapshotManifest.entries as Record<string, { object: string; size: number; mtimeMs: number }>;
+      expect(Object.keys(snapshotEntries).length).toBeGreaterThan(0);
+      const firstObject = Object.values(snapshotEntries)[0].object;
+      await access(path.join(snapshotRoot, 'objects', firstObject.slice(0, 2), firstObject));
+      const corruptManifest = {
+        ...snapshotManifest,
+        createdAt: new Date(Date.now() + 60_000).toISOString(),
+        reason: 'packaged-e2e-corrupt',
+        entries: {
+          ...snapshotEntries,
+          'corrupt-marker.json': {
+            object: 'f'.repeat(64),
+            size: 1,
+            mtimeMs: Date.now(),
+          },
+        },
+      };
+      await writeFile(
+        path.join(manifestRoot, `snapshot-${Date.now() + 60_000}-99999999999999999999-corrupt.json`),
+        `${JSON.stringify(corruptManifest, null, 2)}\n`,
+        'utf8',
+      );
       const migratedOsHome = path.join(sandboxRoot, 'os-home-after-disk-move');
       const nextHostPort = await allocatePort();
       context = rememberContext(await launchPackagedApp({
@@ -2035,7 +2047,7 @@ test('runs the packaged UClaw regression matrix', async () => {
       return {
         startupMs: context.startupMs,
         diskMoveRestoredFromVerifiedSnapshot: true,
-        incompleteSnapshotIgnored: true,
+        corruptSnapshotIgnored: true,
       };
     });
 
