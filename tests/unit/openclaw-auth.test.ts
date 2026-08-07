@@ -1067,10 +1067,10 @@ describe('sanitizeOpenClawConfig', () => {
     // Fresh install should get tools settings enforced
     const tools = result.tools as Record<string, unknown>;
     expect(tools.profile).toBe('full');
-    expect(tools.deny).toEqual(['skill_workshop']);
+    expect(tools.deny).toEqual(['skill_workshop', 'web_search']);
     const gateway = result.gateway as Record<string, unknown>;
     const gatewayTools = gateway.tools as Record<string, unknown>;
-    expect(gatewayTools.deny).toEqual(['skill_workshop']);
+    expect(gatewayTools.deny).toEqual(['skill_workshop', 'web_search']);
     const skills = result.skills as Record<string, unknown>;
     const workshop = skills.workshop as Record<string, unknown>;
     const autonomous = workshop.autonomous as Record<string, unknown>;
@@ -1105,9 +1105,9 @@ describe('sanitizeOpenClawConfig', () => {
     // tools settings should now be enforced
     const tools = result.tools as Record<string, unknown>;
     expect(tools.profile).toBe('full');
-    expect(tools.deny).toEqual(['skill_workshop']);
+    expect(tools.deny).toEqual(['skill_workshop', 'web_search']);
     const gateway = result.gateway as Record<string, unknown>;
-    expect((gateway.tools as Record<string, unknown>).deny).toEqual(['skill_workshop']);
+    expect((gateway.tools as Record<string, unknown>).deny).toEqual(['skill_workshop', 'web_search']);
     const skills = result.skills as Record<string, unknown>;
     expect(((skills.workshop as Record<string, unknown>).autonomous as Record<string, unknown>).enabled).toBe(false);
     expect((skills.entries as Record<string, Record<string, unknown>>)['skill-creator'].enabled).toBe(true);
@@ -1115,7 +1115,7 @@ describe('sanitizeOpenClawConfig', () => {
     logSpy.mockRestore();
   });
 
-  it('preserves existing denied tools while adding skill_workshop to the deny list', async () => {
+  it('preserves existing denied tools while adding ClawX-disabled tools to the deny list', async () => {
     await writeOpenClawJson({
       tools: {
         deny: ['browser'],
@@ -1127,9 +1127,9 @@ describe('sanitizeOpenClawConfig', () => {
 
     const result = await readOpenClawJson();
     const tools = result.tools as Record<string, unknown>;
-    expect(tools.deny).toEqual(['browser', 'skill_workshop']);
+    expect(tools.deny).toEqual(['browser', 'skill_workshop', 'web_search']);
     const gateway = result.gateway as Record<string, unknown>;
-    expect((gateway.tools as Record<string, unknown>).deny).toEqual(['skill_workshop']);
+    expect((gateway.tools as Record<string, unknown>).deny).toEqual(['skill_workshop', 'web_search']);
   });
 
   it('trusts the configured ClawX image relay during prelaunch without dropping other allowlist entries', async () => {

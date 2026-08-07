@@ -3858,6 +3858,7 @@ export async function updateSingleAgentModelProvider(
  * (`runOpenClawDoctorRepair`) runs `openclaw doctor --fix` as a fallback.
  */
 const SKILL_WORKSHOP_TOOL_DENY_ENTRY = 'skill_workshop';
+const WEB_SEARCH_TOOL_DENY_ENTRY = 'web_search';
 const SKILL_CREATOR_SKILL_KEY = 'skill-creator';
 
 function normalizeToolDenyList(value: unknown): string[] {
@@ -4087,14 +4088,24 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     // OpenClaw 6.5+ routes durable skill edits through the Skill Workshop tool.
     // ClawX keeps direct skill-creator authoring instead, so deny the workshop
     // tool even under tools.profile="full".
-    const denyResult = ensureToolDenyIncludes(
+    const workshopDenyResult = ensureToolDenyIncludes(
       normalizeToolDenyList(toolsConfig.deny),
       SKILL_WORKSHOP_TOOL_DENY_ENTRY,
     );
-    if (denyResult.modified) {
+    // This release ships without a usable web-search provider, so keep it out of model tool lists.
+    const denyResult = ensureToolDenyIncludes(
+      workshopDenyResult.deny,
+      WEB_SEARCH_TOOL_DENY_ENTRY,
+    );
+    if (workshopDenyResult.modified || denyResult.modified) {
       toolsConfig.deny = denyResult.deny;
       toolsModified = true;
-      console.log('[sanitize] Added "skill_workshop" to tools.deny for ClawX desktop');
+      if (workshopDenyResult.modified) {
+        console.log('[sanitize] Added "skill_workshop" to tools.deny for ClawX desktop');
+      }
+      if (denyResult.modified) {
+        console.log('[sanitize] Added "web_search" to tools.deny for ClawX desktop');
+      }
     } else if (!Array.isArray(toolsConfig.deny) || toolsConfig.deny.length !== denyResult.deny.length) {
       toolsConfig.deny = denyResult.deny;
       toolsModified = true;
@@ -4149,14 +4160,24 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
         ? { ...(gateway.tools as Record<string, unknown>) }
         : {}
     ) as Record<string, unknown>;
-    const gatewayDenyResult = ensureToolDenyIncludes(
+    const gatewayWorkshopDenyResult = ensureToolDenyIncludes(
       normalizeToolDenyList(gatewayTools.deny),
       SKILL_WORKSHOP_TOOL_DENY_ENTRY,
     );
-    let gatewayModified = gatewayDenyResult.modified;
-    if (gatewayDenyResult.modified) {
+    // Also reject direct Gateway tool invocations outside the model turn.
+    const gatewayDenyResult = ensureToolDenyIncludes(
+      gatewayWorkshopDenyResult.deny,
+      WEB_SEARCH_TOOL_DENY_ENTRY,
+    );
+    let gatewayModified = gatewayWorkshopDenyResult.modified || gatewayDenyResult.modified;
+    if (gatewayModified) {
       gatewayTools.deny = gatewayDenyResult.deny;
-      console.log('[sanitize] Added "skill_workshop" to gateway.tools.deny for ClawX desktop');
+      if (gatewayWorkshopDenyResult.modified) {
+        console.log('[sanitize] Added "skill_workshop" to gateway.tools.deny for ClawX desktop');
+      }
+      if (gatewayDenyResult.modified) {
+        console.log('[sanitize] Added "web_search" to gateway.tools.deny for ClawX desktop');
+      }
     } else if (!Array.isArray(gatewayTools.deny) || gatewayTools.deny.length !== gatewayDenyResult.deny.length) {
       gatewayTools.deny = gatewayDenyResult.deny;
       gatewayModified = true;
