@@ -4,7 +4,9 @@ import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/pr
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   UCLAW_COMPATIBILITY_PROVIDER_ID,
+  UCLAW_IMAGE_GENERATION_TIMEOUT_MS,
   UCLAW_MANAGED_PROVIDER_BASE_URL,
+  UCLAW_MEDIA_GENERATION_TEST_TIMEOUT_MS,
   UCLAW_PROVIDER_REQUEST_TIMEOUT_SECONDS,
   UCLAW_VIDEO_CONTENT_DOWNLOAD_MAX_ATTEMPTS,
   UCLAW_VIDEO_GENERATION_MAX_INPUT_IMAGE_BYTES,
@@ -40,6 +42,12 @@ import {
 
 describe('managed runtime config transaction', () => {
   const videoPolicy = createDefaultManagedClientVideoModelPolicy();
+
+  it('uses a fifteen-minute timeout for image and video generation', () => {
+    expect(UCLAW_IMAGE_GENERATION_TIMEOUT_MS).toBe(900_000);
+    expect(UCLAW_VIDEO_GENERATION_TIMEOUT_MS).toBe(900_000);
+    expect(UCLAW_MEDIA_GENERATION_TEST_TIMEOUT_MS).toBe(900_000);
+  });
 
   beforeEach(async () => {
     await rm(root, { recursive: true, force: true });

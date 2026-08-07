@@ -21,6 +21,7 @@ import {
   CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
   CLAWX_OPENAI_IMAGE_PROVIDER_KEY,
 } from './openclaw-image-relay-constants';
+import { UCLAW_IMAGE_GENERATION_TIMEOUT_MS } from '../../shared/junfeiai-endpoints';
 
 export interface ImageGenerationModelConfig {
   primary: string | null;
@@ -193,6 +194,36 @@ export async function readImageGenerationConfig(): Promise<ImageGenerationModelC
     return { primary: null, fallbacks: [], timeoutMs: null };
   }
   return parseImageGenerationModelConfig(defaults.imageGenerationModel);
+}
+
+/** Align an existing image model's timeout with the managed runtime policy without changing model selection. */
+export async function syncManagedImageGenerationTimeout(): Promise<void> {
+  await withConfigLock(async () => {
+    const config = await readOpenClawConfig();
+    const agents = isRecord(config.agents) ? { ...config.agents } : null;
+    const defaults = agents && isRecord(agents.defaults) ? { ...agents.defaults } : null;
+    if (!agents || !defaults) return;
+
+    const imageGenerationModel = defaults.imageGenerationModel;
+    if (typeof imageGenerationModel === 'string' && imageGenerationModel.trim()) {
+      defaults.imageGenerationModel = {
+        primary: imageGenerationModel.trim(),
+        timeoutMs: UCLAW_IMAGE_GENERATION_TIMEOUT_MS,
+      };
+    } else if (isRecord(imageGenerationModel)) {
+      if (imageGenerationModel.timeoutMs === UCLAW_IMAGE_GENERATION_TIMEOUT_MS) return;
+      defaults.imageGenerationModel = {
+        ...imageGenerationModel,
+        timeoutMs: UCLAW_IMAGE_GENERATION_TIMEOUT_MS,
+      };
+    } else {
+      return;
+    }
+
+    agents.defaults = defaults;
+    config.agents = agents;
+    await writeOpenClawConfig(config);
+  });
 }
 
 export async function setImageGenerationConfig(

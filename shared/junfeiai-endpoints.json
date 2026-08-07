@@ -80,13 +80,13 @@
   },
   "media": {
     "image": {
-      "timeoutMs": 1800000,
+      "timeoutMs": 900000,
       "defaultSize": "1024x1024"
     },
     "video": {
       "providerId": "uclaw-video",
       "apiProtocol": "openai-completions",
-      "timeoutMs": 1800000,
+      "timeoutMs": 900000,
       "pollIntervalMs": 5000,
       "contentDownloadMaxAttempts": 4,
       "maxDownloadBytes": 134217728,
@@ -128,7 +128,7 @@
         }
       ]
     },
-    "testTimeoutMs": 1800000,
+    "testTimeoutMs": 900000,
     "clientTimeoutBufferMs": 10000
   }
 }

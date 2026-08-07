@@ -18,6 +18,7 @@
 
 import 'zx/globals';
 import { ELECTRON_MAIN_RUNTIME_PACKAGES, EXTRA_BUNDLED_PACKAGES } from './openclaw-bundle-config.mjs';
+import { patchOpenClawMediaGenerationRuntime } from './openclaw-media-generation-patch.mjs';
 import { patchExtensionOpenClawSelfImports } from './openclaw-self-import-patch.mjs';
 
 const ROOT = path.resolve(__dirname, '..');
@@ -1044,6 +1045,11 @@ function patchBundledRuntime(outputDir) {
 
 patchBrokenModules(outputNodeModules);
 patchBundledRuntime(OUTPUT);
+
+// Media must complete inside the active UClaw chat turn. Reapply after copying
+// so a manual bundle build cannot omit the postinstall runtime patch.
+const mediaGenerationPatch = await patchOpenClawMediaGenerationRuntime(OUTPUT);
+echo`   🩹 Verified UClaw media generation patch (${mediaGenerationPatch.filesPatched} file(s) patched)`;
 
 const openclawSelfImportPatch = patchExtensionOpenClawSelfImports(OUTPUT);
 if (openclawSelfImportPatch.specifiersPatched > 0) {

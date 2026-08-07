@@ -587,6 +587,39 @@ describe('ACP image-generation compatibility extraction', () => {
     ]);
   });
 
+  it('projects synchronous image_generate results followed by an assistant MEDIA directive', () => {
+    const imagePath = '/Users/me/.openclaw/media/tool-image-generation/blue-coffee-cup.png';
+
+    const supplement = extractImageGenerationTranscriptSupplement([
+      { role: 'user', content: '生成一张蓝色咖啡杯放在白色桌面上的产品照片' },
+      {
+        role: 'toolresult',
+        toolCallId: 'image-tool-sync-result',
+        toolName: 'image_generate',
+        content: `Generated 1 image successfully.\n\nAttachments:\n1. type=image mimeType=image/png path="${imagePath}"`,
+      },
+      {
+        role: 'assistant',
+        id: 'blue-coffee-cup-result',
+        content: `已生成蓝色咖啡杯置于白色桌面的产品照片。\n\nMEDIA:${imagePath}`,
+      },
+    ], SESSION_KEY);
+
+    expect(supplement.starts).toEqual([
+      expect.objectContaining({
+        taskId: 'sync:image-tool-sync-result',
+        toolCallId: 'image-tool-sync-result',
+      }),
+    ]);
+    expect(supplement.completions).toEqual([
+      expect.objectContaining({
+        taskId: 'sync:image-tool-sync-result',
+        caption: '已生成蓝色咖啡杯置于白色桌面的产品照片。',
+        candidates: [expect.objectContaining({ key: imagePath })],
+      }),
+    ]);
+  });
+
   it('does not extract transcript assistant MEDIA text without a prior image_generate start', () => {
     const supplement = extractImageGenerationTranscriptSupplement([
       {

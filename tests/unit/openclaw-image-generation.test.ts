@@ -114,4 +114,31 @@ describe('openclaw-image-generation helpers', () => {
     });
   });
 
+  it('synchronizes the managed image timeout without changing the selected model', async () => {
+    await writeOpenClawJson({
+      agents: {
+        defaults: {
+          imageGenerationModel: {
+            primary: 'clawx-openai-image/gpt-image-2',
+            fallbacks: ['clawx-openai-image/gpt-image-1'],
+            timeoutMs: 1_800_000,
+            retainedExtension: true,
+          },
+        },
+      },
+    });
+
+    const { syncManagedImageGenerationTimeout } = await import('@electron/utils/openclaw-image-generation');
+    await syncManagedImageGenerationTimeout();
+
+    const saved = await readOpenClawJson();
+    const defaults = (saved.agents as Record<string, unknown>).defaults as Record<string, unknown>;
+    expect(defaults.imageGenerationModel).toEqual({
+      primary: 'clawx-openai-image/gpt-image-2',
+      fallbacks: ['clawx-openai-image/gpt-image-1'],
+      timeoutMs: 900_000,
+      retainedExtension: true,
+    });
+  });
+
 });

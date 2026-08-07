@@ -8,6 +8,8 @@ const MESSAGE_TOOL = 'message';
 const GENERATED_IMAGE_CAPTION = 'Generated image is ready.';
 const START_RE = /Background task started for image generation \(([0-9a-f-]{36})\)/i;
 const MEDIA_TAG_RE = /(?<![A-Za-z0-9/\\])(?:MEDIA|media):((?:\/|~\/|[A-Za-z]:\\)[^\n"'()\x5b\x5d,<>`]*?\.(?:png|jpe?g|gif|webp|bmp|avif|svg|ico|tiff?))(?=$|[\s\n"'()\x5b\x5d,<>`]|[，。；;,.!?])/g;
+const SYNC_IMAGE_GENERATION_RESULT_RE = /\bGenerated\s+\d+\s+images?\b/i;
+const SYNC_IMAGE_ATTACHMENT_RE = /\bAttachments:\s*[\s\S]*?\bmimeType=image\/[a-z0-9.+-]+\b[\s\S]*?\bpath=(?:"[^"]+"|'[^']+'|\S+)/i;
 
 export type ImageGenerationTaskStart = {
   sessionKey: string;
@@ -320,6 +322,16 @@ function transcriptRole(message: RawMessage): string {
   return typeof message.role === 'string' ? message.role.toLowerCase() : '';
 }
 
+/** Recognize the fixed successful result written by the managed synchronous image plugin. */
+function isSynchronousImageGenerationResult(message: RawMessage): boolean {
+  if (message.toolName !== 'image_generate') return false;
+  const record = asRecord(message);
+  const details = asRecord(message.details);
+  if (record?.isError === true || details?.isError === true) return false;
+  const text = textFromMessageContent(message.content);
+  return SYNC_IMAGE_GENERATION_RESULT_RE.test(text) && SYNC_IMAGE_ATTACHMENT_RE.test(text);
+}
+
 function transcriptImageGenerationStart(
   message: RawMessage,
   sessionKey: string,
@@ -332,13 +344,16 @@ function transcriptImageGenerationStart(
   const taskId = stringValue(details?.taskId) ?? stringValue(nestedTask?.taskId);
   const text = [textFromMessageContent(message.content), taskId ? `(${taskId})` : ''].filter(Boolean).join('\n');
   const match = text.match(START_RE);
-  if (!match?.[1]) return null;
+  const toolCallId = stringValue(message.toolCallId);
+  const resolvedTaskId = match?.[1]
+    ?? (toolCallId && isSynchronousImageGenerationResult(message) ? `sync:${toolCallId}` : undefined);
+  if (!resolvedTaskId) return null;
 
   return {
     sessionKey,
-    taskId: match[1],
-    ...(message.toolCallId ? { toolCallId: message.toolCallId } : {}),
-    evidenceId: `start:${sessionKey}:${message.toolCallId ?? 'unknown'}:${match[1]}`,
+    taskId: resolvedTaskId,
+    ...(toolCallId ? { toolCallId } : {}),
+    evidenceId: `start:${sessionKey}:${toolCallId ?? 'unknown'}:${resolvedTaskId}`,
   };
 }
 

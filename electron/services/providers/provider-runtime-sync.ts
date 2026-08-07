@@ -40,6 +40,7 @@ import {
   getManagedClientVideoModelPolicy,
 } from '../managed-client-config-service';
 import { reconcileManagedProviderRuntimeForStartup } from '../managed-auth-service';
+import { syncManagedImageGenerationTimeout } from '../../utils/openclaw-image-generation';
 
 /** OpenClaw Codex OAuth hooks only apply to the canonical `openai` provider id. */
 const OPENAI_OAUTH_RUNTIME_PROVIDER = 'openai';
@@ -259,6 +260,7 @@ export async function syncAllProviderAuthToRuntime(
     await migrateAllAgentAuthProfilesToSqlite();
     if (managedPolicies) {
       await reconcileManagedProviderRuntimeForStartup(managedPolicies.text, managedPolicies.video);
+      await syncManagedImageGenerationTimeout();
     }
     const accounts = await listProviderAccounts();
     for (const account of accounts) {

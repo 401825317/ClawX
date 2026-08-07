@@ -119,6 +119,7 @@ describe('Gateway process launcher environment', () => {
       PATH: '/usr/bin',
       OPENCLAW_DISABLE_BONJOUR: '1',
       OPENCLAW_GATEWAY_STARTUP_TRACE: '1',
+      UCLAW_SYNC_MEDIA_GENERATION: '1',
     });
     expect(source).toEqual({
       PATH: '/usr/bin',

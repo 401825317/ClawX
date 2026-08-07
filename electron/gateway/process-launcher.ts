@@ -187,6 +187,9 @@ export function buildGatewayRuntimeEnv(
     // OpenClaw's built-in trace contains stage names and timings only. Keep it
     // enabled so packaged startup incidents are diagnosable from normal logs.
     OPENCLAW_GATEWAY_STARTUP_TRACE: '1',
+    // Avoid detached media tasks in UClaw chat sessions. Their completion has
+    // to cross a second session write lock and can otherwise be lost.
+    UCLAW_SYNC_MEDIA_GENERATION: '1',
   }, [OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS]);
 
   // Never inherit this destructive override from the parent process.

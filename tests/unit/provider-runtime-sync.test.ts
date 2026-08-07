@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => ({
   getManagedClientTextModelPolicy: vi.fn(),
   getManagedClientVideoModelPolicy: vi.fn(),
   reconcileManagedProviderRuntimeForStartup: vi.fn(),
+  syncManagedImageGenerationTimeout: vi.fn(),
 }));
 
 vi.mock('@electron/gateway/managed-runtime-mutation-barrier', () => ({
@@ -104,6 +105,10 @@ vi.mock('@electron/services/managed-client-config-service', () => ({
 
 vi.mock('@electron/services/managed-auth-service', () => ({
   reconcileManagedProviderRuntimeForStartup: mocks.reconcileManagedProviderRuntimeForStartup,
+}));
+
+vi.mock('@electron/utils/openclaw-image-generation', () => ({
+  syncManagedImageGenerationTimeout: mocks.syncManagedImageGenerationTimeout,
 }));
 
 vi.mock('@electron/utils/logger', () => ({
@@ -188,6 +193,7 @@ describe('provider-runtime-sync refresh strategy', () => {
       models: [],
     });
     mocks.reconcileManagedProviderRuntimeForStartup.mockResolvedValue(undefined);
+    mocks.syncManagedImageGenerationTimeout.mockResolvedValue(undefined);
     mocks.snapshotManagedAgentAuthProfiles.mockResolvedValue({});
     mocks.installManagedAgentOpenAiApiKey.mockResolvedValue(undefined);
     mocks.removeManagedAgentOpenAiCredentials.mockResolvedValue(undefined);
@@ -225,6 +231,7 @@ describe('provider-runtime-sync refresh strategy', () => {
         models: [],
       },
     );
+    expect(mocks.syncManagedImageGenerationTimeout).toHaveBeenCalledTimes(1);
   });
 
   it('uses cached policy for non-startup synchronization and takes the lock only after policy lookup', async () => {
