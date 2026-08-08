@@ -226,6 +226,7 @@ describe('chat store session label summary hydration', () => {
 
   it('does not publish a cwd-only session title before the local summary is ready', async () => {
     const sessionKey = 'agent:main:session-windows-restart';
+    const truncatedTitle = '[Working directory: C:\\Users\\Tester\\AppData\\Local\\UClawRuntime\\profiles\\profile-id\\openclaw-state\\…';
     const summary = deferred<Record<string, unknown>>();
     gatewayRpcMock.mockImplementation(async (method: string) => {
       if (method === 'sessions.list') {
@@ -233,7 +234,7 @@ describe('chat store session label summary hydration', () => {
           sessions: [{
             key: sessionKey,
             displayName: 'ACP',
-            derivedTitle: '[Working directory: C:\\Users\\Tester\\AppData\\Local\\UClawRuntime\\profiles\\profile-id\\openclaw-state\\workspace]…',
+            derivedTitle: truncatedTitle,
             updatedAt: 1_700_000_000_000,
           }],
         };
@@ -251,7 +252,7 @@ describe('chat store session label summary hydration', () => {
       currentAgentId: 'main',
       sessions: [],
       messages: [],
-      sessionLabels: {},
+      sessionLabels: { [sessionKey]: truncatedTitle },
       sessionLastActivity: {},
     });
 

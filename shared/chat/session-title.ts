@@ -1,5 +1,5 @@
 const ACP_WORKING_DIRECTORY_PREFIX = /^\[Working directory: [^\r\n]*\](?:\r?\n){0,2}/
-const ACP_WORKING_DIRECTORY_TRUNCATED_TITLE = /^\[Working directory: [^\r\n]*\]…$/
+const ACP_WORKING_DIRECTORY_TRUNCATED_TITLE = /^\[Working directory: [^\r\n]*…$/
 const OPENCLAW_SESSION_ID_FALLBACK_TITLE = /^([0-9a-f]{8}) \((\d{4}-\d{2}-\d{2})\)$/i
 
 export function stripAcpWorkingDirectoryPrefix(text: string): string {

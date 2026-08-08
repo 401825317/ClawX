@@ -76,6 +76,14 @@ describe('isAcpWorkingDirectoryTruncatedTitle', () => {
     ).toBe(true)
   })
 
+  it('identifies a Windows portable cwd truncated before the closing bracket', () => {
+    expect(
+      isAcpWorkingDirectoryTruncatedTitle(
+        '[Working directory: C:\\Users\\Tester\\AppData\\Local\\UClawRuntime\\profiles\\profile-id\\openclaw-state\\…',
+      ),
+    ).toBe(true)
+  })
+
   it('preserves an ellipsis after the normal cwd separator', () => {
     expect(
       isAcpWorkingDirectoryTruncatedTitle(

@@ -274,7 +274,11 @@ function applySessionBackendLabels(set: ChatSet, sessions: ChatSession[]): void 
       const label = derivedTitleUnavailable ? '' : toAutomaticSessionLabel(derivedTitle);
       if (!label && derivedTitleUnavailable) {
         const cachedLabel = nextLabels[session.key];
-        if (cachedLabel === '…' || isSyntheticSessionFallbackLabel(session, cachedLabel)) {
+        if (
+          cachedLabel === '…'
+          || isAcpWorkingDirectoryTruncatedTitle(cachedLabel || '')
+          || isSyntheticSessionFallbackLabel(session, cachedLabel)
+        ) {
           if (nextLabels === state.sessionLabels) nextLabels = { ...state.sessionLabels };
           delete nextLabels[session.key];
         }
@@ -3554,7 +3558,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             const unsafeTitleSessionKeys = sessionsWithCurrent
               .filter((session) => (
                 !hasExplicitSessionLabel(session)
-                && !currentSessionLabels[session.key]?.trim()
+                && (
+                  !currentSessionLabels[session.key]?.trim()
+                  || isAcpWorkingDirectoryTruncatedTitle(currentSessionLabels[session.key] || '')
+                )
                 && isAcpWorkingDirectoryTruncatedTitle(session.derivedTitle || '')
               ))
               .map((session) => session.key);
