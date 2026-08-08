@@ -131,4 +131,6 @@ export type AcpTimelineSnapshot = {
   metadata: AcpSessionMetadata;
   openMessageSegments: Record<string, string>;
   segmentCounts: Record<string, number>;
+  /** Local identities for OpenClaw 6.10 chunks that omit a protocol message id. */
+  fallbackMessageCounts: Record<MessageSegmentItem['role'], number>;
 };

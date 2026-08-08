@@ -9,6 +9,11 @@ import {
   createEmptyAcpTimeline,
   upsertSyntheticTurnAttachments,
 } from '@/lib/acp/reducer';
+import {
+  applyAttachmentResolution,
+  attachmentRequestFingerprint,
+  createPendingAttachment,
+} from '@/lib/acp/attachments';
 import type { AcpTimelineSnapshot, AttachmentRenderPart } from '@/lib/acp/timeline-types';
 
 function transcript(...messages: RawMessage[]): RawMessage[] {
@@ -454,6 +459,153 @@ describe('OpenClaw MEDIA transcript turn alignment', () => {
     expect(alignOpenClawMediaTurns(snapshot, turns, {})).toMatchObject([
       { acpTurnId: 'user-only', candidates: [{ uri: 'report.pdf' }] },
     ]);
+  });
+});
+
+describe('attachment resolution state', () => {
+  function pendingAttachment(): AttachmentRenderPart {
+    return createPendingAttachment({
+      messageId: 'compat:openclaw-media:report',
+      segmentIndex: 0,
+      blockIndex: 0,
+      uri: '/workspace/project/report.pdf',
+      name: 'report-request.pdf',
+      mimeType: 'application/pdf',
+      size: 128,
+      source: 'openclaw-media',
+      evidenceId: 'report-evidence',
+    });
+  }
+
+  function withAttachment(attachment: AttachmentRenderPart): AcpTimelineSnapshot {
+    return upsertSyntheticTurnAttachments(
+      timeline([{ userId: 'user-report', userText: 'Create report' }]),
+      {
+        turnId: 'user-report',
+        evidenceId: 'report-evidence',
+        attachments: [attachment],
+        source: 'openclaw-media',
+      },
+    );
+  }
+
+  function attachmentFrom(snapshot: AcpTimelineSnapshot): AttachmentRenderPart {
+    const attachment = Object.values(snapshot.itemsById)
+      .flatMap((item) => item.kind === 'message-segment' ? item.parts : [])
+      .find((part): part is AttachmentRenderPart => part.kind === 'attachment');
+    if (!attachment) throw new Error('attachment missing');
+    return attachment;
+  }
+
+  it('upgrades a pending attachment to available', () => {
+    const pending = pendingAttachment();
+    const snapshot = withAttachment(pending);
+    const resolved = applyAttachmentResolution(snapshot, {
+      attachmentId: pending.attachmentId,
+      expectedFingerprint: attachmentRequestFingerprint(pending),
+      result: {
+        ok: true,
+        identity: 'report-file',
+        displayName: 'report.pdf',
+        mimeType: 'application/pdf',
+        size: 256,
+        target: {
+          kind: 'local',
+          scope: 'workspace',
+          ref: {
+            sessionKey: 'agent:main:session-1',
+            generation: 4,
+            uri: '/workspace/project/report.pdf',
+          },
+        },
+      },
+    });
+
+    expect(attachmentFrom(resolved).access).toMatchObject({
+      status: 'available',
+      identity: 'report-file',
+    });
+  });
+
+  it('allows an unavailable attachment to recover to available with the original request identity', () => {
+    const pending = pendingAttachment();
+    const expectedFingerprint = attachmentRequestFingerprint(pending);
+    const unavailable = applyAttachmentResolution(withAttachment(pending), {
+      attachmentId: pending.attachmentId,
+      expectedFingerprint,
+      result: { ok: false, displayName: 'resolved-report.pdf', error: 'operationFailed' },
+    });
+    const available = applyAttachmentResolution(unavailable, {
+      attachmentId: pending.attachmentId,
+      expectedFingerprint,
+      result: {
+        ok: true,
+        identity: 'recovered-report-file',
+        displayName: 'resolved-report.pdf',
+        mimeType: 'application/pdf',
+        size: 256,
+        target: {
+          kind: 'local',
+          scope: 'workspace',
+          ref: {
+            sessionKey: 'agent:main:session-1',
+            generation: 4,
+            uri: '/workspace/project/report.pdf',
+          },
+        },
+      },
+    });
+
+    expect(attachmentFrom(unavailable).access.status).toBe('unavailable');
+    expect(attachmentFrom(available).access).toMatchObject({
+      status: 'available',
+      identity: 'recovered-report-file',
+    });
+  });
+
+  it('does not regress an available attachment to unavailable or pending', () => {
+    const pending = pendingAttachment();
+    const expectedFingerprint = attachmentRequestFingerprint(pending);
+    const available = applyAttachmentResolution(withAttachment(pending), {
+      attachmentId: pending.attachmentId,
+      expectedFingerprint,
+      result: {
+        ok: true,
+        identity: 'stable-report-file',
+        displayName: pending.reference.name,
+        mimeType: pending.reference.mimeType!,
+        size: pending.reference.size!,
+        target: {
+          kind: 'local',
+          scope: 'workspace',
+          ref: {
+            sessionKey: 'agent:main:session-1',
+            generation: 4,
+            uri: pending.reference.uri,
+          },
+        },
+      },
+    });
+    const unavailable = applyAttachmentResolution(available, {
+      attachmentId: pending.attachmentId,
+      expectedFingerprint,
+      result: { ok: false, displayName: pending.reference.name, error: 'operationFailed' },
+    });
+    const replayedPending = upsertSyntheticTurnAttachments(unavailable, {
+      turnId: 'user-report',
+      evidenceId: 'report-evidence',
+      attachments: [pending],
+      source: 'openclaw-media',
+    });
+
+    expect(attachmentFrom(unavailable).access).toMatchObject({
+      status: 'available',
+      identity: 'stable-report-file',
+    });
+    expect(attachmentFrom(replayedPending).access).toMatchObject({
+      status: 'available',
+      identity: 'stable-report-file',
+    });
   });
 });
 

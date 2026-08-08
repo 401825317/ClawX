@@ -1149,23 +1149,33 @@ test.describe('ACP media attachments', () => {
     }
   });
 
-  test('drops a delayed 1500 ms transcript retry after switching sessions', async ({ launchElectronApp }) => {
+  test('keeps a delayed 1500 ms MEDIA retry scoped to its session across repeated restores', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
     const retryPrompt = 'Prepare the delayed attachment';
+    const reply = 'The attachment will arrive shortly.';
 
     try {
       const fixture = await installAttachmentHostFixture(app, {
+        replayInLoadResult: true,
         sessions: [
           { key: MAIN_SESSION_KEY, title: 'Main session' },
           { key: OTHER_SESSION_KEY, title: 'Other session' },
         ],
       });
       const delayedPath = await fixture.createWorkspaceFile('delayed.txt', 'delayed attachment');
+      const transcriptMessages = [
+        { role: 'user' as const, id: 'delayed-transcript-user', content: retryPrompt },
+        {
+          role: 'assistant' as const,
+          id: 'delayed-transcript-assistant',
+          content: `MEDIA:${delayedPath}\n${reply}`,
+        },
+      ];
       await fixture.setTranscriptResponses(MAIN_SESSION_KEY, [[]]);
       await fixture.setPromptUpdates(retryPrompt, [{
         sessionUpdate: 'agent_message',
         messageId: 'delayed-reply',
-        content: [{ type: 'text', text: 'The attachment will arrive shortly.' }],
+        content: [{ type: 'text', text: reply }],
       }]);
 
       const page = await openChat(app);
@@ -1178,14 +1188,7 @@ test.describe('ACP media attachments', () => {
         [],
         {
           deferId: 'delayed-retry',
-          messages: [
-            { role: 'user', id: 'delayed-transcript-user', content: retryPrompt },
-            {
-              role: 'assistant',
-              id: 'delayed-transcript-assistant',
-              content: `MEDIA:${delayedPath}\nThe attachment will arrive shortly.`,
-            },
-          ],
+          messages: transcriptMessages,
         },
       ]);
       await fixture.clearHistoryRequestTimes(MAIN_SESSION_KEY);
@@ -1204,11 +1207,195 @@ test.describe('ACP media attachments', () => {
       await fixture.waitForDeferredTranscriptCompleted('delayed-retry');
 
       await expect(page.getByRole('button').filter({ hasText: 'delayed.txt' })).toHaveCount(0);
-      await expect(page.getByText('The attachment will arrive shortly.')).toHaveCount(0);
-      expect((await fixture.getHostInvocations()).some((call) => (
-        call.module === 'files'
-        && (call.action === 'readAttachmentBinary' || call.action === 'openAttachment')
-      ))).toBe(false);
+      await expect(page.getByText(reply, { exact: true })).toHaveCount(0);
+      await expect.poll(async () => {
+        const calls = await fixture.getHostInvocations();
+        return {
+          resolved: calls.some((call) => (
+            call.module === 'files'
+            && call.action === 'resolveAttachment'
+            && call.payload?.ref
+            && (call.payload.ref as Record<string, unknown>).sessionKey === MAIN_SESSION_KEY
+            && (call.payload.ref as Record<string, unknown>).uri === delayedPath
+          )),
+          projected: calls.some((call) => (
+            call.module === 'diagnostics'
+            && call.action === 'recordAcpTrace'
+            && call.payload?.event === 'openclaw-media:projection-appended'
+            && call.payload?.sessionKey === MAIN_SESSION_KEY
+          )),
+        };
+      }).toEqual({ resolved: true, projected: true });
+      await fixture.setTranscriptResponses(MAIN_SESSION_KEY, [transcriptMessages]);
+
+      // Restore ACP replay as the history base; only the bounded media overlay may carry forward.
+      await fixture.setSessionReplay(MAIN_SESSION_KEY, [
+        userUpdate('delayed-history-user', retryPrompt),
+        {
+          sessionUpdate: 'agent_message',
+          messageId: 'delayed-history-reply',
+          content: [{ type: 'text', text: reply }],
+        },
+      ]);
+      await page.getByTestId(`sidebar-session-${MAIN_SESSION_KEY}`).click();
+
+      const timeline = page.getByTestId('acp-chat-timeline');
+      await expect(timeline.getByText(reply, { exact: true })).toHaveCount(1, { timeout: 30_000 });
+      await expect(timeline.getByRole('button').filter({ hasText: 'delayed.txt' })).toHaveCount(1, { timeout: 30_000 });
+      await expect(page.getByText(/MEDIA:/)).toHaveCount(0);
+
+      // A second ordinary replay must not duplicate either the ACP base or compatibility overlay.
+      await page.getByTestId(`sidebar-session-${OTHER_SESSION_KEY}`).click();
+      await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible();
+      await page.getByTestId(`sidebar-session-${MAIN_SESSION_KEY}`).click();
+      await expect(timeline.getByText(reply, { exact: true })).toHaveCount(1, { timeout: 30_000 });
+      await expect(timeline.getByRole('button').filter({ hasText: 'delayed.txt' })).toHaveCount(1);
+      await expect(page.getByText(/MEDIA:/)).toHaveCount(0);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('restores one delayed generated video after switching sessions during resolution', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const prompt = 'Create a delayed product video';
+    const intro = 'I will render the product video.';
+    const outro = 'The product video render is complete.';
+    const taskId = '193b8df5-29c6-4a11-81d4-e2a9f8c0f163';
+    const taskStarted = `Background task started for video generation (${taskId}).`;
+
+    try {
+      const fixture = await installAttachmentHostFixture(app, {
+        replayInLoadResult: true,
+        sessions: [
+          { key: MAIN_SESSION_KEY, title: 'Main session' },
+          { key: OTHER_SESSION_KEY, title: 'Other session' },
+        ],
+      });
+      const videoPath = await fixture.createOpenClawMediaFile(
+        'tool-video-generation/delayed-product.m4v',
+        playableVideoBytes(),
+      );
+      const transcriptMessages = [
+        { role: 'user' as const, id: 'delayed-video-user', content: prompt },
+        {
+          role: 'assistant' as const,
+          id: 'delayed-video-result',
+          content: `Video ready\nMEDIA:${videoPath}`,
+        },
+      ];
+      await fixture.setTranscriptResponses(MAIN_SESSION_KEY, [[]]);
+      await fixture.setPromptUpdates(prompt, [
+        {
+          sessionUpdate: 'agent_message_chunk',
+          messageId: 'delayed-video-reply',
+          content: { type: 'text', text: intro },
+        },
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'delayed-video-tool',
+          title: 'Generate video',
+          status: 'completed',
+          content: [{ type: 'content', content: { type: 'text', text: taskStarted } }],
+          locations: [],
+        },
+        {
+          sessionUpdate: 'agent_message_chunk',
+          messageId: 'delayed-video-reply',
+          content: { type: 'text', text: ` ${outro}` },
+        },
+        {
+          sessionUpdate: 'user_message_chunk',
+          messageId: 'delayed-video-completion',
+          content: {
+            type: 'text',
+            text: [
+              '[Internal task completion event]',
+              'source: video_generation',
+              `session_key: video_generate:${taskId}`,
+              'status: completed',
+            ].join('\n'),
+          },
+        },
+      ]);
+
+      const page = await openChat(app);
+      await fixture.waitForHistoryRequestCount(MAIN_SESSION_KEY, 1);
+      await fixture.waitForHistoryQuiet(MAIN_SESSION_KEY);
+      await fixture.setTranscriptResponses(MAIN_SESSION_KEY, [{
+        deferId: 'delayed-video-resolution',
+        messages: transcriptMessages,
+      }]);
+      await page.getByTestId('chat-composer-input').fill(prompt);
+      await page.getByTestId('chat-composer-send').click();
+      await fixture.waitForDeferredTranscriptReady('delayed-video-resolution');
+
+      // Navigation changes only the visible session; accepted video work keeps its original owner.
+      await page.getByTestId(`sidebar-session-${OTHER_SESSION_KEY}`).click();
+      await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible();
+      await fixture.releaseTranscriptResponse('delayed-video-resolution');
+      await fixture.waitForDeferredTranscriptCompleted('delayed-video-resolution');
+      await expect(page.getByTestId('acp-video-attachment')).toHaveCount(0);
+      await expect(page.getByText(intro, { exact: true })).toHaveCount(0);
+      await expect.poll(async () => {
+        const calls = await fixture.getHostInvocations();
+        return {
+          resolved: calls.some((call) => (
+            call.module === 'files'
+            && call.action === 'resolveAttachment'
+            && call.payload?.ref
+            && (call.payload.ref as Record<string, unknown>).sessionKey === MAIN_SESSION_KEY
+            && (call.payload.ref as Record<string, unknown>).uri === videoPath
+          )),
+          projected: calls.some((call) => (
+            call.module === 'diagnostics'
+            && call.action === 'recordAcpTrace'
+            && call.payload?.event === 'openclaw-media:projection-appended'
+            && call.payload?.sessionKey === MAIN_SESSION_KEY
+          )),
+        };
+      }).toEqual({ resolved: true, projected: true });
+      await fixture.setTranscriptResponses(MAIN_SESSION_KEY, [transcriptMessages]);
+
+      // Replay owns text/tool order; the retained video is the only compatibility overlay.
+      await fixture.setSessionReplay(MAIN_SESSION_KEY, [
+        userUpdate('delayed-video-history-user', prompt),
+        {
+          sessionUpdate: 'agent_message_chunk',
+          messageId: 'delayed-video-history-reply',
+          content: { type: 'text', text: intro },
+        },
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'delayed-video-tool',
+          title: 'Generate video',
+          status: 'completed',
+          content: [{ type: 'content', content: { type: 'text', text: taskStarted } }],
+          locations: [],
+        },
+        {
+          sessionUpdate: 'agent_message_chunk',
+          messageId: 'delayed-video-history-reply',
+          content: { type: 'text', text: ` ${outro}` },
+        },
+      ]);
+      await page.getByTestId(`sidebar-session-${MAIN_SESSION_KEY}`).click();
+
+      const timeline = page.getByTestId('acp-chat-timeline');
+      await expect(timeline.getByText(intro, { exact: true })).toHaveCount(1, { timeout: 30_000 });
+      await expect(timeline.getByTestId('acp-tool-call-card')).toContainText('Generate video');
+      await expect(timeline).toContainText(outro);
+      await expect(timeline.getByTestId('acp-video-attachment')).toHaveCount(1, { timeout: 30_000 });
+      await expect(page.getByText(/MEDIA:/)).toHaveCount(0);
+
+      // Repeated restore replays the base again without duplicating the resolved video.
+      await page.getByTestId(`sidebar-session-${OTHER_SESSION_KEY}`).click();
+      await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible();
+      await page.getByTestId(`sidebar-session-${MAIN_SESSION_KEY}`).click();
+      await expect(timeline.getByText(intro, { exact: true })).toHaveCount(1, { timeout: 30_000 });
+      await expect(timeline.getByTestId('acp-tool-call-card')).toHaveCount(1);
+      await expect(timeline.getByTestId('acp-video-attachment')).toHaveCount(1);
+      await expect(page.getByText(/MEDIA:/)).toHaveCount(0);
     } finally {
       await closeElectronApp(app);
     }

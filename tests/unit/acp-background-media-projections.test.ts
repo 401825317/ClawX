@@ -118,6 +118,15 @@ function mediaProjection(
   });
 }
 
+/** Creates the user-visible terminal state for a failed detached video task. */
+function videoFailureProjection(id: string, evidenceId: string): MessageSegmentItem {
+  return message(id, 'assistant', '', {
+    messageId: `compat:${evidenceId}`,
+    compat: { source: 'video-generation', evidenceId },
+    parts: [{ kind: 'error', message: 'Video generation failed.' }],
+  });
+}
+
 /** Returns all media identities in one timeline item. */
 function itemMediaIdentities(item: TimelineItem | undefined): string[] {
   if (item?.kind !== 'message-segment') return [];
@@ -129,6 +138,29 @@ function itemMediaIdentities(item: TimelineItem | undefined): string[] {
 }
 
 describe('background ACP media projections', () => {
+  it('restores a video failure into its matching replay turn', () => {
+    const previous = timeline([
+      message('old-user', 'user', 'Create a video'),
+      videoFailureProjection('video-failure', 'video-generation:task-1:failed'),
+    ]);
+    const replay = timeline([
+      message('new-user', 'user', 'Create a video'),
+    ], 2);
+
+    const result = restoreBackgroundMediaProjections({
+      replay,
+      previous,
+      sessionKey: 'agent:main:current',
+      generation: 2,
+    });
+
+    expect(result.timeline.itemOrder).toEqual(['new-user', 'video-failure']);
+    expect(result.timeline.itemsById['video-failure']).toMatchObject({
+      compat: { source: 'video-generation' },
+      parts: [{ kind: 'error', message: 'Video generation failed.' }],
+    });
+  });
+
   it('matches repeated user turns by text and tail occurrence when every ACP id changes', () => {
     const previous = timeline([
       message('old-user-older', 'user', 'Repeat this request'),

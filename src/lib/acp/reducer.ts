@@ -9,7 +9,7 @@ import type {
   ToolKind,
 } from '@agentclientprotocol/sdk';
 import { contentBlockToRenderPart, contentBlocksToRenderParts, toolContentToRenderPart, toolContentToRenderParts } from './content-blocks';
-import { dedupeTimelineAttachments } from './attachments';
+import { dedupeTimelineAttachments, mergeMonotonicAttachment } from './attachments';
 import { openClawPromptTextBlocks } from './openclaw-prompt-compat';
 import type { AcpTimelineSnapshot, AttachmentRenderPart, MessageSegmentItem, RenderPart, TimelineItem, ToolCallItem } from './timeline-types';
 
@@ -32,6 +32,7 @@ export function createEmptyAcpTimeline(sessionId: string, loadGeneration: number
     metadata: {},
     openMessageSegments: {},
     segmentCounts: {},
+    fallbackMessageCounts: { user: 0, assistant: 0 },
   };
 }
 
@@ -81,21 +82,51 @@ function propertyExists(record: UpdateRecord, property: string): boolean {
   return Object.prototype.hasOwnProperty.call(record, property);
 }
 
-function fallbackMessageId(state: AcpTimelineSnapshot, role: Role): string {
-  const lastId = state.itemOrder[state.itemOrder.length - 1];
-  const lastItem = lastId ? state.itemsById[lastId] : undefined;
+function fallbackMessageIdentity(
+  state: AcpTimelineSnapshot,
+  role: Role,
+): { state: AcpTimelineSnapshot; messageId: string } {
+  // Compatibility media is an overlay, not an ACP process boundary.
+  let lastItem: TimelineItem | undefined;
+  for (let index = state.itemOrder.length - 1; index >= 0; index -= 1) {
+    const item = state.itemsById[state.itemOrder[index]!];
+    if (item?.kind === 'message-segment' && item.compat) continue;
+    lastItem = item;
+    break;
+  }
   if (
     lastItem?.kind === 'message-segment'
     && lastItem.role === role
     && state.openMessageSegments[lastItem.messageId] === lastItem.id
   ) {
-    return lastItem.messageId;
+    return { state, messageId: lastItem.messageId };
   }
-  return `${role}:message:${state.itemOrder.length}`;
+
+  let sequence = state.fallbackMessageCounts[role] ?? 0;
+  let messageId = `${role}:message:${sequence}`;
+  while (state.segmentCounts[messageId] != null) {
+    sequence += 1;
+    messageId = `${role}:message:${sequence}`;
+  }
+  return {
+    state: {
+      ...state,
+      fallbackMessageCounts: {
+        ...state.fallbackMessageCounts,
+        [role]: sequence + 1,
+      },
+    },
+    messageId,
+  };
 }
 
-function getMessageId(state: AcpTimelineSnapshot, update: UpdateRecord, role: Role): string {
-  return stringValue(update.messageId) ?? fallbackMessageId(state, role);
+function messageIdentity(
+  state: AcpTimelineSnapshot,
+  update: UpdateRecord,
+  role: Role,
+): { state: AcpTimelineSnapshot; messageId: string } {
+  const messageId = stringValue(update.messageId);
+  return messageId ? { state, messageId } : fallbackMessageIdentity(state, role);
 }
 
 function nextMessageSegment(
@@ -224,8 +255,9 @@ function appendMessageChunk(
 ): AcpTimelineSnapshot {
   const content = update.content as ContentBlock | undefined;
   if (!content) return state;
-  const messageId = getMessageId(state, update, role);
-  const result = nextMessageSegment(state, role, messageId);
+  const identity = messageIdentity(state, update, role);
+  const { messageId } = identity;
+  const result = nextMessageSegment(identity.state, role, messageId);
   const blockIndex = result.item.blockCount ?? result.item.parts.length;
   const nextPart = contentBlockToRenderPart(content, {
     role,
@@ -260,6 +292,41 @@ function appendMessageChunk(
     ...result.state,
     itemsById: { ...result.state.itemsById, [nextItem.id]: nextItem },
   };
+}
+
+function replacementMessageParts(
+  existing: MessageSegmentItem,
+  replacement: RenderPart[],
+): RenderPart[] {
+  const next = replacement.map((part) => {
+    if (part.kind !== 'attachment') return part;
+    const previous = existing.parts.find((candidate) => (
+      candidate.kind === 'attachment' && candidate.attachmentId === part.attachmentId
+    ));
+    return previous?.kind === 'attachment' ? preserveAvailableAttachment(previous, part) : part;
+  });
+  if (!existing.compat) return next;
+
+  const imageIdentities = new Set(next.flatMap((part) => (
+    part.kind === 'image' && part.mediaIdentity ? [part.mediaIdentity] : []
+  )));
+  const attachmentIds = new Set(next.flatMap((part) => (
+    part.kind === 'attachment' ? [part.attachmentId] : []
+  )));
+  const overlays = existing.parts.filter((part) => {
+    if (part.kind === 'image' && part.mediaIdentity) {
+      if (imageIdentities.has(part.mediaIdentity)) return false;
+      imageIdentities.add(part.mediaIdentity);
+      return true;
+    }
+    if (part.kind === 'attachment' && part.source === 'openclaw-media') {
+      if (attachmentIds.has(part.attachmentId)) return false;
+      attachmentIds.add(part.attachmentId);
+      return true;
+    }
+    return false;
+  });
+  return overlays.length > 0 ? [...next, ...overlays] : next;
 }
 
 function replaceMessage(
@@ -301,11 +368,14 @@ function replaceMessage(
     ...result.item,
     blockCount: blocks.length,
     optimistic: false,
-    parts: contentBlocksToRenderParts(blocks, {
-      role,
-      messageId,
-      segmentIndex: result.item.segmentIndex,
-    }),
+    parts: replacementMessageParts(
+      result.item,
+      contentBlocksToRenderParts(blocks, {
+        role,
+        messageId,
+        segmentIndex: result.item.segmentIndex,
+      }),
+    ),
     ...(role === 'user' ? { userPromptTextBlocks: openClawPromptTextBlocks(blocks) } : {}),
   };
 
@@ -337,23 +407,22 @@ export function appendSyntheticAssistantMessage(
     compat: { source: input.source ?? 'image-generation', evidenceId: input.evidenceId },
   };
 
-  const closed = closeAllMessageSegments(snapshot);
   const nextOrder = (() => {
-    if (closed.itemOrder.includes(id)) return closed.itemOrder;
-    const anchorIndex = input.afterItemId ? closed.itemOrder.indexOf(input.afterItemId) : -1;
-    if (anchorIndex < 0) return [...closed.itemOrder, id];
+    if (snapshot.itemOrder.includes(id)) return snapshot.itemOrder;
+    const anchorIndex = input.afterItemId ? snapshot.itemOrder.indexOf(input.afterItemId) : -1;
+    if (anchorIndex < 0) return [...snapshot.itemOrder, id];
     return [
-      ...closed.itemOrder.slice(0, anchorIndex + 1),
+      ...snapshot.itemOrder.slice(0, anchorIndex + 1),
       id,
-      ...closed.itemOrder.slice(anchorIndex + 1),
+      ...snapshot.itemOrder.slice(anchorIndex + 1),
     ];
   })();
 
   return dedupeTimelineAttachments({
-    ...closed,
+    ...snapshot,
     itemOrder: nextOrder,
-    itemsById: { ...closed.itemsById, [id]: item },
-    segmentCounts: { ...closed.segmentCounts, [input.messageId]: 1 },
+    itemsById: { ...snapshot.itemsById, [id]: item },
+    segmentCounts: { ...snapshot.segmentCounts, [input.messageId]: 1 },
   });
 }
 
@@ -387,7 +456,15 @@ export function upsertSyntheticTurnAttachments(
     messageId,
     segmentIndex: 0,
     blockCount: 0,
-    parts: input.attachments,
+    parts: input.attachments.map((attachment) => {
+      const existing = existingId ? snapshot.itemsById[existingId] : undefined;
+      const previous = existing?.kind === 'message-segment'
+        ? existing.parts.find((part): part is AttachmentRenderPart => (
+            part.kind === 'attachment' && part.attachmentId === attachment.attachmentId
+          ))
+        : undefined;
+      return mergeMonotonicAttachment(previous, attachment);
+    }),
     compat: { source: input.source, evidenceId: input.evidenceId },
   };
   const itemsById = { ...snapshot.itemsById };
@@ -501,7 +578,9 @@ function appendToolContentChunk(
 function appendThoughtChunk(state: AcpTimelineSnapshot, update: UpdateRecord): AcpTimelineSnapshot {
   const content = update.content as ContentBlock | undefined;
   if (!content) return state;
-  const messageId = getMessageId(state, update, 'assistant');
+  const identity = messageIdentity(state, update, 'assistant');
+  state = identity.state;
+  const { messageId } = identity;
   const id = `thought:${messageId}`;
   const existing = state.itemsById[id];
   const parts = existing?.kind === 'thought' ? existing.parts : [];

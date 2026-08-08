@@ -68,11 +68,29 @@ export function attachmentRequestFingerprint(attachment: AttachmentRenderPart): 
     reference.uri,
     reference.stagingId ?? null,
     reference.transcriptMessageId ?? null,
-    reference.name,
-    reference.mimeType ?? null,
-    reference.size ?? null,
     attachment.evidenceId ?? null,
   ]);
+}
+
+function attachmentAccessPriority(attachment: AttachmentRenderPart): number {
+  if (attachment.access.status === 'available') return 2;
+  if (attachment.access.status === 'unavailable') return 1;
+  return 0;
+}
+
+/** Preserves terminal attachment evidence while allowing a later successful retry to upgrade it. */
+export function mergeMonotonicAttachment(
+  previous: AttachmentRenderPart | undefined,
+  incoming: AttachmentRenderPart,
+): AttachmentRenderPart {
+  if (
+    !previous
+    || previous.attachmentId !== incoming.attachmentId
+    || attachmentRequestFingerprint(previous) !== attachmentRequestFingerprint(incoming)
+  ) return incoming;
+  return attachmentAccessPriority(incoming) < attachmentAccessPriority(previous)
+    ? previous
+    : incoming;
 }
 
 function itemParts(item: TimelineItem): RenderPart[] | null {
@@ -227,6 +245,7 @@ export function applyAttachmentResolution(
         || part.attachmentId !== input.attachmentId
         || attachmentRequestFingerprint(part) !== input.expectedFingerprint
       ) return part;
+      if (part.access.status === 'available' && !input.result.ok) return part;
       changed = true;
       return resolvedAttachment(part, input.result);
     }));

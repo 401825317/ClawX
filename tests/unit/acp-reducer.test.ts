@@ -11,6 +11,160 @@ const assistantBlockContext = {
 };
 
 describe('ACP timeline reducer', () => {
+  it('keeps an Assistant stream open when a generated-media overlay is added', () => {
+    let state = createEmptyAcpTimeline('agent:pi:s1', 1);
+    state = applyAcpSessionUpdate(state, {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'msg-a',
+        content: { type: 'text', text: 'The image is' },
+      },
+    });
+    state = appendSyntheticAssistantMessage(state, {
+      messageId: 'compat:image-generation:evidence-a',
+      evidenceId: 'evidence-a',
+      parts: [{ kind: 'image', source: 'data:image/png;base64,a', mediaIdentity: 'image-a' }],
+      afterItemId: 'msg-a:0',
+    });
+    state = applyAcpSessionUpdate(state, {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'msg-a',
+        content: { type: 'text', text: ' ready.' },
+      },
+    });
+
+    expect(state.itemOrder).toEqual([
+      'msg-a:0',
+      'compat:image-generation:evidence-a:0',
+    ]);
+    expect(state.itemsById['msg-a:0']).toMatchObject({
+      kind: 'message-segment',
+      parts: [{ kind: 'markdown', text: 'The image is ready.' }],
+    });
+    expect(state.openMessageSegments).toMatchObject({ 'msg-a': 'msg-a:0' });
+  });
+
+  it('keeps a fallback Assistant stream open across a generated-media overlay', () => {
+    let state = createEmptyAcpTimeline('agent:pi:s1', 1);
+    state = applyAcpSessionUpdate(state, {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'The image is' },
+      },
+    });
+    state = appendSyntheticAssistantMessage(state, {
+      messageId: 'compat:image-generation:evidence-a',
+      evidenceId: 'evidence-a',
+      parts: [{ kind: 'image', source: 'data:image/png;base64,a', mediaIdentity: 'image-a' }],
+      afterItemId: 'assistant:message:0:0',
+    });
+    state = applyAcpSessionUpdate(state, {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: ' ready.' },
+      },
+    });
+
+    expect(state.itemOrder).toEqual([
+      'assistant:message:0:0',
+      'compat:image-generation:evidence-a:0',
+    ]);
+    expect(state.itemsById['assistant:message:0:0']).toMatchObject({
+      kind: 'message-segment',
+      parts: [{ kind: 'markdown', text: 'The image is ready.' }],
+    });
+    expect(state.itemsById['assistant:message:1:0']).toBeUndefined();
+  });
+
+  it('preserves a resolved generated image when a full Assistant message replaces ACP text', () => {
+    let state = createEmptyAcpTimeline('agent:pi:s1', 1);
+    state = applyAcpSessionUpdate(state, {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'msg-a',
+        content: { type: 'text', text: 'Partial caption' },
+      },
+    });
+    const existing = state.itemsById['msg-a:0'];
+    if (existing?.kind !== 'message-segment') throw new Error('expected Assistant segment');
+    state = {
+      ...state,
+      itemsById: {
+        ...state.itemsById,
+        [existing.id]: {
+          ...existing,
+          compat: { source: 'image-generation', evidenceId: 'evidence-a' },
+          parts: [
+            ...existing.parts,
+            { kind: 'image', source: 'data:image/png;base64,a', mediaIdentity: 'image-a' },
+          ],
+        },
+      },
+    };
+
+    state = applyAcpSessionUpdate(state, {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'agent_message',
+        messageId: 'msg-a',
+        content: [{ type: 'text', text: 'Final caption' }],
+      },
+    });
+
+    expect(state.itemsById['msg-a:0']).toMatchObject({
+      kind: 'message-segment',
+      compat: { source: 'image-generation', evidenceId: 'evidence-a' },
+      parts: [
+        { kind: 'markdown', text: 'Final caption' },
+        { kind: 'image', source: 'data:image/png;base64,a', mediaIdentity: 'image-a' },
+      ],
+    });
+  });
+
+  it('allocates fallback message ids independently from compatibility item count', () => {
+    let state = createEmptyAcpTimeline('agent:pi:s1', 1);
+    state = applyAcpSessionUpdate(state, {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'before tool' },
+      },
+    });
+    state = applyAcpSessionUpdate(state, {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-1',
+        title: 'Read file',
+        status: 'completed',
+      },
+    });
+    state = appendSyntheticAssistantMessage(state, {
+      messageId: 'compat:image-generation:evidence-a',
+      evidenceId: 'evidence-a',
+      parts: [{ kind: 'image', source: 'data:image/png;base64,a', mediaIdentity: 'image-a' }],
+    });
+    state = applyAcpSessionUpdate(state, {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'after tool' },
+      },
+    });
+
+    expect(state.itemOrder).toContain('assistant:message:1:0');
+    expect(state.itemsById['assistant:message:1:0']).toMatchObject({
+      kind: 'message-segment',
+      parts: [{ kind: 'markdown', text: 'after tool' }],
+    });
+  });
+
   it('segments assistant text when process blocks interleave with the same messageId', () => {
     let state = createEmptyAcpTimeline('agent:pi:s1', 1);
 
@@ -89,12 +243,12 @@ describe('ACP timeline reducer', () => {
       },
     });
 
-    expect(state.itemOrder).toEqual(['assistant:message:0:0', 'tool:tool-1', 'assistant:message:2:0']);
+    expect(state.itemOrder).toEqual(['assistant:message:0:0', 'tool:tool-1', 'assistant:message:1:0']);
     expect(state.itemsById['assistant:message:0:0']).toMatchObject({
       kind: 'message-segment',
       parts: [{ kind: 'markdown', text: 'first second' }],
     });
-    expect(state.itemsById['assistant:message:2:0']).toMatchObject({
+    expect(state.itemsById['assistant:message:1:0']).toMatchObject({
       kind: 'message-segment',
       parts: [{ kind: 'markdown', text: 'after tool' }],
     });
@@ -134,16 +288,16 @@ describe('ACP timeline reducer', () => {
 
     expect(state.itemOrder).toEqual([
       'user:message:0:0',
+      'assistant:message:0:0',
+      'user:message:1:0',
       'assistant:message:1:0',
-      'user:message:2:0',
-      'assistant:message:3:0',
     ]);
     expect(state.itemsById['user:message:0:0']).toMatchObject({
       kind: 'message-segment',
       role: 'user',
       parts: [{ kind: 'markdown', text: 'first user' }],
     });
-    expect(state.itemsById['user:message:2:0']).toMatchObject({
+    expect(state.itemsById['user:message:1:0']).toMatchObject({
       kind: 'message-segment',
       role: 'user',
       parts: [{ kind: 'markdown', text: 'second user' }],
@@ -589,7 +743,7 @@ describe('ACP timeline reducer', () => {
     });
 
     expect(state.itemOrder).toEqual(['live-msg:0', 'compat:image-generation:task-1:0']);
-    expect(state.openMessageSegments).toEqual({});
+    expect(state.openMessageSegments).toEqual({ 'live-msg': 'live-msg:0' });
     expect(state.itemsById['compat:image-generation:task-1:0']).toMatchObject({
       kind: 'message-segment',
       role: 'assistant',

@@ -9,7 +9,10 @@ import type {
 } from './timeline-types';
 
 type RendererMediaProjectionItem = MessageSegmentItem & {
-  compat: { source: 'image-generation' | 'openclaw-media'; evidenceId: string };
+  compat: {
+    source: 'image-generation' | 'openclaw-media' | 'video-generation';
+    evidenceId: string;
+  };
 };
 
 type ReplayTurn = {
@@ -48,7 +51,11 @@ function markdownText(item: MessageSegmentItem): string {
 
 function rendererMediaProjection(item: TimelineItem | undefined): item is RendererMediaProjectionItem {
   return item?.kind === 'message-segment'
-    && (item.compat?.source === 'image-generation' || item.compat?.source === 'openclaw-media');
+    && (
+      item.compat?.source === 'image-generation'
+      || item.compat?.source === 'openclaw-media'
+      || item.compat?.source === 'video-generation'
+    );
 }
 
 function isSyntheticImageProjection(item: RendererMediaProjectionItem): boolean {
