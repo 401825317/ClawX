@@ -2566,6 +2566,99 @@ describe('ACP Chat store', () => {
     }
   });
 
+  it('projects a completed video when OpenClaw ends the completion run on the requester session', async () => {
+    vi.useFakeTimers();
+    try {
+      const taskId = '197934eb-5a61-4c0a-81ec-c0314fe46c5b';
+      const videoPath = 'C:\\Users\\test\\.openclaw\\media\\tool-video-generation\\finished-video.mp4';
+      let videoReady = false;
+      hostApiMock.sessionsHistory.mockImplementation(async () => ({
+        success: true,
+        messages: videoReady
+          ? [
+              { role: 'user', id: 'transcript-user', content: 'Create a short video' },
+              { role: 'assistant', id: 'video-result', content: `Video ready\nMEDIA:${videoPath}` },
+            ]
+          : [{ role: 'user', id: 'transcript-user', content: 'Create a short video' }],
+      }));
+      hostApiMock.resolveAttachment.mockImplementation(async (payload: {
+        ref: { sessionKey: string; generation: number; uri: string; transcriptMessageId?: string };
+      }) => ({
+        ok: true,
+        identity: 'windows-local-video',
+        displayName: 'finished-video.mp4',
+        mimeType: 'video/mp4',
+        size: 4_096,
+        target: { kind: 'local', scope: 'openclaw-media', ref: payload.ref },
+      }));
+      hostApiMock.sendAcpPrompt.mockImplementationOnce(async () => {
+        hostEventsMock.updateListener?.({
+          sessionKey: 'agent:pi:s1',
+          generation: 1,
+          notification: {
+            sessionId: 'agent:pi:s1',
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'video-tool',
+              status: 'completed',
+              content: [{
+                type: 'content',
+                content: {
+                  type: 'text',
+                  text: `Background task started for video generation (${taskId}).`,
+                },
+              }],
+            },
+          },
+        });
+        return { success: true };
+      });
+
+      const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+      ensureAcpChatSubscriptions();
+      await useAcpChatSessionStore.getState().loadSession({
+        sessionKey: 'agent:pi:s1', workspaceRoot: 'C:\\repo', cwd: 'C:\\repo', createIfMissing: true,
+      });
+      await useAcpChatSessionStore.getState().sendPrompt({
+        sessionKey: 'agent:pi:s1', cwd: 'C:\\repo', message: 'Create a short video', messageId: 'video-user',
+      });
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(useAcpChatSessionStore.getState().pendingVideoGenerationTaskIds).toEqual([taskId]);
+
+      videoReady = true;
+      hostEventsMock.runtimeEventListener?.({
+        type: 'run.ended',
+        status: 'completed',
+        runId: 'requester-completion-run',
+        sessionKey: 'agent:pi:s1',
+      });
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      const videoAttachments = Object.values(useAcpChatSessionStore.getState().timeline.itemsById)
+        .flatMap((item) => item.kind === 'message-segment' ? item.parts : [])
+        .filter((part) => part.kind === 'attachment' && part.access.status === 'available'
+          && part.access.mimeType === 'video/mp4');
+      expect(videoAttachments).toHaveLength(1);
+      expect(videoAttachments[0]).toMatchObject({
+        reference: { uri: videoPath, transcriptMessageId: 'video-result' },
+        access: { identity: 'windows-local-video', target: { kind: 'local' } },
+      });
+      expect(useAcpChatSessionStore.getState().pendingVideoGenerationTaskIds).toEqual([]);
+
+      const completedReadCount = hostApiMock.sessionsHistory.mock.calls.length;
+      hostEventsMock.runtimeEventListener?.({
+        type: 'run.ended',
+        status: 'completed',
+        runId: 'later-requester-run',
+        sessionKey: 'agent:pi:s1',
+      });
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(hostApiMock.sessionsHistory).toHaveBeenCalledTimes(completedReadCount);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('defers an early video terminal event until the live transcript operation starts', async () => {
     vi.useFakeTimers();
     try {
@@ -6215,6 +6308,108 @@ describe('ACP Chat store', () => {
         .filter((part) => part.kind === 'image')).toMatchObject([
         { source: 'data:image/png;base64,puppy', mediaIdentity: imagePath },
       ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('projects a completed image when OpenClaw ends the completion run after live polling is exhausted', async () => {
+    vi.useFakeTimers();
+    try {
+      const taskId = '52e722ee-1df3-4ad6-a3c2-cddc4ce3b5dc';
+      const imagePath = 'C:\\Users\\test\\.openclaw\\media\\tool-image-generation\\finished-image.png';
+      const pendingMessages = [
+        { role: 'user', content: 'Create a product image' },
+        {
+          role: 'toolresult',
+          toolCallId: 'image-tool',
+          toolName: 'image_generate',
+          content: `Background task started for image generation (${taskId}).`,
+          details: { taskId },
+        },
+      ];
+      let imageReady = false;
+      hostApiMock.sessionsHistory.mockImplementation(async () => ({
+        success: true,
+        messages: imageReady
+          ? [
+              ...pendingMessages,
+              {
+                role: 'user',
+                content: `[Inter-session message] sourceSession=image_generate:${taskId} sourceChannel=webchat sourceTool=image_generate isUser=false\n[Internal task completion event]\nstatus: completed successfully`,
+              },
+              { role: 'assistant', id: 'image-result', content: `Image ready\nMEDIA:${imagePath}` },
+            ]
+          : pendingMessages,
+      }));
+      hostApiMock.resolveAttachment.mockImplementation(async (payload: {
+        ref: { sessionKey: string; generation: number; uri: string; transcriptMessageId?: string };
+      }) => ({
+        ok: true,
+        identity: 'windows-local-image',
+        displayName: 'finished-image.png',
+        mimeType: 'image/png',
+        size: 4_096,
+        target: { kind: 'local', scope: 'openclaw-media', ref: payload.ref },
+      }));
+      hostApiMock.mediaThumbnails.mockResolvedValue({
+        'windows-local-image': { preview: 'data:image/png;base64,finished', fileSize: 4_096 },
+      });
+      hostApiMock.sendAcpPrompt.mockImplementationOnce(async () => {
+        hostEventsMock.updateListener?.({
+          sessionKey: 'agent:pi:s1',
+          generation: 1,
+          notification: {
+            sessionId: 'agent:pi:s1',
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'image-tool',
+              status: 'completed',
+              content: [{
+                type: 'content',
+                content: {
+                  type: 'text',
+                  text: `Background task started for image generation (${taskId}).`,
+                },
+              }],
+            },
+          },
+        });
+        return { success: true };
+      });
+
+      const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+      ensureAcpChatSubscriptions();
+      await useAcpChatSessionStore.getState().loadSession({
+        sessionKey: 'agent:pi:s1', workspaceRoot: 'C:\\repo', cwd: 'C:\\repo', createIfMissing: true,
+      });
+      await useAcpChatSessionStore.getState().sendPrompt({
+        sessionKey: 'agent:pi:s1', cwd: 'C:\\repo', message: 'Create a product image', messageId: 'image-user',
+      });
+
+      await vi.advanceTimersByTimeAsync(180_000);
+      const exhaustedReadCount = hostApiMock.sessionsHistory.mock.calls.length;
+      expect(exhaustedReadCount).toBeGreaterThan(1);
+      expect(useAcpChatSessionStore.getState().pendingImageGenerationTaskIds).toEqual([taskId]);
+
+      imageReady = true;
+      hostEventsMock.runtimeEventListener?.({
+        type: 'run.ended',
+        status: 'completed',
+        runId: 'requester-image-completion-run',
+        sessionKey: 'agent:pi:s1',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      const images = Object.values(useAcpChatSessionStore.getState().timeline.itemsById)
+        .flatMap((item) => item.kind === 'message-segment' ? item.parts : [])
+        .filter((part) => part.kind === 'image');
+      expect(hostApiMock.sessionsHistory.mock.calls.length).toBeGreaterThan(exhaustedReadCount);
+      expect(images).toMatchObject([{
+        source: 'data:image/png;base64,finished',
+        mediaIdentity: 'windows-local-image',
+      }]);
+      expect(useAcpChatSessionStore.getState().pendingImageGenerationTaskIds).toEqual([]);
     } finally {
       vi.useRealTimers();
     }

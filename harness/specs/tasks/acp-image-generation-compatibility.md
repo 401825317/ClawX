@@ -64,6 +64,7 @@ acceptance:
   - Internal-UI sourceReply text is authoritative for both successful media replies and text-only failure replies.
   - ClawX hydrates previews through hostApi.media.thumbnails before rendering images.
   - Duplicate completion records and either live arrival order (native ACP reply first or transcript media supplement first) produce one assistant image reply before and after conversation reload.
+  - If OpenClaw ends a detached media completion agent on the requester session after the initial bounded transcript window expires, ClawX re-arms only the exact active Turn while its recorded media task remains pending; no conversation switch is required, and later terminal events cannot refresh a settled task.
   - Live background image generation shows its dedicated generating label until its success or failure completion is projected, without changing the existing sending/thinking behavior.
   - Switching conversations preserves each live image-generation pending state and restores its indicator on return.
   - Completion evidence received while the image conversation is inactive is deferred to that conversation, and a second prompt cannot be sent until the image task settles.

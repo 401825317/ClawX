@@ -135,6 +135,7 @@ type TranscriptSupplementOperation = {
   completedTaskIds: Set<string>;
   videoTaskIds: Set<string>;
   completedVideoTaskIds: Set<string>;
+  videoRequesterProbe: boolean;
   videoRetryIndex: number;
   videoRetryEpoch: number;
   started: boolean;
@@ -461,6 +462,7 @@ function beginTranscriptSupplement(
     completedTaskIds: new Set<string>(),
     videoTaskIds: new Set<string>(),
     completedVideoTaskIds: new Set<string>(),
+    videoRequesterProbe: false,
     videoRetryIndex: 0,
     videoRetryEpoch: 0,
     started: false,
@@ -1311,7 +1313,8 @@ async function runLiveTranscriptSupplement(operation: TranscriptSupplementOperat
 
 function startLiveTranscriptSupplement(operation: TranscriptSupplementOperation): void {
   operation.started = true;
-  const hasCompletedVideoTask = operation.completedVideoTaskIds.size > 0;
+  const hasCompletedVideoTask = operation.completedVideoTaskIds.size > 0
+    || operation.videoRequesterProbe;
   if (hasCompletedVideoTask) {
     if (!operation.terminal && operation.imageTaskIds.size > 0) {
       scheduleLiveTranscriptSupplement(operation);
@@ -1369,13 +1372,20 @@ async function runVideoCompletionTranscriptSupplement(
     operation.videoRetryEpoch !== epoch
     || !isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation)
   ) return;
-  if (localVideoCount >= operation.completedVideoTaskIds.size) {
+  const expectedTaskIds = operation.completedVideoTaskIds.size > 0
+    ? operation.completedVideoTaskIds
+    : (operation.videoRequesterProbe ? operation.videoTaskIds : new Set<string>());
+  if (expectedTaskIds.size > 0 && localVideoCount >= expectedTaskIds.size) {
+    for (const taskId of expectedTaskIds) {
+      useAcpChatSessionStore.getState().settleVideoGenerationTask(taskId);
+    }
+    operation.videoRequesterProbe = false;
     recordProjectionTrace({
       event: 'video-generation:completion-transcript-projected',
       sessionKey: operation.sessionKey,
       generation: operation.generation,
       details: {
-        completedTaskCount: operation.completedVideoTaskIds.size,
+        completedTaskCount: expectedTaskIds.size,
         localVideoCount,
       },
     });
@@ -1412,6 +1422,50 @@ function refreshCompletedVideoTranscript(taskId: string): void {
     details: { taskId },
   });
   if (operation.started) startVideoCompletionTranscriptSupplement(operation);
+}
+
+/** Re-reads the active Turn when OpenClaw ends a media completion agent on the requester session. */
+function refreshPendingMediaTranscriptForRequesterSession(sessionKey: string | undefined): void {
+  const operation = activeTranscriptSupplement;
+  if (
+    !sessionKey
+    || !operation?.liveUserMessageId
+    || operation.sessionKey !== sessionKey
+    || !isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation)
+  ) return;
+
+  const state = useAcpChatSessionStore.getState();
+  const pendingImageTaskCount = [...operation.imageTaskIds]
+    .filter((taskId) => state.pendingImageGenerationTaskIds.includes(taskId)).length;
+  if (pendingImageTaskCount > 0) {
+    operation.terminal = false;
+    operation.retryIndex = 0;
+    if (operation.retryTimer) clearTimeout(operation.retryTimer);
+    operation.retryTimer = undefined;
+    recordProjectionTrace({
+      event: 'image-generation:requester-run-transcript-started',
+      sessionKey: operation.sessionKey,
+      generation: operation.generation,
+      details: { pendingTaskCount: pendingImageTaskCount },
+    });
+    if (operation.started) {
+      void runLiveTranscriptSupplement(operation);
+      scheduleLiveTranscriptSupplement(operation);
+    }
+  }
+
+  const pendingVideoTaskCount = [...operation.videoTaskIds]
+    .filter((taskId) => state.pendingVideoGenerationTaskIds.includes(taskId)).length;
+  if (pendingVideoTaskCount > 0) {
+    operation.videoRequesterProbe = true;
+    recordProjectionTrace({
+      event: 'video-generation:requester-run-transcript-started',
+      sessionKey: operation.sessionKey,
+      generation: operation.generation,
+      details: { pendingTaskCount: pendingVideoTaskCount },
+    });
+    if (operation.started) startVideoCompletionTranscriptSupplement(operation);
+  }
 }
 
 function completeVideoGenerationTask(taskId: string): void {
@@ -2774,6 +2828,9 @@ export function ensureAcpChatSubscriptions(): void {
     const evidence = extractImageGenerationCompletionFromRuntimeEvent(event);
     const state = useAcpChatSessionStore.getState();
     if (videoTaskId) completeVideoGenerationTask(videoTaskId);
+    else if (event.type === 'run.ended') {
+      refreshPendingMediaTranscriptForRequesterSession(event.sessionKey);
+    }
     if (
       evidence
       && !deferInactiveImageGenerationCompletion(state.activeSessionKey, evidence)
