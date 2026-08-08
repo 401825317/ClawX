@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { groupConsecutiveToolCalls, isToolCallGroupActive } from '@/lib/acp/tool-call-groups';
+import {
+  getSubagentToolGroupProgress,
+  groupConsecutiveToolCalls,
+  isToolCallGroupActive,
+} from '@/lib/acp/tool-call-groups';
+import type { ChatSession } from '@/stores/chat/types';
 import type {
   MessageSegmentItem,
   PermissionItem,
@@ -74,6 +79,16 @@ describe('groupConsecutiveToolCalls', () => {
     ]);
   });
 
+  it('keeps a single subagent spawn as a persistent task group', () => {
+    const spawn = { ...tool('spawn'), title: 'sessions_spawn: task: research' };
+
+    expect(groupConsecutiveToolCalls([spawn])).toEqual([{
+      kind: 'tool-call-group',
+      id: 'tool-call-group:tool:spawn',
+      items: [spawn],
+    }]);
+  });
+
   it.each([
     ['message', assistantMessage],
     ['thought', thought],
@@ -119,6 +134,72 @@ describe('groupConsecutiveToolCalls', () => {
 
     expect(initialGroup).toMatchObject({ id: 'tool-call-group:tool:a' });
     expect(appendedGroup).toMatchObject({ id: 'tool-call-group:tool:a' });
+  });
+});
+
+describe('getSubagentToolGroupProgress', () => {
+  const items: ToolCallItem[] = [
+    { ...tool('spawn-a'), title: 'sessions_spawn: task: research A' },
+    { ...tool('spawn-b'), title: 'sessions_spawn: task: research B' },
+    {
+      ...tool('yield'),
+      title: 'sessions_yield: message: wait',
+      outputParts: [{ kind: 'markdown', text: '{"status":"yielded","message":"wait"}' }],
+    },
+  ];
+  const childSessions: ChatSession[] = [
+    {
+      key: 'agent:main:subagent:child-a',
+      kind: 'subagent',
+      parentSessionKey: 'agent:main:parent',
+      subagentRunState: 'done',
+      hasActiveSubagentRun: false,
+    },
+    {
+      key: 'agent:main:subagent:child-b',
+      kind: 'subagent',
+      parentSessionKey: 'agent:main:parent',
+      subagentRunState: 'running',
+      hasActiveSubagentRun: true,
+    },
+  ];
+
+  it('keeps a yielded parent turn active while one child is still running', () => {
+    expect(getSubagentToolGroupProgress({
+      items,
+      parentSessionKey: 'agent:main:parent',
+      subagentSessions: childSessions,
+      hasFollowingContent: false,
+    })).toEqual({ phase: 'waiting', total: 2, completed: 1 });
+  });
+
+  it('does not complete while a child is still running even if parent content follows', () => {
+    expect(getSubagentToolGroupProgress({
+      items,
+      parentSessionKey: 'agent:main:parent',
+      subagentSessions: childSessions,
+      hasFollowingContent: true,
+    })).toEqual({ phase: 'waiting', total: 2, completed: 1 });
+  });
+
+  it('moves from returned results to complete only after parent content resumes', () => {
+    const completedSessions = childSessions.map((session) => ({
+      ...session,
+      subagentRunState: 'done',
+      hasActiveSubagentRun: false,
+    }));
+    expect(getSubagentToolGroupProgress({
+      items,
+      parentSessionKey: 'agent:main:parent',
+      subagentSessions: completedSessions,
+      hasFollowingContent: false,
+    })).toEqual({ phase: 'resuming', total: 2, completed: 2 });
+    expect(getSubagentToolGroupProgress({
+      items,
+      parentSessionKey: 'agent:main:parent',
+      subagentSessions: completedSessions,
+      hasFollowingContent: true,
+    })).toEqual({ phase: 'completed', total: 2, completed: 2 });
   });
 });
 

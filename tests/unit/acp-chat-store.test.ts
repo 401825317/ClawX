@@ -2012,6 +2012,73 @@ describe('ACP Chat store', () => {
     });
   });
 
+  it('reconciles only the current failed assistant segment from its transcript turn', async () => {
+    const prompt = createDeferred<{ success: boolean; error?: string; generation?: number }>();
+    const userText = '画一张西瓜吃席瓜的图';
+    const persistedPartial = '我按“西瓜在宴席上吃西瓜”的谐音梗来画';
+    hostApiMock.sendAcpPrompt.mockReturnValueOnce(prompt.promise);
+    hostApiMock.sessionsHistory.mockResolvedValueOnce({
+      success: true,
+      messages: [
+        { role: 'user', id: 'transcript-user', content: userText },
+        {
+          role: 'assistant',
+          id: 'failed-assistant-transcript',
+          content: [{ type: 'text', text: persistedPartial }],
+          stopReason: 'error',
+          errorMessage: 'stream_read_error',
+        },
+      ],
+    });
+    const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+    ensureAcpChatSubscriptions();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+
+    const sendPromise = useAcpChatSessionStore.getState().sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: userText, messageId: 'failed-user-live',
+    });
+    hostEventsMock.updateListener?.({
+      sessionKey: 'agent:pi:s1',
+      generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'user_message',
+          messageId: 'failed-user-live',
+          content: [{ type: 'text', text: userText }],
+        },
+      },
+    });
+    hostEventsMock.updateListener?.({
+      sessionKey: 'agent:pi:s1',
+      generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          messageId: 'failed-assistant-live',
+          content: { type: 'text', text: '我' },
+        },
+      },
+    });
+    prompt.resolve({ success: false, error: 'stream_read_error' });
+
+    await expect(sendPromise).resolves.toBe(false);
+    await vi.waitFor(() => expect(hostApiMock.sessionsHistory).toHaveBeenCalledTimes(1));
+    const timeline = useAcpChatSessionStore.getState().timeline;
+    const assistantItems = timeline.itemOrder
+      .map((id) => timeline.itemsById[id])
+      .filter((item) => item?.kind === 'message-segment' && item.role === 'assistant');
+    expect(assistantItems).toHaveLength(1);
+    expect(assistantItems[0]).toMatchObject({
+      messageId: 'failed-assistant-live',
+      parts: [{ kind: 'markdown', text: persistedPartial }],
+    });
+    expect(hostApiMock.loadAcpSession).toHaveBeenCalledTimes(1);
+  });
+
   it('does not respond to missing or already-resolved permission requests', async () => {
     const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
     ensureAcpChatSubscriptions();
@@ -4364,6 +4431,126 @@ describe('ACP Chat store', () => {
     expect(timeline.itemOrder.filter((id) => id.startsWith('compat:image-generation:'))).toEqual([]);
   });
 
+  it('keeps one live completion when a structured gateway image is followed by the model MEDIA mirror', async () => {
+    const prompt = '画一张西瓜吃席瓜的图';
+    const caption = '画好了：西瓜坐在中式宴席上，用筷子吃西瓜，旁边还有一桌西瓜宾客。';
+    const truncatedMirror = '画好了：西瓜坐在中式宴席上，用筷子吃西瓜，旁边还有一桌西瓜';
+    const gatewayUrl = '/api/chat/media/outgoing/agent%3Api%3As1/image-1/full';
+    const imagePath = '/repo/watermelon.png';
+    hostApiMock.sendAcpPrompt.mockImplementationOnce(async () => {
+      hostEventsMock.updateListener?.({
+        sessionKey: 'agent:pi:s1',
+        generation: 1,
+        notification: {
+          sessionId: 'agent:pi:s1',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'image-tool-sync-result',
+            status: 'completed',
+            content: [{
+              type: 'content',
+              content: { type: 'text', text: `Generated 1 image. Attachments: mimeType=image/png path="${imagePath}"` },
+            }],
+          },
+        },
+      });
+      hostEventsMock.updateListener?.({
+        sessionKey: 'agent:pi:s1',
+        generation: 1,
+        notification: {
+          sessionId: 'agent:pi:s1',
+          update: {
+            sessionUpdate: 'agent_message',
+            messageId: 'gateway-image-message',
+            content: [{ type: 'text', text: caption }],
+          },
+        },
+      });
+      return { success: true };
+    });
+    hostApiMock.sessionsHistory.mockResolvedValue({
+      success: true,
+      messages: [
+        { role: 'user', id: 'image-user-transcript', content: prompt },
+        {
+          role: 'toolresult',
+          toolCallId: 'image-tool-sync-result',
+          toolName: 'image_generate',
+          content: `Generated 1 image. Attachments: mimeType=image/png path="${imagePath}"`,
+        },
+        {
+          role: 'assistant',
+          id: 'gateway-image-message',
+          content: [
+            { type: 'text', text: caption },
+            { type: 'image', url: gatewayUrl, mimeType: 'image/png' },
+          ],
+        },
+        {
+          role: 'assistant',
+          id: 'model-image-message',
+          content: `${caption}\n\nMEDIA:${imagePath}`,
+        },
+      ],
+    });
+    hostApiMock.mediaThumbnails.mockResolvedValue({
+      [imagePath]: { preview: 'data:image/png;base64,watermelon', fileSize: 67 },
+    });
+    const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+    ensureAcpChatSubscriptions();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+
+    await useAcpChatSessionStore.getState().sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: prompt, messageId: 'image-user-live',
+    });
+    await vi.waitFor(() => expect(hostApiMock.mediaThumbnails).toHaveBeenCalledTimes(1));
+    hostEventsMock.updateListener?.({
+      sessionKey: 'agent:pi:s1',
+      generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+            sessionUpdate: 'agent_message',
+            messageId: 'model-image-message',
+            content: [{ type: 'text', text: truncatedMirror }],
+        },
+      },
+    });
+
+    const timeline = useAcpChatSessionStore.getState().timeline;
+    const captionItems = timeline.itemOrder
+      .map((id) => timeline.itemsById[id])
+      .filter((item) => item?.kind === 'message-segment'
+        && item.role === 'assistant'
+        && item.parts.some((part) => part.kind === 'markdown' && part.text === caption));
+    expect(captionItems).toHaveLength(1);
+    expect(captionItems[0]).toMatchObject({
+      messageId: 'gateway-image-message',
+      parts: [
+        { kind: 'markdown', text: caption },
+        { kind: 'image', source: 'data:image/png;base64,watermelon' },
+      ],
+    });
+    expect(timeline.itemOrder
+      .map((id) => timeline.itemsById[id])
+      .filter((item) => item?.kind === 'message-segment' && item.role === 'assistant')
+      .flatMap((item) => item?.kind === 'message-segment' ? item.parts : [])
+      .some((part) => part.kind === 'markdown' && part.text === truncatedMirror)).toBe(false);
+    expect(hostApiMock.resolveAttachment).toHaveBeenCalledWith(expect.objectContaining({
+      ref: expect.objectContaining({
+        uri: imagePath,
+        transcriptMessageId: 'model-image-message',
+      }),
+    }));
+    expect(timeline.itemOrder
+      .map((id) => timeline.itemsById[id])
+      .filter((item) => item?.kind === 'message-segment')
+      .flatMap((item) => item?.kind === 'message-segment' ? item.parts : [])
+      .some((part) => part.kind === 'attachment')).toBe(false);
+  });
+
   it('waits for media before projecting a successful text-only image completion', async () => {
     const taskId = '4959fd41-c9eb-448d-a12c-3f120a12bf28';
     const prompt = 'Generate a white woman shopping in China';
@@ -5509,6 +5696,111 @@ describe('ACP Chat store', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('does not let a stale transcript supplement steal an active gateway image projection', async () => {
+    const taskId = 'a5328d99-76f6-429f-b53f-acde09cf838b';
+    const caption = 'The generated product image is ready.';
+    const generatedPath = '/repo/generated-product.png';
+    const gatewayResolution = createDeferred<Record<string, unknown>>();
+    const transcriptResolution = createDeferred<Record<string, unknown>>();
+    const resolvedAttachment = {
+      ok: true,
+      identity: 'generated-product-identity',
+      displayName: 'generated-product.png',
+      mimeType: 'image/png',
+      size: 64,
+      target: {
+        kind: 'local',
+        scope: 'workspace',
+        ref: { sessionKey: 'agent:pi:s1', generation: 1, uri: generatedPath },
+      },
+    };
+    hostApiMock.resolveAttachment
+      .mockReturnValueOnce(gatewayResolution.promise)
+      .mockReturnValueOnce(transcriptResolution.promise);
+    hostApiMock.mediaThumbnails.mockResolvedValue({
+      'generated-product-identity': { preview: 'data:image/png;base64,product', fileSize: 64 },
+    });
+    const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+    ensureAcpChatSubscriptions();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+    hostEventsMock.updateListener?.({
+      sessionKey: 'agent:pi:s1',
+      generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'image-tool-overlap',
+          status: 'completed',
+          content: [{
+            type: 'content',
+            content: {
+              type: 'text',
+              text: `Background task started for image generation (${taskId}).`,
+            },
+          }],
+        },
+      },
+    });
+    hostEventsMock.updateListener?.({
+      sessionKey: 'agent:pi:s1',
+      generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'agent_message',
+          messageId: 'native-image-overlap-reply',
+          content: [{ type: 'text', text: caption }],
+        },
+      },
+    });
+    const evidence = {
+      sessionKey: 'agent:pi:s1',
+      taskId,
+      source: 'gateway-chat-message' as const,
+      evidenceId: 'gateway-image-overlap',
+      caption,
+      authoritativeCaption: true,
+      candidates: [{ key: generatedPath, filePath: generatedPath, mimeType: 'image/png' }],
+    };
+
+    const gatewayProjection = useAcpChatSessionStore.getState().projectImageGenerationCompletion(evidence);
+    await vi.waitFor(() => expect(hostApiMock.resolveAttachment).toHaveBeenCalledTimes(1));
+    let transcriptCurrent = true;
+    const transcriptProjection = useAcpChatSessionStore.getState().projectImageGenerationCompletion(
+      { ...evidence, source: 'transcript-history', evidenceId: 'transcript-image-overlap' },
+      {
+        reservationOwner: 'transcript:overlap:1',
+        isCurrent: () => transcriptCurrent,
+        staleReason: 'stale-transcript-supplement',
+      },
+    );
+    await Promise.resolve();
+    transcriptCurrent = false;
+    transcriptResolution.resolve(resolvedAttachment);
+    await transcriptProjection;
+    gatewayResolution.resolve(resolvedAttachment);
+    await gatewayProjection;
+
+    expect(hostApiMock.resolveAttachment).toHaveBeenCalledTimes(1);
+    const timeline = useAcpChatSessionStore.getState().timeline;
+    const captionItems = timeline.itemOrder
+      .map((id) => timeline.itemsById[id])
+      .filter((item) => item?.kind === 'message-segment'
+        && item.role === 'assistant'
+        && item.parts.some((part) => part.kind === 'markdown' && part.text === caption));
+    expect(captionItems).toHaveLength(1);
+    expect(timeline.itemsById['native-image-overlap-reply:0']).toMatchObject({
+      parts: [
+        { kind: 'markdown', text: caption },
+        { kind: 'image', source: 'data:image/png;base64,product' },
+      ],
+    });
+    expect(timeline.itemOrder.filter((id) => id.startsWith('compat:image-generation:'))).toEqual([]);
   });
 
   it('does not replay an older image-generation turn during a live non-image supplement', async () => {

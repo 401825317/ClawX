@@ -49,6 +49,14 @@ vi.mock('@electron/utils/paths', async () => {
   };
 });
 
+const CLAWX_DESKTOP_TOOL_DENY = [
+  'sessions_spawn',
+  'sessions_yield',
+  'subagents',
+  'skill_workshop',
+  'web_search',
+];
+
 async function writeOpenClawJson(config: unknown): Promise<void> {
   const openclawDir = join(testHome, '.openclaw');
   await mkdir(openclawDir, { recursive: true });
@@ -1067,10 +1075,10 @@ describe('sanitizeOpenClawConfig', () => {
     // Fresh install should get tools settings enforced
     const tools = result.tools as Record<string, unknown>;
     expect(tools.profile).toBe('full');
-    expect(tools.deny).toEqual(['skill_workshop', 'web_search']);
+    expect(tools.deny).toEqual(CLAWX_DESKTOP_TOOL_DENY);
     const gateway = result.gateway as Record<string, unknown>;
     const gatewayTools = gateway.tools as Record<string, unknown>;
-    expect(gatewayTools.deny).toEqual(['skill_workshop', 'web_search']);
+    expect(gatewayTools.deny).toEqual(CLAWX_DESKTOP_TOOL_DENY);
     const skills = result.skills as Record<string, unknown>;
     const workshop = skills.workshop as Record<string, unknown>;
     const autonomous = workshop.autonomous as Record<string, unknown>;
@@ -1105,9 +1113,9 @@ describe('sanitizeOpenClawConfig', () => {
     // tools settings should now be enforced
     const tools = result.tools as Record<string, unknown>;
     expect(tools.profile).toBe('full');
-    expect(tools.deny).toEqual(['skill_workshop', 'web_search']);
+    expect(tools.deny).toEqual(CLAWX_DESKTOP_TOOL_DENY);
     const gateway = result.gateway as Record<string, unknown>;
-    expect((gateway.tools as Record<string, unknown>).deny).toEqual(['skill_workshop', 'web_search']);
+    expect((gateway.tools as Record<string, unknown>).deny).toEqual(CLAWX_DESKTOP_TOOL_DENY);
     const skills = result.skills as Record<string, unknown>;
     expect(((skills.workshop as Record<string, unknown>).autonomous as Record<string, unknown>).enabled).toBe(false);
     expect((skills.entries as Record<string, Record<string, unknown>>)['skill-creator'].enabled).toBe(true);
@@ -1127,9 +1135,34 @@ describe('sanitizeOpenClawConfig', () => {
 
     const result = await readOpenClawJson();
     const tools = result.tools as Record<string, unknown>;
-    expect(tools.deny).toEqual(['browser', 'skill_workshop', 'web_search']);
+    expect(tools.deny).toEqual(['browser', ...CLAWX_DESKTOP_TOOL_DENY]);
     const gateway = result.gateway as Record<string, unknown>;
-    expect((gateway.tools as Record<string, unknown>).deny).toEqual(['skill_workshop', 'web_search']);
+    expect((gateway.tools as Record<string, unknown>).deny).toEqual(CLAWX_DESKTOP_TOOL_DENY);
+  });
+
+  it('disables the Subagent workflow while preserving other denied tools', async () => {
+    await writeOpenClawJson({
+      tools: {
+        deny: ['browser'],
+      },
+      gateway: {
+        tools: {
+          deny: ['computer'],
+        },
+      },
+    });
+
+    const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
+    await sanitizeOpenClawConfig();
+
+    const result = await readOpenClawJson();
+    const tools = result.tools as Record<string, unknown>;
+    expect(tools.deny).toEqual(['browser', ...CLAWX_DESKTOP_TOOL_DENY]);
+    const gateway = result.gateway as Record<string, unknown>;
+    expect((gateway.tools as Record<string, unknown>).deny).toEqual([
+      'computer',
+      ...CLAWX_DESKTOP_TOOL_DENY,
+    ]);
   });
 
   it('trusts the configured ClawX image relay during prelaunch without dropping other allowlist entries', async () => {

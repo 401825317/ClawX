@@ -105,6 +105,33 @@ describe('sessions API workspace summaries', () => {
     });
   });
 
+  it('preserves outer transcript ids for attachment authorization', async () => {
+    seedTranscriptRecords('agent:main:session-message-ids', [{
+      type: 'message',
+      id: 'gateway-image-message',
+      timestamp: '2026-08-08T01:00:00.000Z',
+      message: {
+        role: 'assistant',
+        content: [{
+          type: 'image',
+          url: '/api/chat/media/outgoing/agent%3Amain%3Asession-message-ids/image-1/full',
+          mimeType: 'image/png',
+        }],
+      },
+    }]);
+    const { createSessionsApi } = await import('@electron/services/sessions-api');
+
+    await expect(createSessionsApi().history({
+      sessionKey: 'agent:main:session-message-ids',
+      limit: 5,
+    })).resolves.toMatchObject({
+      success: true,
+      messages: [{
+        id: 'gateway-image-message',
+      }],
+    });
+  });
+
   it('extracts bounded whole-turn timings without treating inter-session messages as new turns', async () => {
     seedTranscriptRecords('agent:main:session-timings', [
       {

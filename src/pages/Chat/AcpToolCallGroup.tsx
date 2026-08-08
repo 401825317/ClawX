@@ -12,6 +12,10 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { ToolCallItem } from '@/lib/acp/timeline-types';
+import {
+  isSubagentYieldTool,
+  type SubagentToolGroupProgress,
+} from '@/lib/acp/tool-call-groups';
 import { cn } from '@/lib/utils';
 import { AcpToolCallCard } from './AcpToolCallCard';
 
@@ -84,16 +88,25 @@ export function AcpToolCallGroup({
   id,
   items,
   active,
+  subagentProgress,
 }: {
   id: string;
   items: ToolCallItem[];
   active: boolean;
+  subagentProgress?: SubagentToolGroupProgress | null;
 }) {
   const { t, i18n } = useTranslation('chat');
   const [expanded, setExpanded] = useState(false);
   const panelId = `${id.replace(/[^a-zA-Z0-9_-]/g, '-')}-items`;
   const toggleLabel = expanded ? t('acp.toolGroup.collapse') : t('acp.toolGroup.expand');
-  const summary = activitySummary(items, active, i18n.language, t);
+  const effectiveActive = active || !!subagentProgress && subagentProgress.phase !== 'completed';
+  const visibleItems = items.filter((item) => !isSubagentYieldTool(item));
+  const summary = subagentProgress
+    ? t(`acp.toolGroup.subagent${subagentProgress.phase[0].toUpperCase()}${subagentProgress.phase.slice(1)}`, {
+        total: subagentProgress.total,
+        completed: subagentProgress.completed,
+      })
+    : activitySummary(items, effectiveActive, i18n.language, t);
   const activityKind = primaryActivityKind(items);
   const CompletedIcon = activityKind === 'generic' ? Wrench : ACTIVITY_ICONS[activityKind];
 
@@ -102,7 +115,7 @@ export function AcpToolCallGroup({
       data-testid="acp-tool-call-group"
       data-tool-group-id={id}
       data-expanded={expanded ? 'true' : 'false'}
-      data-active={active ? 'true' : 'false'}
+      data-active={effectiveActive ? 'true' : 'false'}
       className="w-full min-w-0"
     >
       <button
@@ -123,7 +136,7 @@ export function AcpToolCallGroup({
           )}
           aria-hidden="true"
         />
-        {active
+        {effectiveActive
           ? <Loader2 data-testid="acp-tool-group-running-icon" className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />
           : (
               <CompletedIcon
@@ -135,7 +148,7 @@ export function AcpToolCallGroup({
             )}
         <span
           data-testid="acp-tool-group-summary"
-          className={cn('acp-tool-group-summary min-w-0 flex-1 truncate font-medium', active && 'acp-tool-group-shimmer')}
+          className={cn('acp-tool-group-summary min-w-0 flex-1 truncate font-medium', effectiveActive && 'acp-tool-group-shimmer')}
         >
           {summary}
         </span>
@@ -162,7 +175,7 @@ export function AcpToolCallGroup({
             )}
           >
             <div className="flex min-w-0 flex-col gap-0.5">
-              {items.map((item) => (
+              {visibleItems.map((item) => (
                 <div key={item.id} data-acp-item-id={item.id} className="min-w-0">
                   <AcpToolCallCard item={item} variant="grouped" />
                 </div>

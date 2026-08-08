@@ -297,6 +297,25 @@ describe('sidebar session helpers', () => {
     expect(sessionRow).not.toHaveTextContent('long manual label that must use the cache display text');
   });
 
+  it('never falls back to a cwd-only derived title while the transcript label is unavailable', () => {
+    seedSidebarState();
+    useChatStore.setState({
+      sessions: [{
+        key: sidebarSessionKey,
+        displayName: 'ACP',
+        derivedTitle: '[Working directory: C:\\Users\\Tester\\AppData\\Local\\UClawRuntime\\profiles\\profile-id\\openclaw-state\\workspace]…',
+        updatedAt: 1,
+      }],
+      sessionLabels: {},
+    });
+
+    renderSidebar();
+
+    const sessionRow = screen.getByTestId(`sidebar-session-${sidebarSessionKey}`);
+    expect(sessionRow).toHaveTextContent('ACP');
+    expect(sessionRow).not.toHaveTextContent('Working directory');
+  });
+
   it('uses an icon-only collapse-all control with an accessible label', () => {
     seedSidebarState();
 

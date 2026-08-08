@@ -620,6 +620,44 @@ describe('ACP image-generation compatibility extraction', () => {
     ]);
   });
 
+  it('prefers the later local MEDIA image over a gateway-only structured image', () => {
+    const gatewayUrl = '/api/chat/media/outgoing/agent%3Amain%3Amain/image-1/full';
+    const imagePath = '/Users/me/.openclaw/media/tool-image-generation/watermelon.png';
+    const caption = '画好了：西瓜坐在中式宴席上，用筷子吃西瓜，旁边还有一桌西瓜宾客。';
+
+    const supplement = extractImageGenerationTranscriptSupplement([
+      { role: 'user', content: '画一张西瓜吃席瓜的图' },
+      {
+        role: 'toolresult',
+        toolCallId: 'image-tool-sync-result',
+        toolName: 'image_generate',
+        content: `Generated 1 image with clawx-openai-image/gpt-image-2.\nAttachments:\n1. type=image mimeType=image/png path="${imagePath}"`,
+      },
+      {
+        role: 'assistant',
+        id: 'gateway-image-message',
+        content: [
+          { type: 'text', text: caption },
+          { type: 'image', url: gatewayUrl, mimeType: 'image/png' },
+        ],
+      },
+      {
+        role: 'assistant',
+        id: 'model-image-message',
+        content: `${caption}\n\nMEDIA:${imagePath}`,
+      },
+    ], SESSION_KEY);
+
+    expect(supplement.completions).toEqual([
+      expect.objectContaining({
+        taskId: 'sync:image-tool-sync-result',
+        evidenceId: `transcript:${SESSION_KEY}:model-image-message:${imagePath}`,
+        caption,
+        candidates: [{ key: imagePath, filePath: imagePath, mimeType: 'image/png' }],
+      }),
+    ]);
+  });
+
   it('does not extract transcript assistant MEDIA text without a prior image_generate start', () => {
     const supplement = extractImageGenerationTranscriptSupplement([
       {

@@ -42,6 +42,13 @@ export function isInternalProfileSessionKey(sessionKey: string): boolean {
   return sessionKey.startsWith(INTERNAL_PROFILE_SESSION_PREFIX);
 }
 
+/** OpenClaw background child sessions are status rows, not user conversations. */
+export function isSubagentSession(session: ChatSession): boolean {
+  if (session.kind?.trim().toLowerCase() === 'subagent') return true;
+  if (session.key.includes(':subagent:')) return true;
+  return (session.spawnDepth ?? 0) > 0 && !!(session.spawnedBy || session.parentSessionKey);
+}
+
 /**
  * Gateway may register channel sessions before any real user message (e.g. bot
  * added to a group, webhook ping). Hide those placeholder entries from ClawX
@@ -78,6 +85,7 @@ export function findHiddenOpenClawHeartbeatSession(sessionKey: string, sessions:
 export function shouldIncludeSessionInSidebarList(session: ChatSession): boolean {
   if (!session.key) return false;
   if (isInternalProfileSessionKey(session.key)) return false;
+  if (isSubagentSession(session)) return false;
   // Hide renderer-local placeholders created by New Chat until the first message
   // creates the backing ACP session (acknowledgeAcpSessionCreated clears the flag).
   if (session.createdLocally) return false;

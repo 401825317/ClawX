@@ -55,7 +55,11 @@ import { useNewChatAction } from './use-new-chat-action';
 import { isDefaultWorkspacePath } from '@/lib/workspace-context';
 import { useWorkspaceAvailability } from '@/hooks/use-workspace-availability';
 import { projectSessionRunState } from '@/stores/chat/session-status';
-import { isOpenClawSessionIdFallbackTitle } from '@shared/chat/session-title';
+import {
+  isAcpWorkingDirectoryTruncatedTitle,
+  isOpenClawSessionIdFallbackTitle,
+  stripAcpWorkingDirectoryPrefix,
+} from '@shared/chat/session-title';
 import { SupportContactButton } from '@/components/client/SupportContactButton';
 
 interface NavItemProps {
@@ -204,11 +208,17 @@ export function Sidebar() {
   const isOnChat = useLocation().pathname === '/';
 
   const getSessionLabel = (session: ChatSession) => {
+    const derivedTitle = isAcpWorkingDirectoryTruncatedTitle(session.derivedTitle || '')
+      ? ''
+      : stripAcpWorkingDirectoryPrefix(session.derivedTitle || '').trim();
+    const displayName = isAcpWorkingDirectoryTruncatedTitle(session.displayName || '')
+      ? ''
+      : stripAcpWorkingDirectoryPrefix(session.displayName || '').trim();
     const candidates = [
       sessionLabels[session.key],
       session.label,
-      session.derivedTitle,
-      session.displayName,
+      derivedTitle,
+      displayName,
     ];
     return candidates.find((candidate) => (
       candidate?.trim()

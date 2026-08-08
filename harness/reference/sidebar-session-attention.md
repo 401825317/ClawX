@@ -6,11 +6,11 @@ Related scenarios: `gateway-backend-communication`, `chat-workspace-and-navigati
 
 Related rule: `sidebar-session-attention-authority`
 
-Related task: `sidebar-session-attention`
+Related tasks: `sidebar-session-attention`, `stabilize-acp-restart-media-subagent-flow`
 
 ## Authority And Rationale
 
-OpenClaw Gateway session rows are the sole authority for sidebar run state. The existing `useChatStore.sessions` collection remains the Renderer session catalog; attention adds presentation state, not a second catalog. This lets one projection cover ClawX prompts, channel-triggered work, and other Gateway clients whenever the Gateway projects the run onto the same catalog session key.
+OpenClaw Gateway session rows are the sole authority for sidebar run state. `useChatStore.sessions` remains the navigable Renderer session catalog; attention adds presentation state, not a second user-facing catalog. Native subagent rows are filtered into the memory-only, non-navigable `subagentSessions` status collection so the parent timeline can reflect child progress without adding child conversations or another transport. Subagent rows never participate in sidebar attention. This lets one Gateway-derived projection cover ClawX prompts, channel-triggered work, and other Gateway clients whenever the Gateway projects the run onto the same catalog session key.
 
 ACP prompt state and ACP timeline updates are scoped to an initialized agent connection and cannot observe the whole shared session catalog. Gateway `agent` lifecycle events and ClawX's local `sending` state describe other concerns and can be incomplete for work initiated elsewhere. None of them may derive or override sidebar busy or unread state. Renderer code continues to use the Main-owned Gateway connection through `hostApi`, `useGatewayStore.rpc`, and `hostEvents`; it does not open another transport.
 
@@ -115,11 +115,11 @@ Events arriving while subscription or an older list is pending are retained for 
 
 For a successful timestamped list transaction:
 
-1. Normalize, filter, and deduplicate the list into the candidate catalog.
+1. Normalize and deduplicate the list, splitting native subagent rows from the navigable candidate catalog.
 2. Start attention reconciliation with the canonical list rows, excluding exact keys made uncertain by untimestamped buffered events.
 3. Replay finite-timestamp buffered events in arrival order when `event.ts >= list.ts`. Equality is accepted because equal Gateway timestamps do not prove the event preceded the snapshot; only `event.ts < list.ts` is discarded.
 4. Represent applied row snapshots and exact deletions as ordered attention transitions and fold them in memory.
-5. Publish the final catalog and final attention result, not intermediate list/event states.
+5. Publish the final navigable catalog, hidden subagent status rows, and final attention result, not intermediate list/event states.
 6. Schedule one forced follow-up when an applied event is partial, unsafe, or otherwise requests canonical recovery.
 
 A successful finite `list.ts` advances the epoch's successful-list floor and each installed row's exact-key fence to `max(existingFence, list.ts)`. Outside a list flight, an event must have finite `ts`; events below the successful-list floor are discarded even for a key absent from the list. For a known exact key, an event older than its latest accepted timestamp is discarded. Equality is accepted at both fences; only strictly older timestamps are rejected. Terminal status still wins over stale `hasActiveRun` inside each accepted snapshot.

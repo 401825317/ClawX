@@ -69,7 +69,11 @@
             "runningExecute": "コマンドを実行中",
             "completedExecute": "複数のコマンドを実行しました",
             "runningFetch": "情報を検索・整理中",
-            "completedFetch": "情報を検索・整理しました"
+            "completedFetch": "情報を検索・整理しました",
+            "subagentRunning": "{{total}} 件のタスクを並行処理中",
+            "subagentWaiting": "{{completed}}/{{total}} 件が完了、引き続き待機中",
+            "subagentResuming": "結果を受信し、回答を整理中",
+            "subagentCompleted": "{{total}} 件の並行タスクが完了しました"
         },
         "permission": "権限",
         "plan": "計画",

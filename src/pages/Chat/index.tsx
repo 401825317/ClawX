@@ -181,6 +181,7 @@ export function Chat() {
 
   const currentSessionKey = useChatStore((s) => s.currentSessionKey);
   const sessions = useChatStore((s) => s.sessions);
+  const subagentSessions = useChatStore((s) => s.subagentSessions);
   const currentAgentId = useChatStore((s) => s.currentAgentId);
   const loadSessions = useChatStore((s) => s.loadSessions);
   const selectAcpSession = useChatStore((s) => s.selectAcpSession);
@@ -485,6 +486,8 @@ export function Chat() {
                   ) : (
                     <AcpTimeline
                       snapshot={acpTimeline}
+                      parentSessionKey={currentSessionKey}
+                      subagentSessions={subagentSessions}
                       assistantAvatarSrc={assistantAvatarSrc}
                       turnTimingsByUserMessageId={acpTurnTimings}
                       fileActivity={fileActivity}

@@ -7,6 +7,7 @@ import { AcpMessageSegment } from './AcpMessageSegment';
 import type { AcpFileActivityProjection } from '@/lib/acp/openclaw-file-activities';
 import { AcpAttachmentPart } from './AcpAttachmentPart';
 import type { AcpTurnTiming } from '@/lib/acp/turn-timings';
+import type { ChatSession } from '@/stores/chat/types';
 
 export function AcpTimeline({
   snapshot,
@@ -17,6 +18,8 @@ export function AcpTimeline({
   fileActivity,
   workspaceRoot,
   assistantAvatarSrc,
+  parentSessionKey,
+  subagentSessions = [],
   turnTimingsByUserMessageId = {},
 }: {
   snapshot: AcpTimelineSnapshot;
@@ -27,6 +30,8 @@ export function AcpTimeline({
   fileActivity?: AcpFileActivityProjection;
   workspaceRoot?: string;
   assistantAvatarSrc?: string;
+  parentSessionKey?: string;
+  subagentSessions?: ChatSession[];
   turnTimingsByUserMessageId?: Record<string, AcpTurnTiming>;
 }) {
   const groups = groupAcpTimelineItems(snapshot);
@@ -68,6 +73,8 @@ export function AcpTimeline({
               workspaceRoot={workspaceRoot}
               timing={group.userMessageId ? turnTimingsByUserMessageId[group.userMessageId] : undefined}
               assistantAvatarSrc={assistantAvatarSrc}
+              parentSessionKey={parentSessionKey}
+              subagentSessions={subagentSessions}
               onPermissionSelect={onPermissionSelect}
             />
           </div>

@@ -69,7 +69,11 @@
             "runningExecute": "Running commands",
             "completedExecute": "Ran multiple commands",
             "runningFetch": "Researching information",
-            "completedFetch": "Researched information"
+            "completedFetch": "Researched information",
+            "subagentRunning": "Parallel tasks in progress: {{total}}",
+            "subagentWaiting": "{{completed}} of {{total}} tasks returned; still waiting",
+            "subagentResuming": "Results returned; organizing the response",
+            "subagentCompleted": "Parallel tasks completed: {{total}}"
         },
         "permission": "Permission",
         "plan": "Plan",

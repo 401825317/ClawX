@@ -323,7 +323,12 @@ function readRecentTranscriptRecords(transcriptPath: string, limit: number): Tra
 }
 
 function readRecentTranscriptMessages(transcriptPath: string, limit: number): TranscriptMessage[] {
-  return readRecentTranscriptRecords(transcriptPath, limit).map((record) => record.message);
+  return readRecentTranscriptRecords(transcriptPath, limit).map((record) => ({
+    ...record.message,
+    // OpenClaw stores the stable message identity on the JSONL envelope. Keep
+    // it on the public history message so outgoing media can be authorized.
+    ...(record.id ? { id: record.id } : {}),
+  }));
 }
 
 async function readAllTranscriptMessages(transcriptPath: string): Promise<TranscriptMessage[]> {

@@ -8,6 +8,7 @@ const REVIEWER_SESSION_KEY = 'agent:reviewer:main';
 const REVIEWER_WORKSPACE = '/workspace/reviewer';
 const IMAGE_TASK_ID = '0d2ee919-2dfd-4b72-9da3-d87e6ee56747';
 const GENERATED_IMAGE_PATH = '/workspace/.openclaw/media/tool-image-generation/generated-image.png';
+const GENERATED_GATEWAY_IMAGE_URL = '/api/chat/media/outgoing/agent%3Amain%3Amain/generated-image/full';
 const GENERATED_IMAGE_PREVIEW = 'data:image/png;base64,iVBORw0KGgo=';
 const GENERATED_IMAGE_IDENTITY = 'e2e-transcript-generated-image';
 const DEFAULT_WORKSPACE_SEGMENT = '~%2F.openclaw%2Fworkspace';
@@ -57,6 +58,9 @@ function baseHostApiMocks(loadResult: Record<string, unknown> = { success: true,
 async function installAcpChatMocks(
   app: ElectronApplication,
   loadResult: Record<string, unknown> = { success: true, generation: 1 },
+  gatewaySessions: Array<Record<string, unknown>> = [
+    { key: MAIN_SESSION_KEY, displayName: 'main', workspacePath: MAIN_WORKSPACE },
+  ],
 ) {
   await installIpcMocks(app, {
     gatewayStatus: { state: 'running', gatewayReady: true, port: 18789, pid: 12345 },
@@ -64,7 +68,7 @@ async function installAcpChatMocks(
       [stableStringify(['sessions.list', {}])]: {
         success: true,
         result: {
-          sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main', workspacePath: MAIN_WORKSPACE }],
+          sessions: gatewaySessions,
         },
       },
     },
@@ -422,6 +426,31 @@ async function emitAcpSessionUpdates(
   );
 }
 
+async function emitSubagentSessionSnapshot(
+  app: ElectronApplication,
+  input: { key: string; parentSessionKey: string; state: string; active: boolean },
+) {
+  await app.evaluate(async ({ app: _app }, payload) => {
+    const { BrowserWindow } = process.mainModule!.require('electron') as typeof import('electron');
+    for (const window of BrowserWindow.getAllWindows()) {
+      window.webContents.send('gateway:notification', {
+        method: 'sessions.changed',
+        params: {
+          key: payload.key,
+          ts: Date.now(),
+          session: {
+            key: payload.key,
+            kind: 'subagent',
+            parentSessionKey: payload.parentSessionKey,
+            subagentRunState: payload.state,
+            hasActiveSubagentRun: payload.active,
+          },
+        },
+      });
+    }
+  }, input);
+}
+
 async function openChat(app: ElectronApplication) {
   const page = await getStableWindow(app);
   try {
@@ -708,6 +737,90 @@ test.describe('ClawX ACP inline timeline', () => {
       await expect.poll(() => groups.nth(1).getByTestId('acp-tool-group-summary').evaluate((element) => (
         getComputedStyle(element).color
       ))).not.toBe('rgba(0, 0, 0, 0)');
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('keeps yielded subagent work in the parent timeline without adding child chats', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const childSessionKey = 'agent:main:subagent:e2e-child';
+
+    try {
+      await installAcpChatMocks(
+        app,
+        { success: true, generation: 1 },
+        [
+          { key: MAIN_SESSION_KEY, displayName: 'main', workspacePath: MAIN_WORKSPACE },
+          {
+            key: childSessionKey,
+            kind: 'subagent',
+            parentSessionKey: MAIN_SESSION_KEY,
+            subagentRunState: 'running',
+            hasActiveSubagentRun: true,
+          },
+        ],
+      );
+      const page = await openChat(app);
+      await expect(page.getByTestId(`sidebar-session-${childSessionKey}`)).toHaveCount(0);
+
+      await emitAcpSessionUpdates(app, [
+        {
+          sessionUpdate: 'user_message',
+          messageId: 'subagent-user',
+          content: [{ type: 'text', text: 'Research in parallel' }],
+        },
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'spawn-subagent',
+          title: 'sessions_spawn: task: research',
+          status: 'completed',
+          content: [{
+            type: 'content',
+            content: { type: 'text', text: JSON.stringify({ status: 'accepted', childSessionKey }) },
+          }],
+          locations: [],
+        },
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'yield-subagent',
+          title: 'sessions_yield: message: wait',
+          status: 'completed',
+          content: [{
+            type: 'content',
+            content: { type: 'text', text: JSON.stringify({ status: 'yielded', message: 'wait' }) },
+          }],
+          locations: [],
+        },
+      ]);
+
+      const group = page.getByTestId('acp-tool-call-group');
+      await expect(group).toHaveAttribute('data-active', 'true');
+      await expect(group.getByTestId('acp-tool-group-summary')).toContainText('Parallel tasks in progress: 1');
+      await expect(page.getByTestId('chat-composer-input')).toBeEnabled();
+
+      await group.getByTestId('acp-tool-group-toggle').click();
+      await expect(group).toContainText('sessions_spawn: task: research');
+      await expect(group).not.toContainText('sessions_yield: message: wait');
+      await expect(group).not.toContainText('"status":"yielded"');
+
+      await emitSubagentSessionSnapshot(app, {
+        key: childSessionKey,
+        parentSessionKey: MAIN_SESSION_KEY,
+        state: 'done',
+        active: false,
+      });
+      await expect(group.getByTestId('acp-tool-group-summary')).toContainText('Results returned; organizing the response');
+      await expect(group).toHaveAttribute('data-active', 'true');
+
+      await emitAcpSessionUpdates(app, [{
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'subagent-result',
+        content: { type: 'text', text: 'Combined result' },
+      }]);
+      await expect(page.getByText('Combined result')).toBeVisible();
+      await expect(group.getByTestId('acp-tool-group-summary')).toContainText('Parallel tasks completed: 1');
+      await expect(group).toHaveAttribute('data-active', 'false');
     } finally {
       await closeElectronApp(app);
     }
@@ -1120,6 +1233,8 @@ test.describe('ClawX ACP inline timeline', () => {
 
   test('hydrates historical image-generation completions from transcript history when ACP replay omits them', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
+    const caption = 'Here is the generated image of a watermelon banquet.';
+    const truncatedMirror = 'Here is the generated image of a watermelon';
 
     try {
       await installIpcMocks(app, {
@@ -1148,7 +1263,15 @@ test.describe('ClawX ACP inline timeline', () => {
               {
                 id: 'transcript-image-complete',
                 role: 'assistant',
-                content: `Here is the generated image.\nMEDIA:${GENERATED_IMAGE_PATH}`,
+                content: [
+                  { type: 'text', text: caption },
+                  { type: 'image', url: GENERATED_GATEWAY_IMAGE_URL, mimeType: 'image/png' },
+                ],
+              },
+              {
+                id: 'transcript-image-mirror',
+                role: 'assistant',
+                content: `${caption}\nMEDIA:${GENERATED_IMAGE_PATH}`,
               },
             ],
           },
@@ -1157,7 +1280,7 @@ test.describe('ClawX ACP inline timeline', () => {
               sessionKey: MAIN_SESSION_KEY,
               generation: 1,
               uri: GENERATED_IMAGE_PATH,
-              transcriptMessageId: 'transcript-image-complete',
+              transcriptMessageId: 'transcript-image-mirror',
             },
             mimeType: 'image/png',
           }])]: {
@@ -1173,7 +1296,7 @@ test.describe('ClawX ACP inline timeline', () => {
                 sessionKey: MAIN_SESSION_KEY,
                 generation: 1,
                 uri: GENERATED_IMAGE_PATH,
-                transcriptMessageId: 'transcript-image-complete',
+                transcriptMessageId: 'transcript-image-mirror',
               },
             },
           },
@@ -1183,7 +1306,7 @@ test.describe('ClawX ACP inline timeline', () => {
                 sessionKey: MAIN_SESSION_KEY,
                 generation: 1,
                 uri: GENERATED_IMAGE_PATH,
-                transcriptMessageId: 'transcript-image-complete',
+                transcriptMessageId: 'transcript-image-mirror',
               },
               key: GENERATED_IMAGE_IDENTITY,
               mimeType: 'image/png',
@@ -1216,6 +1339,11 @@ test.describe('ClawX ACP inline timeline', () => {
           content: [{ type: 'content', content: { type: 'text', text: `Background task started for image generation (${IMAGE_TASK_ID})` } }],
           locations: [],
         },
+        {
+          sessionUpdate: 'agent_message',
+          messageId: 'transcript-image-mirror',
+          content: [{ type: 'text', text: truncatedMirror }],
+        },
       ]);
       await installGeneratedImagePreviewRecorder(app);
 
@@ -1242,6 +1370,8 @@ test.describe('ClawX ACP inline timeline', () => {
 
       await expect(page.getByTestId('acp-chat-timeline')).toBeVisible({ timeout: 30_000 });
       await expect(page.getByTestId('acp-tool-call-card')).toContainText('Generate image');
+      await expect(page.getByText(caption, { exact: true })).toHaveCount(1);
+      await expect(page.getByText(truncatedMirror, { exact: true })).toHaveCount(0);
       const imagePart = page.getByTestId('acp-image-part');
       const image = imagePart.locator('img');
       await expect(image).toBeVisible();
@@ -1263,7 +1393,7 @@ test.describe('ClawX ACP inline timeline', () => {
             sessionKey: MAIN_SESSION_KEY,
             generation: 1,
             uri: GENERATED_IMAGE_PATH,
-            transcriptMessageId: 'transcript-image-complete',
+            transcriptMessageId: 'transcript-image-mirror',
           },
           maxBytes: 50 * 1024 * 1024,
         },
@@ -1275,7 +1405,7 @@ test.describe('ClawX ACP inline timeline', () => {
           sessionKey: MAIN_SESSION_KEY,
           generation: 1,
           uri: GENERATED_IMAGE_PATH,
-          transcriptMessageId: 'transcript-image-complete',
+          transcriptMessageId: 'transcript-image-mirror',
         },
       });
       await page.getByTestId('acp-image-preview-close').click();

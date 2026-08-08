@@ -11,8 +11,13 @@ import type { AcpTurnFileSummary } from '@/lib/acp/openclaw-file-activities';
 import { AcpTurnFileActivity } from './AcpTurnFileActivity';
 import { AcpAttachmentPart } from './AcpAttachmentPart';
 import type { AcpTurnTiming } from '@/lib/acp/turn-timings';
-import { groupConsecutiveToolCalls, isToolCallGroupActive } from '@/lib/acp/tool-call-groups';
+import {
+  getSubagentToolGroupProgress,
+  groupConsecutiveToolCalls,
+  isToolCallGroupActive,
+} from '@/lib/acp/tool-call-groups';
 import { AcpToolCallGroup } from './AcpToolCallGroup';
+import type { ChatSession } from '@/stores/chat/types';
 
 function formatDuration(durationMs: number, language: string): string {
   const wholeSeconds = Math.floor(Math.max(0, durationMs) / 1000);
@@ -57,6 +62,8 @@ export function AcpAssistantTurn({
   workspaceRoot,
   timing,
   assistantAvatarSrc,
+  parentSessionKey,
+  subagentSessions = [],
   onPermissionSelect,
 }: {
   group: AcpAssistantTurnDisplayGroup;
@@ -64,6 +71,8 @@ export function AcpAssistantTurn({
   workspaceRoot?: string;
   timing?: AcpTurnTiming;
   assistantAvatarSrc?: string;
+  parentSessionKey?: string;
+  subagentSessions?: ChatSession[];
   onPermissionSelect?: (requestId: string, optionId: string) => void;
 }) {
   const displayEntries = useMemo(() => groupConsecutiveToolCalls(group.items), [group.items]);
@@ -83,6 +92,14 @@ export function AcpAssistantTurn({
       <div className="flex min-w-0 flex-1 flex-col items-start gap-3">
         {displayEntries.map((entry, index) => {
           if (entry.kind === 'tool-call-group') {
+            const subagentProgress = parentSessionKey
+              ? getSubagentToolGroupProgress({
+                  items: entry.items,
+                  parentSessionKey,
+                  subagentSessions,
+                  hasFollowingContent: index < displayEntries.length - 1,
+                })
+              : null;
             const active = isToolCallGroupActive({
               items: entry.items,
               isLastEntry: index === displayEntries.length - 1,
@@ -90,7 +107,12 @@ export function AcpAssistantTurn({
             });
             return (
               <div key={entry.id} className="-my-1 w-full">
-                <AcpToolCallGroup id={entry.id} items={entry.items} active={active} />
+                <AcpToolCallGroup
+                  id={entry.id}
+                  items={entry.items}
+                  active={active}
+                  subagentProgress={subagentProgress}
+                />
               </div>
             );
           }

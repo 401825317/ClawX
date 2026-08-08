@@ -91,6 +91,18 @@ export interface ChatSession {
   updatedAt?: number;
   status?: string;
   hasActiveRun?: boolean;
+  /** OpenClaw session classification and lineage for background sub-Agent work. */
+  kind?: string;
+  spawnedBy?: string;
+  parentSessionKey?: string;
+  spawnDepth?: number;
+  subagentRole?: string;
+  subagentRunState?: string;
+  hasActiveSubagentRun?: boolean;
+  startedAt?: number;
+  endedAt?: number;
+  runtimeMs?: number;
+  childSessions?: string[];
   /** Channel provider that last delivered to this session (e.g. webchat, feishu, discord). */
   channel?: string;
   /** OpenClaw ACP session cwd, mirrored for display and routing. OpenClaw is the source of truth. */
@@ -169,6 +181,8 @@ export interface ChatState {
 
   // Sessions
   sessions: ChatSession[];
+  /** Hidden OpenClaw sub-Agent sessions retained only for parent-turn progress. */
+  subagentSessions: ChatSession[];
   currentSessionKey: string;
   currentAgentId: string;
   /** First user message text per session key, used as display label */

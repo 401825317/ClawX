@@ -69,7 +69,11 @@
             "runningExecute": "正在运行命令",
             "completedExecute": "运行了多条命令",
             "runningFetch": "正在检索并整理资料",
-            "completedFetch": "检索并整理了资料"
+            "completedFetch": "检索并整理了资料",
+            "subagentRunning": "正在并行处理 {{total}} 项任务",
+            "subagentWaiting": "已返回 {{completed}}/{{total}} 项，继续等待",
+            "subagentResuming": "资料已返回，正在整理结果",
+            "subagentCompleted": "已完成 {{total}} 项并行任务"
         },
         "permission": "权限",
         "plan": "计划",

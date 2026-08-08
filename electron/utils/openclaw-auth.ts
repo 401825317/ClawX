@@ -3859,6 +3859,11 @@ export async function updateSingleAgentModelProvider(
  */
 const SKILL_WORKSHOP_TOOL_DENY_ENTRY = 'skill_workshop';
 const WEB_SEARCH_TOOL_DENY_ENTRY = 'web_search';
+const SUBAGENT_TOOL_DENY_ENTRIES = [
+  'sessions_spawn',
+  'sessions_yield',
+  'subagents',
+] as const;
 const SKILL_CREATOR_SKILL_KEY = 'skill-creator';
 
 function normalizeToolDenyList(value: unknown): string[] {
@@ -3875,6 +3880,21 @@ function ensureToolDenyIncludes(
     return { deny, modified: false };
   }
   return { deny: [...deny, entry], modified: true };
+}
+
+/** Add every required entry without disturbing user-owned denials. */
+function ensureToolDenyIncludesAll(
+  deny: string[],
+  entries: readonly string[],
+): { deny: string[]; modified: boolean } {
+  let current = deny;
+  let modified = false;
+  for (const entry of entries) {
+    const result = ensureToolDenyIncludes(current, entry);
+    current = result.deny;
+    modified ||= result.modified;
+  }
+  return { deny: current, modified };
 }
 
 export async function sanitizeOpenClawConfig(): Promise<void> {
@@ -4088,8 +4108,14 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     // OpenClaw 6.5+ routes durable skill edits through the Skill Workshop tool.
     // ClawX keeps direct skill-creator authoring instead, so deny the workshop
     // tool even under tools.profile="full".
-    const workshopDenyResult = ensureToolDenyIncludes(
+    // The current desktop UI does not expose enough child-session detail for
+    // a reliable Subagent workflow, so hide its entry point and companions.
+    const subagentDenyResult = ensureToolDenyIncludesAll(
       normalizeToolDenyList(toolsConfig.deny),
+      SUBAGENT_TOOL_DENY_ENTRIES,
+    );
+    const workshopDenyResult = ensureToolDenyIncludes(
+      subagentDenyResult.deny,
       SKILL_WORKSHOP_TOOL_DENY_ENTRY,
     );
     // This release ships without a usable web-search provider, so keep it out of model tool lists.
@@ -4097,9 +4123,12 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       workshopDenyResult.deny,
       WEB_SEARCH_TOOL_DENY_ENTRY,
     );
-    if (workshopDenyResult.modified || denyResult.modified) {
+    if (subagentDenyResult.modified || workshopDenyResult.modified || denyResult.modified) {
       toolsConfig.deny = denyResult.deny;
       toolsModified = true;
+      if (subagentDenyResult.modified) {
+        console.log('[sanitize] Added Subagent tools to tools.deny for ClawX desktop');
+      }
       if (workshopDenyResult.modified) {
         console.log('[sanitize] Added "skill_workshop" to tools.deny for ClawX desktop');
       }
@@ -4160,8 +4189,12 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
         ? { ...(gateway.tools as Record<string, unknown>) }
         : {}
     ) as Record<string, unknown>;
-    const gatewayWorkshopDenyResult = ensureToolDenyIncludes(
+    const gatewaySubagentDenyResult = ensureToolDenyIncludesAll(
       normalizeToolDenyList(gatewayTools.deny),
+      SUBAGENT_TOOL_DENY_ENTRIES,
+    );
+    const gatewayWorkshopDenyResult = ensureToolDenyIncludes(
+      gatewaySubagentDenyResult.deny,
       SKILL_WORKSHOP_TOOL_DENY_ENTRY,
     );
     // Also reject direct Gateway tool invocations outside the model turn.
@@ -4169,9 +4202,14 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       gatewayWorkshopDenyResult.deny,
       WEB_SEARCH_TOOL_DENY_ENTRY,
     );
-    let gatewayModified = gatewayWorkshopDenyResult.modified || gatewayDenyResult.modified;
+    let gatewayModified = gatewaySubagentDenyResult.modified
+      || gatewayWorkshopDenyResult.modified
+      || gatewayDenyResult.modified;
     if (gatewayModified) {
       gatewayTools.deny = gatewayDenyResult.deny;
+      if (gatewaySubagentDenyResult.modified) {
+        console.log('[sanitize] Added Subagent tools to gateway.tools.deny for ClawX desktop');
+      }
       if (gatewayWorkshopDenyResult.modified) {
         console.log('[sanitize] Added "skill_workshop" to gateway.tools.deny for ClawX desktop');
       }

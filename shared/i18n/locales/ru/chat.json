@@ -69,7 +69,11 @@
             "runningExecute": "Выполнение команд",
             "completedExecute": "Выполнено несколько команд",
             "runningFetch": "Поиск и обработка информации",
-            "completedFetch": "Информация найдена и обработана"
+            "completedFetch": "Информация найдена и обработана",
+            "subagentRunning": "Параллельная обработка задач: {{total}}",
+            "subagentWaiting": "Получено {{completed}} из {{total}} задач; ожидание продолжается",
+            "subagentResuming": "Результаты получены; подготовка ответа",
+            "subagentCompleted": "Завершено параллельных задач: {{total}}"
         },
         "permission": "Разрешение",
         "plan": "План",

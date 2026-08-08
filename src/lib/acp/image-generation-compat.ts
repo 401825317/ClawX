@@ -225,6 +225,19 @@ function collectMediaTagCandidates(text: string): ImageGenerationMediaCandidate[
   return candidates;
 }
 
+function collectAssistantImageCandidates(content: unknown): ImageGenerationMediaCandidate[] {
+  if (!Array.isArray(content)) return [];
+  const candidates: ImageGenerationMediaCandidate[] = [];
+  for (const value of content) {
+    const block = asRecord(value);
+    if (stringValue(block?.type)?.toLowerCase() !== 'image') continue;
+    const source = asRecord(block?.source);
+    const mimeType = block?.mimeType ?? source?.media_type;
+    pushCandidate(candidates, block?.url ?? block?.openUrl ?? source?.url, mimeType);
+  }
+  return candidates;
+}
+
 function visibleAssistantText(text: string): string | undefined {
   const withoutMedia = text.replace(MEDIA_TAG_RE, '');
   const visible = withoutMedia
@@ -399,7 +412,10 @@ export function extractImageGenerationTranscriptSupplement(
     const details = asRecord(message.details);
     const assistantText = role === 'assistant' ? textFromMessageContent(message.content) : '';
     const candidates = role === 'assistant'
-      ? collectMediaTagCandidates(assistantText)
+      ? dedupeCandidates([
+        ...collectAssistantImageCandidates(message.content),
+        ...collectMediaTagCandidates(assistantText),
+      ])
       : role === 'toolresult' && message.toolName === MESSAGE_TOOL && hasInternalUiDeliveryEvidence(details)
         ? collectStructuredMediaCandidates(details)
         : [];
@@ -415,7 +431,7 @@ export function extractImageGenerationTranscriptSupplement(
     if (seenCompletionIds.has(evidenceId)) continue;
     seenCompletionIds.add(evidenceId);
     const taskId = completionTaskId ?? latestStart?.taskId;
-    completions.push({
+    const completion: ImageGenerationCompletionEvidence = {
       sessionKey,
       source: 'transcript-history',
       historical: true,
@@ -425,8 +441,22 @@ export function extractImageGenerationTranscriptSupplement(
       caption: caption ?? GENERATED_IMAGE_CAPTION,
       ...(caption ? { authoritativeCaption: true } : {}),
       candidates,
-    });
-    if (role === 'assistant' && taskId) {
+    };
+    const existingTaskCompletionIndex = taskId
+      ? completions.findIndex((entry) => entry.taskId === taskId)
+      : -1;
+    const hasLocalCandidate = candidates.some((candidate) => Boolean(candidate.filePath));
+    const existingHasOnlyGatewayCandidates = existingTaskCompletionIndex >= 0
+      && completions[existingTaskCompletionIndex]!.candidates.length > 0
+      && completions[existingTaskCompletionIndex]!.candidates.every((candidate) => !candidate.filePath);
+    // OpenClaw writes a gateway-only image message before the model's MEDIA
+    // mirror. The later local path is the authoritative preview source.
+    if (hasLocalCandidate && existingHasOnlyGatewayCandidates) {
+      completions[existingTaskCompletionIndex] = completion;
+    } else if (existingTaskCompletionIndex < 0) {
+      completions.push(completion);
+    }
+    if (role === 'assistant' && taskId && hasLocalCandidate) {
       activeTaskIds.delete(taskId);
       completionTaskId = undefined;
       completionFailed = false;

@@ -26,6 +26,11 @@ export type TranscriptSupplementResult = {
   turnTimings: SessionTurnTimingCandidate[];
 };
 
+export type FailedAssistantTurnSupplement = {
+  text: string;
+  transcriptMessageId?: string;
+};
+
 type TranscriptSupplementInput = {
   sessionKey: string;
   generation: number;
@@ -57,6 +62,42 @@ function transcriptMessageId(
     .sort((left, right) => right.id.length - left.id.length)
     .find((message) => completion.evidenceId.startsWith(`${prefix}${message.id}:`))
     ?.id;
+}
+
+function messageText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.flatMap((value) => {
+    if (!value || typeof value !== 'object') return [];
+    const block = value as Record<string, unknown>;
+    return block.type === 'text' && typeof block.text === 'string' ? [block.text] : [];
+  }).join('\n');
+}
+
+function failedAssistantTurn(messages: RawMessage[]): FailedAssistantTurnSupplement | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || String(message.role).toLowerCase() !== 'assistant') continue;
+    const failed = (message.stopReason ?? message.stop_reason)?.toLowerCase() === 'error'
+      || Boolean(message.errorMessage ?? message.error_message);
+    if (!failed) continue;
+    const text = messageText(message.content).trim();
+    if (!text) return null;
+    return { text, ...(message.id ? { transcriptMessageId: message.id } : {}) };
+  }
+  return null;
+}
+
+/** Reads one failed live turn without replaying transcript history into the timeline. */
+export async function fetchFailedOpenClawTurnSupplement(
+  input: Pick<TranscriptSupplementInput, 'sessionKey' | 'snapshot' | 'liveUserMessageId' | 'isCurrent'>,
+): Promise<FailedAssistantTurnSupplement | null> {
+  if (!input.liveUserMessageId || !input.isCurrent()) return null;
+  const response = await hostApi.sessions.history({ sessionKey: input.sessionKey, limit: 1000 }).catch(() => null);
+  if (!response?.success || !Array.isArray(response.messages) || !input.isCurrent()) return null;
+  const snapshot = typeof input.snapshot === 'function' ? input.snapshot() : input.snapshot;
+  const messages = selectOpenClawTranscriptTurn(response.messages, snapshot, input.liveUserMessageId);
+  return failedAssistantTurn(messages);
 }
 
 // OpenClaw ACP currently projects only assistant text/thought content and strips MEDIA

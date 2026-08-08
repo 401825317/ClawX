@@ -6,7 +6,7 @@ Related scenario: `acp-chat-experience`
 
 Related rules: `acp-chat-state-and-history`, `attachment-access-safety`, `renderer-main-boundary`
 
-Related tasks: `acp-native-chat`, `acp-media-attachments`, `filter-openclaw-heartbeat-session`
+Related tasks: `acp-native-chat`, `acp-media-attachments`, `filter-openclaw-heartbeat-session`, `stabilize-acp-restart-media-subagent-flow`
 
 ## Ownership
 
@@ -37,7 +37,7 @@ ACP `session/load` replay is the primary source of Chat history. ClawX does not 
 
 OpenClaw emits replay through ordinary `session/update` notifications and completes the replay before `session/load` returns. Main collects those raw notifications for the active load generation and returns them with the load result instead of forwarding them incrementally. Renderer temporarily groups generation-matching host events that arrive during the IPC result handoff, then runs the normal reducer over the combined batch and publishes the resulting timeline in one state update. This is an in-flight transaction buffer only, not a history cache; after load, live updates continue through the normal host-event route. Permission requests are accepted only after the current loaded session starts a prompt, preventing load-time or handoff requests from creating invisible waiters.
 
-There are exactly two approved transcript-derived content supplements. ClawX may recover asynchronous image-generation completions with proven `image_generate` context, and it may recover explicit line-leading assistant `MEDIA:` attachment directives omitted by OpenClaw ACP. Both are bounded, marked, memory-only projections. Separately, Main may extract metadata-only whole-turn timing because ACP replay omits original timestamps. Renderer can attach that timing only to an unambiguously matched ACP turn; it cannot reconstruct ordinary assistant text, thoughts, tool cards, plans, permissions, file activity, or missing turns. See `harness/reference/acp-generated-media-and-diagnostics.md#bounded-transcript-exceptions` for the content compatibility grammar and timing boundary.
+There are exactly three approved transcript-derived content supplements. ClawX may recover asynchronous image-generation completions with proven `image_generate` context, recover explicit line-leading assistant `MEDIA:` attachment directives omitted by OpenClaw ACP, and extend one already-visible Assistant text segment after ACP reports that exact prompt failed. The failed-turn exception requires an unambiguous current user identity, a transcript Assistant message explicitly marked failed, and transcript text that is a strict prefix-preserving extension of the one existing live segment; it cannot insert a message or replay history. All three are bounded, marked, memory-only projections. Separately, Main may extract metadata-only whole-turn timing because ACP replay omits original timestamps. Renderer can attach that timing only to an unambiguously matched ACP turn; it cannot otherwise reconstruct ordinary assistant text, thoughts, tool cards, plans, permissions, file activity, or missing turns. See `harness/reference/acp-generated-media-and-diagnostics.md#bounded-transcript-exceptions` for the content compatibility grammar and timing boundary.
 
 ## Timeline Model
 
@@ -63,7 +63,7 @@ type MessageSegmentItem = {
 
 The reducer preserves first-seen ACP order and patches existing items in place. Interleaving a process block with assistant text closes the current segment; later text for that message creates another segment. Replay and live updates use the same reducer path. Optimistic user segments are allowed and are coalesced with the ACP user echo.
 
-UI-only state such as card expansion, scroll position, selected artifact, composer draft, copy feedback, and lightbox state stays outside the reducer.
+UI-only state such as card expansion, scroll position, selected artifact, composer draft, copy feedback, and lightbox state stays outside the reducer. Consecutive tool calls are grouped only in the display projection and keep their flat ACP order and identities.
 
 ## Display Grouping
 
@@ -74,7 +74,9 @@ The protocol timeline remains flat. `src/lib/acp/timeline-groups.ts` derives dis
 - Assistant-side items before the first user item still form a visible assistant turn.
 - Grouping never infers ownership from `messageId`, `toolCallId`, `_meta`, or synthetic persisted turn ids.
 
-An assistant turn has one identity column and one copy action. Copy includes textual assistant segments and excludes tool output. Its footer may show localized whole-turn metadata: live duration runs from optimistic send until prompt settlement, while historical duration runs from the matched transcript user record to the latest assistant or tool-result record before the next real user. Missing or ambiguous timing stays hidden. Tool cards render inline in original order, preserve preformatted whitespace, auto-collapse one second after live completion, respect manual override, and start collapsed when historical and completed.
+An assistant turn has one identity column and one copy action. Copy includes textual assistant segments and excludes tool output. Its footer may show localized whole-turn metadata: live duration runs from optimistic send until prompt settlement, while historical duration runs from the matched transcript user record to the latest assistant or tool-result record before the next real user. Missing or ambiguous timing stays hidden. Consecutive tool calls render as one collapsed display group and expand manually in original order; an isolated ordinary tool keeps its established single-card rendering.
+
+An isolated `sessions_spawn` is also a persistent display group. Native child-session rows from Gateway `sessions.list` and `sessions.changed` drive its running, waiting, returned, and completed text without Renderer polling. Child rows remain non-navigable and are matched to the exact parent, preferring the `childSessionKey` returned by the spawn call. `sessions_yield` contributes to task-state reduction but is removed from expanded user-facing tool details. Yield does not complete the group: all matched children must be terminal, then later parent content must become visible. The composer remains usable while background child work continues.
 
 ## Attachments
 

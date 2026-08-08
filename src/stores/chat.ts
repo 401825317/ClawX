@@ -20,6 +20,7 @@ import {
   isClawXDesktopSessionKey,
   isInternalProfileSessionKey,
   isOpenClawHeartbeatOnlySession,
+  isSubagentSession,
   shouldIncludeSessionInSidebarList,
 } from './chat/session-key-utils';
 import {
@@ -3295,6 +3296,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   runtimeRuns: {},
 
   sessions: [],
+  subagentSessions: [],
   currentSessionKey: DEFAULT_SESSION_KEY,
   currentAgentId: 'main',
   sessionLabels: {},
@@ -3357,6 +3359,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const normalizedSessions: ChatSession[] = rawSessions.map(
             (session: Record<string, unknown>) => normalizeGatewaySessionRow(session),
           );
+          const normalizedSubagentSessions = normalizedSessions.filter(isSubagentSession);
           const sessions = normalizedSessions.filter((s: ChatSession) => shouldIncludeSessionInSidebarList(s));
 
           const canonicalBySuffix = new Map<string, string>();
@@ -3379,7 +3382,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
             return true;
           });
 
-          const { currentSessionKey, sessions: localSessions, sessionLabels: currentSessionLabels } = get();
+          const {
+            currentSessionKey,
+            sessions: localSessions,
+            subagentSessions: localSubagentSessions,
+            sessionLabels: currentSessionLabels,
+          } = get();
           const localSessionByKey = new Map(
             localSessions.map((session) => [session.key, session] as const),
           );
@@ -3387,6 +3395,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
             const localSession = localSessionByKey.get(session.key);
             return mergeGatewaySessionWithLocalState(session, localSession);
           });
+          const localSubagentByKey = new Map(
+            localSubagentSessions.map((session) => [session.key, session] as const),
+          );
+          let mergedSubagentSessions = normalizedSubagentSessions.map((session) => (
+            mergeGatewaySessionWithLocalState(session, localSubagentByKey.get(session.key))
+          ));
           if (previousGatewayListKeys) {
             const currentKeys = new Set(localSessions.map((session) => session.key));
             for (const sessionKey of previousGatewayListKeys) {
@@ -3435,7 +3449,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               _successfulSessionListTsFloor ?? -Infinity,
               listTs,
             );
-            for (const session of visibleMergedSessions) {
+            for (const session of [...visibleMergedSessions, ...mergedSubagentSessions]) {
               _latestSessionEventTsByKey.set(
                 session.key,
                 Math.max(_latestSessionEventTsByKey.get(session.key) ?? -Infinity, listTs),
@@ -3454,13 +3468,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
             if (eventTs < listTs) continue;
 
             const result = applyGatewaySessionsChanged(
-              visibleMergedSessions,
+              [...visibleMergedSessions, ...mergedSubagentSessions],
               event,
               _latestSessionEventTsByKey,
             );
             if (result.applied) {
               updatePendingSessionMutationBaselinesFromEvent(event);
-              visibleMergedSessions = overlayPendingSessionMutations(result.sessions);
+              const projectedCatalog = overlayPendingSessionMutations(result.sessions);
+              visibleMergedSessions = projectedCatalog.filter((session) => !isSubagentSession(session));
+              mergedSubagentSessions = projectedCatalog.filter(isSubagentSession);
               if (result.deletedKey) {
                 clearSessionLabelHydrationTracking(result.deletedKey);
                 if (!uncertainty.keys.has(result.deletedKey)) {
@@ -3529,6 +3545,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
             ]
             : visibleMergedSessions;
 
+          // A portable Windows restart can make OpenClaw expose the injected
+          // working-directory envelope as the derived title until the local
+          // transcript summary is loaded. Resolve those initial titles before
+          // publishing the catalog so the sidebar never flashes a filesystem path.
+          let initialTitleSummaries: SessionLabelSummary[] = [];
+          if (localSessions.length === 0) {
+            const unsafeTitleSessionKeys = sessionsWithCurrent
+              .filter((session) => (
+                !hasExplicitSessionLabel(session)
+                && !currentSessionLabels[session.key]?.trim()
+                && isAcpWorkingDirectoryTruncatedTitle(session.derivedTitle || '')
+              ))
+              .map((session) => session.key);
+            if (unsafeTitleSessionKeys.length > 0) {
+              try {
+                initialTitleSummaries = await fetchSessionLabelSummaries(unsafeTitleSessionKeys);
+              } catch (err) {
+                console.warn('Failed to preload initial session titles:', err);
+              }
+            }
+          }
+
           const previousSessionKey = currentSessionKey;
           if (previousSessionKey !== nextSessionKey) {
             // Mirror switchSession: stop in-flight history polls and swap cached
@@ -3542,6 +3580,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               return {
                 ...switchPatch,
                 sessions: sessionsWithCurrent,
+                subagentSessions: mergedSubagentSessions,
                 sessionLabels: omitRecordKeys(
                   switchPatch.sessionLabels ?? state.sessionLabels,
                   labelCleanupKeys,
@@ -3558,6 +3597,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           } else {
             set((state) => ({
               sessions: sessionsWithCurrent,
+              subagentSessions: mergedSubagentSessions,
               currentSessionKey: nextSessionKey,
               currentAgentId: getAgentIdFromSessionKey(nextSessionKey),
               sessionLabels: omitRecordKeys(state.sessionLabels, labelCleanupKeys),
@@ -3569,6 +3609,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
           reconcileCurrentSessionIdleFromBackend(set, get, sessionsWithCurrent);
           applySessionBackendLabels(set, sessionsWithCurrent);
+          applySessionLabelSummaries(set, initialTitleSummaries);
 
           // Background: fetch first user message for every non-main session to populate labels upfront.
           // This uses the Host API local transcript summary route, not Gateway
@@ -3641,7 +3682,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         } catch (err) {
           console.warn('Failed to load sessions:', err);
           if (generation === _sessionCatalogGeneration) {
-            let reducedSessions = get().sessions;
+            let reducedCatalog = [...get().sessions, ...get().subagentSessions];
             const uncertainty = getSessionEventUncertainty(context.events);
             const toOrderableAttentionRows = (rows: ChatSession[]): ChatSession[] => (
               uncertainty.keys.size === 0
@@ -3655,14 +3696,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
               if (typeof event.ts !== 'number' || !Number.isFinite(event.ts)) continue;
               if (_successfulSessionListTsFloor !== null && event.ts < _successfulSessionListTsFloor) continue;
               const result = applyGatewaySessionsChanged(
-                reducedSessions,
+                reducedCatalog,
                 event,
                 _latestSessionEventTsByKey,
               );
               if (result.applied) {
                 appliedAny = true;
                 updatePendingSessionMutationBaselinesFromEvent(event);
-                reducedSessions = overlayPendingSessionMutations(result.sessions);
+                reducedCatalog = overlayPendingSessionMutations(result.sessions);
                 if (result.deletedKey) {
                   clearSessionLabelHydrationTracking(result.deletedKey);
                   if (!uncertainty.keys.has(result.deletedKey)) {
@@ -3671,7 +3712,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 } else {
                   attentionTransitions.push({
                     type: 'rows',
-                    rows: toOrderableAttentionRows(reducedSessions),
+                    rows: toOrderableAttentionRows(
+                      reducedCatalog.filter((session) => !isSubagentSession(session)),
+                    ),
                   });
                 }
               }
@@ -3679,6 +3722,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }
 
             if (appliedAny) {
+              const reducedSessions = reducedCatalog.filter((session) => !isSubagentSession(session));
+              const reducedSubagentSessions = reducedCatalog.filter(isSubagentSession);
               if (!uncertainty.unscoped && attentionTransitions.length > 0) {
                 useSessionAttentionStore.getState().reconcileSessionTransitions(attentionTransitions);
               }
@@ -3691,6 +3736,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 }
                 return {
                   sessions: reducedSessions,
+                  subagentSessions: reducedSubagentSessions,
                   sessionLabels,
                   sessionLastActivity: mergeSessionActivity(sessionLastActivity, reducedSessions),
                 };
@@ -3771,13 +3817,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     const result = applyGatewaySessionsChanged(
-      get().sessions,
+      [...get().sessions, ...get().subagentSessions],
       payload,
       _latestSessionEventTsByKey,
     );
     if (result.applied) {
       updatePendingSessionMutationBaselinesFromEvent(payload);
-      const projectedSessions = overlayPendingSessionMutations(result.sessions);
+      const projectedCatalog = overlayPendingSessionMutations(result.sessions);
+      const projectedSessions = projectedCatalog.filter((session) => !isSubagentSession(session));
+      const projectedSubagentSessions = projectedCatalog.filter(isSubagentSession);
       const eventKey = typeof payload.session?.key === 'string'
         ? payload.session.key.trim()
         : typeof payload.sessionKey === 'string'
@@ -3789,6 +3837,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       set((state) => ({
         sessions: projectedSessions,
+        subagentSessions: projectedSubagentSessions,
         sessionLabels: result.deletedKey
           ? clearSessionEntryFromMap(state.sessionLabels, result.deletedKey)
           : state.sessionLabels,

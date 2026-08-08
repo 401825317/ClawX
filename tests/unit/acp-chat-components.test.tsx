@@ -81,6 +81,10 @@ vi.mock('react-i18next', () => ({
         'acp.toolGroup.completedExecute': 'Ran commands',
         'acp.toolGroup.runningFetch': 'Researching information',
         'acp.toolGroup.completedFetch': 'Researched information',
+        'acp.toolGroup.subagentRunning': 'Working on {{total}} tasks in parallel',
+        'acp.toolGroup.subagentWaiting': '{{completed}} of {{total}} tasks returned; still waiting',
+        'acp.toolGroup.subagentResuming': 'Results returned; organizing the response',
+        'acp.toolGroup.subagentCompleted': 'Completed {{total}} parallel tasks',
         'acp.loadFailed': 'Load failed',
         'acp.promptFailed': 'Prompt failed',
         'acp.unsupportedContent': 'Unsupported content',
@@ -234,6 +238,36 @@ describe('ACP chat timeline components', () => {
       webBrowserNavigation: null,
       webBrowserNavigationId: 0,
     });
+  });
+
+  it('keeps yielded subagent work visibly active without exposing the raw yield result', () => {
+    const spawn = toolCallItem({
+      id: 'tool:spawn-child',
+      toolCallId: 'spawn-child',
+      title: 'sessions_spawn: task: research',
+    });
+    const yieldItem = toolCallItem({
+      id: 'tool:yield-parent',
+      toolCallId: 'yield-parent',
+      title: 'sessions_yield: message: wait',
+      outputParts: [{ kind: 'markdown', text: '{"status":"yielded","message":"wait"}' }],
+    });
+
+    render(
+      <AcpToolCallGroup
+        id="tool-call-group:subagents"
+        items={[spawn, yieldItem]}
+        active={false}
+        subagentProgress={{ phase: 'waiting', total: 2, completed: 1 }}
+      />,
+    );
+
+    expect(screen.getByTestId('acp-tool-call-group')).toHaveAttribute('data-active', 'true');
+    expect(screen.getByTestId('acp-tool-group-summary')).toHaveTextContent('1 of 2 tasks returned; still waiting');
+    fireEvent.click(screen.getByTestId('acp-tool-group-toggle'));
+    expect(screen.getByText('sessions_spawn: task: research')).toBeInTheDocument();
+    expect(screen.queryByText('sessions_yield: message: wait')).not.toBeInTheDocument();
+    expect(screen.queryByText('{"status":"yielded","message":"wait"}')).not.toBeInTheDocument();
   });
 
   it('renders assistant turns with the active Agent avatar', () => {

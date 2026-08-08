@@ -1,6 +1,6 @@
 import type { ChatSession, GatewaySessionsChangedPayload, ThinkingLevelOption } from './types';
 import { parseCronSessionKey } from './cron-session-utils';
-import { shouldIncludeSessionInSidebarList } from './session-key-utils';
+import { isSubagentSession, shouldIncludeSessionInSidebarList } from './session-key-utils';
 
 export type { GatewaySessionsChangedPayload } from './types';
 
@@ -21,6 +21,23 @@ const STRING_FIELDS = [
   'lastMessagePreview',
   'thinkingLevel',
   'workspacePath',
+  'kind',
+  'spawnedBy',
+  'parentSessionKey',
+  'subagentRole',
+  'subagentRunState',
+] as const satisfies readonly SessionField[];
+
+const NUMBER_FIELDS = [
+  'spawnDepth',
+  'startedAt',
+  'endedAt',
+  'runtimeMs',
+] as const satisfies readonly SessionField[];
+
+const BOOLEAN_FIELDS = [
+  'hasActiveRun',
+  'hasActiveSubagentRun',
 ] as const satisfies readonly SessionField[];
 
 function parseThinkingLevels(value: unknown): ThinkingLevelOption[] | undefined {
@@ -152,12 +169,35 @@ export function normalizeGatewaySessionPatch(raw: Record<string, unknown>): Norm
     }
   }
 
-  if (hasOwn(raw, 'hasActiveRun')) {
-    present.add('hasActiveRun');
-    if (raw.hasActiveRun === null) {
-      cleared.add('hasActiveRun');
-    } else if (typeof raw.hasActiveRun === 'boolean') {
-      values.hasActiveRun = raw.hasActiveRun;
+  for (const field of NUMBER_FIELDS) {
+    if (!hasOwn(raw, field)) continue;
+    present.add(field);
+    if (raw[field] === null) {
+      cleared.add(field);
+    } else if (typeof raw[field] === 'number' && Number.isFinite(raw[field])) {
+      values[field] = raw[field];
+    }
+  }
+
+  for (const field of BOOLEAN_FIELDS) {
+    if (!hasOwn(raw, field)) continue;
+    present.add(field);
+    if (raw[field] === null) {
+      cleared.add(field);
+    } else if (typeof raw[field] === 'boolean') {
+      values[field] = raw[field];
+    }
+  }
+
+  if (hasOwn(raw, 'childSessions')) {
+    present.add('childSessions');
+    if (raw.childSessions === null) {
+      cleared.add('childSessions');
+    } else if (Array.isArray(raw.childSessions)) {
+      values.childSessions = [...new Set(raw.childSessions
+        .filter((value): value is string => typeof value === 'string')
+        .map((value) => value.trim())
+        .filter(Boolean))];
     }
   }
 
@@ -241,7 +281,7 @@ export function applyGatewaySessionsChanged(
       return { sessions, applied: false, requiresReload: true };
     }
     const inserted = normalizeGatewaySessionRow({ ...nested, key });
-    if (!shouldIncludeSessionInSidebarList(inserted)) {
+    if (!isSubagentSession(inserted) && !shouldIncludeSessionInSidebarList(inserted)) {
       return { sessions, applied: false, requiresReload: false };
     }
     if (eventTs !== undefined) latestEventTsByKey.set(key, eventTs);
@@ -260,7 +300,7 @@ export function applyGatewaySessionsChanged(
 
   if (eventTs !== undefined) latestEventTsByKey.set(key, eventTs);
   const nextSessions = [...sessions];
-  if (merged.createdLocally || shouldIncludeSessionInSidebarList(merged)) {
+  if (merged.createdLocally || isSubagentSession(merged) || shouldIncludeSessionInSidebarList(merged)) {
     nextSessions[index] = merged;
   } else {
     nextSessions.splice(index, 1);

@@ -256,6 +256,73 @@ describe('chat store loadSessions startup selection', () => {
     expect(useChatStore.getState().currentSessionKey).toBe('agent:main:session-a');
   });
 
+  it('keeps subagent state outside the ordinary session list and updates it from sessions.changed', async () => {
+    const parentKey = 'agent:main:session-parent';
+    const childKey = 'agent:main:subagent:child-a';
+    gatewayRpcMock.mockImplementation(async (method: string) => {
+      if (method === 'sessions.list') {
+        return {
+          ts: 10,
+          sessions: [
+            { key: parentKey, displayName: 'Parent chat', updatedAt: 5_000 },
+            {
+              key: childKey,
+              kind: 'subagent',
+              parentSessionKey: parentKey,
+              subagentRunState: 'running',
+              hasActiveSubagentRun: true,
+              updatedAt: 6_000,
+            },
+          ],
+        };
+      }
+      if (method === 'chat.history') return { messages: [] };
+      throw new Error(`Unexpected gateway RPC: ${method}`);
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: parentKey,
+      currentAgentId: 'main',
+      sessions: [],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+    });
+
+    await useChatStore.getState().loadSessions();
+
+    expect(useChatStore.getState().sessions.map((session) => session.key)).toEqual([parentKey]);
+    expect(useChatStore.getState().subagentSessions).toEqual([
+      expect.objectContaining({
+        key: childKey,
+        parentSessionKey: parentKey,
+        subagentRunState: 'running',
+        hasActiveSubagentRun: true,
+      }),
+    ]);
+
+    useChatStore.getState().handleSessionsChanged({
+      key: childKey,
+      ts: 11,
+      session: {
+        key: childKey,
+        kind: 'subagent',
+        parentSessionKey: parentKey,
+        subagentRunState: 'done',
+        hasActiveSubagentRun: false,
+      },
+    });
+
+    expect(useChatStore.getState().subagentSessions).toEqual([
+      expect.objectContaining({
+        key: childKey,
+        subagentRunState: 'done',
+        hasActiveSubagentRun: false,
+      }),
+    ]);
+  });
+
   it('starts a fresh session when the current default is a hidden heartbeat even if visible history exists', async () => {
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1711111111111);
     gatewayRpcMock.mockImplementation(async (method: string) => {

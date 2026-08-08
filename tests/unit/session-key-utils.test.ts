@@ -20,6 +20,27 @@ describe('session-key-utils', () => {
     expect(shouldIncludeSessionInSidebarList({ key: 'agent:profile-writer:main' })).toBe(true);
   });
 
+  it('hides OpenClaw subagent sessions from the ordinary chat sidebar', () => {
+    expect(shouldIncludeSessionInSidebarList({
+      key: 'agent:main:subagent:child-by-kind',
+      kind: 'subagent',
+      parentSessionKey: 'agent:main:session-parent',
+    })).toBe(false);
+    expect(shouldIncludeSessionInSidebarList({
+      key: 'agent:main:child-by-lineage',
+      spawnedBy: 'agent:main:session-parent',
+      parentSessionKey: 'agent:main:session-parent',
+      spawnDepth: 1,
+    })).toBe(false);
+    expect(shouldIncludeSessionInSidebarList({
+      key: 'agent:main:subagent:child-by-key',
+    })).toBe(false);
+    expect(shouldIncludeSessionInSidebarList({
+      key: 'agent:main:session-user-created',
+      parentSessionKey: 'agent:main:session-parent',
+    })).toBe(true);
+  });
+
   it('detects feishu and other channel session keys', () => {
     expect(isChannelSessionKey('agent:main:feishu:ou_abc123')).toBe(true);
     expect(isChannelSessionKey('agent:main:telegram:12345')).toBe(true);

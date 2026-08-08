@@ -224,6 +224,62 @@ describe('chat store session label summary hydration', () => {
     expect(backgroundHistoryCalls).toHaveLength(0);
   });
 
+  it('does not publish a cwd-only session title before the local summary is ready', async () => {
+    const sessionKey = 'agent:main:session-windows-restart';
+    const summary = deferred<Record<string, unknown>>();
+    gatewayRpcMock.mockImplementation(async (method: string) => {
+      if (method === 'sessions.list') {
+        return {
+          sessions: [{
+            key: sessionKey,
+            displayName: 'ACP',
+            derivedTitle: '[Working directory: C:\\Users\\Tester\\AppData\\Local\\UClawRuntime\\profiles\\profile-id\\openclaw-state\\workspace]…',
+            updatedAt: 1_700_000_000_000,
+          }],
+        };
+      }
+      throw new Error(`Unexpected gateway RPC: ${method}`);
+    });
+    hostApiFetchMock.mockImplementation((path: string) => {
+      if (path === '/api/sessions/summaries') return summary.promise;
+      return Promise.resolve({ success: true });
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+    });
+
+    const loading = useChatStore.getState().loadSessions();
+    await vi.waitFor(() => {
+      expect(hostApiFetchMock).toHaveBeenCalledWith('/api/sessions/summaries', {
+        method: 'POST',
+        body: JSON.stringify({ sessionKeys: [sessionKey] }),
+      });
+    });
+
+    expect(useChatStore.getState().sessions).toEqual([]);
+
+    summary.resolve({
+      success: true,
+      summaries: [{
+        sessionKey,
+        firstUserText: '帮我整理桌面上的项目资料',
+        lastTimestamp: 1_700_000_001_000,
+        workspacePath: 'C:\\Users\\Tester\\Desktop',
+      }],
+    });
+    await loading;
+
+    expect(useChatStore.getState().sessions).toContainEqual(expect.objectContaining({ key: sessionKey }));
+    expect(useChatStore.getState().sessionLabels[sessionKey]).toBe('帮我整理桌面上的项目资料');
+  });
+
   it('replaces OpenClaw UUID-date fallback labels with the first user prompt', async () => {
     const sessionKey = 'agent:main:session-fallback';
     const sessionId = '72e4b28b-8477-4e29-b57e-e14448fd42d0';

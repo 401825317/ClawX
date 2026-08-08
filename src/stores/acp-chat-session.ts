@@ -46,7 +46,10 @@ import {
 } from '@/lib/acp/reducer';
 import { hashOpenClawMediaDiagnostic, type OpenClawMediaCandidate } from '@/lib/acp/openclaw-media-compat';
 import { openClawResourceLinkPromptText } from '@/lib/acp/openclaw-prompt-compat';
-import { fetchOpenClawTranscriptSupplement } from '@/lib/acp/transcript-supplement';
+import {
+  fetchFailedOpenClawTurnSupplement,
+  fetchOpenClawTranscriptSupplement,
+} from '@/lib/acp/transcript-supplement';
 import { alignHistoricalTurnTimings, type AcpTurnTiming } from '@/lib/acp/turn-timings';
 import { hostApi } from '@/lib/host-api';
 import { hostEvents } from '@/lib/host-events';
@@ -501,7 +504,14 @@ function reserveDelivery(
 ): boolean {
   const session = compatSession(sessionKey);
   if (session.delivered.has(key)) return false;
-  if (session.reservations.has(key) && !allowSupersede) return false;
+  const currentOwner = session.reservations.get(key);
+  if (currentOwner) {
+    // Retries and navigation restores may replace an older attempt from the
+    // same source, but must not steal another source's in-flight projection.
+    const currentSource = currentOwner.split(':', 1)[0];
+    const nextSource = owner.split(':', 1)[0];
+    if (!allowSupersede || currentSource !== nextSource) return false;
+  }
   session.reservations.set(key, owner);
   return true;
 }
@@ -742,6 +752,7 @@ function findAcpImageCompletionMatch(
   sessionKey: string,
   taskId: string | undefined,
   evidenceId: string,
+  preferredMessageId?: string,
 ): AcpImageCompletionMatch {
   if (!afterItemId) return {};
   const normalizedCaption = caption.trim();
@@ -785,6 +796,7 @@ function findAcpImageCompletionMatch(
       .join('\n')
       .trim();
     if (text !== normalizedCaption) continue;
+    if (preferredMessageId && item.messageId === preferredMessageId) return { itemId };
     if (matchingItemId) return { closedReason: 'ambiguous-match' };
     matchingItemId = itemId;
   }
@@ -798,6 +810,7 @@ function matchingAcpImageCompletionItemId(
   sessionKey: string,
   taskId: string | undefined,
   evidenceId: string,
+  preferredMessageId?: string,
 ): string | undefined {
   return findAcpImageCompletionMatch(
     timeline,
@@ -806,6 +819,7 @@ function matchingAcpImageCompletionItemId(
     sessionKey,
     taskId,
     evidenceId,
+    preferredMessageId,
   ).itemId;
 }
 
@@ -839,6 +853,80 @@ function mergeImageCompletionIntoAcpItem(
       },
     },
   };
+}
+
+function removeMessageSegmentItem(
+  timeline: AcpTimelineSnapshot,
+  itemId: string,
+): AcpTimelineSnapshot {
+  const item = timeline.itemsById[itemId];
+  if (item?.kind !== 'message-segment') return timeline;
+  const itemsById = { ...timeline.itemsById };
+  const openMessageSegments = { ...timeline.openMessageSegments };
+  const segmentCounts = { ...timeline.segmentCounts };
+  delete itemsById[itemId];
+  if (openMessageSegments[item.messageId] === itemId) delete openMessageSegments[item.messageId];
+  if (!Object.values(itemsById).some((candidate) => (
+    candidate.kind === 'message-segment' && candidate.messageId === item.messageId
+  ))) delete segmentCounts[item.messageId];
+  return {
+    ...timeline,
+    itemOrder: timeline.itemOrder.filter((candidateId) => candidateId !== itemId),
+    itemsById,
+    openMessageSegments,
+    segmentCounts,
+  };
+}
+
+/** Removes the text-only mirror OpenClaw writes beside an authoritative image message. */
+function dedupeAcpImageCompletionMirrors(
+  timeline: AcpTimelineSnapshot,
+  options?: { allowSyntheticTarget?: boolean },
+): AcpTimelineSnapshot {
+  let next = timeline;
+  for (const targetId of timeline.itemOrder) {
+    const target = next.itemsById[targetId];
+    if (
+      target?.kind !== 'message-segment'
+      || target.role !== 'assistant'
+      || target.compat?.source !== 'image-generation'
+      || (!options?.allowSyntheticTarget && target.messageId.startsWith('compat:image-generation:'))
+      || !target.parts.some((part) => part.kind === 'image')
+    ) continue;
+    const caption = target.parts
+      .flatMap((part) => part.kind === 'markdown' ? [part.text] : [])
+      .join('\n')
+      .trim();
+    if (!caption) continue;
+    const targetIndex = next.itemOrder.indexOf(targetId);
+    const duplicateIds: string[] = [];
+    for (const direction of [-1, 1] as const) {
+      for (let index = targetIndex + direction; index >= 0 && index < next.itemOrder.length; index += direction) {
+        const candidateId = next.itemOrder[index];
+        const candidate = candidateId ? next.itemsById[candidateId] : undefined;
+        if (candidate?.kind === 'tool-call') break;
+        if (candidate?.kind === 'message-segment' && candidate.role === 'user') break;
+        if (candidate?.kind !== 'message-segment' || candidate.role !== 'assistant') continue;
+        const candidateText = candidate.parts
+          .flatMap((part) => part.kind === 'markdown' ? [part.text] : [])
+          .join('\n')
+          .trim();
+        const captionOnly = candidate.parts.length > 0
+          && candidate.parts.every((part) => part.kind === 'markdown');
+        const exactMirror = candidateText === caption;
+        // A failed live stream can leave only a prefix of the model's trailing
+        // MEDIA mirror. Limit prefix removal to messages after the image.
+        const truncatedTrailingMirror = direction === 1
+          && candidateText.length < caption.length
+          && caption.startsWith(candidateText);
+        if (!candidate.compat && captionOnly && (exactMirror || truncatedTrailingMirror)) {
+          duplicateIds.push(candidateId);
+        }
+      }
+    }
+    for (const duplicateId of duplicateIds) next = removeMessageSegmentItem(next, duplicateId);
+  }
+  return next;
 }
 
 function removeSyntheticImageCompletionItem(
@@ -1571,6 +1659,81 @@ function settleBackgroundPromptSnapshot(input: {
   });
 }
 
+function reconcileFailedAssistantSegment(
+  timeline: AcpTimelineSnapshot,
+  liveUserMessageId: string,
+  transcriptMessageId: string | undefined,
+  text: string,
+): AcpTimelineSnapshot {
+  const userIndex = timeline.itemOrder.findIndex((itemId) => {
+    const item = timeline.itemsById[itemId];
+    return item?.kind === 'message-segment'
+      && item.role === 'user'
+      && item.messageId === liveUserMessageId;
+  });
+  if (userIndex < 0) return timeline;
+
+  const candidates: MessageSegmentItem[] = [];
+  for (let index = userIndex + 1; index < timeline.itemOrder.length; index += 1) {
+    const itemId = timeline.itemOrder[index];
+    const item = itemId ? timeline.itemsById[itemId] : undefined;
+    if (item?.kind === 'message-segment' && item.role === 'user') break;
+    if (item?.kind === 'message-segment' && item.role === 'assistant') candidates.push(item);
+  }
+  const target = transcriptMessageId
+    ? candidates.find((item) => item.messageId === transcriptMessageId)
+    : undefined;
+  const resolvedTarget = target ?? (candidates.length === 1 ? candidates[0] : undefined);
+  if (!resolvedTarget) return timeline;
+
+  const currentText = resolvedTarget.parts
+    .flatMap((part) => part.kind === 'markdown' ? [part.text] : [])
+    .join('')
+    .trim();
+  const persistedText = text.trim();
+  if (!persistedText || persistedText.length <= currentText.length || !persistedText.startsWith(currentText)) {
+    return timeline;
+  }
+  const firstMarkdownIndex = resolvedTarget.parts.findIndex((part) => part.kind === 'markdown');
+  if (firstMarkdownIndex < 0) return timeline;
+  const parts: RenderPart[] = [];
+  for (const [index, part] of resolvedTarget.parts.entries()) {
+    if (part.kind !== 'markdown') parts.push(part);
+    else if (index === firstMarkdownIndex) parts.push({ kind: 'markdown', text: persistedText });
+  }
+  return {
+    ...timeline,
+    itemsById: {
+      ...timeline.itemsById,
+      [resolvedTarget.id]: { ...resolvedTarget, parts },
+    },
+  };
+}
+
+async function reconcileFailedPromptTurn(operation: TranscriptSupplementOperation): Promise<void> {
+  const isCurrent = () => isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation);
+  if (!operation.liveUserMessageId || !isCurrent()) return;
+  const supplement = await fetchFailedOpenClawTurnSupplement({
+    sessionKey: operation.sessionKey,
+    snapshot: () => useAcpChatSessionStore.getState().timeline,
+    liveUserMessageId: operation.liveUserMessageId,
+    isCurrent,
+  });
+  if (!supplement || !isCurrent()) return;
+  useAcpChatSessionStore.setState((state) => (
+    isCurrentTranscriptSupplement(state, operation)
+      ? {
+        timeline: reconcileFailedAssistantSegment(
+          state.timeline,
+          operation.liveUserMessageId!,
+          supplement.transcriptMessageId,
+          supplement.text,
+        ),
+      }
+      : {}
+  ));
+}
+
 function applyOperationGeneration(
   state: AcpChatSessionState,
   result: AcpChatOperationResult,
@@ -1893,7 +2056,9 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
           invalidateTranscriptSupplement();
         }
       } else if (activeTranscriptSupplement === transcriptOperation) {
-        invalidateTranscriptSupplement();
+        void reconcileFailedPromptTurn(transcriptOperation).finally(() => {
+          if (activeTranscriptSupplement === transcriptOperation) invalidateTranscriptSupplement();
+        });
       }
       return result.success;
     } catch (error) {
@@ -2417,11 +2582,14 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
           sessionKey,
           correlatedTaskId,
           key,
+          options?.transcriptMessageId,
         )
       : undefined;
     if (matchingAcpItemId) {
       set((current) => ({
-        timeline: mergeImageCompletionIntoAcpItem(current.timeline, matchingAcpItemId, key, imageParts),
+        timeline: dedupeAcpImageCompletionMirrors(
+          mergeImageCompletionIntoAcpItem(current.timeline, matchingAcpItemId, key, imageParts),
+        ),
         pendingImageGenerationTaskIds: settlePendingTask(current),
       }));
       if (missingCount === 0) commitDelivery(sessionKey, key, reservationOwner);
@@ -2470,13 +2638,16 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
 
     set((current) => {
       if (current.activeSessionKey !== sessionKey || current.generation !== generation) return {};
+      const timeline = appendSyntheticAssistantMessage(current.timeline, {
+        messageId: messageIdFromEvidence(key),
+        evidenceId: key,
+        parts,
+        afterItemId,
+      });
       return {
-        timeline: appendSyntheticAssistantMessage(current.timeline, {
-          messageId: messageIdFromEvidence(key),
-          evidenceId: key,
-          parts,
-          afterItemId,
-        }),
+        timeline: evidence.historical && !current.sending
+          ? dedupeAcpImageCompletionMirrors(timeline, { allowSyntheticTarget: true })
+          : timeline,
         pendingImageGenerationTaskIds: settlePendingTask(current),
       };
     });
@@ -2528,9 +2699,12 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       return;
     }
     const updatedTimeline = applyAcpSessionUpdate(state.timeline, event.notification, { historical: !!event.historical });
-    const timeline = isLiveMessageUpdate(event)
+    const reconciledTimeline = isLiveMessageUpdate(event)
       ? reconcileLateAcpImageCompletions(updatedTimeline, event.sessionKey, event.generation)
       : updatedTimeline;
+    const timeline = isLiveMessageUpdate(event)
+      ? dedupeAcpImageCompletionMirrors(reconciledTimeline)
+      : reconciledTimeline;
     const pending = newPendingAttachments(state.timeline, timeline);
     set({ timeline });
     if (state.sending) {
