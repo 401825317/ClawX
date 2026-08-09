@@ -761,6 +761,15 @@ describe('ACP chat timeline components', () => {
     }
   });
 
+  it('renders an unfinished historical tool call as cancelled instead of running', () => {
+    render(<AcpToolCallCard item={toolCallItem({ status: 'running', historical: true, outputParts: [] })} />);
+
+    const card = screen.getByTestId('acp-tool-call-card');
+    expect(card).toHaveTextContent('Cancelled');
+    expect(card).not.toHaveTextContent('Running');
+    expect(card.querySelector('.animate-spin')).toBeNull();
+  });
+
   it('starts a fresh delayed auto-collapse when a completed tool call id changes', () => {
     vi.useFakeTimers();
     try {

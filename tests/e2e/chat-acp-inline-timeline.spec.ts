@@ -1444,6 +1444,37 @@ test.describe('ClawX ACP inline timeline', () => {
     }
   });
 
+  test('renders an unfinished historical tool call as cancelled after restart', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installAcpChatMocks(app);
+      await installAcpLoadReplayMock(app, [
+        {
+          sessionUpdate: 'user_message',
+          messageId: 'interrupted-history-user',
+          content: [{ type: 'text', text: 'Generate an image' }],
+        },
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'interrupted-history-tool',
+          title: 'Generate image',
+          status: 'in_progress',
+          locations: [],
+        },
+      ]);
+
+      const page = await openChat(app);
+      const card = page.getByTestId('acp-tool-call-card');
+      await expect(card).toBeVisible({ timeout: 30_000 });
+      await expect(card).toContainText('Cancelled');
+      await expect(card).not.toContainText('Running');
+      await expect(card.locator('.animate-spin')).toHaveCount(0);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
   test('hydrates historical image-generation completions from transcript history when ACP replay omits them', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
     const caption = 'Here is the generated image of a watermelon banquet.';

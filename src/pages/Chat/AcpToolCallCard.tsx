@@ -13,15 +13,24 @@ type ExpansionState = {
   manualOverride: boolean;
 };
 
-function statusLabelKey(status: ToolCallItem['status']): string {
+type ToolDisplayStatus = ToolCallItem['status'] | 'cancelled';
+
+function statusLabelKey(status: ToolDisplayStatus): string {
   return `acp.${status}`;
 }
 
-function StatusIcon({ status }: { status: ToolCallItem['status'] }) {
+function StatusIcon({ status }: { status: ToolDisplayStatus }) {
   if (status === 'running') return <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />;
   if (status === 'completed') return <CheckCircle2 className="h-4 w-4" aria-hidden="true" />;
   if (status === 'failed') return <XCircle className="h-4 w-4" aria-hidden="true" />;
   return <CircleDashed className="h-4 w-4" aria-hidden="true" />;
+}
+
+/** Prevents replay-only unfinished tools from appearing active after the original process ended. */
+function toolDisplayStatus(item: ToolCallItem, grouped: boolean): ToolDisplayStatus {
+  if (item.historical && (item.status === 'pending' || item.status === 'running')) return 'cancelled';
+  if (grouped && (item.status === 'completed' || item.status === 'failed')) return 'completed';
+  return item.status;
 }
 
 function AcpToolOutputPart({ part }: { part: RenderPart }) {
@@ -49,7 +58,8 @@ export function AcpToolCallCard({
   const { t } = useTranslation('chat');
   const grouped = variant === 'grouped';
   const hasDetails = Boolean(item.error) || item.outputParts.length > 0;
-  const isFinished = item.status === 'completed' || item.status === 'failed';
+  const displayStatus = toolDisplayStatus(item, grouped);
+  const isFinished = displayStatus === 'completed' || displayStatus === 'failed' || displayStatus === 'cancelled';
   const shouldStartExpanded = grouped ? false : !hasDetails || !(item.historical && isFinished);
   const [expansionState, setExpansionState] = useState<ExpansionState>(() => ({
     toolCallId: item.toolCallId,
@@ -87,7 +97,6 @@ export function AcpToolCallCard({
   }, [grouped, hasDetails, item.historical, isFinished, item.toolCallId, manualOverride, shouldStartExpanded]);
 
   const toggleLabel = expanded ? t('acp.collapseTool') : t('acp.expandTool');
-  const displayStatus = grouped && isFinished ? 'completed' : item.status;
 
   return (
     <div
