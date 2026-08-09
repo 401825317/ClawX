@@ -35,6 +35,8 @@ describe('openclaw bundle config', () => {
     ]));
     expect(LOCAL_OPENCLAW_PLUGIN_IDS).toEqual([
       'clawx-openai-image',
+      'uclaw-local-artifacts',
+      'uclaw-blender',
       'uclaw-video',
     ]);
     const packageJson = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf8')) as {
@@ -52,6 +54,7 @@ describe('openclaw bundle config', () => {
 
     expect(packageJson.dependencies).toMatchObject({
       jszip: '^3.10.1',
+      pptxgenjs: '4.0.1',
       sharp: '^0.34.5',
       undici: '8.1.0',
     });

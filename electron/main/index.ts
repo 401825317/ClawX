@@ -59,6 +59,10 @@ import { browserOAuthManager } from '../utils/browser-oauth';
 import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { syncAllProviderAuthToRuntime } from '../services/providers/provider-runtime-sync';
 import { ATTACHMENT_VIDEO_STREAM_SCHEME } from '../services/attachment-video-stream';
+import {
+  startBlenderBridgeServer,
+  stopBlenderBridgeServer,
+} from '../services/blender/bridge-server';
 
 const WINDOWS_APP_USER_MODEL_ID = 'app.clawx.desktop';
 const isE2EMode = process.env.CLAWX_E2E === '1';
@@ -369,6 +373,16 @@ async function initialize(): Promise<void> {
   logger.debug(
     `Runtime: platform=${process.platform}/${process.arch}, electron=${process.versions.electron}, node=${process.versions.node}, packaged=${app.isPackaged}, pid=${process.pid}, ppid=${process.ppid}`
   );
+
+  if (!isE2EMode) {
+    try {
+      const environment = await startBlenderBridgeServer();
+      logger.info(`Blender bridge listening on ${environment.CLAWX_HOST_API_ORIGIN}`);
+    } catch (error) {
+      // Blender is optional; a bridge failure must not block chat startup.
+      logger.warn('Failed to start the Blender bridge:', error);
+    }
+  }
 
   webBrowserSession = configureWebBrowserSession({
     registry: webBrowserGuestRegistry,
@@ -724,9 +738,14 @@ if (gotTheLock) {
 
     void extensionRegistry.teardownAll();
 
-    const stopPromise = gatewayManager.stop().catch((err) => {
-      logger.warn('gatewayManager.stop() error during quit:', err);
-    });
+    const stopPromise = Promise.all([
+      gatewayManager.stop().catch((err) => {
+        logger.warn('gatewayManager.stop() error during quit:', err);
+      }),
+      stopBlenderBridgeServer().catch((err) => {
+        logger.warn('stopBlenderBridgeServer() error during quit:', err);
+      }),
+    ]).then(() => undefined);
     const timeoutPromise = new Promise<'timeout'>((resolve) => {
       setTimeout(() => resolve('timeout'), 5000);
     });
@@ -771,6 +790,11 @@ if (gotTheLock) {
   // short timeout before force-exiting, preventing orphaned processes.
   const emergencyGatewayCleanup = (reason: string, error: unknown): void => {
     logger.error(`${reason}:`, error);
+    try {
+      void stopBlenderBridgeServer().catch(() => { /* ignore */ });
+    } catch {
+      // ignore — bridge state may already be corrupted
+    }
     try {
       void gatewayManager?.stop().catch(() => { /* ignore */ });
     } catch {

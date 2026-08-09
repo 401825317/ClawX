@@ -53,5 +53,7 @@ export const BUNDLED_OPENCLAW_PLUGINS = [
 /** Local UClaw plugins mirrored and copied into every packaged runtime. */
 export const LOCAL_OPENCLAW_PLUGIN_IDS = [
   'clawx-openai-image',
+  'uclaw-local-artifacts',
+  'uclaw-blender',
   'uclaw-video',
 ];

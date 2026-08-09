@@ -1,0 +1,22 @@
+{
+  "id": "uclaw-blender",
+  "name": "UClaw Blender Runtime",
+  "description": "Creates validated Blender scenes through UClaw's local deterministic Blender runtime.",
+  "version": "0.1.3",
+  "entry": "index.mjs",
+  "enabledByDefault": false,
+  "activation": { "onStartup": true },
+  "contracts": {
+    "tools": [
+      "blender_get_capabilities",
+      "create_blender_scene",
+      "repair_blender_scene",
+      "get_blender_job"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

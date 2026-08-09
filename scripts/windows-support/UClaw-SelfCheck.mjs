@@ -21,6 +21,8 @@ const PACKAGED_PLUGINS = [
   { pluginId: 'openclaw-weixin', manifestId: 'openclaw-weixin', packageNames: ['@tencent-weixin/openclaw-weixin'] },
   ...[
     'clawx-openai-image',
+    'uclaw-local-artifacts',
+    'uclaw-blender',
     'uclaw-video',
   ].map((pluginId) => ({
     pluginId,
@@ -724,6 +726,8 @@ async function main() {
     'resources/cli/openclaw.cmd',
     'resources/openclaw/openclaw.mjs',
     'resources/openclaw/package.json',
+    'resources/blender/runtime/uclaw_scene_runner.py',
+    'resources/blender/runtime/scene-spec.schema.json',
     'resources/app.asar.unpacked/node_modules/sharp/package.json',
     'resources/app.asar.unpacked/node_modules/@img/sharp-win32-x64/package.json',
     'resources/app.asar.unpacked/node_modules/@img/sharp-win32-x64/lib/sharp-win32-x64.node',

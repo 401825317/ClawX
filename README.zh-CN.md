@@ -136,6 +136,7 @@ ClawX 现在还内置了腾讯官方个人微信渠道插件，可直接在 Chan
 通过预构建的技能扩展 AI 智能体的能力。集成的 Skills 页面采用“本地优先”方式：会扫描托管目录与 workspace 技能目录，并且无需依赖 Gateway 即可启用或停用技能。公共技能市场通过主进程接入 SkillHub 和兼容的 ClawHub Provider，不要求登录 UClaw 账号，也不会改变 Gateway 的启停状态。
 UClaw 不再单独预装 `pdf`、`xlsx`、`docx`、`pptx` 技能。启动时只会清理仍带有 UClaw `.clawx-preinstalled.json` 所有权标记的旧副本；没有标记的同名目录视为用户所有并保持不动。
 Skills 页面可展示来自多个 OpenClaw 来源的技能（托管目录、workspace、额外技能目录），并显示每个技能的实际路径，便于直接打开真实安装位置。开发模式和打包产物都会完整保留 OpenClaw 自带的 bundled skills，并通过本地优先扫描全部展示。
+UClaw 另外提供 `presentation-maker`、`spreadsheet-maker`、`document-maker` 和 `blender-maker` 四个兼容技能，仍由模型在正常 OpenClaw Agent 循环中选择。Office 文件由本地 artifact runtime 写入，不挂接 prompt 或 transcript；Blender 只通过私有回环桥接接收校验后的声明式 SceneSpec。安装包不包含 Blender 本体，本机未安装时工具会明确返回能力不可用，不会把未生成的任务当成完成。
 
 ### 🔐 安全的供应商集成
 连接多个 AI 供应商（OpenAI、Anthropic、Z.AI / GLM 等），凭证安全存储在系统原生密钥链中。OpenAI 同时支持 API Key 与浏览器 OAuth（Codex 订阅）登录。

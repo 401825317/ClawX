@@ -1494,24 +1494,26 @@ describe('sanitizeOpenClawConfig', () => {
     expect((plugins.entries as Record<string, unknown>)['configured-plugin']).toEqual({ enabled: true });
   });
 
-  it('retires master-only UClaw plugins from Windows-style runtime state and config', async () => {
+  it('retires obsolete UClaw plugins while preserving restored artifact plugins', async () => {
     const retiredPluginIds = [
       'uclaw-artifact-guard',
-      'uclaw-blender',
       'uclaw-desktop-control',
-      'uclaw-local-artifacts',
       'uclaw-task-bridge',
       'uclaw-video-project',
       'parallel',
     ];
+    const restoredPluginIds = ['uclaw-local-artifacts', 'uclaw-blender'];
+    const allUclawPluginIds = [...retiredPluginIds, ...restoredPluginIds];
     const extensionsRoot = join(testHome, '.openclaw', 'extensions');
     const retiredPluginPaths = retiredPluginIds.map((pluginId) => join(extensionsRoot, pluginId));
+    const restoredPluginPaths = restoredPluginIds.map((pluginId) => join(extensionsRoot, pluginId));
     const customPluginPath = join(extensionsRoot, 'custom-installed');
 
-    for (const [index, pluginId] of retiredPluginIds.entries()) {
-      await mkdir(retiredPluginPaths[index]!, { recursive: true });
+    for (const pluginId of allUclawPluginIds) {
+      const pluginPath = join(extensionsRoot, pluginId);
+      await mkdir(pluginPath, { recursive: true });
       await writeFile(
-        join(retiredPluginPaths[index]!, 'openclaw.plugin.json'),
+        join(pluginPath, 'openclaw.plugin.json'),
         JSON.stringify({ id: pluginId }, null, 2),
         'utf8',
       );
@@ -1524,17 +1526,17 @@ describe('sanitizeOpenClawConfig', () => {
     );
     await writeOpenClawJson({
       plugins: {
-        allow: [...retiredPluginIds, 'custom-installed'],
+        allow: [...allUclawPluginIds, 'custom-installed'],
         entries: Object.fromEntries([
-          ...retiredPluginIds.map((pluginId) => [pluginId, { enabled: true }]),
+          ...allUclawPluginIds.map((pluginId) => [pluginId, { enabled: true }]),
           ['custom-installed', { enabled: true }],
         ]),
         installs: Object.fromEntries([
-          ...retiredPluginIds.map((pluginId) => [pluginId, { source: 'legacy' }]),
+          ...allUclawPluginIds.map((pluginId) => [pluginId, { source: 'legacy' }]),
           ['custom-installed', { source: 'user' }],
         ]),
         load: {
-          paths: [...retiredPluginPaths, customPluginPath],
+          paths: [...retiredPluginPaths, ...restoredPluginPaths, customPluginPath],
         },
       },
       tools: {
@@ -1552,14 +1554,25 @@ describe('sanitizeOpenClawConfig', () => {
     await Promise.all(retiredPluginPaths.map(async (pluginPath) => {
       await expect(stat(pluginPath)).rejects.toThrow();
     }));
+    await Promise.all(restoredPluginPaths.map(async (pluginPath) => {
+      await expect(stat(pluginPath)).resolves.toBeDefined();
+    }));
     await expect(stat(customPluginPath)).resolves.toBeDefined();
 
     const result = await readOpenClawJson();
     const plugins = result.plugins as Record<string, unknown>;
-    expect(plugins.allow).toEqual(['custom-installed']);
-    expect(plugins.entries).toEqual({ 'custom-installed': { enabled: true } });
-    expect(plugins.installs).toEqual({ 'custom-installed': { source: 'user' } });
-    expect(plugins.load).toEqual({ paths: [customPluginPath] });
+    expect(plugins.allow).toEqual([...restoredPluginIds, 'custom-installed']);
+    expect(plugins.entries).toEqual({
+      'uclaw-local-artifacts': { enabled: true },
+      'uclaw-blender': { enabled: true },
+      'custom-installed': { enabled: true },
+    });
+    expect(plugins.installs).toEqual({
+      'uclaw-local-artifacts': { source: 'legacy' },
+      'uclaw-blender': { source: 'legacy' },
+      'custom-installed': { source: 'user' },
+    });
+    expect(plugins.load).toEqual({ paths: [...restoredPluginPaths, customPluginPath] });
     expect((result.tools as Record<string, unknown>).web).toBeUndefined();
   });
 
@@ -3630,6 +3643,31 @@ describe('batchSyncConfigFields', () => {
     });
     await rm(testHome, { recursive: true, force: true });
     await rm(testUserData, { recursive: true, force: true });
+  });
+
+  it('enables the restored document and Blender runtime plugins', async () => {
+    await writeOpenClawJson({
+      plugins: {
+        allow: ['custom-installed'],
+        entries: { 'custom-installed': { enabled: true } },
+      },
+    });
+
+    const { batchSyncConfigFields } = await import('@electron/utils/openclaw-auth');
+    await batchSyncConfigFields('new-token');
+
+    const config = await readOpenClawJson();
+    const plugins = config.plugins as Record<string, unknown>;
+    expect(plugins.allow).toEqual([
+      'custom-installed',
+      'uclaw-local-artifacts',
+      'uclaw-blender',
+    ]);
+    expect(plugins.entries).toEqual({
+      'custom-installed': { enabled: true },
+      'uclaw-local-artifacts': { enabled: true },
+      'uclaw-blender': { enabled: true },
+    });
   });
 
   it('seeds web_fetch SSRF policy for fake-IP proxy environments', async () => {

@@ -64,11 +64,13 @@ const AUTH_STORE_VERSION = 1;
 const AUTH_PROFILE_FILENAME = 'auth-profiles.json';
 const LEGACY_MINIMAX_OAUTH_PLUGIN_ID = 'minimax-portal-auth';
 const MERGED_MINIMAX_PLUGIN_ID = 'minimax';
+export const REQUIRED_UCLAW_RUNTIME_PLUGIN_IDS = [
+  'uclaw-local-artifacts',
+  'uclaw-blender',
+] as const;
 const RETIRED_UCLAW_PLUGIN_IDS = [
   'uclaw-artifact-guard',
-  'uclaw-blender',
   'uclaw-desktop-control',
-  'uclaw-local-artifacts',
   'uclaw-task-bridge',
   'uclaw-video-project',
   'parallel',
@@ -3382,6 +3384,15 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
     if (disableLegacyClawXToolSearchDefault(config)) {
       modified = true;
       console.log('[batch-sync] Disabled legacy ClawX tools.toolSearch directory default');
+    }
+
+    // UClaw owns these bundled runtime plugins, so every Gateway launch must
+    // explicitly trust and enable them instead of relying on local discovery.
+    for (const pluginId of REQUIRED_UCLAW_RUNTIME_PLUGIN_IDS) {
+      if (ensurePluginRegistrationEnabled(config, pluginId)) {
+        modified = true;
+        console.log(`[batch-sync] Enabled required UClaw runtime plugin: ${pluginId}`);
+      }
     }
 
     const pinnedProviderRuntimes = applyOpenClawProviderAgentRuntimePinsToConfig(config);

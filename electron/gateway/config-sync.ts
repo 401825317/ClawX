@@ -28,6 +28,7 @@ import {
 import { getUvMirrorEnv } from '../utils/uv-env';
 import { cleanupDanglingWeChatPluginState, listConfiguredChannelsFromConfig, readOpenClawConfig } from '../utils/channel-config';
 import {
+  REQUIRED_UCLAW_RUNTIME_PLUGIN_IDS,
   RetiredUclawPluginCleanupError,
   sanitizeOpenClawConfig,
   batchSyncConfigFields,
@@ -59,6 +60,7 @@ import {
   withProviderMutationLock,
 } from '../services/providers/provider-mutation-lock';
 import { getProviderSecret } from '../services/secrets/secret-store';
+import { getBlenderBridgeEnvironment } from '../services/blender/bridge-server';
 import {
   buildManagedOpenAiProviderEnv,
   shouldInjectProviderEnv,
@@ -107,6 +109,8 @@ const CHANNEL_PLUGIN_MAP: Record<string, { dirName: string; npmName: string }> =
 
   'openclaw-weixin': { dirName: 'openclaw-weixin', npmName: '@tencent-weixin/openclaw-weixin' },
   [CLAWX_OPENAI_IMAGE_PROVIDER_KEY]: { dirName: CLAWX_OPENAI_IMAGE_PROVIDER_KEY, npmName: 'clawx-openai-image-plugin' },
+  'uclaw-local-artifacts': { dirName: 'uclaw-local-artifacts', npmName: 'uclaw-local-artifacts-plugin' },
+  'uclaw-blender': { dirName: 'uclaw-blender', npmName: 'uclaw-blender-plugin' },
   [UCLAW_VIDEO_PROVIDER_ID]: { dirName: UCLAW_VIDEO_PROVIDER_ID, npmName: 'uclaw-video-plugin' },
 };
 
@@ -285,6 +289,12 @@ export function withConfiguredMediaGenerationPlugins(
     : videoPrimary;
   if (videoProvider === UCLAW_VIDEO_PROVIDER_ID && !next.includes(UCLAW_VIDEO_PROVIDER_ID)) {
     next.push(UCLAW_VIDEO_PROVIDER_ID);
+  }
+
+  // Document and Blender tools are UClaw product capabilities rather than
+  // user-configured channels, so keep their runtime plugins installed on every launch.
+  for (const pluginId of REQUIRED_UCLAW_RUNTIME_PLUGIN_IDS) {
+    if (!next.includes(pluginId)) next.push(pluginId);
   }
   return next;
 }
@@ -727,11 +737,16 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
     stripSystemdSupervisorEnv(baseEnvPatched),
     managedDistribution,
   );
+  // The private bridge endpoint is process-scoped. Never inherit a stale
+  // endpoint or token from the shell or an older UClaw process.
+  delete inheritedEnv.CLAWX_HOST_API_ORIGIN;
+  delete inheritedEnv.CLAWX_HOST_API_TOKEN;
   const forkEnv: Record<string, string | undefined> = {
     ...inheritedEnv,
     ...providerEnv,
     ...uvEnv,
     ...proxyEnv,
+    ...getBlenderBridgeEnvironment(),
     OPENCLAW_GATEWAY_TOKEN: appSettings.gatewayToken,
     OPENCLAW_SKIP_CHANNELS: skipChannels ? '1' : '',
     OPENCLAW_NO_RESPAWN: '1',

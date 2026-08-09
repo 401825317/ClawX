@@ -18,6 +18,7 @@
 
 import 'zx/globals';
 import { ELECTRON_MAIN_RUNTIME_PACKAGES, EXTRA_BUNDLED_PACKAGES } from './openclaw-bundle-config.mjs';
+import { installOpenClawSkillShims } from './install-openclaw-skill-shims.mjs';
 import { patchOpenClawAcpStreamingRuntime } from './openclaw-acp-streaming-patch.mjs';
 import { patchOpenClawMediaGenerationRuntime } from './openclaw-media-generation-patch.mjs';
 import { patchExtensionOpenClawSelfImports } from './openclaw-self-import-patch.mjs';
@@ -98,6 +99,13 @@ fs.cpSync(openclawReal, OUTPUT, {
   dereference: true,
   filter: shouldCopyOpenClawPackageEntry,
 });
+
+const installedSkillShims = installOpenClawSkillShims({
+  skillsRoot: path.join(OUTPUT, 'skills'),
+});
+if (installedSkillShims.length > 0) {
+  echo`   Installed OpenClaw skill compatibility shims: ${installedSkillShims.join(', ')}`;
+}
 
 // 4. Recursively collect ALL transitive dependencies via pnpm virtual store BFS
 //

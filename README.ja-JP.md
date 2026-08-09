@@ -135,6 +135,7 @@ AIタスクを自動的に実行するようスケジュール設定できます
 事前構築されたスキルでAIエージェントを拡張できます。統合 Skills ページはローカル優先で、管理ディレクトリや workspace のスキルをスキャンし、Gateway に依存せず有効/無効を切り替えられます。公開 marketplace は Main プロセス経由で SkillHub と互換 ClawHub Provider に対応し、UClaw アカウント認証を要求せず、Gateway のライフサイクルも変更しません。
 UClaw は `pdf`、`xlsx`、`docx`、`pptx` の個別コピーをプリインストールしません。起動時には UClaw の `.clawx-preinstalled.json` 所有マーカーが残る旧コピーだけを削除し、マーカーのない同名ディレクトリには触れません。
 Skills ページでは OpenClaw の複数ソース（管理ディレクトリ、workspace、追加スキルディレクトリ）から検出されたスキルを表示でき、各スキルの実際のパスを確認して実フォルダを直接開けます。開発環境とパッケージ版はいずれも OpenClaw 同梱の bundled skills をすべて保持し、ローカル優先スキャンですべて表示します。
+UClaw はさらに `presentation-maker`、`spreadsheet-maker`、`document-maker`、`blender-maker` の互換スキルを提供します。通常の OpenClaw Agent ループ内でモデルが選択し、Office ファイルは prompt や transcript の hook を使わずローカル artifact runtime が書き込みます。Blender にはプライベートなループバック bridge 経由で検証済みの宣言的 SceneSpec だけを渡します。Blender 本体は同梱されず、未インストールの場合は未生成を完了扱いせず、能力が利用不可であることを明示します。
 
 ### 🔐 セキュアなプロバイダー統合
 複数のAIプロバイダー（OpenAI、Anthropic、Z.AI / GLMなど）に接続でき、資格情報はシステムのネイティブキーチェーンに安全に保存されます。OpenAI は API キーとブラウザ OAuth（Codex サブスクリプション）の両方に対応しています。

@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest';
 
 import { withConfiguredMediaGenerationPlugins } from '@electron/gateway/config-sync';
 
-describe('configured media generation plugins', () => {
-  it('adds managed image and video providers selected by OpenClaw defaults', () => {
+describe('configured runtime plugins', () => {
+  it('adds managed image, video, document and Blender plugins', () => {
     expect(withConfiguredMediaGenerationPlugins(['whatsapp'], {
       agents: {
         defaults: {
@@ -16,10 +16,12 @@ describe('configured media generation plugins', () => {
       'whatsapp',
       'clawx-openai-image',
       'uclaw-video',
+      'uclaw-local-artifacts',
+      'uclaw-blender',
     ]);
   });
 
-  it('does not install media plugins selected from unrelated providers', () => {
+  it('keeps document and Blender plugins when media providers are unrelated', () => {
     expect(withConfiguredMediaGenerationPlugins([], {
       agents: {
         defaults: {
@@ -27,6 +29,9 @@ describe('configured media generation plugins', () => {
           videoGenerationModel: 'other/video',
         },
       },
-    })).toEqual([]);
+    })).toEqual([
+      'uclaw-local-artifacts',
+      'uclaw-blender',
+    ]);
   });
 });
