@@ -13,9 +13,20 @@ type ImageRenderPart = Extract<RenderPart, { kind: 'image' }>;
 
 type FullSizePreviewState =
   | { status: 'idle' }
-  | { status: 'loading' }
-  | { status: 'ready'; url: string }
-  | { status: 'error' };
+  | { status: 'loading'; attachmentKey: string }
+  | { status: 'ready'; attachmentKey: string; url: string }
+  | { status: 'error'; attachmentKey: string };
+
+/** Identify one authorized attachment generation across asynchronous preview reads. */
+function attachmentPreviewKey(ref: NonNullable<ImageRenderPart['attachmentFileRef']>): string {
+  return [
+    ref.sessionKey,
+    String(ref.generation),
+    ref.uri,
+    ref.stagingId ?? '',
+    ref.transcriptMessageId ?? '',
+  ].join('\u0000');
+}
 
 function safeImageSource(source: string): string | null {
   const trimmed = source.trim();
@@ -71,6 +82,14 @@ export function AcpImagePart({
   const src = safeImageSource(part.source);
   const mimeType = part.mimeType?.startsWith('image/') ? part.mimeType : (src ? dataUrlParts(src)?.mimeType : undefined) ?? 'image/png';
   const defaultFileName = `generated-image.${imageExtension(mimeType)}`;
+  const attachmentKey = part.attachmentFileRef
+    ? attachmentPreviewKey(part.attachmentFileRef)
+    : null;
+  const visibleFullSizePreview: FullSizePreviewState = previewOpen && attachmentKey
+    ? fullSizePreview.status !== 'idle' && fullSizePreview.attachmentKey === attachmentKey
+      ? fullSizePreview
+      : { status: 'loading', attachmentKey }
+    : { status: 'idle' };
   const handleCopy = useCallback(async (event: React.MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
     if (!src) return;
@@ -100,13 +119,21 @@ export function AcpImagePart({
     setSaved(true);
     window.setTimeout(() => setSaved(false), 1600);
   }, [src, mimeType, defaultFileName]);
-  const openPreview = useCallback(() => setPreviewOpen(true), []);
+  const openPreview = useCallback(() => {
+    setFullSizePreview(attachmentKey
+      ? { status: 'loading', attachmentKey }
+      : { status: 'idle' });
+    setPreviewOpen(true);
+  }, [attachmentKey]);
   const handlePreviewKeyDown = useCallback((event: React.KeyboardEvent<HTMLImageElement>) => {
     if (event.key !== 'Enter' && event.key !== ' ') return;
     event.preventDefault();
     openPreview();
   }, [openPreview]);
-  const closePreview = useCallback(() => setPreviewOpen(false), []);
+  const closePreview = useCallback(() => {
+    setPreviewOpen(false);
+    setFullSizePreview({ status: 'idle' });
+  }, []);
   const handleReveal = useCallback(async () => {
     if (!part.attachmentFileRef) return;
     try {
@@ -118,21 +145,17 @@ export function AcpImagePart({
   }, [part.attachmentFileRef, t]);
 
   useEffect(() => {
-    if (!previewOpen || !part.attachmentFileRef) {
-      setFullSizePreview({ status: 'idle' });
-      return;
-    }
+    if (!previewOpen || !part.attachmentFileRef || !attachmentKey) return;
 
     let cancelled = false;
     let objectUrl: string | null = null;
-    setFullSizePreview({ status: 'loading' });
     void hostApi.files.readAttachmentBinary({
       ref: part.attachmentFileRef,
       maxBytes: FILE_PREVIEW_MAX_BINARY_BYTES,
     }).then((result) => {
       if (cancelled) return;
       if (!result.ok || !result.data) {
-        setFullSizePreview({ status: 'error' });
+        setFullSizePreview({ status: 'error', attachmentKey });
         return;
       }
       const copiedBytes = new Uint8Array(result.data.byteLength);
@@ -142,16 +165,16 @@ export function AcpImagePart({
         URL.revokeObjectURL(objectUrl);
         return;
       }
-      setFullSizePreview({ status: 'ready', url: objectUrl });
+      setFullSizePreview({ status: 'ready', attachmentKey, url: objectUrl });
     }).catch(() => {
-      if (!cancelled) setFullSizePreview({ status: 'error' });
+      if (!cancelled) setFullSizePreview({ status: 'error', attachmentKey });
     });
 
     return () => {
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [mimeType, part.attachmentFileRef, previewOpen]);
+  }, [attachmentKey, mimeType, part.attachmentFileRef, previewOpen]);
 
   if (!src) {
     return (
@@ -251,18 +274,18 @@ export function AcpImagePart({
             </div>
           </div>
           <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-black/5 p-4 dark:bg-black/40">
-            {part.attachmentFileRef && fullSizePreview.status === 'loading' && (
+            {part.attachmentFileRef && visibleFullSizePreview.status === 'loading' && (
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-label={t('acp.imageLoading')} />
             )}
-            {part.attachmentFileRef && fullSizePreview.status === 'ready' && (
+            {part.attachmentFileRef && visibleFullSizePreview.status === 'ready' && (
               <img
                 data-testid="acp-image-preview-full"
-                src={fullSizePreview.url}
+                src={visibleFullSizePreview.url}
                 alt={part.alt || t('acp.image')}
                 className="max-h-full max-w-full object-contain"
               />
             )}
-            {part.attachmentFileRef && fullSizePreview.status === 'error' && (
+            {part.attachmentFileRef && visibleFullSizePreview.status === 'error' && (
               <p className="text-sm text-destructive">{t('acp.imagePreviewFailed')}</p>
             )}
             {!part.attachmentFileRef && (

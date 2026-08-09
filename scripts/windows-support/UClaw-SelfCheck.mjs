@@ -19,6 +19,7 @@ const PACKAGED_PLUGINS = [
   { pluginId: 'qqbot', manifestId: 'qqbot', packageNames: ['@openclaw/qqbot'] },
   { pluginId: 'whatsapp', manifestId: 'whatsapp', packageNames: ['@openclaw/whatsapp'] },
   { pluginId: 'openclaw-weixin', manifestId: 'openclaw-weixin', packageNames: ['@tencent-weixin/openclaw-weixin'] },
+  { pluginId: 'parallel', manifestId: 'parallel', packageNames: ['@openclaw/parallel-plugin'] },
   ...[
     'clawx-openai-image',
     'uclaw-local-artifacts',
@@ -726,8 +727,8 @@ async function main() {
     'resources/cli/openclaw.cmd',
     'resources/openclaw/openclaw.mjs',
     'resources/openclaw/package.json',
-    'resources/blender/runtime/uclaw_scene_runner.py',
-    'resources/blender/runtime/scene-spec.schema.json',
+    'resources/resources/blender/runtime/uclaw_scene_runner.py',
+    'resources/resources/blender/runtime/scene-spec.schema.json',
     'resources/app.asar.unpacked/node_modules/sharp/package.json',
     'resources/app.asar.unpacked/node_modules/@img/sharp-win32-x64/package.json',
     'resources/app.asar.unpacked/node_modules/@img/sharp-win32-x64/lib/sharp-win32-x64.node',

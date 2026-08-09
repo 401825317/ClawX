@@ -202,8 +202,9 @@ pnpm dev
 
 在 UClaw 托管分发中，继续运行时设置前还必须登录或注册 UClaw，并完成当前设备授权。
 
-> Moonshot（Kimi）说明：ClawX 默认保持开启 Kimi 的 web search。  
-> 当配置 Moonshot 后，ClawX 也会将 OpenClaw 配置中的 Kimi web search 同步到中国区端点（`https://api.moonshot.cn/v1`）。
+> 网络搜索：UClaw 默认启用官方 Parallel Search 插件的免密搜索能力，无需配置 API Key。
+>
+> 配置 Moonshot 后，UClaw 仍会将其网络搜索设置同步到中国区端点（`https://api.moonshot.cn/v1`）；普通网络搜索继续默认使用 Parallel Search。
 
 ### 代理设置
 

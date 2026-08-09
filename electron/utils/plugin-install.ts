@@ -2,7 +2,7 @@
  * Shared OpenClaw Plugin Install Utilities
  *
  * Provides version-aware install/upgrade logic for bundled OpenClaw plugins
- * (DingTalk, WeCom, Feishu, WeChat, Discord, QQBot, WhatsApp).  Used both at app startup (to auto-upgrade
+ * (DingTalk, WeCom, Feishu, WeChat, Discord, QQBot, WhatsApp, Parallel Search). Used both at app startup (to auto-upgrade
  * stale plugins) and when a user configures a channel.
  */
 import { app } from 'electron';
@@ -326,10 +326,11 @@ const PLUGIN_NPM_NAMES: Record<string, string> = {
   whatsapp: '@openclaw/whatsapp',
 
   'openclaw-weixin': '@tencent-weixin/openclaw-weixin',
+  parallel: '@openclaw/parallel-plugin',
 };
 
 /**
- * Official @openclaw/* channel plugins that ClawX mirrors into
+ * Official @openclaw/* extension plugins that ClawX mirrors into
  * ~/.openclaw/extensions/. OpenClaw 2026.6+ requires matching
  * plugins.installs metadata so trustedOfficialInstall is true and
  * runtime APIs such as openKeyedStore are available.
@@ -338,6 +339,7 @@ const TRUSTED_OFFICIAL_EXTENSION_PLUGINS: Record<string, string> = {
   whatsapp: '@openclaw/whatsapp',
   discord: '@openclaw/discord',
   qqbot: '@openclaw/qqbot',
+  parallel: '@openclaw/parallel-plugin',
 };
 
 function getOpenClawExtensionsDir(): string {
@@ -1226,6 +1228,14 @@ export function ensureClawXOpenAiImagePluginInstalled(): { installed: boolean; w
   );
 }
 
+export function ensureParallelPluginInstalled(): { installed: boolean; warning?: string } {
+  return ensurePluginInstalled(
+    'parallel',
+    buildCandidateSources('parallel'),
+    'Parallel Search',
+  );
+}
+
 // ── Bulk startup installer ───────────────────────────────────────────────────
 
 /**
@@ -1240,6 +1250,7 @@ const ALL_BUNDLED_PLUGINS = [
   { fn: ensureDiscordPluginInstalled, label: 'Discord' },
   { fn: ensureQQBotPluginInstalled, label: 'QQBot' },
   { fn: ensureWhatsAppPluginInstalled, label: 'WhatsApp' },
+  { fn: ensureParallelPluginInstalled, label: 'Parallel Search' },
   { fn: ensureClawXOpenAiImagePluginInstalled, label: 'UClaw OpenAI Image' },
 ] as const;
 

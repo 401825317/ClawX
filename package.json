@@ -131,6 +131,7 @@
         "@larksuiteoapi/node-sdk": "^1.61.1",
         "@monaco-editor/react": "^4.7.0",
         "@openclaw/discord": "2026.6.10",
+        "@openclaw/parallel-plugin": "2026.6.10",
         "@openclaw/qqbot": "2026.6.10",
         "@openclaw/whatsapp": "2026.6.10",
         "@playwright/test": "^1.56.1",

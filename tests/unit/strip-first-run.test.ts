@@ -256,7 +256,11 @@ describe('ensureClawXContext', () => {
 
     expect(result).toBe('done');
     await expect(readFile(join(defaultWorkspace, 'AGENTS.md'), 'utf-8')).resolves.toContain('## ClawX Environment');
-    await expect(readFile(join(defaultWorkspace, 'TOOLS.md'), 'utf-8')).resolves.toContain('## ClawX Tool Notes');
+    const toolsContent = await readFile(join(defaultWorkspace, 'TOOLS.md'), 'utf-8');
+    expect(toolsContent).toContain('## ClawX Tool Notes');
+    expect(toolsContent).toContain('Use `web_search` for general web research');
+    expect(toolsContent).toContain('do not retry it repeatedly');
+    expect(toolsContent).not.toContain('When asked to search, look up, or interact with a web page, use the browser tool');
     await expect(access(join(agentWorkspace, 'AGENTS.md'))).rejects.toThrow();
     await expect(access(join(agentWorkspace, 'TOOLS.md'))).rejects.toThrow();
   });

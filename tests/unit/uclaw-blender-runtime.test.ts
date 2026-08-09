@@ -73,7 +73,7 @@ describe('uclaw-blender packaged runtime', () => {
     });
   });
 
-  it('makes the Blender runtime mandatory in Windows USB checks', () => {
+  it('checks the Blender runtime at its Electron packaged path', () => {
     const root = process.cwd();
     const usbBuilder = readFileSync(resolve(root, 'scripts/build-usb-release.mjs'), 'utf8');
     const selfCheck = readFileSync(
@@ -81,11 +81,18 @@ describe('uclaw-blender packaged runtime', () => {
       'utf8',
     );
     for (const relativePath of [
-      'resources/blender/runtime/uclaw_scene_runner.py',
-      'resources/blender/runtime/scene-spec.schema.json',
+      'resources/resources/blender/runtime/uclaw_scene_runner.py',
+      'resources/resources/blender/runtime/scene-spec.schema.json',
     ]) {
       expect(usbBuilder).toContain(relativePath);
       expect(selfCheck).toContain(relativePath);
+    }
+    for (const stalePath of [
+      "'resources/blender/runtime/uclaw_scene_runner.py'",
+      "'resources/blender/runtime/scene-spec.schema.json'",
+    ]) {
+      expect(usbBuilder).not.toContain(stalePath);
+      expect(selfCheck).not.toContain(stalePath);
     }
     expect(selfCheck).toContain("'uclaw-local-artifacts'");
     expect(selfCheck).toContain("'uclaw-blender'");

@@ -73,9 +73,7 @@ const RETIRED_UCLAW_PLUGIN_IDS = [
   'uclaw-desktop-control',
   'uclaw-task-bridge',
   'uclaw-video-project',
-  'parallel',
 ] as const;
-const RETIRED_PARALLEL_SEARCH_PROVIDER_IDS = new Set(['parallel', 'parallel-free']);
 const RETIRED_PLUGIN_REMOVE_MAX_RETRIES = process.platform === 'win32' ? 10 : 3;
 
 interface BundledPluginManifest {
@@ -1414,21 +1412,6 @@ function removeRetiredUclawPluginConfig(config: Record<string, unknown>): boolea
   return modified;
 }
 
-/** Remove obsolete Parallel Search configuration now that its plugin is no longer shipped. */
-function removeRetiredParallelSearchConfig(config: Record<string, unknown>): boolean {
-  if (!isPlainRecord(config.tools) || !isPlainRecord(config.tools.web) || !isPlainRecord(config.tools.web.search)) {
-    return false;
-  }
-  const search = config.tools.web.search;
-  if (typeof search.provider !== 'string' || !RETIRED_PARALLEL_SEARCH_PROVIDER_IDS.has(search.provider)) {
-    return false;
-  }
-
-  delete config.tools.web.search;
-  if (Object.keys(config.tools.web).length === 0) delete config.tools.web;
-  return true;
-}
-
 /** Remove master-only UClaw plugins before OpenClaw can auto-discover local extensions. */
 async function retireMasterOnlyUclawPlugins(config: Record<string, unknown>): Promise<boolean> {
   const extensionsRoot = join(resolveOpenClawStateDir(), 'extensions');
@@ -1474,9 +1457,7 @@ async function retireMasterOnlyUclawPlugins(config: Record<string, unknown>): Pr
     console.log(`[sanitize] Removed retired UClaw plugin: ${pluginId}`);
   }
 
-  const removedPluginConfig = removeRetiredUclawPluginConfig(config);
-  const removedParallelSearchConfig = removeRetiredParallelSearchConfig(config);
-  return removedPluginConfig || removedParallelSearchConfig;
+  return removeRetiredUclawPluginConfig(config);
 }
 
 function normalizeAgentsDefaultsCompactionMode(config: Record<string, unknown>): void {
@@ -3258,12 +3239,13 @@ export async function syncBrowserConfigToOpenClaw(): Promise<void> {
     }
 
     changed = ensureWebFetchSsrfPolicyInConfig(config) || changed;
+    changed = ensureFreeWebSearchProviderInConfig(config) || changed;
 
     if (!changed) return;
 
     config.browser = browser;
     await writeOpenClawJson(config);
-    console.log('Synced browser and web_fetch config to openclaw.json');
+    console.log('Synced browser, web_fetch, and web_search config to openclaw.json');
   });
 }
 
@@ -3380,6 +3362,12 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
       modified = true;
     }
 
+    // Default to the official key-free search provider and migrate DuckDuckGo state.
+    if (ensureFreeWebSearchProviderInConfig(config)) {
+      modified = true;
+      console.log('[batch-sync] Enabled key-free Parallel web search');
+    }
+
     // Remove the Tool Search directory defaults seeded by older ClawX builds.
     if (disableLegacyClawXToolSearchDefault(config)) {
       modified = true;
@@ -3448,7 +3436,7 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
 
     if (modified) {
       await writeOpenClawJson(config);
-      console.log('Synced gateway token, browser config, web_fetch SSRF policy, and session idle to openclaw.json');
+      console.log('Synced gateway token, browser config, web_fetch/web_search config, and session idle to openclaw.json');
     }
   });
 }
@@ -3870,6 +3858,10 @@ export async function updateSingleAgentModelProvider(
  */
 const SKILL_WORKSHOP_TOOL_DENY_ENTRY = 'skill_workshop';
 const WEB_SEARCH_TOOL_DENY_ENTRY = 'web_search';
+const FREE_WEB_SEARCH_PROVIDER_ID = 'parallel-free';
+const LEGACY_DUCKDUCKGO_SEARCH_PLUGIN_ID = 'duckduckgo';
+const PARALLEL_SEARCH_PLUGIN_ID = 'parallel';
+const PARALLEL_WEB_SEARCH_PROVIDER_IDS = new Set(['parallel', 'parallel-free']);
 const SUBAGENT_TOOL_DENY_ENTRIES = [
   'sessions_spawn',
   'sessions_yield',
@@ -3906,6 +3898,52 @@ function ensureToolDenyIncludesAll(
     modified ||= result.modified;
   }
   return { deny: current, modified };
+}
+
+/** Remove a previously managed denial without disturbing other tool policy. */
+function removeToolDenyEntry(
+  deny: string[],
+  entry: string,
+): { deny: string[]; modified: boolean } {
+  const normalizedEntry = entry.toLowerCase();
+  const next = deny.filter((candidate) => candidate.toLowerCase() !== normalizedEntry);
+  return { deny: next, modified: next.length !== deny.length };
+}
+
+/** Configure the official key-free Parallel Search provider without overriding explicit alternatives. */
+function ensureFreeWebSearchProviderInConfig(config: Record<string, unknown>): boolean {
+  const tools = isPlainRecord(config.tools) ? config.tools : {};
+  const web = isPlainRecord(tools.web) ? tools.web : {};
+  const search = isPlainRecord(web.search) ? web.search : {};
+  const provider = typeof search.provider === 'string' ? search.provider.trim() : '';
+  let modified = false;
+
+  if (search.enabled === false) {
+    return false;
+  }
+
+  const shouldMigrateDuckDuckGo = provider === LEGACY_DUCKDUCKGO_SEARCH_PLUGIN_ID;
+  if (provider && !PARALLEL_WEB_SEARCH_PROVIDER_IDS.has(provider) && !shouldMigrateDuckDuckGo) {
+    return false;
+  }
+
+  if (!provider || shouldMigrateDuckDuckGo) {
+    search.provider = FREE_WEB_SEARCH_PROVIDER_ID;
+    web.search = search;
+    tools.web = web;
+    config.tools = tools;
+    modified = true;
+  }
+
+  if (ensurePluginRegistrationEnabled(config, PARALLEL_SEARCH_PLUGIN_ID)) {
+    modified = true;
+  }
+  if (shouldMigrateDuckDuckGo
+    && removePluginRegistrations(config, [LEGACY_DUCKDUCKGO_SEARCH_PLUGIN_ID])) {
+    modified = true;
+  }
+
+  return modified;
 }
 
 export async function sanitizeOpenClawConfig(): Promise<void> {
@@ -4098,6 +4136,12 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       }
     }
 
+    // UClaw uses the official key-free Parallel provider for general web search.
+    if (ensureFreeWebSearchProviderInConfig(config)) {
+      modified = true;
+      console.log('[sanitize] Enabled key-free Parallel web search for UClaw desktop');
+    }
+
     // ── tools.profile & sessions.visibility ───────────────────────
     // OpenClaw 3.8+ requires tools.profile = 'full' and tools.sessions.visibility = 'all'
     // for ClawX to properly integrate with its updated tool system.
@@ -4129,8 +4173,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       subagentDenyResult.deny,
       SKILL_WORKSHOP_TOOL_DENY_ENTRY,
     );
-    // This release ships without a usable web-search provider, so keep it out of model tool lists.
-    const denyResult = ensureToolDenyIncludes(
+    const denyResult = removeToolDenyEntry(
       workshopDenyResult.deny,
       WEB_SEARCH_TOOL_DENY_ENTRY,
     );
@@ -4144,7 +4187,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
         console.log('[sanitize] Added "skill_workshop" to tools.deny for ClawX desktop');
       }
       if (denyResult.modified) {
-        console.log('[sanitize] Added "web_search" to tools.deny for ClawX desktop');
+        console.log('[sanitize] Removed legacy "web_search" from tools.deny for UClaw desktop');
       }
     } else if (!Array.isArray(toolsConfig.deny) || toolsConfig.deny.length !== denyResult.deny.length) {
       toolsConfig.deny = denyResult.deny;
@@ -4208,8 +4251,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       gatewaySubagentDenyResult.deny,
       SKILL_WORKSHOP_TOOL_DENY_ENTRY,
     );
-    // Also reject direct Gateway tool invocations outside the model turn.
-    const gatewayDenyResult = ensureToolDenyIncludes(
+    const gatewayDenyResult = removeToolDenyEntry(
       gatewayWorkshopDenyResult.deny,
       WEB_SEARCH_TOOL_DENY_ENTRY,
     );
@@ -4225,7 +4267,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
         console.log('[sanitize] Added "skill_workshop" to gateway.tools.deny for ClawX desktop');
       }
       if (gatewayDenyResult.modified) {
-        console.log('[sanitize] Added "web_search" to gateway.tools.deny for ClawX desktop');
+        console.log('[sanitize] Removed legacy "web_search" from gateway.tools.deny for UClaw desktop');
       }
     } else if (!Array.isArray(gatewayTools.deny) || gatewayTools.deny.length !== gatewayDenyResult.deny.length) {
       gatewayTools.deny = gatewayDenyResult.deny;
@@ -4287,8 +4329,9 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     // Normalize feishu plugin ids dynamically based on installed manifest.
     // Different environments may report either "openclaw-lark" or
     // "feishu-openclaw-plugin" as the runtime plugin id.
-    if (typeof plugins === 'object' && !Array.isArray(plugins)) {
-      const pluginsObj = plugins as Record<string, unknown>;
+    const currentPlugins = config.plugins;
+    if (typeof currentPlugins === 'object' && !Array.isArray(currentPlugins)) {
+      const pluginsObj = currentPlugins as Record<string, unknown>;
       const pEntries = (
         pluginsObj.entries && typeof pluginsObj.entries === 'object' && !Array.isArray(pluginsObj.entries)
           ? pluginsObj.entries

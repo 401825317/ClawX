@@ -364,10 +364,8 @@ export function preparePortableRuntimeState(layout: PortableRuntimeLayout): void
   if (preservedStatePath && (!restoredV2 || !shouldApplyPortableSnapshot(marker, restoredV2.manifest))) {
     rmSync(layout.stateDir, { recursive: true, force: true });
     renameSync(preservedStatePath, layout.stateDir);
-    preservedStatePath = undefined;
   } else if (preservedStatePath && marker?.lifecycle === 'clean') {
     rmSync(preservedStatePath, { recursive: true, force: true });
-    preservedStatePath = undefined;
   }
 
   if (!restoredV2 && stateIsEmpty) {

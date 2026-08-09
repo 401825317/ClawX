@@ -87,6 +87,9 @@ importers:
       '@openclaw/discord':
         specifier: 2026.6.10
         version: 2026.6.10(openclaw@2026.6.10(encoding@0.1.13))
+      '@openclaw/parallel-plugin':
+        specifier: 2026.6.10
+        version: 2026.6.10(openclaw@2026.6.10(encoding@0.1.13))
       '@openclaw/qqbot':
         specifier: 2026.6.10
         version: 2026.6.10(openclaw@2026.6.10(encoding@0.1.13))
@@ -1490,6 +1493,14 @@ packages:
   '@openclaw/fs-safe@0.3.0':
     resolution: {integrity: sha512-uIBE441CIt1kIURoP9qRGKZ8LkGyfD9ZzeESjwAd29ZPWtghws/5GR3Pjb67jKdcJHP1I6roNXcvnhzAU7lHlA==}
     engines: {node: '>=20.11'}
+
+  '@openclaw/parallel-plugin@2026.6.10':
+    resolution: {integrity: sha512-9XMEIFqzh98Q7R+MdGQTK6V91oaxHFJ4djuasILhIo2fHFDX1N3oWrQMhM7W+jjThDA2VsisOziLNTIHIBfeIA==}
+    peerDependencies:
+      openclaw: '>=2026.6.10'
+    peerDependenciesMeta:
+      openclaw:
+        optional: true
 
   '@openclaw/proxyline@0.3.3':
     resolution: {integrity: sha512-sftHnW69NHQqLjCxBTvQ8f/eQl+peZ5pHCBQtuTWBbeuYRHZ0/GXVTmw/O/YKsShMbqPWhJB0UYtPPdvCUSS8w==}
@@ -7779,6 +7790,10 @@ snapshots:
     optionalDependencies:
       jszip: 3.10.1
       tar: 7.5.13
+
+  '@openclaw/parallel-plugin@2026.6.10(openclaw@2026.6.10(encoding@0.1.13))':
+    optionalDependencies:
+      openclaw: 2026.6.10(encoding@0.1.13)
 
   '@openclaw/proxyline@0.3.3(undici@8.5.0)':
     dependencies:

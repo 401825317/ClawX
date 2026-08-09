@@ -390,4 +390,51 @@ describe('plugin installer diagnostics', () => {
       'utf-8',
     );
   });
+
+  it('writes trusted install metadata for the mirrored official Parallel plugin', async () => {
+    const configPath = '/home/test/.openclaw/openclaw.json';
+    const targetDir = '/home/test/.openclaw/extensions/parallel';
+    const sourceDir = '/bundle/parallel';
+
+    mockExistsSync.mockImplementation((input: string) => {
+      const value = String(input);
+      return value.includes('openclaw.plugin.json')
+        || value.endsWith('/dist/index.js')
+        || value === configPath
+        || value.includes('/bundle/parallel/package.json')
+        || value.includes(`${targetDir}/package.json`);
+    });
+    mockReadFileSync.mockImplementation((input: string) => {
+      if (String(input) === configPath) {
+        return JSON.stringify({
+          plugins: {
+            allow: ['parallel'],
+            enabled: true,
+          },
+        });
+      }
+      if (String(input).endsWith('package.json')) {
+        return JSON.stringify({
+          name: '@openclaw/parallel-plugin',
+          version: '2026.6.10',
+          type: 'module',
+          openclaw: { runtimeExtensions: ['./dist/index.js'] },
+        });
+      }
+      if (String(input).endsWith('openclaw.plugin.json')) return JSON.stringify({ id: 'parallel' });
+      if (String(input).endsWith('dist/index.js')) return 'export default {}';
+      return '{}';
+    });
+    mockRealpathSync.mockImplementation((input: string) => input);
+
+    const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
+    const result = ensurePluginInstalled('parallel', [sourceDir], 'Parallel Search');
+
+    expect(result.installed).toBe(true);
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      configPath,
+      expect.stringContaining('"resolvedName": "@openclaw/parallel-plugin"'),
+      'utf-8',
+    );
+  });
 });

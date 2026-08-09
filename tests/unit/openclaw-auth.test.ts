@@ -54,7 +54,6 @@ const CLAWX_DESKTOP_TOOL_DENY = [
   'sessions_yield',
   'subagents',
   'skill_workshop',
-  'web_search',
 ];
 
 async function writeOpenClawJson(config: unknown): Promise<void> {
@@ -1042,9 +1041,9 @@ describe('sanitizeOpenClawConfig', () => {
     await mkdir(openclawDir, { recursive: true });
     const configPath = join(openclawDir, 'openclaw.json');
     await writeFile(configPath, 'NOT VALID JSON {{{', 'utf8');
-    const retiredPluginPath = join(openclawDir, 'extensions', 'parallel');
-    await mkdir(retiredPluginPath, { recursive: true });
-    await writeFile(join(retiredPluginPath, 'openclaw.plugin.json'), '{"id":"parallel"}', 'utf8');
+    const parallelPluginPath = join(openclawDir, 'extensions', 'parallel');
+    await mkdir(parallelPluginPath, { recursive: true });
+    await writeFile(join(parallelPluginPath, 'openclaw.plugin.json'), '{"id":"parallel"}', 'utf8');
     const before = await readFile(configPath, 'utf8');
 
     const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
@@ -1055,7 +1054,7 @@ describe('sanitizeOpenClawConfig', () => {
     const after = await readFile(configPath, 'utf8');
     // Corrupt file must not be overwritten
     expect(after).toBe(before);
-    await expect(readFile(join(retiredPluginPath, 'openclaw.plugin.json'), 'utf8')).rejects.toThrow();
+    await expect(readFile(join(parallelPluginPath, 'openclaw.plugin.json'), 'utf8')).resolves.toContain('parallel');
 
     logSpy.mockRestore();
   });
@@ -1063,6 +1062,16 @@ describe('sanitizeOpenClawConfig', () => {
   it('properly sanitizes a genuinely empty {} config (fresh install)', async () => {
     // A fresh install with {} is a valid config — sanitize should proceed
     // and enforce tools.profile, commands.restart, etc.
+    const bundledExtensionsDir = join(testHome, '.openclaw-test-openclaw', 'dist', 'extensions');
+    for (const pluginId of ['browser', 'acpx', 'memory-core']) {
+      const pluginDir = join(bundledExtensionsDir, pluginId);
+      await mkdir(pluginDir, { recursive: true });
+      await writeFile(
+        join(pluginDir, 'openclaw.plugin.json'),
+        JSON.stringify({ id: pluginId }, null, 2),
+        'utf8',
+      );
+    }
     await writeOpenClawJson({});
 
     const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
@@ -1076,9 +1085,19 @@ describe('sanitizeOpenClawConfig', () => {
     const tools = result.tools as Record<string, unknown>;
     expect(tools.profile).toBe('full');
     expect(tools.deny).toEqual(CLAWX_DESKTOP_TOOL_DENY);
+    const web = tools.web as Record<string, unknown>;
+    expect(web.search).toEqual({ provider: 'parallel-free' });
     const gateway = result.gateway as Record<string, unknown>;
     const gatewayTools = gateway.tools as Record<string, unknown>;
     expect(gatewayTools.deny).toEqual(CLAWX_DESKTOP_TOOL_DENY);
+    const plugins = result.plugins as Record<string, unknown>;
+    expect(plugins.allow).toEqual(expect.arrayContaining([
+      'browser',
+      'acpx',
+      'memory-core',
+      'parallel',
+    ]));
+    expect((plugins.entries as Record<string, unknown>).parallel).toEqual({ enabled: true });
     const skills = result.skills as Record<string, unknown>;
     const workshop = skills.workshop as Record<string, unknown>;
     const autonomous = workshop.autonomous as Record<string, unknown>;
@@ -1163,6 +1182,50 @@ describe('sanitizeOpenClawConfig', () => {
       'computer',
       ...CLAWX_DESKTOP_TOOL_DENY,
     ]);
+  });
+
+  it('migrates the previous UClaw web search denial and DuckDuckGo provider to Parallel Search', async () => {
+    await writeOpenClawJson({
+      gateway: {
+        tools: {
+          deny: ['computer', 'web_search'],
+        },
+      },
+      plugins: {
+        allow: ['custom-plugin', 'duckduckgo'],
+        entries: {
+          'custom-plugin': { enabled: true },
+          duckduckgo: { enabled: true },
+        },
+      },
+      tools: {
+        deny: ['browser', 'web_search'],
+        web: {
+          search: { provider: 'duckduckgo' },
+        },
+      },
+    });
+
+    const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
+    await sanitizeOpenClawConfig();
+
+    const result = await readOpenClawJson();
+    const tools = result.tools as Record<string, unknown>;
+    expect(tools.deny).toEqual(['browser', ...CLAWX_DESKTOP_TOOL_DENY]);
+    expect((tools.web as Record<string, unknown>).search).toEqual({ provider: 'parallel-free' });
+
+    const gateway = result.gateway as Record<string, unknown>;
+    expect((gateway.tools as Record<string, unknown>).deny).toEqual([
+      'computer',
+      ...CLAWX_DESKTOP_TOOL_DENY,
+    ]);
+
+    const plugins = result.plugins as Record<string, unknown>;
+    expect(plugins.allow).toEqual(expect.arrayContaining(['custom-plugin', 'parallel']));
+    expect(plugins.allow).not.toContain('duckduckgo');
+    expect((plugins.entries as Record<string, unknown>).parallel).toEqual({ enabled: true });
+    expect((plugins.entries as Record<string, unknown>).duckduckgo).toBeUndefined();
+    expect((plugins.entries as Record<string, unknown>)['custom-plugin']).toEqual({ enabled: true });
   });
 
   it('trusts the configured ClawX image relay during prelaunch without dropping other allowlist entries', async () => {
@@ -1425,9 +1488,10 @@ describe('sanitizeOpenClawConfig', () => {
     const allow = plugins.allow as string[];
     const entries = plugins.entries as Record<string, Record<string, unknown>>;
 
-    expect(allow).toEqual(['custom-plugin']);
+    expect(allow).toEqual(['custom-plugin', 'parallel']);
     expect(entries['minimax-portal-auth']).toBeUndefined();
     expect(entries['custom-plugin']).toEqual({ enabled: true });
+    expect(entries.parallel).toEqual({ enabled: true });
   });
 
   it('removes stale bundled OpenClaw dist extension paths from plugins.load.paths', async () => {
@@ -1490,8 +1554,9 @@ describe('sanitizeOpenClawConfig', () => {
     const plugins = result.plugins as Record<string, unknown>;
     const allow = plugins.allow as string[];
 
-    expect(allow).toEqual(['custom-installed', 'configured-plugin']);
+    expect(allow).toEqual(['custom-installed', 'configured-plugin', 'parallel']);
     expect((plugins.entries as Record<string, unknown>)['configured-plugin']).toEqual({ enabled: true });
+    expect((plugins.entries as Record<string, unknown>).parallel).toEqual({ enabled: true });
   });
 
   it('retires obsolete UClaw plugins while preserving restored artifact plugins', async () => {
@@ -1500,9 +1565,8 @@ describe('sanitizeOpenClawConfig', () => {
       'uclaw-desktop-control',
       'uclaw-task-bridge',
       'uclaw-video-project',
-      'parallel',
     ];
-    const restoredPluginIds = ['uclaw-local-artifacts', 'uclaw-blender'];
+    const restoredPluginIds = ['uclaw-local-artifacts', 'uclaw-blender', 'parallel'];
     const allUclawPluginIds = [...retiredPluginIds, ...restoredPluginIds];
     const extensionsRoot = join(testHome, '.openclaw', 'extensions');
     const retiredPluginPaths = retiredPluginIds.map((pluginId) => join(extensionsRoot, pluginId));
@@ -1565,15 +1629,19 @@ describe('sanitizeOpenClawConfig', () => {
     expect(plugins.entries).toEqual({
       'uclaw-local-artifacts': { enabled: true },
       'uclaw-blender': { enabled: true },
+      parallel: { enabled: true },
       'custom-installed': { enabled: true },
     });
     expect(plugins.installs).toEqual({
       'uclaw-local-artifacts': { source: 'legacy' },
       'uclaw-blender': { source: 'legacy' },
+      parallel: { source: 'legacy' },
       'custom-installed': { source: 'user' },
     });
     expect(plugins.load).toEqual({ paths: [...restoredPluginPaths, customPluginPath] });
-    expect((result.tools as Record<string, unknown>).web).toBeUndefined();
+    expect((result.tools as Record<string, unknown>).web).toEqual({
+      search: { provider: 'parallel-free' },
+    });
   });
 
   it('preserves allowlisted plugins loaded from local plugin paths', async () => {
@@ -1601,7 +1669,7 @@ describe('sanitizeOpenClawConfig', () => {
     const allow = plugins.allow as string[];
     const load = plugins.load as Record<string, unknown>;
 
-    expect(allow).toEqual(['custom-loaded']);
+    expect(allow).toEqual(['custom-loaded', 'parallel']);
     expect(load.paths).toEqual([loadedPluginDir]);
   });
 
@@ -2410,9 +2478,10 @@ describe('auth-backed provider discovery', () => {
     const allow = plugins.allow as string[];
     const entries = plugins.entries as Record<string, Record<string, unknown>>;
 
-    expect(allow).toEqual(['custom-plugin']);
+    expect(allow).toEqual(['custom-plugin', 'parallel']);
     expect(entries['minimax-portal-auth']).toBeUndefined();
     expect(entries['custom-plugin']).toEqual({ enabled: true });
+    expect(entries.parallel).toEqual({ enabled: true });
   });
 });
 
@@ -3645,7 +3714,7 @@ describe('batchSyncConfigFields', () => {
     await rm(testUserData, { recursive: true, force: true });
   });
 
-  it('enables the restored document and Blender runtime plugins', async () => {
+  it('enables Parallel Search and the restored document and Blender runtime plugins', async () => {
     await writeOpenClawJson({
       plugins: {
         allow: ['custom-installed'],
@@ -3660,14 +3729,42 @@ describe('batchSyncConfigFields', () => {
     const plugins = config.plugins as Record<string, unknown>;
     expect(plugins.allow).toEqual([
       'custom-installed',
+      'parallel',
       'uclaw-local-artifacts',
       'uclaw-blender',
     ]);
     expect(plugins.entries).toEqual({
       'custom-installed': { enabled: true },
+      parallel: { enabled: true },
       'uclaw-local-artifacts': { enabled: true },
       'uclaw-blender': { enabled: true },
     });
+  });
+
+  it('migrates DuckDuckGo to the key-free Parallel provider during prelaunch sync', async () => {
+    await writeOpenClawJson({
+      tools: {
+        web: {
+          search: { provider: 'duckduckgo' },
+        },
+      },
+      plugins: {
+        allow: ['duckduckgo'],
+        entries: { duckduckgo: { enabled: true } },
+      },
+    });
+
+    const { batchSyncConfigFields } = await import('@electron/utils/openclaw-auth');
+    await batchSyncConfigFields('new-token');
+
+    const config = await readOpenClawJson();
+    const tools = config.tools as Record<string, unknown>;
+    expect((tools.web as Record<string, unknown>).search).toEqual({ provider: 'parallel-free' });
+    const plugins = config.plugins as Record<string, unknown>;
+    expect(plugins.allow).toEqual(expect.arrayContaining(['parallel']));
+    expect(plugins.allow).not.toContain('duckduckgo');
+    expect((plugins.entries as Record<string, unknown>).parallel).toEqual({ enabled: true });
+    expect((plugins.entries as Record<string, unknown>).duckduckgo).toBeUndefined();
   });
 
   it('seeds web_fetch SSRF policy for fake-IP proxy environments', async () => {

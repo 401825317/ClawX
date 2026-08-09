@@ -10,8 +10,13 @@ ownedPaths:
   - electron/gateway/skills-symlink-cleanup.ts
   - electron/services/skills-api.ts
   - src/stores/skills.ts
+  - resources/context/**
   - resources/skills/**
+  - README.md
+  - README.zh-CN.md
+  - README.ja-JP.md
   - tests/unit/openclaw-auth.test.ts
+  - tests/unit/strip-first-run.test.ts
   - tests/unit/channel-config.test.ts
   - tests/unit/plugin-install.test.ts
   - tests/unit/harness-specs.test.ts
@@ -52,6 +57,7 @@ Lifecycle stages:
 - Materialize: ClawX installs, upgrades, copies, links, or verifies the physical package selected by resolution.
 - Validate: ClawX verifies package manifests, dependencies, capability config, ownership uniqueness, and startup requirements.
 - Activate: only resolved and validated capabilities enter final OpenClaw runtime config.
+- Tool provider activation: selecting a managed provider must align the tool selector, enabled plugin entry, and restrictive allowlist; migrations remove only the exact retired deny entry and preserve unrelated tool policy.
 - Recover: failed upgrades, stale registrations, conflicts, and removed channels converge to a single diagnosable state with rollback or cleanup paths.
 - Package: cleanup and pruning keep packaged artifacts small without deleting target runtime assets; macOS universal packages keep both x64 and arm64 native payloads.
 

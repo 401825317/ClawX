@@ -201,8 +201,9 @@ The wizard preselects your system language when it is supported, and falls back 
 
 In UClaw managed distributions, the wizard also requires UClaw sign-in or registration and authorization for the current device before runtime setup can continue.
 
-> Note for Moonshot (Kimi): ClawX keeps Kimi web search enabled by default.  
-> When Moonshot is configured, ClawX also syncs Kimi web search to the China endpoint (`https://api.moonshot.cn/v1`) in OpenClaw config.
+> Web search: UClaw enables the official Parallel Search plugin's key-free provider by default.
+>
+> When Moonshot is configured, UClaw also syncs its web-search settings to the China endpoint (`https://api.moonshot.cn/v1`); Parallel Search remains the default provider for general web search.
 
 ### Proxy Settings
 

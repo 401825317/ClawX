@@ -40,6 +40,7 @@ import { prependPathEntry } from '../utils/env-path';
 import {
   buildCandidateSources,
   cleanupStalePluginInstallArtifacts,
+  ensureParallelPluginInstalled,
   ensurePluginInstalled,
   findBestBundledPluginSource,
   findMissingPluginRuntimeDependencies,
@@ -113,6 +114,23 @@ const CHANNEL_PLUGIN_MAP: Record<string, { dirName: string; npmName: string }> =
   'uclaw-blender': { dirName: 'uclaw-blender', npmName: 'uclaw-blender-plugin' },
   [UCLAW_VIDEO_PROVIDER_ID]: { dirName: UCLAW_VIDEO_PROVIDER_ID, npmName: 'uclaw-video-plugin' },
 };
+
+const PARALLEL_WEB_SEARCH_PROVIDERS = new Set(['parallel', 'parallel-free']);
+
+/** Check whether the current web search selection needs the Parallel plugin runtime. */
+function isParallelWebSearchConfigured(config: unknown): boolean {
+  if (!config || typeof config !== 'object') return false;
+  const tools = (config as { tools?: unknown }).tools;
+  if (!tools || typeof tools !== 'object') return false;
+  const web = (tools as { web?: unknown }).web;
+  if (!web || typeof web !== 'object') return false;
+  const search = (web as { search?: unknown }).search;
+  if (!search || typeof search !== 'object') return false;
+  const provider = (search as { provider?: unknown }).provider;
+  return typeof provider === 'string'
+    && PARALLEL_WEB_SEARCH_PROVIDERS.has(provider.trim())
+    && (search as { enabled?: unknown }).enabled !== false;
+}
 
 /**
  * OpenClaw ships some channel plugins as bundled extensions under
@@ -449,6 +467,7 @@ export async function syncGatewayConfigBeforeLaunch(
   const timingsMs: Record<string, number> = {};
   const maintenance: GatewayPrelaunchSyncSummary['maintenance'] = {};
   let configuredChannels: string[] = [];
+  let shouldInstallParallelSearchPlugin = false;
 
   // Reset the extension-deps cache so that newly installed extensions
   // (e.g. user added a channel while the app was running) get their
@@ -527,6 +546,7 @@ export async function syncGatewayConfigBeforeLaunch(
   try {
     configuredChannels = await measureAsync(timingsMs, 'configuredChannelsMs', async () => {
       const rawCfg = await readOpenClawConfig();
+      shouldInstallParallelSearchPlugin = isParallelWebSearchConfigured(rawCfg);
       return withConfiguredMediaGenerationPlugins(
         await listConfiguredChannelsFromConfig(rawCfg),
         rawCfg,
@@ -558,6 +578,19 @@ export async function syncGatewayConfigBeforeLaunch(
     });
   } catch (err) {
     logger.warn('Failed to batch-sync config fields to openclaw.json:', err);
+  }
+
+  // Batch sync may seed parallel-free on a fresh profile, so resolve again afterwards.
+  try {
+    shouldInstallParallelSearchPlugin ||= isParallelWebSearchConfigured(await readOpenClawConfig());
+    if (shouldInstallParallelSearchPlugin) {
+      const result = measureSync(timingsMs, 'parallelPluginMaintenanceMs', ensureParallelPluginInstalled);
+      if (result.warning) {
+        logger.warn(`[plugin] Parallel Search: ${result.warning}`);
+      }
+    }
+  } catch (err) {
+    logger.warn('Failed to install Parallel Search plugin:', err);
   }
 
   return {

@@ -48,6 +48,7 @@ export const BUNDLED_OPENCLAW_PLUGINS = [
   { npmName: '@openclaw/qqbot', pluginId: 'qqbot', manifestId: 'qqbot' },
   { npmName: '@openclaw/whatsapp', pluginId: 'whatsapp', manifestId: 'whatsapp' },
   { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin', manifestId: 'openclaw-weixin' },
+  { npmName: '@openclaw/parallel-plugin', pluginId: 'parallel', manifestId: 'parallel' },
 ];
 
 /** Local UClaw plugins mirrored and copied into every packaged runtime. */

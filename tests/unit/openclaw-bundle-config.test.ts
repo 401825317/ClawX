@@ -9,6 +9,7 @@ describe('openclaw bundle config', () => {
     const {
       ELECTRON_MAIN_RUNTIME_PACKAGES,
       EXTRA_BUNDLED_PACKAGES,
+      BUNDLED_OPENCLAW_PLUGINS,
       LOCAL_OPENCLAW_PLUGIN_IDS,
     } = await import('../../scripts/openclaw-bundle-config.mjs');
 
@@ -39,11 +40,17 @@ describe('openclaw bundle config', () => {
       'uclaw-blender',
       'uclaw-video',
     ]);
+    expect(BUNDLED_OPENCLAW_PLUGINS).toContainEqual({
+      npmName: '@openclaw/parallel-plugin',
+      pluginId: 'parallel',
+      manifestId: 'parallel',
+    });
     const packageJson = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf8')) as {
       dependencies?: Record<string, string>;
       devDependencies?: Record<string, string>;
     };
     expect(packageJson.devDependencies?.acpx ?? packageJson.dependencies?.acpx).toBe('0.5.3');
+    expect(packageJson.devDependencies?.['@openclaw/parallel-plugin']).toBe('2026.6.10');
   });
 
   it('keeps externalized Electron main packages in production dependencies', () => {
@@ -122,5 +129,16 @@ describe('openclaw bundle config', () => {
 
     expect(writtenSchema).toBe(2);
     expect(writtenSchema).toBe(requiredSchema);
+  });
+
+  it('requires the Parallel plugin in the Windows USB self-check', () => {
+    const selfCheckSource = readFileSync(
+      resolve(process.cwd(), 'scripts/windows-support/UClaw-SelfCheck.mjs'),
+      'utf8',
+    );
+
+    expect(selfCheckSource).toContain(
+      "{ pluginId: 'parallel', manifestId: 'parallel', packageNames: ['@openclaw/parallel-plugin'] }",
+    );
   });
 });
