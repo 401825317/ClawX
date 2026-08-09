@@ -126,6 +126,86 @@ describe('OpenClaw MEDIA transcript extraction', () => {
     expect(turn?.candidates.every((candidate) => candidate.transcriptMessageId === 'assistant-files')).toBe(true);
   });
 
+  it('extracts media before removing its directive from the visible final text', () => {
+    const [turn] = extract(transcript(
+      { role: 'user', content: '生成视频' },
+      {
+        role: 'assistant',
+        id: 'assistant-video',
+        content: '视频已生成。\n\nMEDIA:C:\\Users\\Tester\\Videos\\result.mp4',
+      },
+    ));
+
+    expect(turn?.candidates).toMatchObject([{
+      uri: 'C:\\Users\\Tester\\Videos\\result.mp4',
+      transcriptMessageId: 'assistant-video',
+    }]);
+    expect(turn?.finalAssistant).toEqual({
+      text: '视频已生成。',
+      transcriptMessageId: 'assistant-video',
+    });
+  });
+
+  it('does not let a gateway-injected media mirror replace the model final text', () => {
+    const [turn] = extract(transcript(
+      { role: 'user', content: '生成视频' },
+      {
+        role: 'assistant',
+        id: 'model-video',
+        provider: 'openai',
+        model: 'smart-latest',
+        content: '模型最终回复。\n\nMEDIA:C:\\Users\\Tester\\Videos\\model.mp4',
+      },
+      {
+        role: 'assistant',
+        id: 'gateway-video-mirror',
+        provider: 'openclaw',
+        model: 'gateway-injected',
+        content: '网关注入镜像。\n\nMEDIA:C:\\Users\\Tester\\Videos\\mirror.mp4',
+      },
+    ));
+
+    expect(turn?.candidates.map((candidate) => candidate.uri)).toEqual([
+      'C:\\Users\\Tester\\Videos\\model.mp4',
+      'C:\\Users\\Tester\\Videos\\mirror.mp4',
+    ]);
+    expect(turn?.finalAssistant).toEqual({
+      text: '模型最终回复。',
+      transcriptMessageId: 'model-video',
+    });
+  });
+
+  it('does not treat a failed media assistant record as successful final text', () => {
+    const [turn] = extract(transcript(
+      { role: 'user', content: '生成视频' },
+      {
+        role: 'assistant',
+        id: 'failed-video',
+        provider: 'openai',
+        model: 'smart-latest',
+        stopReason: 'error',
+        errorMessage: 'stream_read_error',
+        content: '视频生成失败。\n\nMEDIA:C:\\Users\\Tester\\Videos\\partial.mp4',
+      },
+    ));
+
+    expect(turn?.candidates).toMatchObject([{
+      uri: 'C:\\Users\\Tester\\Videos\\partial.mp4',
+      transcriptMessageId: 'failed-video',
+    }]);
+    expect(turn?.finalAssistant).toBeUndefined();
+  });
+
+  it('does not remove or settle malformed MEDIA-like prose', () => {
+    const [turn] = extract(transcript(
+      { role: 'user', content: '生成报告' },
+      { role: 'assistant', content: '请查看 MEDIA:C:\\Users\\Tester\\report.pdf' },
+    ));
+
+    expect(turn?.candidates).toEqual([]);
+    expect(turn?.finalAssistant).toBeUndefined();
+  });
+
   it('rejects fenced, wrapped, inline, unknown-scheme, malformed, and overlong references', () => {
     const tooLong = `/tmp/${'x'.repeat(4092)}`;
     const [turn] = extract(transcript(

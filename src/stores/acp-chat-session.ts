@@ -61,7 +61,13 @@ import {
 import { alignHistoricalTurnTimings, type AcpTurnTiming } from '@/lib/acp/turn-timings';
 import { hostApi } from '@/lib/host-api';
 import { hostEvents } from '@/lib/host-events';
-import type { AcpTimelineSnapshot, MessageSegmentItem, PermissionItem, RenderPart } from '@/lib/acp/timeline-types';
+import type {
+  AcpTimelineSnapshot,
+  MessageSegmentItem,
+  PermissionItem,
+  RenderPart,
+  TimelineItem,
+} from '@/lib/acp/timeline-types';
 
 const EMPTY_SESSION_ID = '';
 const CANCEL_PERMISSION_OPTION_ID = '__cancelled__';
@@ -1122,6 +1128,81 @@ function removeMessageSegmentItem(
   };
 }
 
+function assistantMarkdownText(item: MessageSegmentItem): string {
+  return item.parts
+    .flatMap((part) => part.kind === 'markdown' ? [part.text] : [])
+    .join('')
+    .trim();
+}
+
+/** Settles only a media Turn's trailing Assistant prefix from its persisted final reply. */
+function reconcileSuccessfulMediaAssistant(
+  timeline: AcpTimelineSnapshot,
+  userMessageId: string,
+  text: string,
+): AcpTimelineSnapshot {
+  const persistedText = text.trim();
+  if (!persistedText) return timeline;
+
+  const turnItems: Array<{ id: string; item: TimelineItem }> = [];
+  let insideTurn = false;
+  for (const itemId of timeline.itemOrder) {
+    const item = timeline.itemsById[itemId];
+    if (item?.kind === 'message-segment' && item.role === 'user') {
+      if (!insideTurn) {
+        insideTurn = item.messageId === userMessageId;
+        continue;
+      }
+      if (item.messageId !== userMessageId) break;
+    }
+    if (insideTurn && item) turnItems.push({ id: itemId, item });
+  }
+  if (turnItems.length === 0) return timeline;
+
+  let lastToolIndex = -1;
+  for (const [index, entry] of turnItems.entries()) {
+    if (entry.item.kind === 'tool-call') lastToolIndex = index;
+  }
+  const assistantItems = turnItems.flatMap((entry, index) => (
+    entry.item.kind === 'message-segment' && entry.item.role === 'assistant'
+      ? [{ id: entry.id, item: entry.item, index, text: assistantMarkdownText(entry.item) }]
+      : []
+  ));
+  const exact = assistantItems.find((entry) => entry.text === persistedText);
+  const target = assistantItems
+    .filter((entry) => !entry.item.compat && entry.index > lastToolIndex)
+    .at(-1);
+  const targetIsStrictPrefix = Boolean(
+    target
+    && target.text.length > 0
+    && target.text.length < persistedText.length
+    && persistedText.startsWith(target.text),
+  );
+
+  // A complete generated-image reply already owns the caption and media; remove only its trailing mirror.
+  if (exact) {
+    return target && targetIsStrictPrefix && target.index > exact.index
+      ? removeMessageSegmentItem(timeline, target.id)
+      : timeline;
+  }
+
+  if (!target || !targetIsStrictPrefix) return timeline;
+  const firstMarkdownIndex = target.item.parts.findIndex((part) => part.kind === 'markdown');
+  if (firstMarkdownIndex < 0) return timeline;
+  const parts: RenderPart[] = [];
+  for (const [index, part] of target.item.parts.entries()) {
+    if (part.kind !== 'markdown') parts.push(part);
+    else if (index === firstMarkdownIndex) parts.push({ kind: 'markdown', text: persistedText });
+  }
+  return {
+    ...timeline,
+    itemsById: {
+      ...timeline.itemsById,
+      [target.id]: { ...target.item, parts },
+    },
+  };
+}
+
 /** Removes the text-only mirror OpenClaw writes beside an authoritative image message. */
 function dedupeAcpImageCompletionMirrors(
   timeline: AcpTimelineSnapshot,
@@ -1772,6 +1853,15 @@ async function runTranscriptSupplement(operation: TranscriptSupplementOperation)
         candidate,
       );
       if (localVideoIdentity) localVideoIdentities.add(localVideoIdentity);
+    }
+    if (supplement.finalAssistant && isCurrent()) {
+      commitSessionTimeline(operation.sessionKey, operation.generation, (timeline) => (
+        reconcileSuccessfulMediaAssistant(
+          timeline,
+          supplement.acpTurnId,
+          supplement.finalAssistant!.text,
+        )
+      ), { retainForReplay: true });
     }
   }
   return localVideoIdentities.size;

@@ -5583,6 +5583,578 @@ describe('ACP Chat store', () => {
       .some((part) => part.kind === 'attachment')).toBe(false);
   });
 
+  it('removes a truncated image completion mirror after a later exec tool in the same turn', async () => {
+    const prompt = '做一个小猫的图片，做好直接打开';
+    const caption = '小猫图片已生成，并已在电脑上打开。';
+    const truncatedMirror = '小猫图片已生成，并已在';
+    const imagePath = 'C:\\Users\\Tester\\.openclaw\\media\\tool-image-generation\\kitten.png';
+    const gatewayUrl = '/api/chat/media/outgoing/agent%3Api%3As1/kitten/full';
+    hostApiMock.sessionsHistory.mockResolvedValue({
+      success: true,
+      messages: [
+        { role: 'user', id: 'image-user-transcript', content: prompt },
+        {
+          role: 'toolresult',
+          toolCallId: 'image-tool-real-order',
+          toolName: 'image_generate',
+          content: `Generated 1 image. Attachments: mimeType=image/png path="${imagePath}"`,
+        },
+        {
+          role: 'assistant',
+          id: 'gateway-image-message',
+          provider: 'openclaw',
+          model: 'gateway-injected',
+          content: [
+            { type: 'text', text: caption },
+            { type: 'image', url: gatewayUrl, mimeType: 'image/png' },
+          ],
+        },
+        {
+          role: 'assistant',
+          id: 'model-image-message',
+          provider: 'openai',
+          model: 'smart-latest',
+          stopReason: 'stop',
+          content: `${caption}\n\nMEDIA:${imagePath}`,
+        },
+      ],
+    });
+    hostApiMock.mediaThumbnails.mockResolvedValue({
+      [imagePath]: { preview: 'data:image/png;base64,kitten', fileSize: 67 },
+    });
+    hostApiMock.sendAcpPrompt.mockImplementationOnce(async () => {
+      hostEventsMock.updateListener?.({
+        sessionKey: 'agent:pi:s1',
+        generation: 1,
+        notification: {
+          sessionId: 'agent:pi:s1',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'image-tool-real-order',
+            status: 'completed',
+            content: [{
+              type: 'content',
+              content: { type: 'text', text: `Generated 1 image. Attachments: mimeType=image/png path="${imagePath}"` },
+            }],
+          },
+        },
+      });
+      hostEventsMock.updateListener?.({
+        sessionKey: 'agent:pi:s1',
+        generation: 1,
+        notification: {
+          sessionId: 'agent:pi:s1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: caption },
+          },
+        },
+      });
+      hostEventsMock.updateListener?.({
+        sessionKey: 'agent:pi:s1',
+        generation: 1,
+        notification: {
+          sessionId: 'agent:pi:s1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'open-image-exec',
+            title: 'Open generated image',
+            status: 'completed',
+            content: [],
+            locations: [],
+          },
+        },
+      });
+      hostEventsMock.updateListener?.({
+        sessionKey: 'agent:pi:s1',
+        generation: 1,
+        notification: {
+          sessionId: 'agent:pi:s1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: truncatedMirror },
+          },
+        },
+      });
+      return { success: true };
+    });
+
+    const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+    ensureAcpChatSubscriptions();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+    await useAcpChatSessionStore.getState().sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: prompt, messageId: 'image-user-live',
+    });
+    await vi.waitFor(() => expect(hostApiMock.mediaThumbnails).toHaveBeenCalledTimes(1));
+
+    const timeline = useAcpChatSessionStore.getState().timeline;
+    const assistantParts = timeline.itemOrder
+      .map((id) => timeline.itemsById[id])
+      .filter((item) => item?.kind === 'message-segment' && item.role === 'assistant')
+      .flatMap((item) => item?.kind === 'message-segment' ? item.parts : []);
+    expect(assistantParts.filter((part) => part.kind === 'markdown' && part.text === caption)).toHaveLength(1);
+    expect(assistantParts.some((part) => part.kind === 'markdown' && part.text === truncatedMirror)).toBe(false);
+    expect(assistantParts.filter((part) => part.kind === 'image')).toHaveLength(1);
+    expect(timeline.itemsById['tool:open-image-exec']).toBeDefined();
+    await useAcpChatSessionStore.getState().cancel();
+  });
+
+  it('settles a successful video turn from the transcript without exposing its MEDIA path', async () => {
+    const prompt = '将这个图做成小猫喝水的视频吧';
+    const intro = '我会以刚才的小猫图为首帧，让小猫自然低头舔水。';
+    const finalText = '小猫喝水的视频已生成，并已在电脑上打开。当前模型未生成音轨，画面为 6 秒、1:1、720P。';
+    const truncatedText = '小猫喝水的视频已生成，并已在电脑上打开。当前模型未生成音轨，画面';
+    const videoPath = 'C:\\Users\\Tester\\.openclaw\\media\\tool-video-generation\\kitten.mp4';
+    hostApiMock.sessionsHistory.mockResolvedValue({
+      success: true,
+      messages: [
+        { role: 'user', id: 'video-user-transcript', content: prompt },
+        {
+          role: 'assistant',
+          id: 'video-result',
+          provider: 'openai',
+          model: 'smart-latest',
+          stopReason: 'stop',
+          content: `${finalText}\n\nMEDIA:${videoPath}`,
+        },
+      ],
+    });
+    hostApiMock.resolveAttachment.mockImplementation(async (payload: {
+      ref: { sessionKey: string; generation: number; uri: string; transcriptMessageId?: string };
+    }) => ({
+      ok: true,
+      identity: 'kitten-video-identity',
+      displayName: 'kitten.mp4',
+      mimeType: 'video/mp4',
+      size: 2_048,
+      target: { kind: 'local', scope: 'openclaw-media', ref: payload.ref },
+    }));
+    hostApiMock.sendAcpPrompt.mockImplementationOnce(async () => {
+      for (const update of [
+        { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: intro } },
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'video-tool-real-order',
+          title: 'Generate video',
+          status: 'completed',
+          content: [],
+          locations: [],
+        },
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'open-video-exec',
+          title: 'Open generated video',
+          status: 'completed',
+          content: [],
+          locations: [],
+        },
+        { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: truncatedText } },
+      ]) {
+        hostEventsMock.updateListener?.({
+          sessionKey: 'agent:pi:s1',
+          generation: 1,
+          notification: { sessionId: 'agent:pi:s1', update },
+        });
+      }
+      return { success: true };
+    });
+
+    const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+    ensureAcpChatSubscriptions();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+    await useAcpChatSessionStore.getState().sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: prompt, messageId: 'video-user-live',
+    });
+    await vi.waitFor(() => expect(hostApiMock.resolveAttachment).toHaveBeenCalledTimes(1));
+
+    const timeline = useAcpChatSessionStore.getState().timeline;
+    const assistantParts = timeline.itemOrder
+      .map((id) => timeline.itemsById[id])
+      .filter((item) => item?.kind === 'message-segment' && item.role === 'assistant')
+      .flatMap((item) => item?.kind === 'message-segment' ? item.parts : []);
+    expect(assistantParts.some((part) => part.kind === 'markdown' && part.text === finalText)).toBe(true);
+    expect(assistantParts.some((part) => part.kind === 'markdown' && part.text === truncatedText)).toBe(false);
+    expect(assistantParts.some((part) => part.kind === 'markdown' && part.text.includes('MEDIA:'))).toBe(false);
+    expect(assistantParts.some((part) => (
+      part.kind === 'attachment'
+      && part.access.status === 'available'
+      && part.access.mimeType === 'video/mp4'
+    ))).toBe(true);
+    await useAcpChatSessionStore.getState().cancel();
+  });
+
+  it('settles a replayed video prefix after loading the completed conversation again', async () => {
+    const prompt = '生成一个 6 秒的小猫视频';
+    const finalText = '小猫视频已生成，并已在电脑上打开。画面为 6 秒、1:1、720P。';
+    const truncatedText = '小猫视频已生成，并已在电脑上打开。画面';
+    const videoPath = 'C:\\Users\\Tester\\.openclaw\\media\\tool-video-generation\\replayed.mp4';
+    hostApiMock.loadAcpSession.mockResolvedValueOnce({
+      success: true,
+      generation: 2,
+      sessionUpdates: [
+        {
+          sessionKey: 'agent:pi:replayed-video',
+          generation: 2,
+          historical: true,
+          notification: {
+            sessionId: 'agent:pi:replayed-video',
+            update: {
+              sessionUpdate: 'user_message_chunk',
+              content: { type: 'text', text: prompt },
+            },
+          },
+        },
+        {
+          sessionKey: 'agent:pi:replayed-video',
+          generation: 2,
+          historical: true,
+          notification: {
+            sessionId: 'agent:pi:replayed-video',
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'replayed-video-tool',
+              title: 'Generate video',
+              status: 'completed',
+              content: [],
+              locations: [],
+            },
+          },
+        },
+        {
+          sessionKey: 'agent:pi:replayed-video',
+          generation: 2,
+          historical: true,
+          notification: {
+            sessionId: 'agent:pi:replayed-video',
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'replayed-open-video',
+              title: 'Open generated video',
+              status: 'completed',
+              content: [],
+              locations: [],
+            },
+          },
+        },
+        {
+          sessionKey: 'agent:pi:replayed-video',
+          generation: 2,
+          historical: true,
+          notification: {
+            sessionId: 'agent:pi:replayed-video',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: truncatedText },
+            },
+          },
+        },
+      ],
+    });
+    hostApiMock.sessionsHistory.mockResolvedValue({
+      success: true,
+      messages: [
+        { role: 'user', id: 'replayed-video-user', content: prompt },
+        {
+          role: 'assistant',
+          id: 'replayed-video-result',
+          provider: 'openai',
+          model: 'smart-latest',
+          stopReason: 'stop',
+          content: `${finalText}\n\nMEDIA:${videoPath}`,
+        },
+      ],
+    });
+    hostApiMock.resolveAttachment.mockImplementation(async (payload: {
+      ref: { sessionKey: string; generation: number; uri: string; transcriptMessageId?: string };
+    }) => ({
+      ok: true,
+      identity: 'replayed-video-identity',
+      displayName: 'replayed.mp4',
+      mimeType: 'video/mp4',
+      size: 2_048,
+      target: { kind: 'local', scope: 'openclaw-media', ref: payload.ref },
+    }));
+
+    const { useAcpChatSessionStore } = await importStore();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:replayed-video',
+      workspaceRoot: '/repo',
+      cwd: '/repo',
+    });
+    await vi.waitFor(() => expect(hostApiMock.resolveAttachment).toHaveBeenCalledTimes(1));
+
+    const timeline = useAcpChatSessionStore.getState().timeline;
+    const assistantParts = timeline.itemOrder
+      .map((id) => timeline.itemsById[id])
+      .filter((item) => item?.kind === 'message-segment' && item.role === 'assistant')
+      .flatMap((item) => item?.kind === 'message-segment' ? item.parts : []);
+    expect(assistantParts.some((part) => part.kind === 'markdown' && part.text === finalText)).toBe(true);
+    expect(assistantParts.some((part) => part.kind === 'markdown' && part.text === truncatedText)).toBe(false);
+    expect(assistantParts.some((part) => (
+      part.kind === 'attachment'
+      && part.access.status === 'available'
+      && part.access.mimeType === 'video/mp4'
+    ))).toBe(true);
+  });
+
+  it('does not replace divergent assistant text with a successful media transcript reply', async () => {
+    const prompt = '生成一个产品演示视频';
+    const persistedText = '产品演示视频已生成，并已在电脑上打开。';
+    const divergentText = '视频生成结束，但本地下载失败，请使用服务端链接。';
+    const videoPath = 'C:\\Users\\Tester\\.openclaw\\media\\tool-video-generation\\divergent.mp4';
+    hostApiMock.sessionsHistory.mockResolvedValue({
+      success: true,
+      messages: [
+        { role: 'user', id: 'divergent-video-user', content: prompt },
+        {
+          role: 'assistant',
+          id: 'divergent-video-result',
+          provider: 'openai',
+          model: 'smart-latest',
+          stopReason: 'stop',
+          content: `${persistedText}\n\nMEDIA:${videoPath}`,
+        },
+      ],
+    });
+    hostApiMock.resolveAttachment.mockImplementation(async (payload: {
+      ref: { sessionKey: string; generation: number; uri: string; transcriptMessageId?: string };
+    }) => ({
+      ok: true,
+      identity: 'divergent-video-identity',
+      displayName: 'divergent.mp4',
+      mimeType: 'video/mp4',
+      size: 2_048,
+      target: { kind: 'local', scope: 'openclaw-media', ref: payload.ref },
+    }));
+    hostApiMock.sendAcpPrompt.mockImplementationOnce(async () => {
+      for (const update of [
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'divergent-video-tool',
+          title: 'Generate video',
+          status: 'completed',
+          content: [],
+          locations: [],
+        },
+        { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: divergentText } },
+      ]) {
+        hostEventsMock.updateListener?.({
+          sessionKey: 'agent:pi:s1',
+          generation: 1,
+          notification: { sessionId: 'agent:pi:s1', update },
+        });
+      }
+      return { success: true };
+    });
+
+    const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+    ensureAcpChatSubscriptions();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+    await useAcpChatSessionStore.getState().sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: prompt, messageId: 'divergent-video-user-live',
+    });
+    await vi.waitFor(() => expect(hostApiMock.resolveAttachment).toHaveBeenCalledTimes(1));
+
+    const assistantParts = useAcpChatSessionStore.getState().timeline.itemOrder
+      .map((id) => useAcpChatSessionStore.getState().timeline.itemsById[id])
+      .filter((item) => item?.kind === 'message-segment' && item.role === 'assistant')
+      .flatMap((item) => item?.kind === 'message-segment' ? item.parts : []);
+    expect(assistantParts.some((part) => part.kind === 'markdown' && part.text === divergentText)).toBe(true);
+    expect(assistantParts.some((part) => part.kind === 'markdown' && part.text === persistedText)).toBe(false);
+    expect(assistantParts.some((part) => (
+      part.kind === 'attachment'
+      && part.access.status === 'available'
+      && part.access.mimeType === 'video/mp4'
+    ))).toBe(true);
+    await useAcpChatSessionStore.getState().cancel();
+  });
+
+  it('does not settle an earlier prefix when a later assistant reply diverges', async () => {
+    const prompt = '生成一个带字幕的视频';
+    const persistedText = '带字幕的视频已生成，并已在电脑上打开。';
+    const earlierPrefix = '带字幕的视频已生成，并已在';
+    const laterReply = '补充说明：字幕文件需要单独下载。';
+    const videoPath = 'C:\\Users\\Tester\\.openclaw\\media\\tool-video-generation\\captioned.mp4';
+    hostApiMock.sessionsHistory.mockResolvedValue({
+      success: true,
+      messages: [
+        { role: 'user', id: 'captioned-video-user', content: prompt },
+        {
+          role: 'assistant',
+          id: 'captioned-video-result',
+          provider: 'openai',
+          model: 'smart-latest',
+          stopReason: 'stop',
+          content: `${persistedText}\n\nMEDIA:${videoPath}`,
+        },
+      ],
+    });
+    hostApiMock.resolveAttachment.mockImplementation(async (payload: {
+      ref: { sessionKey: string; generation: number; uri: string; transcriptMessageId?: string };
+    }) => ({
+      ok: true,
+      identity: 'captioned-video-identity',
+      displayName: 'captioned.mp4',
+      mimeType: 'video/mp4',
+      size: 2_048,
+      target: { kind: 'local', scope: 'openclaw-media', ref: payload.ref },
+    }));
+    hostApiMock.sendAcpPrompt.mockImplementationOnce(async () => {
+      for (const update of [
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'captioned-video-tool',
+          title: 'Generate video',
+          status: 'completed',
+          content: [],
+          locations: [],
+        },
+        {
+          sessionUpdate: 'agent_message',
+          messageId: 'captioned-video-result',
+          content: [{ type: 'text', text: earlierPrefix }],
+        },
+        {
+          sessionUpdate: 'agent_message',
+          messageId: 'captioned-video-follow-up',
+          content: [{ type: 'text', text: laterReply }],
+        },
+      ]) {
+        hostEventsMock.updateListener?.({
+          sessionKey: 'agent:pi:s1',
+          generation: 1,
+          notification: { sessionId: 'agent:pi:s1', update },
+        });
+      }
+      return { success: true };
+    });
+
+    const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+    ensureAcpChatSubscriptions();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+    await useAcpChatSessionStore.getState().sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: prompt, messageId: 'captioned-video-user-live',
+    });
+    await vi.waitFor(() => expect(hostApiMock.resolveAttachment).toHaveBeenCalledTimes(1));
+
+    const assistantTexts = useAcpChatSessionStore.getState().timeline.itemOrder
+      .map((id) => useAcpChatSessionStore.getState().timeline.itemsById[id])
+      .filter((item) => item?.kind === 'message-segment' && item.role === 'assistant')
+      .flatMap((item) => item?.kind === 'message-segment' ? item.parts : [])
+      .flatMap((part) => part.kind === 'markdown' ? [part.text] : []);
+    expect(assistantTexts).toContain(earlierPrefix);
+    expect(assistantTexts).toContain(laterReply);
+    expect(assistantTexts).not.toContain(persistedText);
+    await useAcpChatSessionStore.getState().cancel();
+  });
+
+  it('does not settle a media reply prefix across the next user turn', async () => {
+    const firstPrompt = '生成一个 6 秒的视频';
+    const firstFinalText = '视频已生成，并已在电脑上打开。画面为 6 秒、1:1、720P。';
+    const secondPrompt = '再帮我解释一下';
+    const secondReply = '视频已生成，并已在电脑上打开。画面';
+    const videoPath = 'C:\\Users\\Tester\\.openclaw\\media\\tool-video-generation\\first-turn.mp4';
+    hostApiMock.loadAcpSession.mockResolvedValueOnce({
+      success: true,
+      generation: 2,
+      sessionUpdates: [
+        {
+          sessionKey: 'agent:pi:two-turns',
+          generation: 2,
+          historical: true,
+          notification: {
+            sessionId: 'agent:pi:two-turns',
+            update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: firstPrompt } },
+          },
+        },
+        {
+          sessionKey: 'agent:pi:two-turns',
+          generation: 2,
+          historical: true,
+          notification: {
+            sessionId: 'agent:pi:two-turns',
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'first-turn-video-tool',
+              title: 'Generate video',
+              status: 'completed',
+              content: [],
+              locations: [],
+            },
+          },
+        },
+        {
+          sessionKey: 'agent:pi:two-turns',
+          generation: 2,
+          historical: true,
+          notification: {
+            sessionId: 'agent:pi:two-turns',
+            update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: secondPrompt } },
+          },
+        },
+        {
+          sessionKey: 'agent:pi:two-turns',
+          generation: 2,
+          historical: true,
+          notification: {
+            sessionId: 'agent:pi:two-turns',
+            update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: secondReply } },
+          },
+        },
+      ],
+    });
+    hostApiMock.sessionsHistory.mockResolvedValue({
+      success: true,
+      messages: [
+        { role: 'user', id: 'first-turn-user', content: firstPrompt },
+        {
+          role: 'assistant',
+          id: 'first-turn-result',
+          provider: 'openai',
+          model: 'smart-latest',
+          stopReason: 'stop',
+          content: `${firstFinalText}\n\nMEDIA:${videoPath}`,
+        },
+        { role: 'user', id: 'second-turn-user', content: secondPrompt },
+        { role: 'assistant', id: 'second-turn-result', content: secondReply },
+      ],
+    });
+    hostApiMock.resolveAttachment.mockImplementation(async (payload: {
+      ref: { sessionKey: string; generation: number; uri: string; transcriptMessageId?: string };
+    }) => ({
+      ok: true,
+      identity: 'first-turn-video-identity',
+      displayName: 'first-turn.mp4',
+      mimeType: 'video/mp4',
+      size: 2_048,
+      target: { kind: 'local', scope: 'openclaw-media', ref: payload.ref },
+    }));
+
+    const { useAcpChatSessionStore } = await importStore();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:two-turns',
+      workspaceRoot: '/repo',
+      cwd: '/repo',
+    });
+    await vi.waitFor(() => expect(hostApiMock.resolveAttachment).toHaveBeenCalledTimes(1));
+
+    const assistantTexts = useAcpChatSessionStore.getState().timeline.itemOrder
+      .map((id) => useAcpChatSessionStore.getState().timeline.itemsById[id])
+      .filter((item) => item?.kind === 'message-segment' && item.role === 'assistant')
+      .flatMap((item) => item?.kind === 'message-segment' ? item.parts : [])
+      .flatMap((part) => part.kind === 'markdown' ? [part.text] : []);
+    expect(assistantTexts).toContain(secondReply);
+    expect(assistantTexts).not.toContain(firstFinalText);
+  });
+
   it('waits for media before projecting a successful text-only image completion', async () => {
     const taskId = '4959fd41-c9eb-448d-a12c-3f120a12bf28';
     const prompt = 'Generate a white woman shopping in China';

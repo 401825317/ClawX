@@ -1260,7 +1260,8 @@ test.describe('ACP media attachments', () => {
     const app = await launchElectronApp({ skipSetup: true });
     const prompt = 'Create a delayed product video';
     const intro = 'I will render the product video.';
-    const outro = 'The product video render is complete.';
+    const finalText = 'The product video render is complete and is ready to play.';
+    const truncatedFinalText = 'The product video render is complete and is ready';
     const taskId = '193b8df5-29c6-4a11-81d4-e2a9f8c0f163';
     const taskStarted = `Background task started for video generation (${taskId}).`;
 
@@ -1281,7 +1282,9 @@ test.describe('ACP media attachments', () => {
         {
           role: 'assistant' as const,
           id: 'delayed-video-result',
-          content: `Video ready\nMEDIA:${videoPath}`,
+          provider: 'openai',
+          model: 'smart-latest',
+          content: `${finalText}\nMEDIA:${videoPath}`,
         },
       ];
       await fixture.setTranscriptResponses(MAIN_SESSION_KEY, [[]]);
@@ -1302,7 +1305,7 @@ test.describe('ACP media attachments', () => {
         {
           sessionUpdate: 'agent_message_chunk',
           messageId: 'delayed-video-reply',
-          content: { type: 'text', text: ` ${outro}` },
+          content: { type: 'text', text: ` ${truncatedFinalText}` },
         },
         {
           sessionUpdate: 'user_message_chunk',
@@ -1376,7 +1379,7 @@ test.describe('ACP media attachments', () => {
         {
           sessionUpdate: 'agent_message_chunk',
           messageId: 'delayed-video-history-reply',
-          content: { type: 'text', text: ` ${outro}` },
+          content: { type: 'text', text: ` ${truncatedFinalText}` },
         },
       ]);
       await page.getByTestId(`sidebar-session-${MAIN_SESSION_KEY}`).click();
@@ -1384,7 +1387,8 @@ test.describe('ACP media attachments', () => {
       const timeline = page.getByTestId('acp-chat-timeline');
       await expect(timeline.getByText(intro, { exact: true })).toHaveCount(1, { timeout: 30_000 });
       await expect(timeline.getByTestId('acp-tool-call-card')).toContainText('Generate video');
-      await expect(timeline).toContainText(outro);
+      await expect(timeline.getByText(finalText, { exact: true })).toHaveCount(1);
+      await expect(timeline.getByText(truncatedFinalText, { exact: true })).toHaveCount(0);
       await expect(timeline.getByTestId('acp-video-attachment')).toHaveCount(1, { timeout: 30_000 });
       await expect(page.getByText(/MEDIA:/)).toHaveCount(0);
 
@@ -1393,6 +1397,8 @@ test.describe('ACP media attachments', () => {
       await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible();
       await page.getByTestId(`sidebar-session-${MAIN_SESSION_KEY}`).click();
       await expect(timeline.getByText(intro, { exact: true })).toHaveCount(1, { timeout: 30_000 });
+      await expect(timeline.getByText(finalText, { exact: true })).toHaveCount(1);
+      await expect(timeline.getByText(truncatedFinalText, { exact: true })).toHaveCount(0);
       await expect(timeline.getByTestId('acp-tool-call-card')).toHaveCount(1);
       await expect(timeline.getByTestId('acp-video-attachment')).toHaveCount(1);
       await expect(page.getByText(/MEDIA:/)).toHaveCount(0);

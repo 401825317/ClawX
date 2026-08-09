@@ -3,7 +3,7 @@ id: acp-media-attachments
 title: Render ACP resources and bounded OpenClaw MEDIA attachments
 scenario: gateway-backend-communication
 taskType: runtime-bridge
-intent: Render standard ACP resources and recover only explicit OpenClaw MEDIA attachments omitted by the distributed ACP adapter through a bounded transcript compatibility projection.
+intent: Render standard ACP resources and recover explicit OpenClaw MEDIA attachments plus strictly bounded successful media-Turn final text omitted or truncated by the distributed ACP adapter.
 touchedAreas:
   - package.json
   - harness/specs/tasks/acp-media-attachments.md
@@ -23,6 +23,7 @@ touchedAreas:
   - harness/reference/acp-generated-media-and-diagnostics.md
   - harness/reference/openclaw-file-activity.md
   - shared/acp-chat/types.ts
+  - shared/chat/types.ts
   - shared/host-api/contract.ts
   - shared/file-preview/limits.ts
   - electron/services/acp-session-access-registry.ts
@@ -116,6 +117,7 @@ touchedAreas:
 expectedUserBehavior:
   - Standard ACP resource_link and URI-backed resource content renders as paperclip attachment cards.
   - Explicit assistant OpenClaw MEDIA directives omitted by ACP are recovered for live completions and historical session loads without displaying the raw directive.
+  - A successful media reply truncated by ACP settles only the last strict-prefix Assistant segment in the same user Turn; gateway-injected mirrors, failed records, divergent text, earlier segments, and later user Turns remain unchanged.
   - MEDIA recovery remains aligned when the triggering ACP user turn contains structured resources, images, or no text.
   - Attachment rows render after assistant prose and preserve declaration order.
   - User image attachments render as thumbnails with a filename overlay on hover.
@@ -162,6 +164,7 @@ acceptance:
   - The reported OpenClaw MEDIA directive for budget_sample.xlsx renders an attachment in ACP Chat even though OpenClaw ACP emits no resource block.
   - User resource links and attachment-only prompts do not prevent the same turn's assistant MEDIA attachment from rendering.
   - The raw MEDIA directive is not displayed.
+  - A model-authored successful media completion can settle only an existing trailing strict prefix in the exactly aligned user Turn and cannot create an ordinary message.
   - The attachment renders after assistant prose and preserves declaration order.
   - Supported files open in the right-side Preview panel.
   - Unsupported session-valid local files open with the system default application after a click.
@@ -196,7 +199,7 @@ Standard ACP resource content is the preferred attachment source. The OpenClaw t
 | Acceptance behavior | Test or durable rule |
 | --- | --- |
 | Standard ACP resources render actionable cards | `tests/unit/acp-reducer.test.ts`, `tests/unit/acp-chat-components.test.tsx`, `tests/e2e/chat-acp-attachments.spec.ts` |
-| Explicit OpenClaw `MEDIA:` recovery and hidden raw directives | `tests/unit/acp-media-attachments.test.ts`, `tests/unit/acp-chat-store.test.ts`, `tests/e2e/chat-acp-attachments.spec.ts` |
+| Explicit OpenClaw `MEDIA:` recovery, hidden raw directives, and strict successful media-Turn text settlement | `tests/unit/acp-media-attachments.test.ts`, `tests/unit/acp-chat-store.test.ts`, `tests/e2e/chat-acp-attachments.spec.ts` |
 | Explicit parser grammar rejects fenced, wrapped, inline, malformed, unknown-scheme, and overlong values | `tests/unit/acp-media-attachments.test.ts`, `acp-compatibility-content-safety` |
 | Transcript suffix alignment uses normalized user text and occurrence from the tail without guessing | `tests/unit/acp-media-attachments.test.ts`, `tests/unit/acp-chat-store.test.ts`, `acp-chat-state-and-history` |
 | Attached and attachment-only user turns use binary-free structured prompt projection | `tests/unit/acp-media-attachments.test.ts`, `tests/unit/acp-reducer.test.ts`, `tests/unit/acp-chat-store.test.ts`, `tests/e2e/chat-acp-attachments.spec.ts`, `acp-chat-state-and-history` |

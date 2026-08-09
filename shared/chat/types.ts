@@ -27,6 +27,10 @@ export interface RawMessage {
   content: unknown; // string | ContentBlock[]
   timestamp?: number;
   id?: string;
+  /** Provider metadata persisted by OpenClaw for assistant transcript messages. */
+  provider?: string;
+  /** Model metadata, including OpenClaw's non-model gateway-injected marker. */
+  model?: string;
   toolCallId?: string;
   toolName?: string;
   details?: unknown;

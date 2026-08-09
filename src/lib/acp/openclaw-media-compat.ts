@@ -15,15 +15,22 @@ export type OpenClawMediaCandidate = {
   order: number;
 };
 
+export type OpenClawVisibleAssistantFinal = {
+  text: string;
+  transcriptMessageId?: string;
+};
+
 export type OpenClawMediaTurnSupplement = {
   acpTurnId: string;
   candidates: OpenClawMediaCandidate[];
+  finalAssistant?: OpenClawVisibleAssistantFinal;
 };
 
 export type TranscriptMediaTurn = {
   normalizedUserText: string;
   userOccurrenceFromTail: number;
   candidates: OpenClawMediaCandidate[];
+  finalAssistant?: OpenClawVisibleAssistantFinal;
 };
 
 type MutableTranscriptTurn = Omit<TranscriptMediaTurn, 'userOccurrenceFromTail'>;
@@ -73,6 +80,19 @@ function isInternalInterSessionUser(message: RawMessage): boolean {
     if (typeof kind === 'string' && kind.toLowerCase() === 'inter_session') return true;
   }
   return /^\[Inter-session message\]\s/.test(textFromContent(message.content));
+}
+
+/** Gateway-injected media mirrors are transport projections, not model final replies. */
+function isGatewayInjectedAssistant(message: RawMessage): boolean {
+  return typeof message.model === 'string' && message.model.toLowerCase() === 'gateway-injected';
+}
+
+/** Failed transcript records belong to the dedicated failed-Turn reconciliation path. */
+function isFailedAssistant(message: RawMessage): boolean {
+  const stopReason = message.stopReason ?? message.stop_reason;
+  return message.isError === true
+    || (typeof stopReason === 'string' && stopReason.toLowerCase() === 'error')
+    || Boolean(message.errorMessage ?? message.error_message);
 }
 
 function parseDirectiveReference(line: string, executionCwd: string): string | null {
@@ -133,6 +153,15 @@ function mediaReferences(text: string): Array<{ uri: string; line: number }> {
   return references;
 }
 
+/** Removes only validated MEDIA directive lines from the user-visible copy. */
+function visibleAssistantText(text: string, mediaLines: ReadonlySet<number>): string {
+  return text
+    .split(/\r?\n/)
+    .filter((_, lineIndex) => !mediaLines.has(lineIndex))
+    .join('\n')
+    .trim();
+}
+
 function assignOccurrencesFromTail<T extends { normalizedUserText: string }>(turns: T[]): Array<T & { userOccurrenceFromTail: number }> {
   const occurrences = new Map<string, number>();
   const result = new Array<T & { userOccurrenceFromTail: number }>(turns.length);
@@ -166,9 +195,22 @@ export function extractOpenClawMediaTurns(
     if (role !== 'assistant' || !current) continue;
 
     const text = textFromContent(message.content);
-    for (const reference of mediaReferences(text)) {
+    const references = mediaReferences(text).flatMap((reference) => {
       const uri = parseDirectiveReference(reference.uri, input.executionCwd);
-      if (!uri || input.suppressedUris.has(uri)) continue;
+      return uri ? [{ ...reference, uri }] : [];
+    });
+    if (references.length === 0) continue;
+
+    // Parse attachment evidence before removing its directive from the visible text.
+    const finalText = visibleAssistantText(text, new Set(references.map((reference) => reference.line)));
+    if (finalText && !isGatewayInjectedAssistant(message) && !isFailedAssistant(message)) {
+      current.finalAssistant = {
+        text: finalText,
+        ...(message.id ? { transcriptMessageId: message.id } : {}),
+      };
+    }
+    for (const reference of references) {
+      if (input.suppressedUris.has(reference.uri)) continue;
       const order = current.candidates.length;
       const messageIdentity = message.id
         ? `id:${message.id}`
@@ -176,9 +218,9 @@ export function extractOpenClawMediaTurns(
           ? `timestamp:${message.timestamp}`
           : `content:${stableHash(text)}`;
       current.candidates.push({
-        evidenceSeed: `${messageIdentity}:${reference.line}:${uri}`,
+        evidenceSeed: `${messageIdentity}:${reference.line}:${reference.uri}`,
         ...(message.id ? { transcriptMessageId: message.id } : {}),
-        uri,
+        uri: reference.uri,
         order,
       });
     }
@@ -187,6 +229,7 @@ export function extractOpenClawMediaTurns(
   return assignOccurrencesFromTail(turns).map((turn) => ({
     normalizedUserText: turn.normalizedUserText,
     userOccurrenceFromTail: turn.userOccurrenceFromTail,
+    ...(turn.finalAssistant ? { finalAssistant: turn.finalAssistant } : {}),
     candidates: turn.candidates.map(({ evidenceSeed, ...candidate }) => ({
       ...candidate,
       evidenceId: `openclaw-media:${stableHash(JSON.stringify([
@@ -284,12 +327,16 @@ export function alignOpenClawMediaTurns(
 
   const supplements: OpenClawMediaTurnSupplement[] = [];
   for (const transcriptTurn of transcriptTurns) {
-    if (transcriptTurn.candidates.length === 0) continue;
+    if (transcriptTurn.candidates.length === 0 && !transcriptTurn.finalAssistant) continue;
     const key = turnMatchKey(transcriptTurn);
     if (ambiguousKeys.has(key)) continue;
     const acpTurn = acpByKey.get(key);
     if (!acpTurn) continue;
-    supplements.push({ acpTurnId: acpTurn.turnId, candidates: transcriptTurn.candidates });
+    supplements.push({
+      acpTurnId: acpTurn.turnId,
+      candidates: transcriptTurn.candidates,
+      ...(transcriptTurn.finalAssistant ? { finalAssistant: transcriptTurn.finalAssistant } : {}),
+    });
   }
   return supplements;
 }

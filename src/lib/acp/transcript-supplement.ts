@@ -169,7 +169,9 @@ export async function fetchOpenClawTranscriptSupplement(
   const media = alignOpenClawMediaTurns(snapshot, transcriptMediaTurns, {
     ...(input.liveUserMessageId ? { liveUserMessageId: input.liveUserMessageId } : {}),
   });
-  const transcriptMediaTurnCount = transcriptMediaTurns.filter((turn) => turn.candidates.length > 0).length;
+  const transcriptMediaTurnCount = transcriptMediaTurns.filter((turn) => (
+    turn.candidates.length > 0 || Boolean(turn.finalAssistant)
+  )).length;
 
   recordTrace(input, 'openclaw-media:history-request-succeeded', {
     source: 'openclaw-media',
@@ -189,6 +191,7 @@ export async function fetchOpenClawTranscriptSupplement(
       source: 'openclaw-media',
       reason: input.liveUserMessageId ? 'live-user-identity' : 'reverse-user-occurrence',
       candidateCount: supplement.candidates.length,
+      finalAssistantPresent: Boolean(supplement.finalAssistant),
     });
   }
 
