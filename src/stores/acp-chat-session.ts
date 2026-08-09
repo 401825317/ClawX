@@ -11,6 +11,7 @@ import type {
   MediaThumbnailResult,
   ResolveAttachmentPayload,
   ResolveAttachmentResult,
+  SessionTurnTimingCandidate,
 } from '@shared/host-api/contract';
 import {
   UCLAW_IMAGE_GENERATION_TIMEOUT_MS,
@@ -52,7 +53,11 @@ import {
   type SessionTimelineIdentity,
   type SessionTimelineRecord,
 } from '@/lib/acp/session-timeline-coordinator';
-import { hashOpenClawMediaDiagnostic, type OpenClawMediaCandidate } from '@/lib/acp/openclaw-media-compat';
+import {
+  acpUserTurns,
+  hashOpenClawMediaDiagnostic,
+  type OpenClawMediaCandidate,
+} from '@/lib/acp/openclaw-media-compat';
 import { openClawResourceLinkPromptText } from '@/lib/acp/openclaw-prompt-compat';
 import {
   fetchFailedOpenClawTurnSupplement,
@@ -79,6 +84,7 @@ const VIDEO_GENERATION_TRANSCRIPT_RETRY_DELAYS_MS = [500, 1500, 3000, 5000, 8000
 const LIVE_TEXT_BATCH_WINDOW_MS = 32;
 const LIVE_TEXT_BATCH_MAX_UPDATES = 128;
 const MAX_SETTLED_BACKGROUND_SNAPSHOTS = 3;
+const MAX_CACHED_TURN_TIMING_SESSIONS = 32;
 
 type ImageGenerationCompatSession = {
   taskStartedAt: number;
@@ -118,6 +124,7 @@ type LiveSessionSnapshot = {
   unconsumedTimelineUpdate: boolean;
 };
 const liveSessionSnapshots = new Map<string, LiveSessionSnapshot>();
+const completedLiveTurnTimings = new Map<string, SessionTurnTimingCandidate[]>();
 const sessionTimelineCoordinator = new AcpSessionTimelineCoordinator({ maxUnretainedRecords: 3 });
 const imageGenerationTaskTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const videoGenerationTaskTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -302,6 +309,73 @@ function hasTranscriptSupplementWork(sessionKey: string, generation: number): bo
   ));
 }
 
+/** Retains exact completed live timings independently from short-lived media snapshots. */
+function rememberCompletedLiveTurnTimings(snapshot: Pick<
+  LiveSessionSnapshot,
+  'sessionKey' | 'timeline' | 'turnTimingsByUserMessageId'
+>): void {
+  const candidates = acpUserTurns(snapshot.timeline).flatMap((turn) => {
+    const timing = snapshot.turnTimingsByUserMessageId[turn.turnId];
+    if (timing?.source !== 'live' || timing.status !== 'complete') return [];
+    return [{
+      normalizedUserText: turn.normalizedUserText,
+      userOccurrenceFromTail: turn.userOccurrenceFromTail,
+      durationMs: timing.durationMs,
+    }];
+  });
+  if (candidates.length === 0) return;
+
+  // Map insertion order acts as a bounded LRU for renderer-session lifetime.
+  completedLiveTurnTimings.delete(snapshot.sessionKey);
+  completedLiveTurnTimings.set(snapshot.sessionKey, candidates);
+  while (completedLiveTurnTimings.size > MAX_CACHED_TURN_TIMING_SESSIONS) {
+    const oldestSessionKey = completedLiveTurnTimings.keys().next().value;
+    if (typeof oldestSessionKey !== 'string') break;
+    completedLiveTurnTimings.delete(oldestSessionKey);
+  }
+}
+
+/** Rebinds exact live timings to replayed message ids and gives them precedence over transcript estimates. */
+function restoreCompletedLiveTurnTimings(
+  sessionKey: string,
+  timeline: AcpTimelineSnapshot,
+  fallback: Record<string, AcpTurnTiming>,
+): Record<string, AcpTurnTiming> {
+  const candidates = completedLiveTurnTimings.get(sessionKey);
+  if (!candidates?.length) return fallback;
+  const aligned = alignHistoricalTurnTimings(timeline, candidates);
+  if (Object.keys(aligned).length === 0) return fallback;
+
+  const exact = Object.fromEntries(Object.entries(aligned).flatMap(([messageId, timing]) => (
+    timing.status === 'complete'
+      ? [[
+        messageId,
+        { source: 'live', status: 'complete', durationMs: timing.durationMs } satisfies AcpTurnTiming,
+      ]]
+      : []
+  )));
+  return { ...fallback, ...exact };
+}
+
+/** Keeps current live timers authoritative when a delayed transcript supplement arrives. */
+function mergeHistoricalTurnTimings(
+  sessionKey: string,
+  timeline: AcpTimelineSnapshot,
+  current: Record<string, AcpTurnTiming>,
+  historical: SessionTurnTimingCandidate[],
+): Record<string, AcpTurnTiming> {
+  const fallback = restoreCompletedLiveTurnTimings(
+    sessionKey,
+    timeline,
+    alignHistoricalTurnTimings(timeline, historical),
+  );
+  const live = Object.fromEntries(acpUserTurns(timeline).flatMap((turn) => {
+    const timing = current[turn.turnId];
+    return timing?.source === 'live' ? [[turn.turnId, timing]] : [];
+  }));
+  return { ...fallback, ...live };
+}
+
 function captureLiveSession(state: AcpChatSessionState): void {
   if (!state.activeSessionKey) return;
   const existing = liveSessionSnapshots.get(state.activeSessionKey);
@@ -374,6 +448,7 @@ function pruneSettledBackgroundSnapshots(): void {
 }
 
 function storeLiveSessionSnapshot(snapshot: LiveSessionSnapshot): void {
+  rememberCompletedLiveTurnTimings(snapshot);
   syncTimelineRecord(snapshot);
   if (hasLiveSessionSnapshotWork(snapshot)) {
     // Map insertion order is the LRU clock for settled, not-yet-consumed overlays.
@@ -1823,7 +1898,14 @@ async function runTranscriptSupplement(operation: TranscriptSupplementOperation)
   if (!operation.liveUserMessageId && result.turnTimings.length > 0) {
     useAcpChatSessionStore.setState((current) => (
       isCurrentTranscriptSupplement(current, operation)
-        ? { turnTimingsByUserMessageId: alignHistoricalTurnTimings(current.timeline, result.turnTimings) }
+        ? {
+          turnTimingsByUserMessageId: mergeHistoricalTurnTimings(
+            operation.sessionKey,
+            current.timeline,
+            current.turnTimingsByUserMessageId,
+            result.turnTimings,
+          ),
+        }
         : {}
     ));
   }
@@ -2437,6 +2519,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
   prepareLocalSession(input) {
     flushPendingLiveTextBatch();
     captureLiveSession(get());
+    completedLiveTurnTimings.delete(input.sessionKey);
     loadRequestSeq += 1;
     pendingLoadUpdates.clear();
     const generation = get().generation;
@@ -2595,6 +2678,13 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         createEmptyAcpTimeline(input.sessionKey, generation),
         timeline,
       );
+      const restoredTurnTimings = restoreCompletedLiveTurnTimings(
+        input.sessionKey,
+        timeline,
+        currentResumedSnapshot?.turnTimingsByUserMessageId
+          ?? restorableBackgroundSnapshot?.turnTimingsByUserMessageId
+          ?? {},
+      );
       set({
         loading: false,
         sending: currentResumedSnapshot?.sending ?? false,
@@ -2609,10 +2699,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         error: null,
         generation,
         timeline,
-        turnTimingsByUserMessageId:
-          currentResumedSnapshot?.turnTimingsByUserMessageId
-          ?? restorableBackgroundSnapshot?.turnTimingsByUserMessageId
-          ?? {},
+        turnTimingsByUserMessageId: restoredTurnTimings,
       });
       syncTimelineRecord({
         sessionKey: input.sessionKey,

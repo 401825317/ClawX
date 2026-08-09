@@ -551,6 +551,252 @@ describe('ACP Chat store', () => {
     now.mockRestore();
   });
 
+  it('preserves exact live turn timing when transcript timing is reloaded after navigation', async () => {
+    hostApiMock.loadAcpSession
+      .mockResolvedValueOnce({ success: true, generation: 1 })
+      .mockResolvedValueOnce({ success: true, generation: 2 })
+      .mockResolvedValueOnce({
+        success: true,
+        generation: 3,
+        sessionUpdates: [
+          {
+            sessionKey: 'agent:pi:s1',
+            generation: 3,
+            historical: true,
+            notification: {
+              sessionId: 'agent:pi:s1',
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                messageId: 'user-replayed',
+                content: { type: 'text', text: 'Long task' },
+              },
+            },
+          },
+          {
+            sessionKey: 'agent:pi:s1',
+            generation: 3,
+            historical: true,
+            notification: {
+              sessionId: 'agent:pi:s1',
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                messageId: 'assistant-replayed',
+                content: { type: 'text', text: 'Finished' },
+              },
+            },
+          },
+        ],
+      });
+    hostApiMock.sessionTurnTimings.mockResolvedValue({
+      success: true,
+      timings: [{
+        normalizedUserText: 'Long task',
+        userOccurrenceFromTail: 1,
+        durationMs: 6_000,
+      }],
+    });
+    const { useAcpChatSessionStore } = await importStore();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo',
+    });
+    useAcpChatSessionStore.getState().applyUpdateEnvelope({
+      sessionKey: 'agent:pi:s1',
+      generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          messageId: 'user-live',
+          content: { type: 'text', text: 'Long task' },
+        },
+      },
+    });
+    useAcpChatSessionStore.getState().applyUpdateEnvelope({
+      sessionKey: 'agent:pi:s1',
+      generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          messageId: 'assistant-live',
+          content: { type: 'text', text: 'Finished live' },
+        },
+      },
+    });
+    useAcpChatSessionStore.setState({
+      turnTimingsByUserMessageId: {
+        'user-live': { source: 'live', status: 'complete', durationMs: 60_000 },
+      },
+    });
+
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s2', workspaceRoot: '/repo', cwd: '/repo',
+    });
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo',
+    });
+    await vi.waitFor(() => expect(
+      useAcpChatSessionStore.getState().turnTimingsByUserMessageId['user-replayed'],
+    ).toEqual({ source: 'live', status: 'complete', durationMs: 60_000 }));
+  });
+
+  it('keeps a resumed live turn running when historical timing arrives after a session switch', async () => {
+    hostApiMock.loadAcpSession
+      .mockResolvedValueOnce({ success: true, generation: 1 })
+      .mockResolvedValueOnce({ success: true, generation: 2 })
+      .mockResolvedValueOnce({ success: true, generation: 1, resumedActivePrompt: true });
+    hostApiMock.sessionTurnTimings.mockResolvedValue({
+      success: true,
+      timings: [{
+        normalizedUserText: 'Long running task',
+        userOccurrenceFromTail: 1,
+        durationMs: 42_000,
+      }],
+    });
+    const { useAcpChatSessionStore } = await importStore();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+    useAcpChatSessionStore.getState().applyUpdateEnvelope({
+      sessionKey: 'agent:pi:s1',
+      generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          messageId: 'user-live',
+          content: { type: 'text', text: 'Long running task' },
+        },
+      },
+    });
+    useAcpChatSessionStore.getState().applyUpdateEnvelope({
+      sessionKey: 'agent:pi:s1',
+      generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          messageId: 'assistant-live',
+          content: { type: 'text', text: 'Still working' },
+        },
+      },
+    });
+    useAcpChatSessionStore.setState({
+      sending: true,
+      turnTimingsByUserMessageId: {
+        'user-live': { source: 'live', status: 'running', startedAtMs: 1_000 },
+      },
+    });
+
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s2', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo',
+    });
+    await vi.waitFor(() => expect(hostApiMock.recordAcpTrace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'openclaw-media:history-request-succeeded',
+        sessionKey: 'agent:pi:s1',
+      }),
+    ));
+
+    expect(useAcpChatSessionStore.getState()).toMatchObject({
+      sending: true,
+      turnTimingsByUserMessageId: {
+        'user-live': { source: 'live', status: 'running', startedAtMs: 1_000 },
+      },
+    });
+  });
+
+  it('does not reuse completed live timing after the same session key is prepared as a new session', async () => {
+    hostApiMock.loadAcpSession
+      .mockResolvedValueOnce({ success: true, generation: 1 })
+      .mockResolvedValueOnce({
+        success: true,
+        generation: 2,
+        sessionUpdates: [
+          {
+            sessionKey: 'agent:pi:s1',
+            generation: 2,
+            historical: true,
+            notification: {
+              sessionId: 'agent:pi:s1',
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                messageId: 'user-recreated',
+                content: { type: 'text', text: 'Repeated task' },
+              },
+            },
+          },
+          {
+            sessionKey: 'agent:pi:s1',
+            generation: 2,
+            historical: true,
+            notification: {
+              sessionId: 'agent:pi:s1',
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                messageId: 'assistant-recreated',
+                content: { type: 'text', text: 'New result' },
+              },
+            },
+          },
+        ],
+      });
+    hostApiMock.sessionTurnTimings.mockResolvedValue({
+      success: true,
+      timings: [{
+        normalizedUserText: 'Repeated task',
+        userOccurrenceFromTail: 1,
+        durationMs: 6_000,
+      }],
+    });
+    const { useAcpChatSessionStore } = await importStore();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo',
+    });
+    useAcpChatSessionStore.getState().applyUpdateEnvelope({
+      sessionKey: 'agent:pi:s1',
+      generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          messageId: 'user-live',
+          content: { type: 'text', text: 'Repeated task' },
+        },
+      },
+    });
+    useAcpChatSessionStore.getState().applyUpdateEnvelope({
+      sessionKey: 'agent:pi:s1',
+      generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          messageId: 'assistant-live',
+          content: { type: 'text', text: 'Old result' },
+        },
+      },
+    });
+    useAcpChatSessionStore.setState({
+      turnTimingsByUserMessageId: {
+        'user-live': { source: 'live', status: 'complete', durationMs: 60_000 },
+      },
+    });
+
+    useAcpChatSessionStore.getState().prepareLocalSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo',
+    });
+    await vi.waitFor(() => expect(
+      useAcpChatSessionStore.getState().turnTimingsByUserMessageId['user-recreated'],
+    ).toEqual({ source: 'transcript', status: 'complete', durationMs: 6_000 }));
+  });
+
   it('keeps an in-flight timeline updated while another session is active and restores it on return', async () => {
     const prompt = createDeferred<{ success: boolean; generation: number }>();
     hostApiMock.loadAcpSession

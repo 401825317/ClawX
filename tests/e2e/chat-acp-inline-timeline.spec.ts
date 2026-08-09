@@ -6,6 +6,7 @@ const MAIN_WORKSPACE = '/workspace';
 const DEFAULT_WORKSPACE = '~/.openclaw/workspace';
 const REVIEWER_SESSION_KEY = 'agent:reviewer:main';
 const REVIEWER_WORKSPACE = '/workspace/reviewer';
+const TIMING_SECONDARY_SESSION_KEY = 'agent:main:timing-secondary';
 const IMAGE_TASK_ID = '0d2ee919-2dfd-4b72-9da3-d87e6ee56747';
 const GENERATED_IMAGE_PATH = '/workspace/.openclaw/media/tool-image-generation/generated-image.png';
 const GENERATED_GATEWAY_IMAGE_URL = '/api/chat/media/outgoing/agent%3Amain%3Amain/generated-image/full';
@@ -401,6 +402,125 @@ async function resolveDeferredAcpPrompt(app: ElectronApplication) {
   });
 }
 
+async function installTurnTimingSessionSwitchMock(app: ElectronApplication) {
+  await app.evaluate(async ({ app: _app }, payload) => {
+    const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
+    type HostInvokeRequest = {
+      id?: string;
+      module?: string;
+      action?: string;
+      payload?: Record<string, unknown>;
+    };
+    type HostInvokeHandler = (event: unknown, request: HostInvokeRequest) => Promise<unknown>;
+    type FixtureState = {
+      generation: number;
+      mainLoadCount: number;
+      promptResolved: boolean;
+      transcriptTimingReloaded: boolean;
+      resolvePrompt?: () => void;
+    };
+    const handlers = (ipcMain as unknown as { _invokeHandlers?: Map<string, HostInvokeHandler> })._invokeHandlers;
+    const originalHostInvoke = handlers?.get('host:invoke');
+    const globals = globalThis as unknown as { __turnTimingSwitchFixture?: FixtureState };
+    const state: FixtureState = {
+      generation: 0,
+      mainLoadCount: 0,
+      promptResolved: false,
+      transcriptTimingReloaded: false,
+    };
+    globals.__turnTimingSwitchFixture = state;
+    const respond = (id: string | undefined, data: unknown) => ({ id, ok: true, data });
+
+    ipcMain.removeHandler('host:invoke');
+    ipcMain.handle('host:invoke', async (event: unknown, request: HostInvokeRequest) => {
+      const sessionKey = String(request.payload?.sessionKey ?? '');
+      if (request.module === 'chat' && request.action === 'loadAcpSession') {
+        if (sessionKey === payload.mainSessionKey) state.mainLoadCount += 1;
+        if (
+          sessionKey === payload.mainSessionKey
+          && state.mainLoadCount > 1
+          && !state.promptResolved
+        ) {
+          return respond(request.id, {
+            success: true,
+            generation: 1,
+            resumedActivePrompt: true,
+          });
+        }
+        state.generation += 1;
+        const generation = state.generation;
+        const replay = sessionKey === payload.mainSessionKey && state.mainLoadCount > 1
+          ? [
+              {
+                sessionUpdate: 'user_message_chunk',
+                messageId: 'timing-replayed-user',
+                content: { type: 'text', text: 'Keep the exact duration' },
+              },
+              {
+                sessionUpdate: 'agent_message_chunk',
+                messageId: 'timing-replayed-assistant',
+                content: { type: 'text', text: 'Completed in the background' },
+              },
+            ]
+          : [];
+        return respond(request.id, {
+          success: true,
+          generation,
+          sessionUpdates: replay.map((update) => ({
+            sessionKey,
+            generation,
+            historical: true,
+            notification: { sessionId: sessionKey, update },
+          })),
+        });
+      }
+      if (request.module === 'chat' && request.action === 'sendAcpPrompt') {
+        return await new Promise((resolve) => {
+          state.resolvePrompt = () => {
+            state.promptResolved = true;
+            resolve(respond(request.id, { success: true, generation: 1 }));
+          };
+        });
+      }
+      if (request.module === 'sessions' && request.action === 'history') {
+        return respond(request.id, { success: true, messages: [] });
+      }
+      if (request.module === 'sessions' && request.action === 'turnTimings') {
+        if (sessionKey === payload.mainSessionKey && state.mainLoadCount > 1) {
+          state.transcriptTimingReloaded = true;
+        }
+        return respond(request.id, {
+          success: true,
+          timings: sessionKey === payload.mainSessionKey
+            ? [{
+                normalizedUserText: 'Keep the exact duration',
+                userOccurrenceFromTail: 1,
+                durationMs: 6_000,
+              }]
+            : [],
+        });
+      }
+      return originalHostInvoke?.(event, request) ?? respond(request.id, {});
+    });
+  }, { mainSessionKey: MAIN_SESSION_KEY });
+}
+
+async function resolveTurnTimingPrompt(app: ElectronApplication) {
+  await app.evaluate(async ({ app: _app }) => {
+    (globalThis as unknown as {
+      __turnTimingSwitchFixture?: { resolvePrompt?: () => void };
+    }).__turnTimingSwitchFixture?.resolvePrompt?.();
+  });
+}
+
+async function hasReloadedTranscriptTiming(app: ElectronApplication): Promise<boolean> {
+  return await app.evaluate(async ({ app: _app }) => (
+    (globalThis as unknown as {
+      __turnTimingSwitchFixture?: { transcriptTimingReloaded: boolean };
+    }).__turnTimingSwitchFixture?.transcriptTimingReloaded ?? false
+  ));
+}
+
 async function emitAcpSessionUpdates(
   app: ElectronApplication,
   updates: AcpSessionUpdate[],
@@ -492,6 +612,99 @@ test.describe('ClawX ACP inline timeline', () => {
       await expect(page.getByText('Historical turn measured')).toBeVisible({ timeout: 30_000 });
       await expect(page.getByTestId('acp-turn-duration')).toHaveText('Took 6 sec');
     } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('keeps the exact completed duration after switching sessions and replaying transcript timing', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installAcpChatMocks(app, { success: true, generation: 1 }, [
+        { key: MAIN_SESSION_KEY, displayName: 'main', workspacePath: MAIN_WORKSPACE },
+        { key: TIMING_SECONDARY_SESSION_KEY, displayName: 'secondary', workspacePath: MAIN_WORKSPACE },
+      ]);
+      await installTurnTimingSessionSwitchMock(app);
+      const page = await openChat(app);
+      await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible({ timeout: 30_000 });
+      await page.evaluate(() => {
+        const clock = window as unknown as { __turnTimingNowMs: number };
+        clock.__turnTimingNowMs = Date.now();
+        Date.now = () => clock.__turnTimingNowMs;
+      });
+
+      await page.getByTestId('chat-composer-input').fill('Keep the exact duration');
+      await page.getByTestId('chat-composer-send').click();
+      await emitAcpSessionUpdates(app, [{
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'timing-live-assistant',
+        content: { type: 'text', text: 'Working before the switch' },
+      }]);
+      await expect(page.getByTestId('acp-turn-duration')).toContainText('elapsed');
+
+      await page.getByTestId(`sidebar-session-${TIMING_SECONDARY_SESSION_KEY}`).click();
+      await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible();
+      await page.evaluate(() => {
+        const clock = window as unknown as { __turnTimingNowMs: number };
+        clock.__turnTimingNowMs += 60_000;
+      });
+      await resolveTurnTimingPrompt(app);
+
+      await page.getByTestId(`sidebar-session-${MAIN_SESSION_KEY}`).click();
+      await expect(page.getByText('Completed in the background')).toBeVisible();
+      await expect.poll(async () => await hasReloadedTranscriptTiming(app)).toBe(true);
+      await expect(page.getByTestId('acp-turn-duration')).toHaveText('Took 60 sec');
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('continues a running duration after switching sessions and receiving historical timing', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installAcpChatMocks(app, { success: true, generation: 1 }, [
+        { key: MAIN_SESSION_KEY, displayName: 'main', workspacePath: MAIN_WORKSPACE },
+        { key: TIMING_SECONDARY_SESSION_KEY, displayName: 'secondary', workspacePath: MAIN_WORKSPACE },
+      ]);
+      await installTurnTimingSessionSwitchMock(app);
+      const page = await openChat(app);
+      await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible({ timeout: 30_000 });
+      await page.evaluate(() => {
+        const clock = window as unknown as { __turnTimingNowMs: number };
+        clock.__turnTimingNowMs = Date.now();
+        Date.now = () => clock.__turnTimingNowMs;
+      });
+
+      await page.getByTestId('chat-composer-input').fill('Keep the exact duration');
+      await page.getByTestId('chat-composer-send').click();
+      await emitAcpSessionUpdates(app, [{
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'timing-live-assistant',
+        content: { type: 'text', text: 'Working before the switch' },
+      }]);
+      await expect(page.getByTestId('acp-turn-duration')).toContainText('elapsed');
+
+      await page.getByTestId(`sidebar-session-${TIMING_SECONDARY_SESSION_KEY}`).click();
+      await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible();
+      await page.evaluate(() => {
+        const clock = window as unknown as { __turnTimingNowMs: number };
+        clock.__turnTimingNowMs += 60_000;
+      });
+
+      await page.getByTestId(`sidebar-session-${MAIN_SESSION_KEY}`).click();
+      await expect(page.getByText('Working before the switch')).toBeVisible();
+      await expect.poll(async () => await hasReloadedTranscriptTiming(app)).toBe(true);
+      await expect(page.getByTestId('acp-turn-duration')).toHaveText('60 sec elapsed');
+
+      await page.evaluate(() => {
+        const clock = window as unknown as { __turnTimingNowMs: number };
+        clock.__turnTimingNowMs += 2_000;
+      });
+      await page.waitForTimeout(1_100);
+      await expect(page.getByTestId('acp-turn-duration')).toHaveText('62 sec elapsed');
+    } finally {
+      await resolveTurnTimingPrompt(app);
       await closeElectronApp(app);
     }
   });
