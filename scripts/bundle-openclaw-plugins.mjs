@@ -12,6 +12,7 @@
  *   - @openclaw/qqbot -> build/openclaw-plugins/qqbot
  *   - @openclaw/whatsapp -> build/openclaw-plugins/whatsapp
  *   - @tencent-weixin/openclaw-weixin -> build/openclaw-plugins/openclaw-weixin
+ *   - @openclaw/parallel-plugin -> build/openclaw-plugins/parallel
  *   - clawx-openai-image (local) -> build/openclaw-plugins/clawx-openai-image
  *   - uclaw-video (local) -> build/openclaw-plugins/uclaw-video
  *
