@@ -47,7 +47,7 @@ describe('local skill service', () => {
     vi.unstubAllEnvs();
   });
 
-  it('includes bundled skill-creator but filters out other bundled openclaw skills', async () => {
+  it('includes every bundled OpenClaw skill', async () => {
     const root = mkdtempSync(join(tmpdir(), 'clawx-local-skills-'));
     const managedRoot = join(root, 'managed');
     const bundledRoot = join(root, 'openclaw');
@@ -59,7 +59,7 @@ describe('local skill service', () => {
     writeFileSync(join(bundledRoot, 'skills', 'skill-creator', 'SKILL.md'), '---\nname: skill-creator\ndescription: bundled creator\n---\n');
 
     mkdirSync(join(bundledRoot, 'skills', 'other-bundled'), { recursive: true });
-    writeFileSync(join(bundledRoot, 'skills', 'other-bundled', 'SKILL.md'), '---\nname: other-bundled\ndescription: should not appear\n---\n');
+    writeFileSync(join(bundledRoot, 'skills', 'other-bundled', 'SKILL.md'), '---\nname: other-bundled\ndescription: bundled skill\n---\n');
 
     listAgentsSnapshotMock.mockResolvedValue({ agents: [] });
     getOpenClawSkillsDirMock.mockReturnValue(managedRoot);
@@ -69,13 +69,17 @@ describe('local skill service', () => {
     const { listLocalSkills } = await import('@electron/services/skills/local-skill-service');
     const skills = await listLocalSkills();
 
-    expect(skills.map((skill) => skill.id)).toEqual(['pdf', 'skill-creator']);
+    expect(skills.map((skill) => skill.id)).toEqual(['pdf', 'other-bundled', 'skill-creator']);
     expect(skills.find((skill) => skill.id === 'skill-creator')).toMatchObject({
       source: 'openclaw-bundled',
       isBundled: true,
       enabled: true,
     });
-    expect(skills.find((skill) => skill.id === 'other-bundled')).toBeUndefined();
+    expect(skills.find((skill) => skill.id === 'other-bundled')).toMatchObject({
+      source: 'openclaw-bundled',
+      isBundled: true,
+      enabled: true,
+    });
   });
 
   it('does not invent a default version when local metadata has no version', async () => {

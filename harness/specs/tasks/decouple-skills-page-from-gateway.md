@@ -69,9 +69,9 @@ acceptance:
   - Skills page first loads /api/skills/local and remains usable when Gateway is stopped.
   - Gateway skills.status becomes a best-effort runtime merge, not a hard dependency for initial rendering.
   - Enabling/disabling skills writes skills.entries.<skillKey>.enabled in openclaw.json via Host API.
-  - Gateway-offline local scan includes the allowlisted bundled OpenClaw skill `skill-creator`.
-  - Non-allowlisted bundled OpenClaw skills are physically trimmed from the active OpenClaw runtime (dev + packaged), and stale openclaw.json entries for those removed bundled skills are pruned.
-  - Packaged OpenClaw bundles physically keep only the allowlisted bundled skill `skill-creator`.
+  - Gateway-offline local scan includes every skill physically bundled by OpenClaw.
+  - Development and packaged OpenClaw runtimes preserve the complete upstream bundled skills directory without an UClaw allowlist.
+  - Startup removes retired `docx`, `pdf`, `pptx`, and `xlsx` copies only when their directories carry matching UClaw `.clawx-preinstalled.json` ownership markers; unmarked same-name directories and configs remain untouched.
   - Uninstalling a managed skill removes skills.entries.<skillKey> instead of preserving stale config.
   - Without an extension marketplace provider, /api/clawhub/capability reports local-only and install/search are unavailable.
   - package.json no longer depends on npm clawhub.

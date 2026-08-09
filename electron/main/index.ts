@@ -52,7 +52,7 @@ import {
 } from './quit-lifecycle';
 import { createSignalQuitHandler } from './signal-quit';
 import { acquireProcessInstanceFileLock } from './process-instance-lock';
-import { ensureBuiltinSkillsInstalled, ensurePreinstalledSkillsInstalled, trimBundledOpenClawSkillsAndConfigs } from '../utils/skill-config';
+import { ensureBuiltinSkillsInstalled, removeRetiredPreinstalledSkills } from '../utils/skill-config';
 
 import { deviceOAuthManager } from '../utils/device-oauth';
 import { browserOAuthManager } from '../utils/browser-oauth';
@@ -432,6 +432,21 @@ async function initialize(): Promise<void> {
     webBrowserGuestRegistry,
   );
 
+  // Retire only UClaw-owned document skills before the first renderer load.
+  // Unmarked same-name directories are user-managed and must remain untouched.
+  if (!isE2EMode) {
+    try {
+      const { removed, removedConfigs } = await removeRetiredPreinstalledSkills();
+      if (removed > 0 || removedConfigs > 0) {
+        logger.info(
+          `Removed retired UClaw preinstalled skills: removed ${removed}, pruned configs ${removedConfigs}`,
+        );
+      }
+    } catch (error) {
+      logger.warn('Failed to remove retired UClaw preinstalled skills:', error);
+    }
+  }
+
   loadMainWindow(window);
 
   // Create system tray
@@ -484,30 +499,6 @@ async function initialize(): Promise<void> {
   if (!isE2EMode) {
     void ensureBuiltinSkillsInstalled().catch((error) => {
       logger.warn('Failed to install built-in skills:', error);
-    });
-  }
-
-  // Keep community builds aligned with Clawx-biz by physically trimming
-  // bundled OpenClaw consumer skills on startup (dev + packaged), keeping only
-  // `skill-creator`. This also prunes stale openclaw.json entries for trimmed
-  // bundled skills so we do not keep `enabled: false` config for skills that no
-  // longer exist.
-  if (!isE2EMode) {
-    void trimBundledOpenClawSkillsAndConfigs().then(({ removed, removedConfigs, kept }) => {
-      if (removed > 0 || removedConfigs > 0) {
-        logger.info(
-          `Trimmed bundled OpenClaw skills: removed ${removed}, pruned configs ${removedConfigs}, kept ${kept.join(', ')}`,
-        );
-      }
-    });
-  }
-
-  // Pre-deploy bundled third-party skills from resources/preinstalled-skills.
-  // This installs full skill directories (not only SKILL.md) in an idempotent,
-  // non-destructive way and never blocks startup.
-  if (!isE2EMode) {
-    void ensurePreinstalledSkillsInstalled().catch((error) => {
-      logger.warn('Failed to install preinstalled skills:', error);
     });
   }
 

@@ -25,7 +25,6 @@ import { patchExtensionOpenClawSelfImports } from './openclaw-self-import-patch.
 const ROOT = path.resolve(__dirname, '..');
 const OUTPUT = path.join(ROOT, 'build', 'openclaw');
 const NODE_MODULES = path.join(ROOT, 'node_modules');
-const BUNDLED_OPENCLAW_SKILL_ALLOWLIST = new Set(['skill-creator']);
 
 // On Windows, pnpm virtual store paths can exceed MAX_PATH (260 chars).
 function normWin(p) {
@@ -58,23 +57,6 @@ function shouldCopyOpenClawPackageEntry(src) {
   }
 
   return true;
-}
-
-function trimBundledOpenClawSkills(skillsRoot) {
-  if (!fs.existsSync(skillsRoot)) return { removed: 0, kept: [...BUNDLED_OPENCLAW_SKILL_ALLOWLIST] };
-
-  let removed = 0;
-  for (const entry of fs.readdirSync(skillsRoot, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    if (BUNDLED_OPENCLAW_SKILL_ALLOWLIST.has(entry.name)) continue;
-
-    const skillDir = path.join(skillsRoot, entry.name);
-    if (!fs.existsSync(path.join(skillDir, 'SKILL.md'))) continue;
-    fs.rmSync(skillDir, { recursive: true, force: true });
-    removed += 1;
-  }
-
-  return { removed, kept: [...BUNDLED_OPENCLAW_SKILL_ALLOWLIST] };
 }
 
 function removeDirRobust(targetDir) {
@@ -116,11 +98,6 @@ fs.cpSync(openclawReal, OUTPUT, {
   dereference: true,
   filter: shouldCopyOpenClawPackageEntry,
 });
-
-const bundledSkillsTrim = trimBundledOpenClawSkills(path.join(OUTPUT, 'skills'));
-if (bundledSkillsTrim.removed > 0) {
-  echo`   Trimmed bundled OpenClaw skills: removed ${bundledSkillsTrim.removed}, kept ${bundledSkillsTrim.kept.join(', ')}`;
-}
 
 // 4. Recursively collect ALL transitive dependencies via pnpm virtual store BFS
 //

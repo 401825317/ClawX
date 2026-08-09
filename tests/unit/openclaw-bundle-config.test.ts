@@ -71,6 +71,23 @@ describe('openclaw bundle config', () => {
     ]));
   });
 
+  it('preserves bundled OpenClaw skills without packaging retired UClaw skill copies', () => {
+    const builderConfig = parse(
+      readFileSync(resolve(process.cwd(), 'electron-builder.yml'), 'utf8'),
+    ) as { extraResources?: Array<Record<string, unknown>> };
+    const packageJson = JSON.parse(
+      readFileSync(resolve(process.cwd(), 'package.json'), 'utf8'),
+    ) as { scripts?: Record<string, string> };
+    const bundleSource = readFileSync(
+      resolve(process.cwd(), 'scripts/bundle-openclaw.mjs'),
+      'utf8',
+    );
+
+    expect(JSON.stringify(builderConfig.extraResources)).not.toContain('preinstalled-skills');
+    expect(JSON.stringify(packageJson.scripts)).not.toContain('preinstalled-skills');
+    expect(bundleSource).not.toContain('trimBundledOpenClawSkills');
+  });
+
   it('declares every managed video request timeout in the plugin config schema', () => {
     const manifest = JSON.parse(readFileSync(
       resolve(process.cwd(), 'resources/openclaw-plugins/uclaw-video/openclaw.plugin.json'),

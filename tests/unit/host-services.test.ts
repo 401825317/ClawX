@@ -2018,6 +2018,7 @@ describe('host services', () => {
     );
     const createMainWindowIndex = source.indexOf('const window = createMainWindow();');
     const registerHandlersIndex = source.indexOf('registerIpcHandlers(');
+    const retiredSkillsCleanupIndex = source.indexOf('await removeRetiredPreinstalledSkills()');
     const loadRendererIndex = source.indexOf('loadMainWindow(window);');
     const appReadySource = source.slice(
       source.indexOf('app.whenReady().then('),
@@ -2031,6 +2032,8 @@ describe('host services', () => {
     expect(configureIndex).toBeLessThan(firstInitializationAwaitIndex);
     expect(createMainWindowIndex).toBeGreaterThan(configureIndex);
     expect(registerHandlersIndex).toBeGreaterThan(createMainWindowIndex);
+    expect(retiredSkillsCleanupIndex).toBeGreaterThan(registerHandlersIndex);
+    expect(loadRendererIndex).toBeGreaterThan(retiredSkillsCleanupIndex);
     expect(loadRendererIndex).toBeGreaterThan(registerHandlersIndex);
     expect(initializeCompleteIndex).toBeGreaterThan(-1);
     expect(activateHandlerIndex).toBeGreaterThan(initializeCompleteIndex);

@@ -12,7 +12,6 @@ import type { Skill, MarketplaceCatalogMeta, MarketplaceSkill } from '../types/s
 
 type GatewaySkillStatus = NonNullable<SkillsStatusResult['skills']>[number];
 
-const BUNDLED_OPENCLAW_SKILL_ALLOWLIST = new Set(['skill-creator']);
 const GATEWAY_ONLY_APPENDABLE_SOURCES = new Set(['openclaw-plugin', 'openclaw-extra']);
 const VALID_MARKETPLACE_SKILL_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const MARKETPLACE_HOME_SEARCH_LIMIT = 100;
@@ -232,16 +231,6 @@ function normalizeSkillPath(value?: string): string {
   return (value || '').trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 }
 
-function isAllowedBundledGatewaySkill(status: GatewaySkillStatus): boolean {
-  if (!status.bundled) return true;
-
-  const aliases = [status.skillKey, status.slug]
-    .map((value) => normalizeSkillKey(value))
-    .filter(Boolean);
-
-  return aliases.some((alias) => BUNDLED_OPENCLAW_SKILL_ALLOWLIST.has(alias));
-}
-
 function shouldAppendGatewayOnlySkill(status: GatewaySkillStatus): boolean {
   return GATEWAY_ONLY_APPENDABLE_SOURCES.has((status.source || '').trim().toLowerCase());
 }
@@ -360,9 +349,6 @@ function mergeGatewaySkills(localSkills: Skill[], gatewaySkills?: GatewaySkillSt
   });
 
   for (const gatewaySkill of gatewaySkills) {
-    if (!isAllowedBundledGatewaySkill(gatewaySkill)) {
-      continue;
-    }
     const aliases = [
       normalizeSkillKey(gatewaySkill.skillKey),
       normalizeSkillKey(gatewaySkill.slug),

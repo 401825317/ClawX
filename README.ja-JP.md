@@ -133,8 +133,8 @@ AIタスクを自動的に実行するようスケジュール設定できます
 
 ### 🧩 拡張可能なスキルシステム
 事前構築されたスキルでAIエージェントを拡張できます。統合 Skills ページはローカル優先で、管理ディレクトリや workspace のスキルをスキャンし、Gateway に依存せず有効/無効を切り替えられます。公開 marketplace は Main プロセス経由で SkillHub と互換 ClawHub Provider に対応し、UClaw アカウント認証を要求せず、Gateway のライフサイクルも変更しません。
-ClawX はドキュメント処理スキル（`pdf`、`xlsx`、`docx`、`pptx`）もフル内容で同梱し、起動時に管理スキルディレクトリ（既定 `~/.openclaw/skills`）へ自動配備し、初回インストール時に既定で有効化します。
-Skills ページでは OpenClaw の複数ソース（管理ディレクトリ、workspace、追加スキルディレクトリ）から検出されたスキルを表示でき、各スキルの実際のパスを確認して実フォルダを直接開けます。OpenClaw 同梱の bundled skill については、コミュニティ版ではパッケージにも表示にも `skill-creator` のみを残し、dev 起動時と packaged 起動時の両方で他の bundled skill を物理的に削除します。さらに、削除済み bundled skill の古い `openclaw.json` エントリも一緒に掃除します。
+UClaw は `pdf`、`xlsx`、`docx`、`pptx` の個別コピーをプリインストールしません。起動時には UClaw の `.clawx-preinstalled.json` 所有マーカーが残る旧コピーだけを削除し、マーカーのない同名ディレクトリには触れません。
+Skills ページでは OpenClaw の複数ソース（管理ディレクトリ、workspace、追加スキルディレクトリ）から検出されたスキルを表示でき、各スキルの実際のパスを確認して実フォルダを直接開けます。開発環境とパッケージ版はいずれも OpenClaw 同梱の bundled skills をすべて保持し、ローカル優先スキャンですべて表示します。
 
 ### 🔐 セキュアなプロバイダー統合
 複数のAIプロバイダー（OpenAI、Anthropic、Z.AI / GLMなど）に接続でき、資格情報はシステムのネイティブキーチェーンに安全に保存されます。OpenAI は API キーとブラウザ OAuth（Codex サブスクリプション）の両方に対応しています。
@@ -407,7 +407,7 @@ pnpm run comms:compare    # リプレイ指標をベースライン閾値と比�
 # ビルド＆パッケージ
 pnpm run build:vite       # フロントエンドのみビルド
 pnpm build                # フルプロダクションビルド（パッケージアセット含む）
-pnpm package              # 現在のプラットフォーム向けにパッケージ化（同梱プリインストールスキルを含む）
+pnpm package              # 現在のプラットフォーム向けパッケージアセットを準備
 pnpm package:mac          # macOS向けにパッケージ化
 pnpm package:win          # Windows向けにパッケージ化
 pnpm package:win:usb      # Windows x64 USB ZIPを作成（Windowsのみ、クリーンなソースが必要）

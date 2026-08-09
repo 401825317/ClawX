@@ -39,7 +39,6 @@ type SourceDescriptor = {
   root: string;
   source: string;
   priority: number;
-  allowedSkillSlugs?: Set<string>;
 };
 
 type ParsedSkillManifest = {
@@ -76,7 +75,6 @@ type PreinstalledMeta = {
 };
 
 const MAX_SKILL_FILE_BYTES = 256_000;
-const BUNDLED_OPENCLAW_SKILL_ALLOWLIST = new Set(['skill-creator']);
 
 async function pathExists(targetPath: string): Promise<boolean> {
   try {
@@ -332,9 +330,7 @@ async function scanRoot(
       if (entry.name === 'node_modules') continue;
       const entryPath = join(descriptor.root, entry.name);
       if (entry.isDirectory()) {
-        if (!descriptor.allowedSkillSlugs || descriptor.allowedSkillSlugs.has(entry.name)) {
-          skillDirs.add(entryPath);
-        }
+        skillDirs.add(entryPath);
         continue;
       }
       if (entry.isSymbolicLink()) {
@@ -392,7 +388,6 @@ async function buildDescriptors(): Promise<SourceDescriptor[]> {
       root: join(getOpenClawResolvedDir(), 'skills'),
       source: 'openclaw-bundled',
       priority: 4,
-      allowedSkillSlugs: BUNDLED_OPENCLAW_SKILL_ALLOWLIST,
     },
   ];
 }

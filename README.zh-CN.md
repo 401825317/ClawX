@@ -134,8 +134,8 @@ ClawX 现在还内置了腾讯官方个人微信渠道插件，可直接在 Chan
 
 ### 🧩 可扩展技能系统
 通过预构建的技能扩展 AI 智能体的能力。集成的 Skills 页面采用“本地优先”方式：会扫描托管目录与 workspace 技能目录，并且无需依赖 Gateway 即可启用或停用技能。公共技能市场通过主进程接入 SkillHub 和兼容的 ClawHub Provider，不要求登录 UClaw 账号，也不会改变 Gateway 的启停状态。
-ClawX 还会内置预装完整的文档处理技能（`pdf`、`xlsx`、`docx`、`pptx`），在启动时自动部署到托管技能目录（默认 `~/.openclaw/skills`），并在首次安装时默认启用。
-Skills 页面可展示来自多个 OpenClaw 来源的技能（托管目录、workspace、额外技能目录），并显示每个技能的实际路径，便于直接打开真实安装位置。对于 OpenClaw 自带的 bundled skills，社区版现在在打包产物里只保留并展示 `skill-creator`；开发模式和打包版启动时都会直接清理其它 bundled skill，同时把这些已删除 bundled skill 在 `openclaw.json` 中残留的旧配置一并移除。
+UClaw 不再单独预装 `pdf`、`xlsx`、`docx`、`pptx` 技能。启动时只会清理仍带有 UClaw `.clawx-preinstalled.json` 所有权标记的旧副本；没有标记的同名目录视为用户所有并保持不动。
+Skills 页面可展示来自多个 OpenClaw 来源的技能（托管目录、workspace、额外技能目录），并显示每个技能的实际路径，便于直接打开真实安装位置。开发模式和打包产物都会完整保留 OpenClaw 自带的 bundled skills，并通过本地优先扫描全部展示。
 
 ### 🔐 安全的供应商集成
 连接多个 AI 供应商（OpenAI、Anthropic、Z.AI / GLM 等），凭证安全存储在系统原生密钥链中。OpenAI 同时支持 API Key 与浏览器 OAuth（Codex 订阅）登录。
@@ -394,7 +394,7 @@ ACP Chat 也可在 runtime 以可信结构化媒体投递图像生成结果时�
 ```bash
 # 开发
 pnpm run init             # 安装依赖并下载捆绑二进制（uv、agent-browser）
-pnpm dev                  # 以热重载模式启动（若缺失会自动准备预装技能包）
+pnpm dev                  # 以热重载模式启动
 
 # 代码质量
 pnpm lint                 # 运行 ESLint 检查
@@ -411,7 +411,7 @@ pnpm run comms:compare    # 将回放指标与基线阈值对比
 # 构建与打包
 pnpm run build:vite       # 仅构建前端
 pnpm build                # 完整生产构建（含打包资源）
-pnpm package              # 为当前平台打包（包含预装技能资源）
+pnpm package              # 为当前平台准备打包资源
 pnpm package:mac          # 为 macOS 打包
 pnpm package:win          # 为 Windows 打包
 pnpm package:win:usb      # 构建 Windows x64 USB 便携包（仅 Windows，要求源码工作区干净）

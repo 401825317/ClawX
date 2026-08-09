@@ -70,6 +70,51 @@ describe('skills store local-first fetch', () => {
     });
   });
 
+  it('merges Gateway status into every locally discovered bundled skill', async () => {
+    const gatewayDeferred = deferred<{ skills: Array<Record<string, unknown>> }>();
+    statusMock.mockReturnValueOnce(gatewayDeferred.promise);
+    localMock.mockResolvedValueOnce({
+      success: true,
+      skills: [{
+        id: 'browser-use',
+        slug: 'browser-use',
+        name: 'browser-use',
+        description: 'local bundled skill',
+        enabled: false,
+        isBundled: true,
+        source: 'openclaw-bundled',
+      }],
+    });
+
+    const { useSkillsStore } = await import('@/stores/skills');
+    useSkillsStore.setState({ skills: [], loading: false, error: null });
+
+    await expect(useSkillsStore.getState().fetchSkills()).resolves.toBe(true);
+    expect(useSkillsStore.getState().skills[0]).toMatchObject({
+      id: 'browser-use',
+      enabled: false,
+    });
+
+    gatewayDeferred.resolve({
+      skills: [{
+        skillKey: 'browser-use',
+        slug: 'browser-use',
+        name: 'browser-use',
+        bundled: true,
+        disabled: false,
+        version: '1.2.3',
+      }],
+    });
+
+    await vi.waitFor(() => {
+      expect(useSkillsStore.getState().skills[0]).toMatchObject({
+        id: 'browser-use',
+        enabled: true,
+        version: '1.2.3',
+      });
+    });
+  });
+
   it('does not append bundled gateway skills that are missing from local scan', async () => {
     const gatewayDeferred = deferred<{ skills: Array<Record<string, unknown>> }>();
     statusMock.mockReturnValueOnce(gatewayDeferred.promise);
