@@ -31,13 +31,14 @@ env:
 
 jobs:
   preflight:
-    name: Lock master release identity
+    name: Lock release branch identity
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.identity.outputs.version }}
       commit: ${{ steps.identity.outputs.commit }}
       short_commit: ${{ steps.identity.outputs.short_commit }}
       tag: ${{ steps.identity.outputs.tag }}
+      release_branch: ${{ steps.identity.outputs.release_branch }}
     steps:
       - name: Checkout selected commit
         uses: actions/checkout@v6
@@ -49,7 +50,7 @@ jobs:
         with:
           node-version: ${{ env.UCLAW_NODE_VERSION }}
 
-      - name: Require the latest clean master commit and matching version
+      - name: Require the latest clean release branch commit and matching version
         id: identity
         shell: bash
         env:
@@ -58,21 +59,22 @@ jobs:
           SELECTED_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [[ "$SELECTED_REF" != "refs/heads/master" ]]; then
-            echo "Formal portable releases must be dispatched from master; selected ref: $SELECTED_REF" >&2
+          if [[ "$SELECTED_REF" != refs/heads/* ]]; then
+            echo "Formal portable releases must be dispatched from a branch; selected ref: $SELECTED_REF" >&2
             exit 1
           fi
+          SELECTED_BRANCH="${SELECTED_REF#refs/heads/}"
           if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Version must be a stable semantic version: $RELEASE_VERSION" >&2
             exit 1
           fi
 
-          git fetch --no-tags origin master
+          git fetch --no-tags origin "$SELECTED_BRANCH"
           LOCAL_COMMIT="$(git rev-parse HEAD)"
-          REMOTE_MASTER="$(git rev-parse origin/master)"
-          if [[ "$LOCAL_COMMIT" != "$SELECTED_SHA" || "$LOCAL_COMMIT" != "$REMOTE_MASTER" ]]; then
-            echo "Selected commit is not the latest origin/master." >&2
-            echo "selected=$SELECTED_SHA local=$LOCAL_COMMIT remote=$REMOTE_MASTER" >&2
+          REMOTE_BRANCH_COMMIT="$(git rev-parse "origin/$SELECTED_BRANCH")"
+          if [[ "$LOCAL_COMMIT" != "$SELECTED_SHA" || "$LOCAL_COMMIT" != "$REMOTE_BRANCH_COMMIT" ]]; then
+            echo "Selected commit is not the latest origin/$SELECTED_BRANCH." >&2
+            echo "selected=$SELECTED_SHA local=$LOCAL_COMMIT remote=$REMOTE_BRANCH_COMMIT" >&2
             exit 1
           fi
           if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
@@ -106,6 +108,7 @@ jobs:
           echo "commit=$LOCAL_COMMIT" >> "$GITHUB_OUTPUT"
           echo "short_commit=${LOCAL_COMMIT:0:7}" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "release_branch=$SELECTED_BRANCH" >> "$GITHUB_OUTPUT"
 
   build-and-sign:
     name: Build, sign, and stage exact package
