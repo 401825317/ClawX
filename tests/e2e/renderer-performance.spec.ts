@@ -10,6 +10,7 @@ import {
   stopMainCpuProfile,
   test,
 } from './fixtures/electron';
+import { E2E_PERFORMANCE_TAG } from './parallel-policy';
 
 const SESSION_KEY = 'agent:main:performance';
 const WORKSPACE = '/synthetic-workspace';
@@ -171,7 +172,9 @@ async function writeArtifact(testInfo: TestInfo, name: string, body: unknown): P
 
 test.use({ trace: 'off', video: 'off' });
 
-test('profiles a populated timeline during a growing Markdown stream', async ({ launchElectronApp }, testInfo) => {
+test('profiles a populated timeline during a growing Markdown stream', {
+  tag: E2E_PERFORMANCE_TAG,
+}, async ({ launchElectronApp }, testInfo) => {
   const app = await launchElectronApp({ skipSetup: true });
 
   try {
@@ -314,7 +317,9 @@ test('profiles a populated timeline during a growing Markdown stream', async ({ 
   }
 });
 
-test('profiles sidebar animation and scrolling with rich static Markdown', async ({ launchElectronApp }, testInfo) => {
+test('profiles sidebar animation and scrolling with rich static Markdown', {
+  tag: E2E_PERFORMANCE_TAG,
+}, async ({ launchElectronApp }, testInfo) => {
   const app = await launchElectronApp({ skipSetup: true });
 
   try {

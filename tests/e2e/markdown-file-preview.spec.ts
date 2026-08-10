@@ -6,6 +6,7 @@ import {
   installAttachmentHostFixture,
   test,
 } from './fixtures/electron';
+import { E2E_EXCLUSIVE_TAG } from './parallel-policy';
 
 const MAIN_SESSION_KEY = 'agent:main:main';
 const FILE_NAME = 'streamdown-preview.md';
@@ -71,7 +72,7 @@ async function openChat(app: ElectronApplication): Promise<Page> {
   return page;
 }
 
-test.describe('Markdown file preview', () => {
+test.describe('Markdown file preview', { tag: E2E_EXCLUSIVE_TAG }, () => {
   test('renders workspace Markdown through static Streamdown', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 

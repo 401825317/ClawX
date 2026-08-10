@@ -2,7 +2,6 @@ import electronBinaryPath from 'electron';
 import { _electron as electron, expect, test as base, type ElectronApplication, type Page } from '@playwright/test';
 import { build as buildWithEsbuild } from 'esbuild';
 import { access, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -139,28 +138,6 @@ function productionAttachmentBundle(): Promise<string> {
   return productionAttachmentBundlePromise;
 }
 
-async function allocatePort(): Promise<number> {
-  return await new Promise((resolvePort, reject) => {
-    const server = createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      if (!address || typeof address === 'string') {
-        server.close(() => reject(new Error('Failed to allocate an ephemeral port')));
-        return;
-      }
-      const { port } = address;
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolvePort(port);
-      });
-    });
-  });
-}
-
 async function getStableWindow(app: ElectronApplication): Promise<Page> {
   const deadline = Date.now() + 30_000;
   let page = await app.firstWindow();
@@ -254,7 +231,10 @@ async function launchClawXElectron(
     throw new Error('Electron E2E must not bypass application media permission prompts');
   }
   await seedE2eSettings(userDataDir);
-  const hostApiPort = await allocatePort();
+  const inheritedEnv = { ...process.env };
+  delete inheritedEnv.CLAWX_E2E_SKIP_SETUP;
+  delete inheritedEnv.CLAWX_REMOTE_DEBUGGING_PORT;
+  delete inheritedEnv.VITE_DEV_SERVER_URL;
   const electronEnv = process.platform === 'linux'
     ? {
       ELECTRON_DISABLE_SANDBOX: '1',
@@ -265,7 +245,7 @@ async function launchClawXElectron(
     executablePath: electronBinaryPath,
     args: ['--lang=en-US', ...(options.additionalArgs ?? []), electronEntry],
     env: {
-      ...process.env,
+      ...inheritedEnv,
       ...electronEnv,
       HOME: homeDir,
       USERPROFILE: homeDir,
@@ -277,8 +257,9 @@ async function launchClawXElectron(
       LANGUAGE: 'en',
       CLAWX_E2E: '1',
       CLAWX_USER_DATA_DIR: userDataDir,
+      OPENCLAW_STATE_DIR: join(homeDir, '.openclaw'),
+      OPENCLAW_CONFIG_PATH: join(homeDir, '.openclaw', 'openclaw.json'),
       ...(options.skipSetup ? { CLAWX_E2E_SKIP_SETUP: '1' } : {}),
-      CLAWX_PORT_CLAWX_HOST_API: String(hostApiPort),
     },
     timeout: 90_000,
   });

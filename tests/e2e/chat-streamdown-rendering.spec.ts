@@ -1,5 +1,6 @@
 import type { ElectronApplication } from '@playwright/test';
 import { closeElectronApp, expect, getStableWindow, installIpcMocks, test } from './fixtures/electron';
+import { E2E_EXCLUSIVE_TAG } from './parallel-policy';
 
 const SESSION_KEY = 'agent:main:main';
 const MAIN_WORKSPACE = '/workspace';
@@ -78,7 +79,7 @@ async function resolveAcpPrompt(app: ElectronApplication) {
   });
 }
 
-test.describe('ClawX streaming Markdown rendering', () => {
+test.describe('ClawX streaming Markdown rendering', { tag: E2E_EXCLUSIVE_TAG }, () => {
   test('repairs and animates only the pending assistant response, then clears animation markers', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 

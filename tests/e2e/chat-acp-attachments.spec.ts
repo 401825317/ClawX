@@ -76,6 +76,13 @@ function filesActionCalls(
   return calls.filter((call) => call.module === 'files' && call.action === action);
 }
 
+function resolvedAttachmentRefs(calls: RecordedHostInvocation[]): Record<string, unknown>[] {
+  return calls
+    .filter((call) => call.module === 'files' && call.action === 'resolveAttachment')
+    .map((call) => call.payload?.ref)
+    .filter((ref): ref is Record<string, unknown> => ref != null);
+}
+
 async function openChat(app: ElectronApplication): Promise<Page> {
   const page = await getStableWindow(app);
   try {
@@ -227,14 +234,6 @@ test.describe('ACP media attachments', () => {
         ));
         return resolveCall?.payload?.ref ?? null;
       }).not.toBeNull();
-      const resolveCall = (await fixture.getHostInvocations()).find((call) => (
-        call.module === 'files'
-        && call.action === 'resolveAttachment'
-        && (call.payload?.ref as Record<string, unknown> | undefined)?.uri === spreadsheetPath
-      ));
-      const resolvedRef = resolveCall?.payload?.ref as Record<string, unknown>;
-      await fixture.clearInvocations();
-
       await trigger.click();
       const menu = page.getByTestId('acp-attachment-open-with-menu');
       await expect(menu).toBeVisible();
@@ -249,7 +248,17 @@ test.describe('ACP media attachments', () => {
         await expect.poll(async () => filesActionCalls(
           await fixture.getHostInvocations(),
           'listAttachmentOpenHandlers',
-        ).map((call) => call.payload)).toEqual([resolvedRef]);
+        )).toHaveLength(1);
+        const openWithRef = filesActionCalls(
+          await fixture.getHostInvocations(),
+          'listAttachmentOpenHandlers',
+        )[0].payload as Record<string, unknown>;
+        expect(openWithRef).toMatchObject({
+          sessionKey: MAIN_SESSION_KEY,
+          uri: spreadsheetPath,
+          generation: expect.any(Number),
+        });
+        expect(resolvedAttachmentRefs(await fixture.getHostInvocations())).toContainEqual(openWithRef);
         const appRows = page.getByTestId('acp-attachment-open-with-app');
         await expect(appRows).toHaveCount(2);
         await expect(appRows.nth(0)).toHaveText('Zulu Sheets');
@@ -265,7 +274,7 @@ test.describe('ACP media attachments', () => {
         await expect.poll(async () => filesActionCalls(
           await fixture.getHostInvocations(),
           'openAttachmentWith',
-        ).map((call) => call.payload)).toEqual([{ ref: resolvedRef, handlerId: 'app-alpha' }]);
+        ).map((call) => call.payload)).toEqual([{ ref: openWithRef, handlerId: 'app-alpha' }]);
         await expect(page.getByTestId('artifact-panel')).toHaveCount(0);
         await trigger.click();
       } else {
@@ -278,7 +287,17 @@ test.describe('ACP media attachments', () => {
       await expect.poll(async () => filesActionCalls(
         await fixture.getHostInvocations(),
         'revealAttachment',
-      ).map((call) => call.payload)).toEqual([resolvedRef]);
+      )).toHaveLength(1);
+      const revealRef = filesActionCalls(
+        await fixture.getHostInvocations(),
+        'revealAttachment',
+      )[0].payload as Record<string, unknown>;
+      expect(revealRef).toMatchObject({
+        sessionKey: MAIN_SESSION_KEY,
+        uri: spreadsheetPath,
+        generation: expect.any(Number),
+      });
+      expect(resolvedAttachmentRefs(await fixture.getHostInvocations())).toContainEqual(revealRef);
       await expect(page.getByTestId('artifact-panel')).toHaveCount(0);
 
       await fixture.clearInvocations();
