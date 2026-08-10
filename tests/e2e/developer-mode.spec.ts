@@ -6,6 +6,7 @@ test.describe('ClawX developer-mode gated UI', () => {
 
     await page.getByTestId('sidebar-nav-settings').click();
     await expect(page.getByTestId('settings-page')).toBeVisible();
+    await expect(page.getByText(/^(About|关于|このアプリについて|О приложении)$/i)).toHaveCount(0);
     await expect(page.getByTestId('settings-developer-section')).toHaveCount(0);
     await expect(page.getByTestId('settings-dev-mode-switch')).toHaveAttribute('data-state', 'unchecked');
     await expect(page.getByTestId('sidebar-open-dev-console')).toHaveCount(0);
