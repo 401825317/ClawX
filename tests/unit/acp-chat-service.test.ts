@@ -40,6 +40,10 @@ vi.mock('@electron/utils/logger', () => ({
   logger: loggerMock,
 }));
 
+vi.mock('@electron/utils/control-ui-device-pairing', () => ({
+  approvePendingLocalDeviceRequests: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock('@agentclientprotocol/sdk', () => ({
   ClientSideConnection: acpSdkMock.ClientSideConnection,
   ndJsonStream: acpSdkMock.ndJsonStream,
@@ -339,6 +343,30 @@ describe('AcpChatService', () => {
     })).resolves.toEqual({ success: false, error: 'ACP unavailable' });
 
     expect(turnImagePreferenceStore.discard).toHaveBeenCalledWith('image-pref-2');
+  });
+
+  it('preserves structured terminal provider errors from ACP prompt rejection', async () => {
+    const connection = createConnection();
+    connection.prompt.mockRejectedValueOnce({
+      message: '用户额度不足',
+      code: 'insufficient_user_quota',
+      status: 403,
+    });
+    const { service } = await createService(connection);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+
+    await expect(service.sendPrompt({
+      sessionKey: 'agent:pi:s1',
+      cwd: '/repo',
+      message: 'continue',
+    })).resolves.toEqual({
+      success: false,
+      error: '用户额度不足',
+      errorCode: 'INSUFFICIENT_QUOTA',
+      retryable: false,
+      httpStatus: 403,
+      upstreamCode: 'insufficient_user_quota',
+    });
   });
 
   it('queues video composer options without changing the ACP prompt text', async () => {

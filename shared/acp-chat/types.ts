@@ -4,6 +4,7 @@ import type {
   RequestPermissionResponse,
   SessionNotification,
 } from '@agentclientprotocol/sdk';
+import type { AcpChatErrorCode } from './errors';
 
 export type AcpJsonRecord = Record<string, unknown>;
 
@@ -58,6 +59,12 @@ export type AcpChatRespondPermissionPayload = AcpSessionKeyPayload & {
 export type AcpChatOperationResult = {
   success: boolean;
   error?: string;
+  /** Stable failure category used by the renderer to choose copy and recovery actions. */
+  errorCode?: AcpChatErrorCode;
+  /** True only when repeating the request can reasonably recover without user configuration changes. */
+  retryable?: boolean;
+  httpStatus?: number;
+  upstreamCode?: string;
   generation?: number;
   /** The requested session still has a live prompt and was reactivated without history replay. */
   resumedActivePrompt?: boolean;

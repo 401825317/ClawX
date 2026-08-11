@@ -4,6 +4,7 @@ import type {
   AttachmentFileRef,
   AttachmentRemoteRef,
 } from '@shared/host-api/contract';
+import type { AcpChatErrorDetails } from '@shared/acp-chat/errors';
 
 export type AttachmentUnavailableReason = AttachmentAccessError;
 
@@ -112,7 +113,15 @@ export type PlanItem = {
   entries: PlanEntry[];
 };
 
-export type TimelineItem = MessageSegmentItem | ThoughtItem | ToolCallItem | PermissionItem | PlanItem;
+/** A terminal prompt failure attached to the user turn that triggered it. */
+export type TurnFailureItem = {
+  kind: 'turn-failure';
+  id: string;
+  userMessageId: string;
+  failure: AcpChatErrorDetails;
+};
+
+export type TimelineItem = MessageSegmentItem | ThoughtItem | ToolCallItem | PermissionItem | PlanItem | TurnFailureItem;
 
 export type AcpSessionMetadata = {
   currentModeId?: string;

@@ -15,6 +15,7 @@ export function AcpTimeline({
   errorKind = 'load',
   onDismissError,
   onPermissionSelect,
+  onRecharge,
   fileActivity,
   workspaceRoot,
   assistantAvatarSrc,
@@ -27,6 +28,7 @@ export function AcpTimeline({
   errorKind?: 'load' | 'prompt';
   onDismissError?: () => void;
   onPermissionSelect?: (requestId: string, optionId: string) => void;
+  onRecharge?: () => void;
   fileActivity?: AcpFileActivityProjection;
   workspaceRoot?: string;
   assistantAvatarSrc?: string;
@@ -76,6 +78,7 @@ export function AcpTimeline({
               parentSessionKey={parentSessionKey}
               subagentSessions={subagentSessions}
               onPermissionSelect={onPermissionSelect}
+              onRecharge={onRecharge}
             />
           </div>
         );

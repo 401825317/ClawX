@@ -35,7 +35,7 @@
     "license": "MIT",
     "private": true,
     "scripts": {
-        "postinstall": "node scripts/patch-browser-hint.mjs && node scripts/openclaw-media-generation-patch.mjs && node scripts/openclaw-acp-streaming-patch.mjs && node scripts/install-openclaw-skill-shims.mjs",
+        "postinstall": "node scripts/patch-browser-hint.mjs && node scripts/openclaw-media-generation-patch.mjs && node scripts/openclaw-acp-streaming-patch.mjs && node scripts/openclaw-acp-terminal-error-patch.mjs && node scripts/install-openclaw-skill-shims.mjs",
         "init": "pnpm install && pnpm run uv:download && pnpm run agent-browser:download",
         "predev": "node scripts/generate-ext-bridge.mjs && node scripts/install-openclaw-skill-shims.mjs",
         "dev": "vite",

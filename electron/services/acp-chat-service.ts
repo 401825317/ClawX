@@ -23,6 +23,7 @@ import type {
   AcpPermissionRequestEnvelope,
   AcpSessionUpdateEnvelope,
 } from '@shared/acp-chat/types';
+import { normalizeAcpChatError } from '@shared/acp-chat/errors';
 import { getOpenClawEmbeddedForkSpec } from '../utils/openclaw-cli';
 import {
   approvePendingLocalDeviceRequests,
@@ -88,7 +89,17 @@ function ok(generation?: number, sessionUpdates?: AcpSessionUpdateEnvelope[]): A
 }
 
 function fail(error: unknown): AcpChatOperationResult {
-  return { success: false, error: error instanceof Error ? error.message : String(error) };
+  const failure = normalizeAcpChatError(error);
+  return {
+    success: false,
+    error: failure.message,
+    ...(failure.code !== 'UNKNOWN' ? {
+      errorCode: failure.code,
+      retryable: failure.retryable,
+    } : {}),
+    ...(failure.httpStatus ? { httpStatus: failure.httpStatus } : {}),
+    ...(failure.upstreamCode ? { upstreamCode: failure.upstreamCode } : {}),
+  };
 }
 
 function cancelledPermissionResponse(): RequestPermissionResponse {

@@ -11,6 +11,7 @@ import type {
 import { contentBlockToRenderPart, contentBlocksToRenderParts, toolContentToRenderPart, toolContentToRenderParts } from './content-blocks';
 import { dedupeTimelineAttachments, mergeMonotonicAttachment } from './attachments';
 import { openClawPromptTextBlocks } from './openclaw-prompt-compat';
+import { normalizeAcpChatError } from '@shared/acp-chat/errors';
 import type { AcpTimelineSnapshot, AttachmentRenderPart, MessageSegmentItem, RenderPart, TimelineItem, ToolCallItem } from './timeline-types';
 
 type UpdateRecord = Record<string, unknown> & {
@@ -598,6 +599,36 @@ function appendThoughtChunk(state: AcpTimelineSnapshot, update: UpdateRecord): A
   });
 }
 
+function appendTurnFailure(state: AcpTimelineSnapshot, update: UpdateRecord): AcpTimelineSnapshot {
+  const requestedUserMessageId = stringValue(update.userMessageId);
+  const requestedExists = requestedUserMessageId && state.itemOrder.some((itemId) => {
+    const item = state.itemsById[itemId];
+    return item?.kind === 'message-segment'
+      && item.role === 'user'
+      && item.messageId === requestedUserMessageId;
+  });
+  const latestUserMessage = [...state.itemOrder]
+    .reverse()
+    .map((itemId) => state.itemsById[itemId])
+    .find((item) => item?.kind === 'message-segment' && item.role === 'user');
+  const userMessageId = requestedExists
+    ? requestedUserMessageId
+    : latestUserMessage?.kind === 'message-segment' ? latestUserMessage.messageId : undefined;
+  if (!userMessageId) return state;
+
+  const id = `turn-failure:${userMessageId}`;
+  return appendItem(closeAllMessageSegments(state), {
+    kind: 'turn-failure',
+    id,
+    userMessageId,
+    failure: normalizeAcpChatError({
+      message: stringValue(update.errorMessage) ?? 'ACP prompt failed',
+      code: update.errorCode,
+      status: update.httpStatus,
+    }),
+  });
+}
+
 function updateSessionInfoMetadata(state: AcpTimelineSnapshot, update: UpdateRecord): AcpTimelineSnapshot {
   return {
     ...state,
@@ -639,6 +670,8 @@ export function applyAcpSessionUpdate(
       return appendMessageChunk(snapshot, 'assistant', update);
     case 'agent_thought_chunk':
       return appendThoughtChunk(snapshot, update);
+    case 'uclaw_turn_failure':
+      return appendTurnFailure(snapshot, update);
     case 'tool_call':
     case 'tool_call_update':
       return upsertToolCall(snapshot, update, options);

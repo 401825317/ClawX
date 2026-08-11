@@ -1001,4 +1001,35 @@ describe('ACP timeline reducer', () => {
 
     expect(state.metadata.configOptions).toEqual(configOptions);
   });
+
+  it('rebuilds a persisted terminal failure against the latest replayed user turn', () => {
+    let state = createEmptyAcpTimeline('agent:pi:s1', 1);
+    state = applyAcpSessionUpdate(state, {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'continue' },
+      },
+    });
+    state = applyAcpSessionUpdate(state, {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'uclaw_turn_failure',
+        userMessageId: 'live-id-not-present-during-replay',
+        errorMessage: 'status_code=403, code=insufficient_user_quota, 用户额度不足',
+      },
+    });
+
+    expect(state.itemOrder).toEqual(['user:message:0:0', 'turn-failure:user:message:0']);
+    expect(state.itemsById['turn-failure:user:message:0']).toMatchObject({
+      kind: 'turn-failure',
+      userMessageId: 'user:message:0',
+      failure: {
+        code: 'INSUFFICIENT_QUOTA',
+        retryable: false,
+        httpStatus: 403,
+        upstreamCode: 'insufficient_user_quota',
+      },
+    });
+  });
 });

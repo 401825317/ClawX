@@ -2434,12 +2434,18 @@ describe('ACP Chat store', () => {
       media: [{ filePath: '/repo/image.png', stagingId: 'stage-image', fileName: 'image.png', mimeType: 'image/png' }],
       messageId: expect.any(String),
     });
-    expect(useAcpChatSessionStore.getState()).toMatchObject({
-      sending: false,
-      error: 'prompt failed',
+    const sentMessageId = (hostApiMock.sendAcpPrompt.mock.calls[0]?.[0] as { messageId: string }).messageId;
+    expect(useAcpChatSessionStore.getState()).toMatchObject({ sending: false, error: null });
+    expect(useAcpChatSessionStore.getState().timeline.itemOrder).toEqual([
+      `${sentMessageId}:0`,
+      `turn-failure:${sentMessageId}`,
+    ]);
+    expect(useAcpChatSessionStore.getState().timeline.itemsById[`turn-failure:${sentMessageId}`]).toMatchObject({
+      kind: 'turn-failure',
+      userMessageId: sentMessageId,
+      failure: { code: 'UNKNOWN', message: 'prompt failed', retryable: false },
     });
-    expect(useAcpChatSessionStore.getState().timeline.itemOrder).toEqual([]);
-    expect(useAcpChatSessionStore.getState().turnTimingsByUserMessageId).toEqual({});
+    expect(useAcpChatSessionStore.getState().turnTimingsByUserMessageId[sentMessageId]).toBeUndefined();
 
     useAcpChatSessionStore.getState().clearError();
     expect(useAcpChatSessionStore.getState().error).toBeNull();
@@ -2610,12 +2616,19 @@ describe('ACP Chat store', () => {
     prompt.resolve({ success: false, error: 'prompt failed after echo' });
     await expect(sendPromise).resolves.toBe(false);
 
-    expect(useAcpChatSessionStore.getState().timeline.itemOrder).toHaveLength(1);
+    expect(useAcpChatSessionStore.getState().timeline.itemOrder).toEqual([
+      `${sentPayload.messageId}:0`,
+      `turn-failure:${sentPayload.messageId}`,
+    ]);
     expect(useAcpChatSessionStore.getState().timeline.itemsById[`${sentPayload.messageId}:0`]).toMatchObject({
       kind: 'message-segment',
       role: 'user',
       optimistic: false,
       parts: [{ kind: 'markdown', text: 'hello from user' }],
+    });
+    expect(useAcpChatSessionStore.getState().timeline.itemsById[`turn-failure:${sentPayload.messageId}`]).toMatchObject({
+      kind: 'turn-failure',
+      failure: { code: 'UNKNOWN', message: 'prompt failed after echo' },
     });
   });
 

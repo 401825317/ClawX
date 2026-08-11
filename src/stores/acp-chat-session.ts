@@ -7,6 +7,7 @@ import type {
   AcpPermissionRequestEnvelope,
   AcpSessionUpdateEnvelope,
 } from '@shared/acp-chat/types';
+import { normalizeAcpChatError, type AcpChatErrorDetails } from '@shared/acp-chat/errors';
 import type {
   MediaThumbnailResult,
   ResolveAttachmentPayload,
@@ -2345,24 +2346,59 @@ function appendOptimisticUserSegment(
   };
 }
 
-function removePendingOptimisticUserSegment(
+function settleOptimisticUserSegment(
   timeline: AcpTimelineSnapshot,
   messageId: string,
 ): AcpTimelineSnapshot {
   const itemId = timeline.openMessageSegments[messageId];
   const item = itemId ? timeline.itemsById[itemId] : undefined;
-  if (item?.kind !== 'message-segment' || item.role !== 'user' || !item.optimistic) return timeline;
-
-  const { [itemId]: _removedItem, ...itemsById } = timeline.itemsById;
-  const { [messageId]: _removedOpenSegment, ...openMessageSegments } = timeline.openMessageSegments;
-  const { [messageId]: _removedSegmentCount, ...segmentCounts } = timeline.segmentCounts;
-
+  if (item?.kind !== 'message-segment' || item.role !== 'user') return timeline;
+  const { [messageId]: _closedSegment, ...openMessageSegments } = timeline.openMessageSegments;
   return {
     ...timeline,
-    itemOrder: timeline.itemOrder.filter((id) => id !== itemId),
-    itemsById,
+    itemsById: {
+      ...timeline.itemsById,
+      [itemId]: {
+        ...item,
+        optimistic: false,
+        userPromptTextBlocksOptimistic: false,
+      },
+    },
     openMessageSegments,
-    segmentCounts,
+  };
+}
+
+function operationFailure(
+  result: AcpChatOperationResult,
+  fallback = 'ACP prompt failed',
+): AcpChatErrorDetails {
+  const normalized = normalizeAcpChatError({
+    message: result.error || fallback,
+    code: result.upstreamCode ?? result.errorCode,
+    status: result.httpStatus,
+  }, fallback);
+  return {
+    ...normalized,
+    ...(result.errorCode ? { code: result.errorCode } : {}),
+    ...(result.retryable != null ? { retryable: result.retryable } : {}),
+  };
+}
+
+function appendPromptFailure(
+  timeline: AcpTimelineSnapshot,
+  messageId: string,
+  failure: AcpChatErrorDetails,
+): AcpTimelineSnapshot {
+  const settled = settleOptimisticUserSegment(timeline, messageId);
+  if (failure.code === 'CANCELLED') return settled;
+  const id = `turn-failure:${messageId}`;
+  return {
+    ...settled,
+    itemOrder: settled.itemOrder.includes(id) ? settled.itemOrder : [...settled.itemOrder, id],
+    itemsById: {
+      ...settled.itemsById,
+      [id]: { kind: 'turn-failure', id, userMessageId: messageId, failure },
+    },
   };
 }
 
@@ -2396,6 +2432,7 @@ function settleBackgroundPromptSnapshot(input: {
   settledAtMs: number;
   success: boolean;
   resultGeneration?: number;
+  failure?: AcpChatErrorDetails;
 }): void {
   const snapshot = liveSessionSnapshots.get(input.sessionKey);
   if (snapshot?.generation !== input.generation) return;
@@ -2405,7 +2442,11 @@ function settleBackgroundPromptSnapshot(input: {
     : snapshot.generation;
   const timeline = input.success
     ? snapshot.timeline
-    : removePendingOptimisticUserSegment(snapshot.timeline, input.messageId);
+    : appendPromptFailure(
+        snapshot.timeline,
+        input.messageId,
+        input.failure ?? normalizeAcpChatError('ACP prompt failed'),
+      );
   storeLiveSessionSnapshot({
     ...snapshot,
     generation,
@@ -2820,6 +2861,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
           settledAtMs,
           success: result.success,
           resultGeneration: result.generation,
+          ...(!result.success ? { failure: operationFailure(result) } : {}),
         });
         if (result.success && isCurrentTranscriptSupplement(get(), transcriptOperation)) {
           startLiveTranscriptSupplement(transcriptOperation);
@@ -2833,7 +2875,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       deleteLiveSessionSnapshot(sessionKey, generation);
       const failedTimeline = result.success
         ? state.timeline
-        : removePendingOptimisticUserSegment(state.timeline, messageId);
+        : appendPromptFailure(state.timeline, messageId, operationFailure(result));
       set({
         sending: false,
         turnTimingsByUserMessageId: settledPromptTurnTimings(
@@ -2842,7 +2884,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         ),
         ...(result.success
           ? applyOperationGeneration(state, result)
-          : { error: failedOperationMessage(result, 'ACP prompt failed'), timeline: failedTimeline }),
+          : { error: null, timeline: failedTimeline }),
       });
       if (result.success) {
         const current = get();
@@ -2873,6 +2915,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
           startedAtMs,
           settledAtMs,
           success: false,
+          failure: normalizeAcpChatError(error),
         });
       } else {
         deleteLiveSessionSnapshot(sessionKey, generation);
@@ -2883,8 +2926,8 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
           ? (() => {
             return {
               sending: false,
-              error: errorMessage(error, 'ACP prompt failed'),
-              timeline: removePendingOptimisticUserSegment(current.timeline, messageId),
+              error: null,
+              timeline: appendPromptFailure(current.timeline, messageId, normalizeAcpChatError(error)),
               turnTimingsByUserMessageId: settledPromptTurnTimings(
                 current.turnTimingsByUserMessageId,
                 { messageId, success: false, startedAtMs, settledAtMs },

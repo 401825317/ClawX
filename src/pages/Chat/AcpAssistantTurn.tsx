@@ -18,6 +18,7 @@ import {
 } from '@/lib/acp/tool-call-groups';
 import { AcpToolCallGroup } from './AcpToolCallGroup';
 import type { ChatSession } from '@/stores/chat/types';
+import { AcpTurnFailureCard } from './AcpTurnFailureCard';
 
 function formatDuration(durationMs: number, language: string): string {
   const wholeSeconds = Math.floor(Math.max(0, durationMs) / 1000);
@@ -65,6 +66,7 @@ export function AcpAssistantTurn({
   parentSessionKey,
   subagentSessions = [],
   onPermissionSelect,
+  onRecharge,
 }: {
   group: AcpAssistantTurnDisplayGroup;
   fileSummaries?: AcpTurnFileSummary[];
@@ -74,6 +76,7 @@ export function AcpAssistantTurn({
   parentSessionKey?: string;
   subagentSessions?: ChatSession[];
   onPermissionSelect?: (requestId: string, optionId: string) => void;
+  onRecharge?: () => void;
 }) {
   const displayEntries = useMemo(() => groupConsecutiveToolCalls(group.items), [group.items]);
 
@@ -157,6 +160,14 @@ export function AcpAssistantTurn({
             return (
               <div key={item.id} data-acp-item-id={item.id} className="w-full">
                 <AcpPlanItem item={item} />
+              </div>
+            );
+          }
+
+          if (item.kind === 'turn-failure') {
+            return (
+              <div key={item.id} data-acp-item-id={item.id} className="w-full">
+                <AcpTurnFailureCard item={item} onRecharge={onRecharge} />
               </div>
             );
           }

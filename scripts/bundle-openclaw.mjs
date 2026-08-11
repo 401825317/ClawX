@@ -20,6 +20,7 @@ import 'zx/globals';
 import { ELECTRON_MAIN_RUNTIME_PACKAGES, EXTRA_BUNDLED_PACKAGES } from './openclaw-bundle-config.mjs';
 import { installOpenClawSkillShims } from './install-openclaw-skill-shims.mjs';
 import { patchOpenClawAcpStreamingRuntime } from './openclaw-acp-streaming-patch.mjs';
+import { patchOpenClawAcpTerminalErrorRuntime } from './openclaw-acp-terminal-error-patch.mjs';
 import { patchOpenClawMediaGenerationRuntime } from './openclaw-media-generation-patch.mjs';
 import { patchExtensionOpenClawSelfImports } from './openclaw-self-import-patch.mjs';
 
@@ -1035,6 +1036,11 @@ patchBundledRuntime(OUTPUT);
 // Keep the packaged 6.10 ACP stream behavior identical to the patched dev runtime.
 const acpStreamingPatch = await patchOpenClawAcpStreamingRuntime(OUTPUT);
 echo`   🩹 Verified UClaw ACP streaming patch (${acpStreamingPatch.filesPatched} file(s) patched)`;
+
+// Terminal provider failures must reject the ACP prompt so the renderer can
+// attach the correct recovery message to the originating user turn.
+const acpTerminalErrorPatch = await patchOpenClawAcpTerminalErrorRuntime(OUTPUT);
+echo`   🩹 Verified UClaw ACP terminal error patch (${acpTerminalErrorPatch.filesPatched} file(s) patched)`;
 
 // Media must complete inside the active UClaw chat turn. Reapply after copying
 // so a manual bundle build cannot omit the postinstall runtime patch.

@@ -497,6 +497,7 @@ export function Chat() {
                       onPermissionSelect={(requestId, optionId) => {
                         void respondAcpPermission(requestId, optionId);
                       }}
+                      onRecharge={() => { window.location.hash = '/recharge'; }}
                     />
                   )}
                 </div>

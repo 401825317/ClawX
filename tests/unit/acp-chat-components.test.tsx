@@ -5,6 +5,7 @@ import { AcpToolCallGroup } from '@/pages/Chat/AcpToolCallGroup';
 import { AcpAttachmentPart } from '@/pages/Chat/AcpAttachmentPart';
 import { AcpImagePart } from '@/pages/Chat/AcpImagePart';
 import { AcpTimeline } from '@/pages/Chat/AcpTimeline';
+import { AcpTurnFailureCard } from '@/pages/Chat/AcpTurnFailureCard';
 import { AcpTurnFileActivity } from '@/pages/Chat/AcpTurnFileActivity';
 import type { AcpTimelineSnapshot, AttachmentRenderPart, ToolCallItem } from '@/lib/acp/timeline-types';
 import type { AcpFileActivityProjection } from '@/lib/acp/openclaw-file-activities';
@@ -97,6 +98,11 @@ vi.mock('react-i18next', () => ({
         'acp.turnDuration': 'Took {{duration}}',
         'acp.turnElapsed': '{{duration}} elapsed',
         'acp.dismiss': 'Dismiss',
+        'acp.failure.insufficientQuota.title': 'Insufficient balance',
+        'acp.failure.insufficientQuota.message': 'Recharge to continue.',
+        'acp.failure.insufficientQuota.action': 'Recharge',
+        'acp.failure.serviceUnavailable.title': 'Model service unavailable',
+        'acp.failure.serviceUnavailable.message': 'Try again later.',
         'acp.attachment.loading': 'Loading attachment',
         'acp.attachment.unavailable': 'Attachment unavailable',
         'acp.attachment.open': 'Open {{name}}',
@@ -238,6 +244,48 @@ describe('ACP chat timeline components', () => {
       webBrowserNavigation: null,
       webBrowserNavigationId: 0,
     });
+  });
+
+  it('renders quota failures with a recharge action', () => {
+    const onRecharge = vi.fn();
+    render(<AcpTurnFailureCard
+      item={{
+        kind: 'turn-failure',
+        id: 'turn-failure:user-1',
+        userMessageId: 'user-1',
+        failure: {
+          code: 'INSUFFICIENT_QUOTA',
+          message: '用户额度不足',
+          retryable: false,
+          httpStatus: 403,
+        },
+      }}
+      onRecharge={onRecharge}
+    />);
+
+    expect(screen.getByText('Insufficient balance')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Recharge' }));
+    expect(onRecharge).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders transient service failures without a billing action', () => {
+    render(<AcpTurnFailureCard
+      item={{
+        kind: 'turn-failure',
+        id: 'turn-failure:user-2',
+        userMessageId: 'user-2',
+        failure: {
+          code: 'SERVICE_UNAVAILABLE',
+          message: 'status_code=503',
+          retryable: true,
+          httpStatus: 503,
+        },
+      }}
+      onRecharge={vi.fn()}
+    />);
+
+    expect(screen.getByText('Model service unavailable')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Recharge' })).not.toBeInTheDocument();
   });
 
   it('keeps yielded subagent work visibly active without exposing the raw yield result', () => {
