@@ -101,18 +101,55 @@ export function resolveOpenClawWorkspacePath(path: string, env: NodeJS.ProcessEn
 export function collapseOpenClawWorkspacePath(
   path: string,
   stateDir: string = resolveOpenClawStateDir(),
+  env: NodeJS.ProcessEnv = process.env,
 ): string {
-  if (!isAbsolute(path)) return path;
+  const portableWorkspace = collapsePortableDefaultWorkspacePath(path, env);
+  if (!isAbsolute(path)) return portableWorkspace ?? path;
 
   const physicalWorkspace = resolve(stateDir, 'workspace');
   const relativePath = relative(physicalWorkspace, resolve(path));
   const isDefaultWorkspace = relativePath === ''
     || (!isAbsolute(relativePath) && relativePath !== '..' && !relativePath.startsWith(`..${sep}`));
-  if (!isDefaultWorkspace) return path;
+  if (!isDefaultWorkspace) return portableWorkspace ?? path;
 
   return relativePath
     ? `${DEFAULT_WORKSPACE_CWD}/${relativePath.split(sep).join('/')}`
     : DEFAULT_WORKSPACE_CWD;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function collapsePortableDefaultWorkspacePath(
+  input: string,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  const portableId = env.CLAWX_PORTABLE_ID?.trim();
+  const portableMode = env.CLAWX_PORTABLE?.trim() === '1' || Boolean(portableId);
+  if (!portableMode) return null;
+
+  const slashedPath = input.trim().replace(/\\/g, '/').replace(/\/+$/, '');
+  if (!slashedPath || (!slashedPath.startsWith('/') && !/^[A-Za-z]:\//.test(slashedPath))) return null;
+
+  const workspaceSuffixes = [
+    'UClawData/openclaw-home/\\.openclaw/workspace',
+    ...(portableId
+      ? [`UClawRuntime/profiles/${escapeRegExp(portableId)}/openclaw-state/workspace`]
+      : []),
+  ];
+
+  for (const suffix of workspaceSuffixes) {
+    const match = new RegExp(`(?:^|/)${suffix}(?:/(.*))?$`, 'i').exec(slashedPath);
+    if (!match) continue;
+    const childPath = match[1]?.trim();
+    if (!childPath) return DEFAULT_WORKSPACE_CWD;
+    const segments = childPath.split('/');
+    if (segments.some((segment) => !segment || segment === '.' || segment === '..')) return null;
+    return `${DEFAULT_WORKSPACE_CWD}/${segments.join('/')}`;
+  }
+
+  return null;
 }
 
 export function resolveOpenClawConfigPath(env: NodeJS.ProcessEnv = process.env): string {

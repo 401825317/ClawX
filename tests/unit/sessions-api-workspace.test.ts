@@ -82,6 +82,7 @@ function seedTranscriptRecords(sessionKey: string, records: unknown[]) {
 
 describe('sessions API workspace summaries', () => {
   beforeEach(() => {
+    vi.unstubAllEnvs();
     rmSync(testOpenClawDir, { recursive: true, force: true });
     rmSync(testOpenClawConfigDir, { recursive: true, force: true });
   });
@@ -304,6 +305,25 @@ describe('sessions API workspace summaries', () => {
     expect(result.summaries?.[0]).toMatchObject({
       sessionKey: 'agent:main:session-default-child',
       workspacePath: `${DEFAULT_WORKSPACE_CWD}/projects/demo`,
+    });
+  });
+
+  it('recovers a portable default workspace persisted by another Windows computer', async () => {
+    vi.stubEnv('CLAWX_PORTABLE', '1');
+    vi.stubEnv('CLAWX_PORTABLE_ID', 'portable-1234');
+    seedAcpReplayCwd(
+      'agent:main:session-portable-default',
+      'C:\\Users\\old-user\\AppData\\Local\\UClawRuntime\\profiles\\portable-1234\\openclaw-state\\workspace',
+    );
+    const { createSessionsApi } = await import('@electron/services/sessions-api');
+
+    const result = await createSessionsApi().summaries({
+      sessionKeys: ['agent:main:session-portable-default'],
+    });
+
+    expect(result.summaries?.[0]).toMatchObject({
+      sessionKey: 'agent:main:session-portable-default',
+      workspacePath: DEFAULT_WORKSPACE_CWD,
     });
   });
 

@@ -6,6 +6,7 @@ ownedPaths:
   - shared/workspace.ts
   - shared/chat/session-title.ts
   - electron/services/sessions-api.ts
+  - electron/utils/paths.ts
   - src/lib/workspace-context.ts
   - src/hooks/use-workspace-availability.ts
   - src/stores/settings.ts
@@ -38,6 +39,7 @@ ownedPaths:
   - electron/utils/store.ts
   - shared/i18n/locales/*/chat.json
   - tests/unit/workspace-context.test.ts
+  - tests/unit/paths.test.ts
   - tests/unit/session-title.test.ts
   - tests/unit/session-catalog.test.ts
   - tests/unit/chat-load-sessions-startup.test.ts
@@ -80,7 +82,7 @@ requiredRules:
   - docs-sync
 ---
 
-This scenario covers inheriting the selected conversation's effective workspace when creating a new Chat; selecting persisted recent, known-session, or newly browsed workspaces while the new Chat remains unbound; validating workspace availability before ACP load; deriving a newly visible local-session title atomically from its first prompt; replacing matching synthetic UUID-date fallback titles with transcript prompts; recovering from deleted global or inherited workspace paths; marking unavailable non-default sidebar groups; permanently deleting their sessions after confirmation; binding workspaces through OpenClaw ACP cwd; targeting another agent without losing that agent's workspace or first prompt; restoring historical workspace context; renaming imported workspace display labels; navigating workspace-grouped sessions with busy, unread, and relative-time status; browsing the effective workspace; using the distinct persistent Web Browser artifact tab; previewing supported Office documents under the documented safety boundaries; and jumping among user questions.
+This scenario covers inheriting the selected conversation's effective workspace when creating a new Chat; selecting persisted recent, known-session, or newly browsed workspaces while the new Chat remains unbound; validating workspace availability before ACP load; deriving a newly visible local-session title atomically from its first prompt; replacing matching synthetic UUID-date fallback titles with transcript prompts; recovering the active portable identity's default workspace after USB or local-runtime path changes; recovering from deleted global or inherited workspace paths; marking unavailable non-default sidebar groups; permanently deleting their sessions after confirmation; binding workspaces through OpenClaw ACP cwd; targeting another agent without losing that agent's workspace or first prompt; restoring historical workspace context; renaming imported workspace display labels; navigating workspace-grouped sessions with busy, unread, and relative-time status; browsing the effective workspace; using the distinct persistent Web Browser artifact tab; previewing supported Office documents under the documented safety boundaries; and jumping among user questions.
 
 Workspace file browsing keeps the store value `browser`; the Electron Web Browser uses `web-browser`. Its toolbar reserves a fixed-size favicon or placeholder slot only in the non-editing title state, omits the hover URL tooltip, and gives every More menu action an icon. Current workspace resolution, ordering, title normalization, and file-browser behavior are documented in `harness/reference/chat-workspace-and-navigation.md`; the Electron guest contract is documented in `harness/reference/web-browser.md`.
 
