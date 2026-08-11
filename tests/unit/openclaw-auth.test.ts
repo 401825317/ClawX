@@ -579,6 +579,124 @@ describe('sanitizeOpenClawConfig', () => {
     expect(telegram.botToken).toBe('telegram-token');
   });
 
+  it('migrates legacy plugin-only channel accounts before stripping credential mirrors', async () => {
+    await writeOpenClawJson({
+      plugins: {
+        enabled: true,
+        allow: ['discord', 'whatsapp', 'qqbot'],
+        entries: {
+          discord: {
+            enabled: true,
+            defaultAccount: 'discord-agent',
+            accounts: {
+              'discord-agent': { enabled: true, token: 'discord-token' },
+            },
+          },
+          whatsapp: {
+            enabled: true,
+            defaultAccount: 'whatsapp-agent',
+            accounts: {
+              'whatsapp-agent': { enabled: true, phoneNumber: '+15555550123' },
+            },
+          },
+          qqbot: {
+            enabled: true,
+            defaultAccount: 'qq-agent',
+            accounts: {
+              'qq-agent': { enabled: true, appId: 'qq-app', clientSecret: 'qq-secret' },
+            },
+          },
+        },
+      },
+    });
+
+    const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
+    await sanitizeOpenClawConfig();
+
+    const result = await readOpenClawJson();
+    const channels = result.channels as Record<string, Record<string, unknown>>;
+    expect(channels.discord.defaultAccount).toBe('discord-agent');
+    expect(channels.discord.accounts).toEqual({
+      'discord-agent': { enabled: true, token: 'discord-token' },
+    });
+    expect(channels.discord.token).toBe('discord-token');
+    expect(channels.whatsapp.accounts).toEqual({
+      'whatsapp-agent': { enabled: true, phoneNumber: '+15555550123' },
+    });
+    expect(channels.qqbot.accounts).toEqual({
+      'qq-agent': { enabled: true, appId: 'qq-app', clientSecret: 'qq-secret' },
+    });
+    expect(channels.qqbot.appId).toBe('qq-app');
+    expect(channels.qqbot.clientSecret).toBe('qq-secret');
+
+    const plugins = result.plugins as Record<string, unknown>;
+    const entries = plugins.entries as Record<string, Record<string, unknown>>;
+    expect(entries.discord).toEqual({ enabled: true });
+    expect(entries.whatsapp).toEqual({ enabled: true });
+    expect(entries.qqbot).toEqual({ enabled: true });
+  });
+
+  it('normalizes QQBot as an external plugin without credential mirrors', async () => {
+    await writeOpenClawJson({
+      channels: {
+        qqbot: {
+          enabled: true,
+          appId: 'qq-app',
+          clientSecret: 'qq-secret',
+          accounts: {
+            default: { appId: 'qq-app', clientSecret: 'qq-secret', enabled: true },
+          },
+        },
+      },
+      plugins: {
+        enabled: true,
+        allow: ['openclaw-qqbot'],
+        entries: {
+          'openclaw-qqbot': { enabled: true },
+          qqbot: {
+            enabled: true,
+            defaultAccount: 'default',
+            accounts: {
+              default: { appId: 'qq-app', clientSecret: 'qq-secret', enabled: true },
+            },
+          },
+        },
+      },
+    });
+
+    const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
+    await sanitizeOpenClawConfig();
+
+    const result = await readOpenClawJson();
+    const plugins = result.plugins as Record<string, unknown>;
+    const entries = plugins.entries as Record<string, Record<string, unknown>>;
+    expect(plugins.allow).toEqual(['qqbot']);
+    expect(entries.qqbot).toEqual({ enabled: true });
+    expect(entries['openclaw-qqbot']).toBeUndefined();
+    expect((result.channels as Record<string, unknown>).qqbot).toBeDefined();
+  });
+
+  it('recovers external plugin registrations for legacy channel-only configs', async () => {
+    await writeOpenClawJson({
+      channels: {
+        discord: { enabled: true, token: 'discord-token' },
+        whatsapp: { enabled: true },
+        qqbot: { enabled: true, appId: 'qq-app', clientSecret: 'qq-secret' },
+      },
+    });
+
+    const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
+    await sanitizeOpenClawConfig();
+
+    const result = await readOpenClawJson();
+    const plugins = result.plugins as Record<string, unknown>;
+    const entries = plugins.entries as Record<string, Record<string, unknown>>;
+    expect(plugins.allow).toEqual(expect.arrayContaining(['discord', 'whatsapp', 'qqbot']));
+    expect(entries.discord).toEqual({ enabled: true });
+    expect(entries.whatsapp).toEqual({ enabled: true });
+    expect(entries.qqbot).toEqual({ enabled: true });
+  });
+
   it('normalizes legacy feishu plugin state to a single external plugin and removes built-in feishu', async () => {
     await writeOpenClawJson({
       channels: {
