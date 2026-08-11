@@ -169,6 +169,7 @@ export function normalizeAcpChatError(error: unknown, fallback = 'ACP prompt fai
 
   if (includesAny(searchable, [
     /session file locked/u,
+    /session file changed while embedded prompt lock was released/u,
     /session.{0,20}\blocked\b/u,
     /file lock timeout/u,
     /会话.{0,8}(?:锁定|占用)/u,
@@ -198,6 +199,10 @@ export function normalizeAcpChatError(error: unknown, fallback = 'ACP prompt fai
   if ((httpStatus != null && httpStatus >= 500) || includesAny(searchable, [
     /bad gateway/u,
     /service unavailable/u,
+    /service[_ -]?unavailable[_ -]?error/u,
+    /server[_ -]?is[_ -]?overloaded/u,
+    /servers? (?:are|is).{0,20}overloaded/u,
+    /temporarily overloaded/u,
     /upstream.{0,12}(?:error|unavailable)/u,
     /服务.{0,8}(?:异常|不可用)/u,
     /responses stream error/u,
