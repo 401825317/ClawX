@@ -98,6 +98,7 @@
             "modelUnavailable": { "title": "当前模型不可用", "message": "该模型暂未配置可用账号，请切换模型或联系管理员。" },
             "contentPolicy": { "title": "内容安全检查未通过", "message": "本次生成被安全策略拦截，请修改提示词后重新发送。" },
             "conversationInvalid": { "title": "会话上下文异常", "message": "当前会话的模型上下文无法继续，请新建聊天后重试。" },
+            "imageTooLarge": { "title": "图片过大", "message": "图片压缩后仍超过 6 MiB，请选择尺寸或文件体积更小的图片后重新发送。" },
             "invalidRequest": { "title": "请求参数不正确", "message": "请根据下方原因调整请求后重新发送。" },
             "cancelled": { "title": "已停止生成", "message": "本次请求已取消。" },
             "unknown": { "title": "模型调用失败", "message": "请求未能完成，请稍后重新发送；持续失败时请联系支持人员。" }
@@ -378,6 +379,7 @@
         "targetChip": "@{{agent}}",
         "agentPickerTitle": "将下一条消息直接发送给其他 Agent",
         "sessionLoadingPlaceholder": "正在加载会话...",
+        "gatewayStartingPlaceholder": "正在启动网关，请稍候...",
         "sessionCancellingPlaceholder": "正在停止当前操作...",
         "workspacePreparingPlaceholder": "正在准备工作空间...",
         "workspaceUnavailablePlaceholder": "工作空间不可用，请重新选择...",

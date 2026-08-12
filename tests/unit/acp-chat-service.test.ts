@@ -197,7 +197,13 @@ describe('AcpChatService', () => {
 
   it('routes ACP through the active isolated Gateway port', async () => {
     const gateway = {
-      getStatus: vi.fn(() => ({ port: 60792 })),
+      getStatus: vi.fn(() => ({
+        state: 'running' as const,
+        gatewayReady: true,
+        port: 60792,
+        pid: 42,
+        connectedAt: 1_786_545_000_000,
+      })),
       getGatewayToken: vi.fn().mockResolvedValue('test-gateway-token'),
     };
     const { service } = await createSpawnedService(createConnection(), gateway);
@@ -241,6 +247,55 @@ describe('AcpChatService', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('rejects an in-flight session load when the Gateway runtime identity changes', async () => {
+    const status = {
+      state: 'running' as const, gatewayReady: true, port: 60792, pid: 42, connectedAt: 100,
+    };
+    const gateway = {
+      getStatus: vi.fn(() => ({ ...status })),
+      getGatewayToken: vi.fn().mockResolvedValue('test-gateway-token'),
+    };
+    const connection = createConnection();
+    const pendingLoad = createDeferred<unknown>();
+    connection.loadSession.mockReturnValueOnce(pendingLoad.promise);
+    const { service } = await createSpawnedService(connection, gateway);
+
+    const load = service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    await vi.waitFor(() => expect(connection.loadSession).toHaveBeenCalledTimes(1));
+    status.pid = 43;
+    status.connectedAt = 200;
+    pendingLoad.resolve({});
+
+    await expect(load).resolves.toMatchObject({
+      success: false, errorCode: 'SERVICE_UNAVAILABLE', retryable: true,
+    });
+  });
+
+  it('does not retry a prompt when the Gateway runtime changes during submission', async () => {
+    const status = {
+      state: 'running' as const, gatewayReady: true, port: 60792, pid: 42, connectedAt: 100,
+    };
+    const gateway = {
+      getStatus: vi.fn(() => ({ ...status })),
+      getGatewayToken: vi.fn().mockResolvedValue('test-gateway-token'),
+    };
+    const connection = createConnection();
+    const pendingPrompt = createDeferred<unknown>();
+    connection.prompt.mockReturnValueOnce(pendingPrompt.promise);
+    const { service } = await createSpawnedService(connection, gateway);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+
+    const prompt = service.sendPrompt({ sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'hello' });
+    await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(1));
+    status.connectedAt = 200;
+    pendingPrompt.resolve({});
+
+    await expect(prompt).resolves.toMatchObject({
+      success: false, errorCode: 'SERVICE_UNAVAILABLE', retryable: true,
+    });
+    expect(connection.prompt).toHaveBeenCalledTimes(1);
   });
 
   it('filters non-JSON stdout diagnostics before the ACP SDK parser sees them', async () => {
@@ -1007,7 +1062,7 @@ describe('AcpChatService', () => {
     const firstLoad = service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
     const secondLoad = service.loadSession({ sessionKey: 'agent:pi:s2', workspaceRoot: '/repo', cwd: '/repo' });
 
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(connection.initialize).toHaveBeenCalledTimes(1);
 
     initialized.resolve(createInitResponse());

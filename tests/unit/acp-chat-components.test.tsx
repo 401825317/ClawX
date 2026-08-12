@@ -103,6 +103,8 @@ vi.mock('react-i18next', () => ({
         'acp.failure.insufficientQuota.action': 'Recharge',
         'acp.failure.serviceUnavailable.title': 'Model service unavailable',
         'acp.failure.serviceUnavailable.message': 'Try again later.',
+        'acp.failure.imageTooLarge.title': 'Image too large',
+        'acp.failure.imageTooLarge.message': 'Choose a smaller image.',
         'acp.attachment.loading': 'Loading attachment',
         'acp.attachment.unavailable': 'Attachment unavailable',
         'acp.attachment.open': 'Open {{name}}',
@@ -286,6 +288,26 @@ describe('ACP chat timeline components', () => {
 
     expect(screen.getByText('Model service unavailable')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Recharge' })).not.toBeInTheDocument();
+  });
+
+  it('renders an image-specific failure instead of a generic session error', () => {
+    render(<AcpTurnFailureCard
+      item={{
+        kind: 'turn-failure',
+        id: 'turn-failure:user-image',
+        userMessageId: 'user-image',
+        failure: {
+          code: 'IMAGE_TOO_LARGE',
+          message: 'image exceeds size limit (10793001 > 6291456 bytes)',
+          retryable: false,
+          httpStatus: 400,
+        },
+      }}
+    />);
+
+    expect(screen.getByText('Image too large')).toBeInTheDocument();
+    expect(screen.getByText('Choose a smaller image.')).toBeInTheDocument();
+    expect(screen.queryByText('Load failed')).not.toBeInTheDocument();
   });
 
   it('keeps yielded subagent work visibly active without exposing the raw yield result', () => {

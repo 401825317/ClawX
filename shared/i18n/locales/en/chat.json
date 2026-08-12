@@ -98,6 +98,7 @@
             "modelUnavailable": { "title": "Model unavailable", "message": "No configured account currently supports this model. Switch models or contact the administrator." },
             "contentPolicy": { "title": "Content safety check failed", "message": "The generation was blocked by a safety policy. Revise the prompt and send it again." },
             "conversationInvalid": { "title": "Conversation context invalid", "message": "The model cannot continue this conversation context. Create a new chat and try again." },
+            "imageTooLarge": { "title": "Image too large", "message": "The image is still larger than 6 MiB after compression. Choose a smaller image and send it again." },
             "invalidRequest": { "title": "Invalid request parameters", "message": "Adjust the request using the reason below, then send it again." },
             "cancelled": { "title": "Generation stopped", "message": "This request was cancelled." },
             "unknown": { "title": "Model call failed", "message": "The request could not be completed. Try again shortly or contact support if it continues." }
@@ -378,6 +379,7 @@
         "modelPickerTitle": "Switch model for this chat",
         "modelSwitchFailed": "Failed to switch model: {{error}}",
         "sessionLoadingPlaceholder": "Loading conversation...",
+        "gatewayStartingPlaceholder": "Starting the gateway, please wait...",
         "sessionCancellingPlaceholder": "Stopping the current operation...",
         "workspacePreparingPlaceholder": "Preparing workspace...",
         "workspaceUnavailablePlaceholder": "Workspace unavailable. Choose another folder...",

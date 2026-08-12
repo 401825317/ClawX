@@ -222,6 +222,8 @@ export function getPreloadPath(): string {
  */
 export function getOpenClawDir(): string {
   if (getElectronApp().isPackaged) {
+    const portableRuntimeDir = process.env.CLAWX_OPENCLAW_RUNTIME_DIR?.trim();
+    if (portableRuntimeDir) return resolve(portableRuntimeDir);
     return join(process.resourcesPath, 'openclaw');
   }
   // Development: use node_modules/openclaw

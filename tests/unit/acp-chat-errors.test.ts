@@ -36,6 +36,12 @@ describe('ACP chat error classification', () => {
     ],
     ['status_code=500, responses stream error: response.failed', 'SERVICE_UNAVAILABLE', true, 500],
     ['status_code=500, request context done: context canceled', 'NETWORK', true, 500],
+    [
+      'status_code=400, image exceeds size limit (10793001 > 6291456 bytes)',
+      'IMAGE_TOO_LARGE',
+      false,
+      400,
+    ],
   ] as const)('classifies production zz-cn signature: %s', (message, code, retryable, httpStatus) => {
     expect(normalizeAcpChatError(message)).toMatchObject({ code, retryable, httpStatus });
   });
@@ -70,6 +76,17 @@ describe('ACP chat error classification', () => {
       retryable: false,
       httpStatus: 403,
       upstreamCode: 'insufficient_user_quota',
+    });
+  });
+
+  it('classifies the stable local image compression error', () => {
+    expect(normalizeAcpChatError(Object.assign(
+      new Error('ACP chat image could not be compressed below 6291456 bytes.'),
+      { code: 'IMAGE_TOO_LARGE' },
+    ))).toMatchObject({
+      code: 'IMAGE_TOO_LARGE',
+      retryable: false,
+      upstreamCode: 'IMAGE_TOO_LARGE',
     });
   });
 

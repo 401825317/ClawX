@@ -726,10 +726,18 @@ describe('ACP Chat page', () => {
     expect(screen.getByTestId('mock-chat-input')).toHaveAttribute('data-disabled', 'true');
   });
 
-  it('loads ACP sessions and keeps the composer enabled while Gateway is stopped', async () => {
+  it('waits for Gateway readiness before loading ACP sessions or enabling the composer', async () => {
     gatewayState.status = { state: 'stopped', gatewayReady: false, port: 18789 };
 
-    render(<Chat />);
+    const { rerender } = render(<Chat />);
+
+    expect(screen.getByTestId('mock-chat-input')).toHaveAttribute('data-disabled', 'true');
+    expect(acpState.loadSession).not.toHaveBeenCalled();
+
+    gatewayState.status = {
+      state: 'running', gatewayReady: true, port: 18789, pid: 42, connectedAt: 1_786_545_000_000,
+    };
+    rerender(<Chat />);
 
     await waitFor(() => {
       expect(screen.getByTestId('mock-chat-input')).toHaveAttribute('data-disabled', 'false');

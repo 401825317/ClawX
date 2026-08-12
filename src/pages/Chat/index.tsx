@@ -15,6 +15,7 @@ import { useArtifactPanel } from '@/stores/artifact-panel';
 import { useChatStore } from '@/stores/chat';
 import { useSessionAttentionStore } from '@/stores/session-attention';
 import { useSettingsStore } from '@/stores/settings';
+import { useGatewayStore } from '@/stores/gateway';
 import { ensureAcpChatSubscriptions, useAcpChatSessionStore } from '@/stores/acp-chat-session';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { cn } from '@/lib/utils';
@@ -264,12 +265,18 @@ export function Chat() {
   const cancelAcp = useAcpChatSessionStore((s) => s.cancel);
   const respondAcpPermission = useAcpChatSessionStore((s) => s.respondPermission);
   const clearAcpError = useAcpChatSessionStore((s) => s.clearError);
+  const gatewayStatus = useGatewayStore((s) => s.status);
+  const gatewayReady = gatewayStatus.state === 'running' && gatewayStatus.gatewayReady === true;
+  const gatewayRuntimeIdentity = gatewayReady
+    ? `${gatewayStatus.pid ?? 'none'}:${gatewayStatus.connectedAt ?? 'none'}:${gatewayStatus.port}`
+    : null;
 
   const panelOpen = useArtifactPanel((s) => s.open);
   const panelWidthPct = useArtifactPanel((s) => s.widthPct);
   const closeArtifactPanel = useArtifactPanel((s) => s.close);
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
   const acpLoadInFlightKeyRef = useRef<string | null>(null);
+  const loadedGatewayRuntimeRef = useRef<string | null>(null);
   const { contentRef, scrollRef, scrollToBottom, isAtBottom } = useStickToBottomInstant(
     currentSessionKey,
     acpSending || acpCancelling,
@@ -353,10 +360,15 @@ export function Chat() {
   }, [acpActiveSessionKey, acpCwd, acpTimeline.itemOrder.length, acpTimeline.sessionId, acpWorkspaceRoot, currentSession, currentSessionKey, cwd, prepareLocalAcpSession]);
 
   useEffect(() => {
-    if (!currentSessionKey || !cwd || !workspaceContextAvailable) return;
+    if (!gatewayRuntimeIdentity || !currentSessionKey || !cwd || !workspaceContextAvailable || acpLoading) return;
     if (currentSessionKey === DEFAULT_SESSION_KEY && sessions.length === 0 && acpActiveSessionKey == null && !sessionDiscoveryAttempted) return;
-    if (acpActiveSessionKey === currentSessionKey && acpWorkspaceRoot === cwd && acpCwd === cwd) return;
-    const acpLoadKey = `${currentSessionKey}\0${cwd}`;
+    if (
+      loadedGatewayRuntimeRef.current === gatewayRuntimeIdentity
+      && acpActiveSessionKey === currentSessionKey
+      && acpWorkspaceRoot === cwd
+      && acpCwd === cwd
+    ) return;
+    const acpLoadKey = `${gatewayRuntimeIdentity}\0${currentSessionKey}\0${cwd}`;
     if (acpLoadInFlightKeyRef.current === acpLoadKey) return;
     const currentSession = sessions.find((session) => session.key === currentSessionKey);
     if (currentSession?.createdLocally) return;
@@ -368,6 +380,7 @@ export function Chat() {
       cwd,
       ...(createIfMissing ? { createIfMissing: true } : {}),
     }).then((loaded) => {
+      if (loaded) loadedGatewayRuntimeRef.current = gatewayRuntimeIdentity;
       if (loaded && createIfMissing) {
         acknowledgeAcpSessionCreated(currentSessionKey);
       }
@@ -376,14 +389,16 @@ export function Chat() {
         acpLoadInFlightKeyRef.current = null;
       }
     });
-  }, [acknowledgeAcpSessionCreated, acpActiveSessionKey, acpCwd, acpWorkspaceRoot, currentSessionKey, cwd, loadAcpSession, sessionDiscoveryAttempted, sessions, workspaceContextAvailable]);
+  }, [acknowledgeAcpSessionCreated, acpActiveSessionKey, acpCwd, acpLoading, acpWorkspaceRoot, currentSessionKey, cwd, gatewayRuntimeIdentity, loadAcpSession, sessionDiscoveryAttempted, sessions, workspaceContextAvailable]);
 
   const platform = window.electron?.platform;
   const isMac = platform === 'darwin';
   const isWindows = platform === 'win32';
   const composerBusy = acpSending || acpCancelling;
-  const composerDisabledPlaceholder = acpLoading
-    ? t('composer.sessionLoadingPlaceholder')
+  const composerDisabledPlaceholder = !gatewayReady
+    ? t('composer.gatewayStartingPlaceholder')
+    : acpLoading
+      ? t('composer.sessionLoadingPlaceholder')
     : acpCancelling
       ? t('composer.sessionCancellingPlaceholder')
       : !cwd || workspaceUnavailable
@@ -530,7 +545,7 @@ export function Chat() {
             imageOptions?: AcpImageGenerationOptions,
             videoOptions?: AcpVideoGenerationOptions,
           ) => {
-            if (!currentSessionKey || !cwd || !workspaceContextAvailable) return;
+            if (!gatewayReady || !currentSessionKey || !cwd || !workspaceContextAvailable) return;
             const targetAgent = targetAgentId
               ? agents.find((agent) => agent.id === targetAgentId) ?? null
               : null;
@@ -551,6 +566,7 @@ export function Chat() {
               selectAcpSession(sessionKey, promptCwd);
             }
             void (async () => {
+              if (!gatewayReady) return;
               if (promptCwd !== cwd) {
                 const promptWorkspace = await hostApi.files.resolveWorkspaceContext({
                   workspaceRoot: promptCwd,
@@ -564,6 +580,7 @@ export function Chat() {
                 || (existingSession.createdLocally === true && existingSession.createdOnGateway !== true);
               if (
                 pendingAcpConfirmation
+                || loadedGatewayRuntimeRef.current !== gatewayRuntimeIdentity
                 || acpActiveSessionKey !== sessionKey
                 || acpWorkspaceRoot !== promptCwd
                 || acpCwd !== promptCwd
@@ -588,6 +605,7 @@ export function Chat() {
                   acknowledgeAcpSessionCreated(sessionKey, promptCwd, text);
                 }
                 if (!loaded) return;
+                loadedGatewayRuntimeRef.current = gatewayRuntimeIdentity;
               }
               const sendPromise = sendAcpPrompt({
                 sessionKey,
@@ -604,7 +622,7 @@ export function Chat() {
             })();
           }}
           onStop={() => void cancelAcp()}
-          disabled={acpLoading || acpCancelling || !cwd || !workspaceContextAvailable}
+          disabled={!gatewayReady || acpLoading || acpCancelling || !cwd || !workspaceContextAvailable}
           disabledPlaceholder={composerDisabledPlaceholder}
           sending={composerBusy}
           imageGenerating={imageGenerationPending}

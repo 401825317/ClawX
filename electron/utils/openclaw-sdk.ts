@@ -28,20 +28,25 @@ import { createRequire } from 'module';
 import { join } from 'node:path';
 import { getOpenClawDir, getOpenClawResolvedDir } from './paths';
 
-const _openclawResolvedPath = getOpenClawResolvedDir();
-const _openclawPath = getOpenClawDir();
-const _openclawSdkRequire = createRequire(join(_openclawResolvedPath, 'package.json'));
-const _projectSdkRequire = createRequire(join(_openclawPath, 'package.json'));
+function createOpenClawRequires() {
+  const openClawResolvedPath = getOpenClawResolvedDir();
+  const openClawPath = getOpenClawDir();
+  return {
+    openClawSdkRequire: createRequire(join(openClawResolvedPath, 'package.json')),
+    projectSdkRequire: createRequire(join(openClawPath, 'package.json')),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 function requireOpenClawSdk(subpath: string): Record<string, unknown> {
+  const { openClawSdkRequire, projectSdkRequire } = createOpenClawRequires();
   try {
-    return _openclawSdkRequire(subpath);
+    return openClawSdkRequire(subpath);
   } catch {
-    return _projectSdkRequire(subpath);
+    return projectSdkRequire(subpath);
   }
 }
 
@@ -51,12 +56,13 @@ function requireOpenClawSdk(subpath: string): Record<string, unknown> {
  * tree is incomplete.
  */
 function requireExtensionApi(relativePath: string): Record<string, unknown> | null {
+  const { openClawSdkRequire, projectSdkRequire } = createOpenClawRequires();
   try {
     // Require relative to the openclaw dist directory.
-    return _openclawSdkRequire(relativePath);
+    return openClawSdkRequire(relativePath);
   } catch {
     try {
-      return _projectSdkRequire(relativePath);
+      return projectSdkRequire(relativePath);
     } catch {
       return null;
     }
@@ -132,68 +138,53 @@ function loadChannelSdk<T>(
   return fallback;
 }
 
-const _discordSdk = loadChannelSdk<DiscordSdk>(
-  'openclaw/plugin-sdk/discord',
-  './dist/extensions/discord/api.js',
-  {
-    listDiscordDirectoryGroupsFromConfig: noopAsyncList,
-    listDiscordDirectoryPeersFromConfig: noopAsyncList,
-    normalizeDiscordMessagingTarget: noopNormalize,
-  },
-  ['listDiscordDirectoryGroupsFromConfig', 'listDiscordDirectoryPeersFromConfig', 'normalizeDiscordMessagingTarget'],
-);
+let discordSdk: DiscordSdk | null = null;
+let telegramSdk: TelegramSdk | null = null;
+let slackSdk: SlackSdk | null = null;
+let whatsappSdk: WhatsappSdk | null = null;
 
-const _telegramSdk = loadChannelSdk<TelegramSdk>(
-  'openclaw/plugin-sdk/telegram-surface',
-  './dist/extensions/telegram/api.js',
-  {
-    listTelegramDirectoryGroupsFromConfig: noopAsyncList,
-    listTelegramDirectoryPeersFromConfig: noopAsyncList,
-    normalizeTelegramMessagingTarget: noopNormalize,
-  },
-  ['listTelegramDirectoryGroupsFromConfig', 'listTelegramDirectoryPeersFromConfig', 'normalizeTelegramMessagingTarget'],
-);
+function getDiscordSdk(): DiscordSdk {
+  return discordSdk ??= loadChannelSdk<DiscordSdk>(
+    'openclaw/plugin-sdk/discord', './dist/extensions/discord/api.js',
+    { listDiscordDirectoryGroupsFromConfig: noopAsyncList, listDiscordDirectoryPeersFromConfig: noopAsyncList, normalizeDiscordMessagingTarget: noopNormalize },
+    ['listDiscordDirectoryGroupsFromConfig', 'listDiscordDirectoryPeersFromConfig', 'normalizeDiscordMessagingTarget'],
+  );
+}
 
-const _slackSdk = loadChannelSdk<SlackSdk>(
-  'openclaw/plugin-sdk/slack',
-  './dist/extensions/slack/api.js',
-  {
-    listSlackDirectoryGroupsFromConfig: noopAsyncList,
-    listSlackDirectoryPeersFromConfig: noopAsyncList,
-    normalizeSlackMessagingTarget: noopNormalize,
-  },
-  ['listSlackDirectoryGroupsFromConfig', 'listSlackDirectoryPeersFromConfig', 'normalizeSlackMessagingTarget'],
-);
+function getTelegramSdk(): TelegramSdk {
+  return telegramSdk ??= loadChannelSdk<TelegramSdk>(
+    'openclaw/plugin-sdk/telegram-surface', './dist/extensions/telegram/api.js',
+    { listTelegramDirectoryGroupsFromConfig: noopAsyncList, listTelegramDirectoryPeersFromConfig: noopAsyncList, normalizeTelegramMessagingTarget: noopNormalize },
+    ['listTelegramDirectoryGroupsFromConfig', 'listTelegramDirectoryPeersFromConfig', 'normalizeTelegramMessagingTarget'],
+  );
+}
 
-const _whatsappSdk = loadChannelSdk<WhatsappSdk>(
-  'openclaw/plugin-sdk/whatsapp-shared',
-  './dist/extensions/whatsapp/api.js',
-  {
-    normalizeWhatsAppMessagingTarget: noopNormalize,
-  },
-  ['normalizeWhatsAppMessagingTarget'],
-);
+function getSlackSdk(): SlackSdk {
+  return slackSdk ??= loadChannelSdk<SlackSdk>(
+    'openclaw/plugin-sdk/slack', './dist/extensions/slack/api.js',
+    { listSlackDirectoryGroupsFromConfig: noopAsyncList, listSlackDirectoryPeersFromConfig: noopAsyncList, normalizeSlackMessagingTarget: noopNormalize },
+    ['listSlackDirectoryGroupsFromConfig', 'listSlackDirectoryPeersFromConfig', 'normalizeSlackMessagingTarget'],
+  );
+}
+
+function getWhatsappSdk(): WhatsappSdk {
+  return whatsappSdk ??= loadChannelSdk<WhatsappSdk>(
+    'openclaw/plugin-sdk/whatsapp-shared', './dist/extensions/whatsapp/api.js',
+    { normalizeWhatsAppMessagingTarget: noopNormalize }, ['normalizeWhatsAppMessagingTarget'],
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Public re-exports — identical API surface as before.
 // ---------------------------------------------------------------------------
 
-export const {
-  listDiscordDirectoryGroupsFromConfig,
-  listDiscordDirectoryPeersFromConfig,
-  normalizeDiscordMessagingTarget,
-} = _discordSdk;
-
-export const {
-  listTelegramDirectoryGroupsFromConfig,
-  listTelegramDirectoryPeersFromConfig,
-  normalizeTelegramMessagingTarget,
-} = _telegramSdk;
-
-export const {
-  listSlackDirectoryGroupsFromConfig,
-  listSlackDirectoryPeersFromConfig,
-  normalizeSlackMessagingTarget,
-} = _slackSdk;
-
-export const { normalizeWhatsAppMessagingTarget } = _whatsappSdk;
+export const listDiscordDirectoryGroupsFromConfig: DiscordSdk['listDiscordDirectoryGroupsFromConfig'] = (...args) => getDiscordSdk().listDiscordDirectoryGroupsFromConfig(...args);
+export const listDiscordDirectoryPeersFromConfig: DiscordSdk['listDiscordDirectoryPeersFromConfig'] = (...args) => getDiscordSdk().listDiscordDirectoryPeersFromConfig(...args);
+export const normalizeDiscordMessagingTarget: DiscordSdk['normalizeDiscordMessagingTarget'] = (target) => getDiscordSdk().normalizeDiscordMessagingTarget(target);
+export const listTelegramDirectoryGroupsFromConfig: TelegramSdk['listTelegramDirectoryGroupsFromConfig'] = (...args) => getTelegramSdk().listTelegramDirectoryGroupsFromConfig(...args);
+export const listTelegramDirectoryPeersFromConfig: TelegramSdk['listTelegramDirectoryPeersFromConfig'] = (...args) => getTelegramSdk().listTelegramDirectoryPeersFromConfig(...args);
+export const normalizeTelegramMessagingTarget: TelegramSdk['normalizeTelegramMessagingTarget'] = (target) => getTelegramSdk().normalizeTelegramMessagingTarget(target);
+export const listSlackDirectoryGroupsFromConfig: SlackSdk['listSlackDirectoryGroupsFromConfig'] = (...args) => getSlackSdk().listSlackDirectoryGroupsFromConfig(...args);
+export const listSlackDirectoryPeersFromConfig: SlackSdk['listSlackDirectoryPeersFromConfig'] = (...args) => getSlackSdk().listSlackDirectoryPeersFromConfig(...args);
+export const normalizeSlackMessagingTarget: SlackSdk['normalizeSlackMessagingTarget'] = (target) => getSlackSdk().normalizeSlackMessagingTarget(target);
+export const normalizeWhatsAppMessagingTarget: WhatsappSdk['normalizeWhatsAppMessagingTarget'] = (target) => getWhatsappSdk().normalizeWhatsAppMessagingTarget(target);

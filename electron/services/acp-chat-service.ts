@@ -41,7 +41,7 @@ import {
   type AcpTurnVideoPreferenceStore,
 } from './acp-turn-video-preference-store';
 import { resolveOpenClawWorkspacePath } from '../utils/paths';
-import { prepareVideoReferenceImage } from '../utils/video-reference-image';
+import { prepareAcpChatImage, prepareVideoReferenceImage } from '../utils/video-reference-image';
 
 type AcpConnection = Pick<ClientSideConnection, 'initialize' | 'newSession' | 'loadSession' | 'prompt' | 'cancel'>;
 type MainWindowLike = {
@@ -93,6 +93,8 @@ function gatewayNeedsReadinessWait(status: ReturnType<NonNullable<GatewayPairing
 function waitForDelay(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
+
+const GATEWAY_TRANSITION_ERROR = 'Gateway is starting or reconnecting. Please wait and try again.';
 
 function ok(generation?: number, sessionUpdates?: AcpSessionUpdateEnvelope[]): AcpChatOperationResult {
   return {
@@ -174,6 +176,7 @@ export class AcpChatService {
   private connection: AcpConnection | null;
   private initializing: Promise<AcpConnection> | null = null;
   private initialized = false;
+  private connectionRuntimeIdentity: string | null = null;
   private generation = 0;
   private generationSeq = 0;
   private activeSessionKey: string | null = null;
@@ -271,7 +274,9 @@ export class AcpChatService {
     let previousAccessGrant: AcpSessionAccessContext | null = null;
 
     try {
-      const connection = await this.ensureConnection();
+      const runtimeIdentity = await this.requireReadyGatewayRuntime();
+      const connection = await this.ensureConnection(runtimeIdentity);
+      this.requireSameGatewayRuntime(runtimeIdentity);
       const livePrompt = this.livePrompts.get(payload.sessionKey);
       if (livePrompt) {
         const preparedAccessGrant = await this.accessRegistry.prepareGrant({
@@ -321,6 +326,7 @@ export class AcpChatService {
         workspaceRoot: payload.workspaceRoot,
         executionCwd: payload.cwd,
       });
+      this.requireSameGatewayRuntime(runtimeIdentity);
 
       this.generation = nextGeneration;
       this.activeSessionKey = payload.sessionKey;
@@ -355,6 +361,7 @@ export class AcpChatService {
           mcpServers: [],
         });
       }
+      this.requireSameGatewayRuntime(runtimeIdentity);
       this.activeAcpSessionId = acpSessionId;
       this.loadedSessionKey = payload.sessionKey;
       this.loadedAcpSessionId = acpSessionId;
@@ -420,6 +427,7 @@ export class AcpChatService {
     let imagePreferenceId: string | undefined;
     let videoPreferenceId: string | undefined;
     try {
+      const runtimeIdentity = await this.requireReadyGatewayRuntime();
       const promptCwd = payload.cwd === accessGrant.executionCwd
         ? payload.cwd
         : await import('node:fs/promises')
@@ -433,7 +441,8 @@ export class AcpChatService {
         generation,
         details: { messageLength: payload.message?.length ?? 0, mediaCount: payload.media?.length ?? 0 },
       });
-      const connection = await this.ensureConnection();
+      const connection = await this.ensureConnection(runtimeIdentity);
+      this.requireSameGatewayRuntime(runtimeIdentity);
       const promptBuild = await this.buildPromptBlocks(payload);
       const prompt = promptBuild.blocks;
       const message = payload.message?.trim();
@@ -469,12 +478,14 @@ export class AcpChatService {
         this.historicalGeneration = null;
       }
       this.permissionsEnabled = true;
+      this.requireSameGatewayRuntime(runtimeIdentity);
       await connection.prompt({
         sessionId: acpSessionId,
         prompt,
         messageId: payload.messageId ?? randomUUID(),
         _meta: { sessionKey: payload.sessionKey, prefixCwd: true },
       });
+      this.requireSameGatewayRuntime(runtimeIdentity);
       this.trace('session/prompt:success', {
         sessionKey: payload.sessionKey,
         generation,
@@ -513,7 +524,9 @@ export class AcpChatService {
 
     try {
       this.trace('session/cancel:start', { sessionKey: payload.sessionKey });
-      const connection = await this.ensureConnection();
+      const runtimeIdentity = await this.requireReadyGatewayRuntime();
+      const connection = await this.ensureConnection(runtimeIdentity);
+      this.requireSameGatewayRuntime(runtimeIdentity);
       await connection.cancel({ sessionId: this.loadedAcpSessionId });
       this.permissionsEnabled = false;
       this.resolvePermissionWaitersForSession(payload.sessionKey, cancelledPermissionResponse());
@@ -542,11 +555,53 @@ export class AcpChatService {
     return ok(waiter.generation);
   }
 
-  private async ensureConnection(): Promise<AcpConnection> {
-    if (this.connection && this.initialized) return this.connection;
+  private getReadyGatewayRuntimeIdentity(): string | null {
+    if (!this.gateway) return null;
+    const status = this.gateway.getStatus?.();
+    if (!status || status.state !== 'running' || status.gatewayReady !== true) {
+      throw new Error(GATEWAY_TRANSITION_ERROR);
+    }
+    return `${status.pid ?? 'none'}:${status.connectedAt ?? 'none'}:${status.port}`;
+  }
+
+  private async requireReadyGatewayRuntime(): Promise<string | null> {
+    await this.waitForGatewayReady();
+    return this.getReadyGatewayRuntimeIdentity();
+  }
+
+  private requireSameGatewayRuntime(expectedIdentity: string | null): void {
+    const currentIdentity = this.getReadyGatewayRuntimeIdentity();
+    if (currentIdentity !== expectedIdentity) {
+      this.invalidateConnectionForGatewayTransition();
+      throw new Error(GATEWAY_TRANSITION_ERROR);
+    }
+  }
+
+  private invalidateConnectionForGatewayTransition(): void {
+    const child = this.child;
+    if (child) {
+      try {
+        child.kill();
+      } catch {
+        // The child may already be exiting after its Gateway disappeared.
+      }
+      this.dropConnectionForChild(child);
+      return;
+    }
+    this.initialized = false;
+    this.initializing = null;
+    this.connection = null;
+    this.connectionRuntimeIdentity = null;
+  }
+
+  private async ensureConnection(runtimeIdentity: string | null): Promise<AcpConnection> {
+    if (this.connection && this.initialized) {
+      if (this.connectionRuntimeIdentity === runtimeIdentity) return this.connection;
+      this.invalidateConnectionForGatewayTransition();
+    }
     if (this.initializing) return this.initializing;
 
-    this.initializing = this.initializeConnection();
+    this.initializing = this.initializeConnection(runtimeIdentity);
     try {
       return await this.initializing;
     } finally {
@@ -554,15 +609,16 @@ export class AcpChatService {
     }
   }
 
-  private async initializeConnection(): Promise<AcpConnection> {
-    if (this.gateway?.getStatus) {
-      await this.waitForGatewayReady();
-    }
+  private async initializeConnection(runtimeIdentity: string | null): Promise<AcpConnection> {
+    this.requireSameGatewayRuntime(runtimeIdentity);
     await this.approveLocalDeviceRequests();
 
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        return await this.initializeConnectionOnce(attempt);
+        const connection = await this.initializeConnectionOnce(attempt);
+        this.requireSameGatewayRuntime(runtimeIdentity);
+        this.connectionRuntimeIdentity = runtimeIdentity;
+        return connection;
       } catch (error) {
         if (attempt >= 2) throw error;
         logger.info(
@@ -659,7 +715,9 @@ export class AcpChatService {
   }
 
   private waitForChildExit(child: AcpChildProcess | null): Promise<number | null> {
-    if (!child) return Promise.resolve(null);
+    // An injected connection has no child process to supervise. It must not win
+    // the initialization race as a synthetic process-exit event.
+    if (!child) return new Promise<number | null>(() => {});
     if (child.exitCode !== null) return Promise.resolve(child.exitCode);
     if (child.signalCode) return Promise.resolve(child.exitCode);
 
@@ -724,6 +782,7 @@ export class AcpChatService {
     this.initialized = false;
     this.initializing = null;
     this.connection = null;
+    this.connectionRuntimeIdentity = null;
     this.child = null;
     this.loadedSessionKey = null;
     this.loadedAcpSessionId = null;
@@ -868,7 +927,6 @@ export class AcpChatService {
         throw new Error('Video generation supports at most one reference image.');
       }
 
-      const fsP = await import('node:fs/promises');
       for (const item of media) {
         const mimeType = item.mimeType || 'application/octet-stream';
         if (mimeType.startsWith('image/')) {
@@ -879,16 +937,18 @@ export class AcpChatService {
               mimeType,
               maxBytes: UCLAW_VIDEO_GENERATION_MAX_INPUT_IMAGE_BYTES,
             })
-            : null;
-          const data = prepared
-            ? prepared.buffer.toString('base64')
-            : await fsP.readFile(item.filePath, 'base64');
-          if (prepared?.compressed) {
+            : await prepareAcpChatImage({
+              filePath: item.filePath,
+              fileName: item.fileName,
+              mimeType,
+            });
+          const data = prepared.buffer.toString('base64');
+          if (prepared.compressed) {
             logger.info(
-              `[acp-chat] Compressed video reference image from ${prepared.inputBytes} to ${prepared.outputBytes} bytes`,
+              `[acp-chat] Compressed ${payload.videoOptions ? 'video reference' : 'chat'} image from ${prepared.inputBytes} to ${prepared.outputBytes} bytes`,
             );
           }
-          if (prepared) {
+          if (payload.videoOptions) {
             videoReferenceImage = {
               buffer: prepared.buffer,
               fileName: prepared.fileName,
@@ -898,7 +958,7 @@ export class AcpChatService {
           blocks.push({
             type: 'image',
             data,
-            mimeType: prepared?.mimeType ?? mimeType,
+            mimeType: prepared.mimeType,
             uri: item.filePath,
             _meta: {
               clawx: {

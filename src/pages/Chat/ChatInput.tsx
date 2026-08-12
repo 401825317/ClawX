@@ -630,8 +630,8 @@ export function ChatInput({
   const showModelPicker = modelOptions.length > 0;
   const settingsAreDefault = effectiveModelRef === managedDefaultModelRef && !selectedThinkingLevel;
   const chatComposerStatusComponents = rendererExtensionRegistry.getChatComposerStatusComponents();
-  const isGatewayUsable = gatewayStatus.state === 'running' && gatewayStatus.gatewayReady !== false;
-  const inputDisabled = disabled;
+  const isGatewayUsable = gatewayStatus.state === 'running' && gatewayStatus.gatewayReady === true;
+  const inputDisabled = disabled || !isGatewayUsable;
   const workspaceSelectorDisabled = workspaceReadOnly || inputDisabled || sending || !onSelectWorkspace;
   const skillTokenRanges = useMemo(() => findSkillTokenRanges(input), [input]);
   const openArtifactPreview = useArtifactPanel((s) => s.openPreview);

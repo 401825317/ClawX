@@ -8,6 +8,7 @@ import { logger } from './logger';
 import { getOpenClawConfigDir, getOpenClawDir, getOpenClawEntryPath } from './paths';
 import { getSetting } from './store';
 import { getUvMirrorEnv } from './uv-env';
+import type { GatewayStatus } from '@shared/types/gateway';
 
 /** Browser Control UI client id used in OpenClaw 2026.5.x connect frames. */
 export const CONTROL_UI_BROWSER_CLIENT_ID = 'openclaw-control-ui';
@@ -42,11 +43,7 @@ export type DevicePairingList = {
 
 export type GatewayPairingRpcClient = {
   isConnected: () => boolean;
-  getStatus?: () => {
-    port?: number;
-    state?: string;
-    gatewayReady?: boolean;
-  };
+  getStatus?: () => GatewayStatus;
   getGatewayToken?: () => Promise<string>;
   rpc: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
 };

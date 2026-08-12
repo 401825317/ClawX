@@ -98,6 +98,7 @@
             "modelUnavailable": { "title": "モデルを利用できません", "message": "このモデルを利用できるアカウントがありません。モデルを切り替えるか管理者に連絡してください。" },
             "contentPolicy": { "title": "コンテンツ安全チェックに失敗しました", "message": "安全ポリシーにより生成がブロックされました。プロンプトを修正して再送信してください。" },
             "conversationInvalid": { "title": "会話コンテキストが無効です", "message": "この会話をモデルで続行できません。新しいチャットを作成して再試行してください。" },
+            "imageTooLarge": { "title": "画像が大きすぎます", "message": "圧縮後も画像が 6 MiB を超えています。より小さい画像を選んで再送信してください。" },
             "invalidRequest": { "title": "リクエストパラメータが不正です", "message": "以下の理由に従ってリクエストを修正し、再送信してください。" },
             "cancelled": { "title": "生成を停止しました", "message": "このリクエストはキャンセルされました。" },
             "unknown": { "title": "モデル呼び出しに失敗しました", "message": "リクエストを完了できませんでした。再試行し、続く場合はサポートに連絡してください。" }
@@ -378,6 +379,7 @@
         "targetChip": "@{{agent}}",
         "agentPickerTitle": "次のメッセージを別の Agent に直接送信します",
         "sessionLoadingPlaceholder": "会話を読み込み中...",
+        "gatewayStartingPlaceholder": "ゲートウェイを起動しています。しばらくお待ちください...",
         "sessionCancellingPlaceholder": "現在の操作を停止中...",
         "workspacePreparingPlaceholder": "ワークスペースを準備中...",
         "workspaceUnavailablePlaceholder": "ワークスペースを利用できません。別のフォルダーを選択してください...",

@@ -10,6 +10,7 @@ export type AcpChatErrorCode =
   | 'MODEL_UNAVAILABLE'
   | 'CONTENT_POLICY'
   | 'CONVERSATION_INVALID'
+  | 'IMAGE_TOO_LARGE'
   | 'INVALID_REQUEST'
   | 'CANCELLED'
   | 'UNKNOWN';
@@ -140,6 +141,14 @@ export function normalizeAcpChatError(error: unknown, fallback = 'ACP prompt fai
     /用户(?:主动)?取消/u,
   ])) return result('CANCELLED', false);
 
+  if (includesAny(searchable, [
+    /\bimage[_ -]?too[_ -]?large\b/u,
+    /acp chat image could not be compressed below/u,
+    /image exceeds size limit\s*\(\s*\d+\s*>\s*\d+\s*bytes?\s*\)/u,
+    /image exceeds size limit\s*\(\s*\d+\s*>\s*\d+\s*\)/u,
+    /图片.{0,12}(?:超过|超出).{0,12}(?:大小|尺寸|限制)/u,
+  ])) return result('IMAGE_TOO_LARGE', false);
+
   if (httpStatus === 400 || httpStatus === 422 || includesAny(searchable, [
     /invalid[_ -]?request/u,
     /unsupported parameter/u,
@@ -197,6 +206,7 @@ export function normalizeAcpChatError(error: unknown, fallback = 'ACP prompt fai
   ])) return result('NETWORK', true);
 
   if ((httpStatus != null && httpStatus >= 500) || includesAny(searchable, [
+    /gateway is starting or reconnecting/u,
     /bad gateway/u,
     /service unavailable/u,
     /service[_ -]?unavailable[_ -]?error/u,
