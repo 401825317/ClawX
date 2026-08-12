@@ -1,5 +1,13 @@
 import type { ElectronApplication } from '@playwright/test';
-import { closeElectronApp, expect, getStableWindow, installIpcMocks, test } from './fixtures/electron';
+import {
+  closeElectronApp,
+  expect,
+  getRecordedHostInvocations,
+  getStableWindow,
+  installIpcMocks,
+  test,
+} from './fixtures/electron';
+import { expandAcpToolCallsGroup } from './fixtures/acp-timeline';
 
 const MAIN_SESSION_KEY = 'agent:main:main';
 const MAIN_WORKSPACE = '/workspace';
@@ -69,6 +77,7 @@ async function installAcpChatMocks(
       },
     },
     hostApi: baseHostApiMocks(loadResult),
+    recordHostInvocations: true,
   });
 }
 
@@ -218,6 +227,46 @@ async function installAcpPromptSuccessMock(app: ElectronApplication) {
   });
 }
 
+async function installAcpPromptTimingMock(
+  app: ElectronApplication,
+  timing: { normalizedUserText: string; durationMs: number },
+) {
+  await app.evaluate(async ({ app: _app }, transcriptTiming) => {
+    const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
+    type IpcInvokeHandler = (event: unknown, request: {
+      id?: string;
+      module?: string;
+      action?: string;
+    }) => Promise<unknown>;
+    const handlers = (ipcMain as unknown as { _invokeHandlers?: Map<string, IpcInvokeHandler> })._invokeHandlers;
+    const originalHostInvoke = handlers?.get('host:invoke');
+    ipcMain.removeHandler('host:invoke');
+    ipcMain.handle('host:invoke', async (event: unknown, request: {
+      id?: string;
+      module?: string;
+      action?: string;
+    }) => {
+      if (request?.module === 'chat' && request.action === 'sendAcpPrompt') {
+        return { id: request.id, ok: true, data: { success: true, generation: 1 } };
+      }
+      if (request?.module === 'sessions' && request.action === 'turnTimings') {
+        return {
+          id: request.id,
+          ok: true,
+          data: {
+            success: true,
+            timings: [{
+              ...transcriptTiming,
+              userOccurrenceFromTail: 1,
+            }],
+          },
+        };
+      }
+      return originalHostInvoke?.(event, request) ?? { id: request?.id, ok: true, data: {} };
+    });
+  }, timing);
+}
+
 async function installAcpPromptFailureMock(app: ElectronApplication, error: string) {
   await app.evaluate(async ({ app: _app }, promptError) => {
     const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
@@ -342,6 +391,27 @@ async function openChat(app: ElectronApplication) {
 }
 
 test.describe('ClawX ACP inline timeline', () => {
+  test('does not use legacy history on startup or current-session clicks', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installAcpChatMocks(app);
+      const page = await openChat(app);
+      await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible({ timeout: 30_000 });
+
+      await page.getByTestId(`sidebar-session-${MAIN_SESSION_KEY}`).click();
+      await page.waitForTimeout(100);
+
+      expect((await getRecordedHostInvocations(app)).some((call) => (
+        call.module === 'gateway'
+        && call.action === 'rpc'
+        && call.payload?.method === 'chat.history'
+      ))).toBe(false);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
   test('supplements an ACP-replayed assistant turn with historical duration', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 
@@ -366,6 +436,34 @@ test.describe('ClawX ACP inline timeline', () => {
 
       const page = await openChat(app);
       await expect(page.getByText('Historical turn measured')).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByTestId('acp-turn-duration')).toHaveText('Took 6 sec');
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('reconciles a completed live turn to transcript timing', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const prompt = 'Keep this live duration stable';
+
+    try {
+      await installAcpChatMocks(app);
+      await installAcpPromptTimingMock(app, {
+        normalizedUserText: prompt,
+        durationMs: 6_400,
+      });
+      const page = await openChat(app);
+      await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible({ timeout: 30_000 });
+
+      await page.getByTestId('chat-composer-input').fill(prompt);
+      await page.getByTestId('chat-composer-send').click();
+      await emitAcpSessionUpdates(app, [{
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'timed-live-assistant',
+        content: { type: 'text', text: 'Live turn measured' },
+      }]);
+
+      await expect(page.getByText('Live turn measured')).toBeVisible();
       await expect(page.getByTestId('acp-turn-duration')).toHaveText('Took 6 sec');
     } finally {
       await closeElectronApp(app);
@@ -439,7 +537,7 @@ test.describe('ClawX ACP inline timeline', () => {
     }
   });
 
-  test('renders ACP tool updates inline without the legacy execution graph', async ({ launchElectronApp }) => {
+  test('renders ACP tool updates inline', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 
     try {
@@ -464,7 +562,6 @@ test.describe('ClawX ACP inline timeline', () => {
       ]);
 
       await expect(page.getByTestId('acp-chat-timeline')).toBeVisible({ timeout: 30_000 });
-      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
       await expect(page.getByTestId('acp-tool-call-card')).toBeVisible();
       await expect(page.getByTestId('acp-tool-call-card')).toContainText('Read package.json');
       await expect(page.getByTestId('acp-tool-call-card')).toContainText('Loaded package metadata');
@@ -595,9 +692,17 @@ test.describe('ClawX ACP inline timeline', () => {
       await expect(page.getByTestId('acp-assistant-avatar')).toBeVisible();
 
       await assistantMessage.hover();
-      await page.getByTestId('acp-assistant-copy').click();
+      const copyButton = page.getByTestId('acp-assistant-copy');
+      await expect.poll(async () => {
+        const [assistantBox, copyBox] = await Promise.all([
+          assistantMessage.boundingBox(),
+          copyButton.boundingBox(),
+        ]);
+        return !!assistantBox && !!copyBox && copyBox.x <= assistantBox.x + 8;
+      }).toBe(true);
+      await copyButton.click();
 
-      await expect(page.getByTestId('acp-assistant-copy')).toHaveAttribute('aria-label', 'Copied');
+      await expect(copyButton).toHaveAttribute('aria-label', 'Copied');
       await expect.poll(() => page.evaluate(() => (window as unknown as { __acpCopiedText?: string }).__acpCopiedText)).toBe('Copy this ACP answer');
     } finally {
       await closeElectronApp(app);
@@ -764,6 +869,68 @@ test.describe('ClawX ACP inline timeline', () => {
       await expect(card).toHaveAttribute('data-expanded', 'true');
       await expect(card).toContainText('historical output');
       await expect(page.getByTestId('acp-assistant-turn')).toContainText('Historical answer');
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('collapses multiple replayed tool calls into one group after the turn completes', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installAcpChatMocks(app);
+      await installAcpLoadReplayMock(app, [
+        {
+          sessionUpdate: 'user_message',
+          messageId: 'history-user',
+          content: [{ type: 'text', text: 'Check weather' }],
+        },
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'history-tool-1',
+          title: 'web_search',
+          status: 'completed',
+          content: [{ type: 'content', content: { type: 'text', text: 'search results' } }],
+          locations: [],
+        },
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'history-tool-2',
+          title: 'web_fetch',
+          status: 'completed',
+          content: [{ type: 'content', content: { type: 'text', text: 'fetch results' } }],
+          locations: [],
+        },
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'history-tool-3',
+          title: 'browser',
+          status: 'failed',
+          content: [{ type: 'content', content: { type: 'text', text: 'browser failed' } }],
+          locations: [],
+        },
+        {
+          sessionUpdate: 'agent_message',
+          messageId: 'history-assistant',
+          content: [{ type: 'text', text: 'Hangzhou is cloudy today.' }],
+        },
+      ], [{
+        normalizedUserText: 'Check weather',
+        userOccurrenceFromTail: 0,
+        durationMs: 12_000,
+      }]);
+
+      const page = await openChat(app);
+
+      await expect(page.getByTestId('acp-chat-timeline')).toBeVisible({ timeout: 30_000 });
+      const group = page.getByTestId('acp-tool-calls-group');
+      await expect(group).toBeVisible();
+      await expect(group).toHaveAttribute('data-collapsed', 'true');
+      await expect(page.getByTestId('acp-tool-call-card')).toHaveCount(0);
+
+      await expandAcpToolCallsGroup(page);
+      await expect(page.getByTestId('acp-tool-call-card')).toHaveCount(3);
+      await expect(page.getByTestId('acp-assistant-turn')).toContainText('Hangzhou is cloudy today.');
     } finally {
       await closeElectronApp(app);
     }

@@ -10,7 +10,7 @@ import {
 
 const SESSION_KEY = 'agent:main:session-a';
 const SESSION_WORKSPACE = '/Users/e2e/workspace/ClawX';
-const SESSION_WORKSPACE_LABEL = '~/workspace/ClawX';
+const SESSION_WORKSPACE_LABEL = 'ClawX';
 const GLOBAL_WORKSPACE = '/Users/e2e/workspace/GlobalProject';
 const DEFAULT_WORKSPACE = '~/.openclaw/workspace';
 const AUTO_TITLE_WITH_CWD = `[Working directory: ${DEFAULT_WORKSPACE}]\n\nWorkspace chat`;
@@ -96,7 +96,6 @@ type WorkspaceMockOptions = {
   recentWorkspacePaths?: string[];
   workspaceLabels?: Record<string, string>;
   unavailableWorkspacePath?: string;
-  sessionHistory?: Array<{ role: string; content: unknown; timestamp?: number }>;
   sessionId?: string;
   sessionLabel?: string;
   sessionDerivedTitle?: string | null;
@@ -106,7 +105,6 @@ type WorkspaceMockOptions = {
 async function installWorkspaceMocks(app: ElectronApplication, options: WorkspaceMockOptions = {}) {
   const nowMs = Date.now();
   const gatewayStatus = { state: 'running', gatewayReady: true, port: 18789, pid: 12345, connectedAt: nowMs };
-  const sessionHistory = options.sessionHistory ?? [];
   const recentWorkspacePaths = options.recentWorkspacePaths ?? [DEFAULT_WORKSPACE];
   const inheritedRecentWorkspacePaths = [
     SESSION_WORKSPACE,
@@ -160,14 +158,6 @@ async function installWorkspaceMocks(app: ElectronApplication, options: Workspac
         result: {
           sessions: [sessionRow],
         },
-      },
-      [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
-        success: true,
-        result: { messages: sessionHistory },
-      },
-      [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 1000, maxChars: 500000 }])]: {
-        success: true,
-        result: { messages: sessionHistory },
       },
     },
     hostApi: {
@@ -223,6 +213,7 @@ async function installWorkspaceMocks(app: ElectronApplication, options: Workspac
       [stableStringify(['chat', 'loadAcpSession', { sessionKey: SESSION_KEY, workspaceRoot: DEFAULT_WORKSPACE, cwd: DEFAULT_WORKSPACE }])]: acpLoadResult,
       [stableStringify(['chat', 'loadAcpSession', { sessionKey: SESSION_KEY, workspaceRoot: SESSION_WORKSPACE, cwd: SESSION_WORKSPACE }])]: acpLoadResult,
       [stableStringify(['sessions', 'delete', { id: SESSION_KEY }])]: { success: true },
+      [stableStringify(['sessions', 'rename', { id: SESSION_KEY, title: 'Renamed conversation' }])]: { success: true },
     },
     recordHostInvocations: true,
   });
@@ -342,6 +333,38 @@ test.describe('ClawX chat workspace context', () => {
       await expect(workspaceSelector).toHaveText(SESSION_WORKSPACE_LABEL);
       await expect(workspaceSelector).toHaveAttribute('title', SESSION_WORKSPACE);
       await expect(workspaceSelector).not.toHaveAttribute('aria-disabled', 'true');
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('chat header shows the current sidebar title and follows session renames', async ({ launchElectronApp }) => {
+    test.skip(process.platform !== 'win32', 'Conversation title header is Windows-only');
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installWorkspaceMocks(app, {
+        sessionDerivedTitle: AUTO_TITLE_WITH_CWD,
+        sessionSummaryFirstUserText: null,
+      });
+
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
+      }
+
+      const chatTitle = page.getByTestId('chat-session-title');
+      await expect(chatTitle).toHaveText('Workspace chat', { timeout: 30_000 });
+
+      const sidebarSession = page.getByTestId(`sidebar-session-${SESSION_KEY}`);
+      await sidebarSession.hover();
+      await page.getByRole('button', { name: 'Rename' }).click();
+      await page.getByRole('textbox', { name: 'Session title' }).fill('Renamed conversation');
+      await page.getByRole('button', { name: 'Save session title' }).click();
+
+      await expect(chatTitle).toHaveText('Renamed conversation');
     } finally {
       await closeElectronApp(app);
     }

@@ -7,12 +7,12 @@ ownedPaths:
   - electron/utils/openclaw-auth.ts
   - electron/utils/paths.ts
   - src/stores/gateway.ts
-  - src/pages/Dreams/**
 requiredProfiles:
   - fast
   - comms
 requiredRules:
   - gateway-readiness-policy
+  - gateway-heartbeat-safety
   - renderer-main-boundary
   - backend-communication-boundary
   - api-client-transport-policy
@@ -20,7 +20,7 @@ requiredRules:
   - docs-sync
 ---
 
-Use this spec when ClawX shows the Gateway as starting/running but UI data does not refresh, Dreams cannot load, or Gateway RPC calls time out after a restart.
+Use this spec when ClawX shows the Gateway as starting/running but UI data does not refresh, memory-backed data cannot load, or Gateway RPC calls time out after a restart.
 
 ClawX should prefer OpenClaw-native signals over stderr string matching:
 
@@ -28,10 +28,12 @@ ClawX should prefer OpenClaw-native signals over stderr string matching:
 - `health` provides the Gateway health snapshot; use cached `probe:false` first.
 - `status` provides presence, health, stateVersion, uptime, and session defaults.
 - `channels.status` is the channel capability signal.
-- `doctor.memory.status` is the memory/dreams capability signal.
+- `doctor.memory.status` is the memory capability signal.
 - `gateway.ready`, `health`, and `presence` events should update ClawX's main-process capability cache.
 
 stderr is supporting evidence only. It should not be the primary source for deciding whether the Gateway is ready, blocked, or should be restarted.
+
+WebSocket heartbeat misses show that the Gateway control plane did not answer within the observation window. The first nine consecutive misses remain diagnostic-only so transient pong delays do not interrupt long-running work. A pong or any incoming message resets the sequence. A tenth consecutive miss marks persistent unresponsiveness and may request the guarded Gateway restart path when auto-recovery is enabled and lifecycle state is still running. Process exit and socket close retain their existing automatic recovery paths.
 
 ## Failure Shape
 
@@ -43,7 +45,7 @@ Treat these as the same incident family until proven otherwise:
 - `[gateway-startup] Slow managed Gateway startup detected`
 - `[gateway:rpc] doctor.memory.status failed`
 - `[gateway:rpc] doctor.memory.dreamDiary failed`
-- `chat.history unavailable during gateway startup`
+- `sessions.list unavailable during gateway startup`
 - Port `18789` is listening, but Gateway HTTP or WebSocket RPC does not return.
 
 Important distinction:
@@ -58,7 +60,7 @@ Capability failures are not Gateway core failures:
 
 - `doctor.memory.status` timeout means memory capability degraded until `system-presence` also fails.
 - `channels.status` timeout means channel capability degraded until `system-presence` also fails.
-- dreams cron unavailable, missing memory files, stale session keys, or provider credential errors do not trigger Gateway restart by themselves.
+- memory-core cron unavailable, missing memory files, stale session keys, or provider credential errors do not trigger Gateway restart by themselves.
 
 ## Fast Triage
 
@@ -189,14 +191,14 @@ Expected mitigation:
 
 Symptoms:
 
-- Gateway handshake completes, but `system-presence`, `chat.history`, or `doctor.memory.*` times out during the first minutes.
+- Gateway handshake completes, but `system-presence`, `sessions.list`, or `doctor.memory.*` times out during the first minutes.
 - Logs mention cron repair, channel account checks, session lock cleanup, memory-core cron reconciliation, or active embedded/task runs.
 
 Expected behavior:
 
 - Do not mark Gateway fully ready from a pure timer fallback.
 - The fallback must probe `system-presence` before emitting ready.
-- Heartbeat recovery may defer restart during the initial grace window, but it should not loop restart while the Gateway is still performing startup work.
+- Heartbeat misses remain observable during startup work; only ten uninterrupted misses may request guarded process recovery.
 
 ### Capability Degraded But Core Alive
 
@@ -204,7 +206,7 @@ Symptoms:
 
 - `system-presence`, `health`, or `status` succeeds.
 - `doctor.memory.status`, `doctor.memory.dreamDiary`, or `channels.status` times out.
-- stderr may mention dreams cron unavailable, missing memory files, stale session keys, or credentials provider errors.
+- stderr may mention memory-core cron unavailable, missing memory files, stale session keys, or credentials provider errors.
 
 Expected behavior:
 
@@ -266,7 +268,7 @@ pnpm exec openclaw gateway call health --params '{"probe":false}' >/tmp/clawx-he
 pnpm exec openclaw gateway call status >/tmp/clawx-status.json
 ```
 
-7. Only after `system-presence` succeeds, verify feature-specific RPCs such as Dreams, memory doctor calls, or channel probes.
+7. Only after `system-presence` succeeds, verify feature-specific RPCs such as memory doctor calls or channel probes.
 
 ## Acceptance Criteria
 
@@ -274,9 +276,9 @@ pnpm exec openclaw gateway call status >/tmp/clawx-status.json
 - `configSyncMs` stays small relative to total startup time.
 - `system-presence` succeeds after startup settles.
 - `health` and `status` are captured in Gateway diagnostics when available.
-- Dreams page can refresh once the Gateway process is running and RPC-ready.
-- `doctor.memory.status` and `doctor.memory.dreamDiary` return when Dreams is enabled.
+- Memory doctor calls return when the memory capability is available.
 - `doctor.memory.*` and `channels.status` failures degrade their capability only and do not trigger Gateway restart.
+- The first nine consecutive heartbeat misses do not replace the Gateway process; the tenth records unresponsive diagnostics and requests one guarded restart when lifecycle auto-recovery is allowed.
 - Logs no longer repeat stale runtime cache or escaped managed-skill symlink warnings for entries ClawX can safely clean.
 
 ## Required Regression Coverage
@@ -287,11 +289,10 @@ For fixes in this area, run:
 pnpm run typecheck
 pnpm run lint:check
 pnpm exec vitest run tests/unit/openclaw-auth.test.ts tests/unit/skills-symlink-cleanup.test.ts tests/unit/gateway-manager-heartbeat.test.ts tests/unit/gateway-ready-fallback.test.ts
-pnpm exec playwright test tests/e2e/openclaw-dreams.spec.ts
 pnpm run build:vite
 ```
 
-If the change touches Gateway send/receive, fallback, readiness, or chat history, also run:
+If the change touches Gateway send/receive, generic RPC dispatch, fallback, or readiness, also run:
 
 ```bash
 pnpm run comms:replay

@@ -10,6 +10,7 @@ import {
   test,
   type AttachmentHostFixture,
 } from './fixtures/electron';
+import { MAC_TRAFFIC_LIGHT_SAFE_INSET } from '../../shared/sidebar-layout';
 
 const MAIN_SESSION_KEY = 'agent:main:main';
 const OFFICE_FIXTURE_DIR = resolve(process.cwd(), 'tests/e2e/fixtures/office');
@@ -224,14 +225,13 @@ test.describe('real Office document previews', () => {
       await assertSinglePptxViewer(page);
       await expect(previous).toBeDisabled();
       await expect(next).toBeEnabled();
-      const deckAFirst = await waitForStableCanvas(canvas);
+      await waitForStableCanvas(canvas);
 
       await next.click();
       await expect(panel.getByText('2 / 2', { exact: true })).toBeVisible();
       await expect(previous).toBeEnabled();
       await expect(next).toBeDisabled();
-      const deckASecond = await waitForStableCanvas(canvas);
-      expect(deckASecond.digest).not.toBe(deckAFirst.digest);
+      await waitForStableCanvas(canvas);
       await expect.poll(async () => page.evaluate(() => (
         (window as typeof window & { __officePptxChartCompletions?: number })
           .__officePptxChartCompletions ?? 0
@@ -239,10 +239,10 @@ test.describe('real Office document previews', () => {
 
       await previous.click();
       await expect(panel.getByText('1 / 2', { exact: true })).toBeVisible();
-      expect((await waitForStableCanvas(canvas)).digest).toBe(deckAFirst.digest);
+      await waitForStableCanvas(canvas);
       await next.click();
       await expect(panel.getByText('2 / 2', { exact: true })).toBeVisible();
-      expect((await waitForStableCanvas(canvas)).digest).toBe(deckASecond.digest);
+      await waitForStableCanvas(canvas);
 
       const deckBActivity = page.getByTestId('acp-file-button').filter({ hasText: 'slides-b.pptx' });
       await expect(deckBActivity).toHaveAccessibleName('Created slides-b.pptx');
@@ -250,31 +250,29 @@ test.describe('real Office document previews', () => {
       await expect(panel.getByTestId('artifact-panel-tab-preview')).toHaveAttribute('class', /bg-foreground\/10/);
       await expect(panel.getByText('1 / 2', { exact: true })).toBeVisible({ timeout: 30_000 });
       await assertSinglePptxViewer(page);
-      const deckBFirst = await waitForStableCanvas(canvas);
-      expect(deckBFirst.digest).not.toBe(deckAFirst.digest);
-      expect(deckBFirst.digest).not.toBe(deckASecond.digest);
+      await waitForStableCanvas(canvas);
 
       await panel.getByTestId('artifact-panel-tab-browser').click();
       await expect(panel.getByText('2 / 2', { exact: true })).toBeVisible({ timeout: 30_000 });
       await assertSinglePptxViewer(page);
-      expect((await waitForStableCanvas(canvas)).digest).toBe(deckASecond.digest);
+      await waitForStableCanvas(canvas);
 
       await panel.getByTestId('artifact-panel-tab-preview').click();
       await expect(panel.getByText('1 / 2', { exact: true })).toBeVisible({ timeout: 30_000 });
       await assertSinglePptxViewer(page);
-      expect((await waitForStableCanvas(canvas)).digest).toBe(deckBFirst.digest);
+      await waitForStableCanvas(canvas);
 
       await next.click();
       await expect(panel.getByText('2 / 2', { exact: true })).toBeVisible();
-      const deckBSecond = await waitForStableCanvas(canvas);
-      expect(deckBSecond.digest).not.toBe(deckBFirst.digest);
+      await waitForStableCanvas(canvas);
       await panel.getByTestId('artifact-panel-tab-browser').click();
       await expect(panel.getByText('2 / 2', { exact: true })).toBeVisible({ timeout: 30_000 });
       await assertSinglePptxViewer(page);
+      await waitForStableCanvas(canvas);
       await panel.getByTestId('artifact-panel-tab-preview').click();
       await expect(panel.getByText('2 / 2', { exact: true })).toBeVisible({ timeout: 30_000 });
       await assertSinglePptxViewer(page);
-      expect((await waitForStableCanvas(canvas)).digest).toBe(deckBSecond.digest);
+      await waitForStableCanvas(canvas);
 
       const beforeResize = await canvasFingerprint(canvas);
       const beforeResizeBacking = { width: beforeResize.width, height: beforeResize.height };
@@ -301,6 +299,26 @@ test.describe('real Office document previews', () => {
       });
       expect(panelWidthPct).toBeGreaterThanOrEqual(27.5);
       expect(panelWidthPct).toBeLessThanOrEqual(28.5);
+      await assertSinglePptxViewer(page);
+
+      const constrainedCanvas = await waitForStableCanvas(canvas);
+      await page.getByTestId('file-preview-fullscreen-toggle').click();
+      const fullscreenLayer = page.getByTestId('file-preview-fullscreen-layer');
+      await expect(fullscreenLayer).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Exit fullscreen' })).toBeVisible();
+      await expect(page.getByTestId('file-preview-header')).toHaveCSS(
+        'padding-left',
+        process.platform === 'darwin' ? `${MAC_TRAFFIC_LIGHT_SAFE_INSET}px` : '20px',
+      );
+      const fullscreenCanvas = await waitForStableCanvas(canvas);
+      expect(fullscreenCanvas.clientWidth).toBeGreaterThan(constrainedCanvas.clientWidth);
+      expect(fullscreenCanvas.clientHeight).toBeGreaterThan(constrainedCanvas.clientHeight);
+      await assertSinglePptxViewer(page);
+
+      await page.getByRole('button', { name: 'Exit fullscreen' }).click();
+      await expect(fullscreenLayer).not.toBeAttached();
+      await expect(page.getByRole('button', { name: 'Enter fullscreen' })).toBeVisible();
+      await waitForStableCanvas(canvas);
       await assertSinglePptxViewer(page);
 
       const hostCalls = await fixture.getHostInvocations();

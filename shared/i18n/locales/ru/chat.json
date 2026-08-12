@@ -12,19 +12,13 @@
     },
     "noLogs": "(Журналы ещё недоступны)",
     "scrollToLatest": "Вернуться вниз",
-    "loadMoreHistory": "Загрузить предыдущие сообщения",
-    "loadingMoreHistory": "Загрузка…",
     "toolbar": {
         "refresh": "Обновить чат",
-        "currentAgent": "Общение с {{agent}}",
+        "currentAgent": "{{agent}}",
         "workspace": "Рабочая область"
     },
     "generatedFiles": {
-        "title": "Изменения файлов ({{count}})",
-        "created": "Создано",
-        "modified": "Изменено",
-        "openFolder": "Открыть папку",
-        "viewAll": "Все изменения"
+        "openFolder": "Открыть папку"
     },
     "fileActivity": {
         "created": "Создан",
@@ -38,7 +32,8 @@
     "fileCard": {
         "openWith": "Открыть с помощью",
         "openWithFile": "Открыть {{name}} с помощью",
-        "openInBuiltInBrowser": "Открыть во встроенном браузере",
+        "openInBuiltInBrowser": "Открыть в просмотре ClawX",
+        "openInSystemBrowser": "Открыть в системном браузере",
         "searchingApplications": "Поиск приложений",
         "showInFinder": "Показать в Finder",
         "showInExplorer": "Показать в Проводнике",
@@ -54,6 +49,9 @@
         "tool": "Инструмент",
         "expandTool": "Развернуть результат инструмента",
         "collapseTool": "Свернуть результат инструмента",
+        "expandToolGroup": "Развернуть вызовы инструментов",
+        "collapseToolGroup": "Свернуть вызовы инструментов",
+        "toolGroupSummary": "Вызовов инструментов: {{count}}",
         "permission": "Разрешение",
         "plan": "План",
         "running": "Выполняется",
@@ -86,8 +84,7 @@
         "tabs": {
             "changes": "Изменения",
             "preview": "Просмотр",
-            "browser": "Рабочая область",
-            "webBrowser": "Веб-браузер"
+            "browser": "Рабочая область"
         },
         "actions": {
             "back": "Назад к списку"
@@ -101,60 +98,14 @@
         },
         "preview": {
             "emptyTitle": "Файл не выбран",
-            "emptyHint": "Сначала откройте файл через карточку в чате — выбранный файл появится в этом предпросмотре."
-        },
-        "webBrowser": {
-            "actions": {
-                "back": "Назад",
-                "forward": "Вперёд",
-                "refresh": "Обновить",
-                "more": "Ещё",
-                "forceRefresh": "Обновить принудительно",
-                "clearCookies": "Очистить файлы cookie",
-                "clearSiteData": "Очистить данные сайта",
-                "openExternal": "Открыть в системном браузере"
-            },
-            "address": {
-                "label": "Веб-адрес",
-                "placeholder": "Введите URL"
-            },
-            "errors": {
-                "empty": "Введите веб-адрес.",
-                "absolutePath": "Для локального пути используйте URL вида file:///.",
-                "invalidUrl": "Недопустимый веб-адрес.",
-                "unsupportedProtocol": "Этот протокол URL не поддерживается.",
-                "reservedUrl": "Этот внутренний URL нельзя открыть.",
-                "loadFailed": "Не удалось загрузить страницу.",
-                "clearCookiesFailed": "Не удалось очистить файлы cookie.",
-                "clearSiteDataFailed": "Не удалось очистить данные сайта.",
-                "openExternalFailed": "Не удалось открыть страницу в системном браузере."
-            },
-            "success": {
-                "cookiesCleared": "Файлы cookie очищены.",
-                "siteDataCleared": "Данные сайта очищены."
-            },
-            "crash": {
-                "title": "Веб-браузер остановлен",
-                "message": "Страница браузера неожиданно закрылась. История навигации и состояние страницы потеряны.",
-                "recover": "Восстановить браузер"
-            },
-            "permissionDialog": {
-                "title": "Доступ к камере и микрофону",
-                "message": "{{origin}} запрашивает доступ к устройству: {{capability}}.",
-                "camera": "камера",
-                "microphone": "микрофон",
-                "cameraAndMicrophone": "камера и микрофон",
-                "allow": "Разрешить",
-                "deny": "Запретить"
-            }
+            "emptyHint": "Сначала откройте файл через карточку в чате — выбранный файл появится в этом предпросмотре.",
+            "fullscreenLabel": "Полноэкранный предпросмотр файла"
         }
     },
     "filePreview": {
         "tabs": {
             "source": "Исходник",
-            "preview": "Предпросмотр",
-            "changes": "Изменения",
-            "info": "Информация"
+            "preview": "Предпросмотр"
         },
         "actions": {
             "save": "Сохранить",
@@ -162,12 +113,11 @@
             "revert": "Откатить",
             "openInFinder": "Показать в файловом менеджере",
             "openDirectly": "Открыть напрямую",
-            "close": "Закрыть"
-        },
-        "info": {
-            "path": "Путь",
-            "size": "Размер",
-            "type": "Тип"
+            "close": "Закрыть",
+            "enterFullscreen": "Полноэкранный просмотр",
+            "exitFullscreen": "Выйти из полноэкранного режима",
+            "openHtmlExternally": "Открыть HTML в системном браузере",
+            "retry": "Повторить"
         },
         "toast": {
             "saved": "Сохранено на диск",
@@ -183,19 +133,17 @@
             "notFound": "Файл не найден",
             "loadFailed": "Ошибка загрузки: {{error}}",
             "noPreview": "Для этого файла предпросмотр недоступен",
-            "unsupportedFormatTitle": "Этот формат файла не поддерживает встроенный предпросмотр или diff",
-            "unsupportedFormatHint": "Встроенный предпросмотр и diff сейчас поддерживают только напрямую читаемые текстовые/Markdown-файлы. Откройте файл через файловый менеджер.",
+            "unsupportedFormatTitle": "Этот формат файла не поддерживает встроенный предпросмотр",
+            "unsupportedFormatHint": "Встроенный предпросмотр сейчас поддерживает только напрямую читаемые текстовые/Markdown-файлы. Откройте файл через файловый менеджер.",
             "largeBinaryOpenTitle": "Этот файл слишком большой для встроенного предпросмотра",
             "largeBinaryOpenHint": "Размер файла — {{size}}. ClawX не может показать его встроенно, но вы можете подтвердить открытие в системном приложении по умолчанию.",
             "openInFinderFailed": "Не удалось показать файл",
-            "openFailed": "Не удалось открыть: {{error}}"
+            "openFailed": "Не удалось открыть: {{error}}",
+            "htmlLoadFailed": "Не удалось загрузить предпросмотр HTML",
+            "openHtmlExternallyFailed": "Не удалось открыть HTML в системном браузере"
         },
-        "diff": {
-            "noChanges": "Нет изменений для отображения",
-            "newFile": "Новый файл — нет оригинала для сравнения",
-            "tooLarge": "Файл слишком большой — режим diff отключён, откройте вкладку «Источник» для просмотра содержимого",
-            "unavailable": "В этом чате не удалось зафиксировать точную базовую версию этого файла, поэтому diff недоступен.",
-            "unavailableHint": "Откройте вкладку «Просмотр» для текущего содержимого; точное сравнение — в Git или другой системе."
+        "html": {
+            "crashed": "Предпросмотр HTML остановлен"
         },
         "confirmOpen": {
             "title": "Открыть файл",
@@ -252,35 +200,8 @@
             "openRootInFinder": "Показать корень в файловом менеджере"
         }
     },
-    "taskPanel": {
-        "eyebrow": "Вид выполнения",
-        "title": "Структура задачи",
-        "emptyTitle": "Пока нет структурированных шагов",
-        "emptyBody": "Когда начнётся выполнение, ClawX покажет размышления, вызовы инструментов и состояния передачи здесь.",
-        "status": {
-            "idle": "Бездействует",
-            "running_one": "1 активный шаг",
-            "running_other": "{{count}} активных шагов"
-        },
-        "stepStatus": {
-            "running": "Выполняется",
-            "completed": "Готово",
-            "error": "Ошибка"
-        }
-    },
-    "executionGraph": {
-        "title": "Граф выполнения",
-        "branchLabel": "ветвь",
-        "thinkingLabel": "Думаю",
-        "errorLabel": "Ошибка модели",
-        "imageGenerateLabel": "Генерация изображения",
-        "agentRun": "Выполнение {{agent}}",
-        "collapsedSummary": "Вызовов инструментов: {{toolCount}} · Промежуточных сообщений: {{processCount}}",
-        "collapseAction": "Свернуть граф выполнения"
-    },
     "imageGeneration": {
         "generating": "Изображение генерируется, подождите…",
-        "previewLoading": "Загрузка предпросмотра изображения…",
         "previewUnavailable": "Создание изображения завершено, но предпросмотр загрузить не удалось.",
         "generatedReady": "Сгенерированное изображение готово.",
         "generatedReadyWithMissing": "Сгенерированное изображение готово, но некоторые изображения не удалось загрузить."
@@ -306,7 +227,7 @@
         "thinking": "Думаю…",
         "gatewayConnected": "подключён",
         "gatewayStarting": "запуск",
-        "gatewayStatus": "шлюз {{state}} | порт: {{port}} | PID: {{pid}}",
+        "gatewayStatus": "шлюз {{state}}",
         "retryFailedAttachments": "Повторить неудавшиеся вложения",
         "workspacePrefix": "{{workspace}}",
         "workspacePickerTitle": "Выберите папку рабочей области",

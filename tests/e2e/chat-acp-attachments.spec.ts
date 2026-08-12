@@ -10,6 +10,10 @@ import {
   test,
   type RecordedHostInvocation,
 } from './fixtures/electron';
+import {
+  executeInWebBrowserGuest,
+  getWebBrowserMainSnapshot,
+} from './fixtures/web-browser';
 
 const MAIN_SESSION_KEY = 'agent:main:main';
 const OTHER_SESSION_KEY = 'agent:main:other';
@@ -72,6 +76,13 @@ function filesActionCalls(
   return calls.filter((call) => call.module === 'files' && call.action === action);
 }
 
+function resolvedAttachmentRefs(calls: RecordedHostInvocation[]): Record<string, unknown>[] {
+  return calls
+    .filter((call) => call.module === 'files' && call.action === 'resolveAttachment')
+    .map((call) => call.payload?.ref)
+    .filter((ref): ref is Record<string, unknown> => ref != null);
+}
+
 async function openChat(app: ElectronApplication): Promise<Page> {
   const page = await getStableWindow(app);
   try {
@@ -85,7 +96,47 @@ async function openChat(app: ElectronApplication): Promise<Page> {
 }
 
 test.describe('ACP media attachments', () => {
-  test('opens a local HTML attachment in the right-side Web Browser', async ({ launchElectronApp }) => {
+  test('keeps a user directory attachment available for system open', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      const fixture = await installAttachmentHostFixture(app, {
+        sessions: [{ key: MAIN_SESSION_KEY, title: 'Main session' }],
+      });
+      const directoryPath = await fixture.createWorkspaceDirectory('高铁发票');
+      await fixture.setSessionReplay(MAIN_SESSION_KEY, [{
+        sessionUpdate: 'user_message',
+        messageId: 'user-directory',
+        content: [
+          { type: 'text', text: 'Process these train invoices.' },
+          {
+            type: 'resource_link',
+            uri: directoryPath,
+            name: '高铁发票',
+            mimeType: 'application/x-directory',
+          },
+        ],
+      }]);
+      await fixture.setTranscriptResponses(MAIN_SESSION_KEY, [[]]);
+
+      const page = await openChat(app);
+      const attachment = page.getByRole('button', { name: 'Open 高铁发票', exact: true });
+      await expect(attachment).toBeEnabled({ timeout: 30_000 });
+      await expect(page.getByText('Attachment unavailable')).toHaveCount(0);
+      await attachment.click();
+
+      await expect.poll(async () => (await fixture.getShellInvocations()).filter(
+        (call) => call.action === 'openPath',
+      ).map((call) => call.payload)).toEqual([{ path: directoryPath }]);
+      await expect(page.getByTestId('artifact-panel')).toHaveCount(0);
+      await expect(page.getByTestId('acp-attachment-open-with-trigger')).toHaveCount(0);
+      expect(await getRecordedLegacyIpcInvocations(app)).toEqual([]);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('opens a local HTML attachment in the right-side Preview tab', async ({ launchElectronApp }) => {
     // Electron's webview support is unstable on Linux.
     test.skip(process.platform !== 'win32' && process.platform !== 'darwin');
 
@@ -112,29 +163,28 @@ test.describe('ACP media attachments', () => {
       await fixture.setTranscriptResponses(MAIN_SESSION_KEY, [[]]);
 
       const page = await openChat(app);
-      const trigger = page.getByRole('button', { name: 'Open browser demo.html with', exact: true });
-      await expect(trigger).toBeEnabled({ timeout: 30_000 });
-      await trigger.click();
-      const browserItem = page.getByTestId('acp-file-open-in-built-in-browser');
-      await expect(page.getByRole('menuitem').first()).toHaveAttribute(
-        'data-testid',
-        'acp-file-open-in-built-in-browser',
-      );
-      await browserItem.click();
+      const attachment = page.getByRole('button', { name: 'Preview browser demo.html', exact: true });
+      await expect(attachment).toBeEnabled({ timeout: 30_000 });
+      await attachment.click();
 
       const expectedUrl = pathToFileURL(htmlPath).href;
       const panel = page.getByTestId('artifact-panel');
       await expect(panel).toBeVisible();
-      await expect(panel.getByTestId('artifact-panel-tab-web-browser')).toHaveClass(/bg-foreground\/10/);
-      await expect(page.getByTestId('web-browser-host')).toHaveAttribute('aria-hidden', 'false');
+      await expect(panel.getByTestId('artifact-panel-tab-preview')).toHaveClass(/bg-foreground\/10/);
+      await expect(panel.getByTestId('artifact-panel-tab-web-browser')).toHaveCount(0);
+      await expect(page.getByTestId('html-preview-host')).toHaveAttribute('aria-hidden', 'false');
+      await expect(panel.getByTestId('html-preview-open-external')).toBeVisible();
+      await panel.getByTestId('file-preview-fullscreen-toggle').click();
+      await expect(page.getByTestId('file-preview-fullscreen-layer')).toBeVisible();
+      await expect(page.getByTestId('html-preview-host')).toHaveCSS('z-index', '110');
+      await expect(page.getByTestId('html-preview-webview')).toBeVisible();
+      await page.getByTestId('file-preview-fullscreen-toggle').click();
       await expect.poll(async () => (await fixture.getHostInvocations()).some((request) => (
         request.module === 'webBrowser'
         && request.action === 'navigate'
         && request.payload?.url === expectedUrl
       ))).toBe(true);
-      await expect(page.getByTestId('web-browser-address-display')).toHaveAccessibleName(
-        new RegExp(expectedUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
-      );
+      await expect(page.getByTestId('web-browser-address-display')).toHaveCount(0);
     } finally {
       await closeElectronApp(app);
     }
@@ -184,14 +234,6 @@ test.describe('ACP media attachments', () => {
         ));
         return resolveCall?.payload?.ref ?? null;
       }).not.toBeNull();
-      const resolveCall = (await fixture.getHostInvocations()).find((call) => (
-        call.module === 'files'
-        && call.action === 'resolveAttachment'
-        && (call.payload?.ref as Record<string, unknown> | undefined)?.uri === spreadsheetPath
-      ));
-      const resolvedRef = resolveCall?.payload?.ref as Record<string, unknown>;
-      await fixture.clearInvocations();
-
       await trigger.click();
       const menu = page.getByTestId('acp-attachment-open-with-menu');
       await expect(menu).toBeVisible();
@@ -206,7 +248,17 @@ test.describe('ACP media attachments', () => {
         await expect.poll(async () => filesActionCalls(
           await fixture.getHostInvocations(),
           'listAttachmentOpenHandlers',
-        ).map((call) => call.payload)).toEqual([resolvedRef]);
+        )).toHaveLength(1);
+        const openWithRef = filesActionCalls(
+          await fixture.getHostInvocations(),
+          'listAttachmentOpenHandlers',
+        )[0].payload as Record<string, unknown>;
+        expect(openWithRef).toMatchObject({
+          sessionKey: MAIN_SESSION_KEY,
+          uri: spreadsheetPath,
+          generation: expect.any(Number),
+        });
+        expect(resolvedAttachmentRefs(await fixture.getHostInvocations())).toContainEqual(openWithRef);
         const appRows = page.getByTestId('acp-attachment-open-with-app');
         await expect(appRows).toHaveCount(2);
         await expect(appRows.nth(0)).toHaveText('Zulu Sheets');
@@ -222,7 +274,7 @@ test.describe('ACP media attachments', () => {
         await expect.poll(async () => filesActionCalls(
           await fixture.getHostInvocations(),
           'openAttachmentWith',
-        ).map((call) => call.payload)).toEqual([{ ref: resolvedRef, handlerId: 'app-alpha' }]);
+        ).map((call) => call.payload)).toEqual([{ ref: openWithRef, handlerId: 'app-alpha' }]);
         await expect(page.getByTestId('artifact-panel')).toHaveCount(0);
         await trigger.click();
       } else {
@@ -235,7 +287,17 @@ test.describe('ACP media attachments', () => {
       await expect.poll(async () => filesActionCalls(
         await fixture.getHostInvocations(),
         'revealAttachment',
-      ).map((call) => call.payload)).toEqual([resolvedRef]);
+      )).toHaveLength(1);
+      const revealRef = filesActionCalls(
+        await fixture.getHostInvocations(),
+        'revealAttachment',
+      )[0].payload as Record<string, unknown>;
+      expect(revealRef).toMatchObject({
+        sessionKey: MAIN_SESSION_KEY,
+        uri: spreadsheetPath,
+        generation: expect.any(Number),
+      });
+      expect(resolvedAttachmentRefs(await fixture.getHostInvocations())).toContainEqual(revealRef);
       await expect(page.getByTestId('artifact-panel')).toHaveCount(0);
 
       await fixture.clearInvocations();
@@ -252,7 +314,7 @@ test.describe('ACP media attachments', () => {
     }
   });
 
-  test('keeps the HTML preview and source switcher in the file header', async ({ launchElectronApp }) => {
+  test('previews local HTML while blocking every link and popup', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 
     try {
@@ -261,7 +323,7 @@ test.describe('ACP media attachments', () => {
       });
       const htmlPath = await fixture.createWorkspaceFile(
         'inline-preview.html',
-        '<!doctype html><html><body><h1>Inline HTML preview</h1></body></html>',
+        '<!doctype html><html><body><a id="external" href="https://example.com/from-html">External</a></body></html>',
       );
       await fixture.setSessionReplay(MAIN_SESSION_KEY, [
         userUpdate('html-preview-user', 'Show the HTML file'),
@@ -278,20 +340,51 @@ test.describe('ACP media attachments', () => {
       const attachment = page.getByRole('button', { name: 'Preview inline-preview.html', exact: true });
       await expect(attachment).toBeEnabled({ timeout: 30_000 });
       await attachment.click();
+      await expect(page.getByTestId('artifact-panel-tab-preview')).toBeVisible();
+      await expect(page.getByTestId('artifact-panel-tab-web-browser')).toHaveCount(0);
 
-      const panel = page.getByTestId('artifact-panel');
-      const fileHeader = panel.locator('header').filter({ hasText: 'inline-preview.html' });
-      const viewTabs = fileHeader.getByTestId('file-preview-view-tabs');
-      await expect(viewTabs).toBeVisible();
-      await expect(viewTabs.getByRole('tab', { name: 'Preview', exact: true })).toHaveAttribute('data-state', 'active');
-      await expect(panel.getByTestId('html-preview-frame')).toBeVisible();
-
-      await viewTabs.getByRole('tab', { name: 'Source', exact: true }).click();
-      await expect(viewTabs.getByRole('tab', { name: 'Source', exact: true })).toHaveAttribute('data-state', 'active');
-      await expect(panel.getByTestId('html-preview-frame')).toHaveCount(0);
-
-      await viewTabs.getByRole('tab', { name: 'Preview', exact: true }).click();
-      await expect(panel.getByTestId('html-preview-frame')).toBeVisible();
+      await expect.poll(() => getWebBrowserMainSnapshot(app)).toMatchObject({
+        url: pathToFileURL(htmlPath).href,
+        matchingGuestCount: 1,
+      });
+      const guestId = (await getWebBrowserMainSnapshot(app)).guestId;
+      if (!guestId) throw new Error('HTML preview guest was not created');
+      const linkPolicy = await executeInWebBrowserGuest<{
+        pointerEvents: string;
+        textDecorationLine: string;
+        color: string;
+        parentColor: string;
+        popupBlocked: boolean;
+      }>(
+        app,
+        guestId,
+        `(() => {
+          const link = document.querySelector('#external');
+          if (!(link instanceof HTMLAnchorElement) || !link.parentElement) {
+            throw new Error('Expected external link');
+          }
+          const style = getComputedStyle(link);
+          return {
+            pointerEvents: style.pointerEvents,
+            textDecorationLine: style.textDecorationLine,
+            color: style.color,
+            parentColor: getComputedStyle(link.parentElement).color,
+            popupBlocked: window.open('https://example.com/popup') === null,
+          };
+        })()`,
+      );
+      expect(linkPolicy).toEqual({
+        pointerEvents: 'none',
+        textDecorationLine: 'none',
+        color: linkPolicy.parentColor,
+        parentColor: linkPolicy.parentColor,
+        popupBlocked: true,
+      });
+      await expect(getWebBrowserMainSnapshot(app)).resolves.toMatchObject({
+        url: pathToFileURL(htmlPath).href,
+        matchingGuestCount: 1,
+      });
+      expect(await fixture.getShellInvocations()).toEqual([]);
       expect(await getRecordedLegacyIpcInvocations(app)).toEqual([]);
     } finally {
       await closeElectronApp(app);
@@ -374,6 +467,7 @@ test.describe('ACP media attachments', () => {
           sessionUpdate: 'agent_message',
           messageId: 'ineligible-reply',
           content: [
+            { type: 'text', text: 'Reference: [External reference](https://example.test/reference)' },
             { type: 'resource_link', uri: 'https://example.test/remote-report.pdf', name: 'Remote report.pdf', mimeType: 'application/pdf' },
             { type: 'resource_link', uri: missingPath, name: 'Missing report.pdf', mimeType: 'application/pdf' },
             { type: 'resource_link', uri: zipPath, name: 'System open.zip', mimeType: 'application/zip' },
@@ -387,6 +481,10 @@ test.describe('ACP media attachments', () => {
       await expect(page.getByText('Remote report.pdf')).toBeVisible();
       await expect(page.getByText('Missing report.pdf')).toBeVisible();
       await expect(page.getByText('System open.zip')).toBeVisible();
+      const externalReference = page.getByText('External reference', { exact: true });
+      await expect(externalReference).toBeVisible();
+      await expect(externalReference).not.toHaveAttribute('href');
+      await expect(page.getByRole('link', { name: 'External reference' })).toHaveCount(0);
       for (const name of ['User report.pdf', 'Remote report.pdf', 'Missing report.pdf', 'System open.zip']) {
         await expect(page.getByRole('button', { name: `Open ${name} with`, exact: true })).toHaveCount(0);
       }
@@ -537,6 +635,69 @@ test.describe('ACP media attachments', () => {
     }
   });
 
+  test('renders canonical OpenClaw transcript media when assistant prose only names the path', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const prompt = 'Create the Markdown market report';
+    const reply = 'Markdown 文件在这里：';
+
+    try {
+      const fixture = await installAttachmentHostFixture(app, {
+        sessions: [
+          { key: MAIN_SESSION_KEY, title: 'Main session' },
+          { key: OTHER_SESSION_KEY, title: 'Other session' },
+        ],
+      });
+      const reportPath = await fixture.createWorkspaceFile('market-report.md', '# Market report\n');
+      await fixture.setSessionReplay(MAIN_SESSION_KEY, [
+        userUpdate('structured-media-user', prompt),
+        {
+          sessionUpdate: 'agent_message',
+          messageId: 'structured-media-reply',
+          content: [{ type: 'text', text: `${reply}\n${reportPath}` }],
+        },
+      ]);
+      const transcript = [
+        { role: 'user', id: 'structured-transcript-user', content: prompt },
+        {
+          role: 'assistant',
+          id: 'structured-transcript-assistant',
+          content: `${reply}\n${reportPath}`,
+          __openclaw: {
+            media: [{
+              path: reportPath,
+              fileName: 'market-report.md',
+              contentType: 'text/markdown',
+              sizeBytes: 16,
+            }],
+          },
+        },
+      ];
+      await fixture.setTranscriptResponses(MAIN_SESSION_KEY, [[]]);
+
+      const page = await openChat(app);
+      await expect(page.getByText(reply)).toBeVisible({ timeout: 30_000 });
+      await fixture.waitForHistoryRequestCount(MAIN_SESSION_KEY, 1);
+      await fixture.setTranscriptResponses(MAIN_SESSION_KEY, [transcript]);
+      await page.getByTestId(`sidebar-session-${OTHER_SESSION_KEY}`).click();
+      await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible();
+      await page.getByTestId(`sidebar-session-${MAIN_SESSION_KEY}`).click();
+
+      const attachment = page.getByRole('button', { name: 'Preview market-report.md', exact: true });
+      await expect(attachment).toBeEnabled();
+      await expect.poll(async () => (await fixture.getHostInvocations()).some((call) => (
+        call.module === 'files'
+        && call.action === 'resolveAttachment'
+        && call.payload?.name === 'market-report.md'
+        && call.payload?.mimeType === 'text/markdown'
+        && (call.payload?.ref as Record<string, unknown> | undefined)?.uri === reportPath
+        && (call.payload?.ref as Record<string, unknown> | undefined)?.transcriptMessageId
+          === 'structured-transcript-assistant'
+      ))).toBe(true);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
   test('previews the reported live spreadsheet flow and restores one historical card', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 
@@ -580,6 +741,7 @@ test.describe('ACP media attachments', () => {
       const panel = page.getByTestId('artifact-panel');
       await expect(panel).toBeVisible();
       await expect(panel.getByTestId('artifact-panel-tab-preview')).toBeVisible();
+      await expect(panel.getByTestId('artifact-panel-tab-web-browser')).toHaveCount(0);
       await expect(panel.getByText('Operations')).toBeVisible({ timeout: 30_000 });
       await expect.poll(async () => (await fixture.getHostInvocations()).some((call) => (
         call.module === 'files'

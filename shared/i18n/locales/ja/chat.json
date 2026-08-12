@@ -12,19 +12,13 @@
     },
     "noLogs": "（ログはまだありません）",
     "scrollToLatest": "最下部に戻る",
-    "loadMoreHistory": "以前のメッセージを読み込む",
-    "loadingMoreHistory": "読み込み中…",
     "toolbar": {
         "refresh": "チャットを更新",
-        "currentAgent": "現在の会話相手: {{agent}}",
+        "currentAgent": "{{agent}}",
         "workspace": "ワークスペース"
     },
     "generatedFiles": {
-        "title": "ファイルの変更（{{count}} 件）",
-        "created": "新規",
-        "modified": "更新",
-        "openFolder": "フォルダーを開く",
-        "viewAll": "ファイル変更を見る"
+        "openFolder": "フォルダーを開く"
     },
     "fileActivity": {
         "created": "作成済み",
@@ -38,7 +32,8 @@
     "fileCard": {
         "openWith": "アプリで開く",
         "openWithFile": "{{name}} をアプリで開く",
-        "openInBuiltInBrowser": "内蔵ブラウザで開く",
+        "openInBuiltInBrowser": "ClawX プレビューで開く",
+        "openInSystemBrowser": "システムブラウザで開く",
         "searchingApplications": "アプリを検索中",
         "showInFinder": "Finder に表示",
         "showInExplorer": "エクスプローラーに表示",
@@ -54,6 +49,9 @@
         "tool": "ツール",
         "expandTool": "ツール結果を展開",
         "collapseTool": "ツール結果を折りたたむ",
+        "expandToolGroup": "ツール呼び出しを展開",
+        "collapseToolGroup": "ツール呼び出しを折りたたむ",
+        "toolGroupSummary": "ツール呼び出し {{count}} 件",
         "permission": "権限",
         "plan": "計画",
         "running": "実行中",
@@ -86,8 +84,7 @@
         "tabs": {
             "changes": "変更",
             "preview": "プレビュー",
-            "browser": "ワークスペース",
-            "webBrowser": "ウェブブラウザ"
+            "browser": "ワークスペース"
         },
         "actions": {
             "back": "一覧に戻る"
@@ -101,60 +98,14 @@
         },
         "preview": {
             "emptyTitle": "ファイルが選択されていません",
-            "emptyHint": "まず会話内のファイルカードをクリックしてファイルを選択すると、ここにプレビューが表示されます。"
-        },
-        "webBrowser": {
-            "actions": {
-                "back": "戻る",
-                "forward": "進む",
-                "refresh": "再読み込み",
-                "more": "その他",
-                "forceRefresh": "強制再読み込み",
-                "clearCookies": "Cookie を消去",
-                "clearSiteData": "サイトデータを消去",
-                "openExternal": "システムブラウザで開く"
-            },
-            "address": {
-                "label": "ウェブアドレス",
-                "placeholder": "URL を入力"
-            },
-            "errors": {
-                "empty": "ウェブアドレスを入力してください。",
-                "absolutePath": "ローカルパスには file:/// URL を使用してください。",
-                "invalidUrl": "ウェブアドレスが無効です。",
-                "unsupportedProtocol": "この URL プロトコルはサポートされていません。",
-                "reservedUrl": "この内部 URL は開けません。",
-                "loadFailed": "ページを読み込めませんでした。",
-                "clearCookiesFailed": "Cookie を消去できませんでした。",
-                "clearSiteDataFailed": "サイトデータを消去できませんでした。",
-                "openExternalFailed": "システムブラウザでページを開けませんでした。"
-            },
-            "success": {
-                "cookiesCleared": "Cookie を消去しました。",
-                "siteDataCleared": "サイトデータを消去しました。"
-            },
-            "crash": {
-                "title": "ウェブブラウザが停止しました",
-                "message": "ブラウザページが予期せず終了しました。閲覧履歴とページの状態は失われました。",
-                "recover": "ブラウザを復旧"
-            },
-            "permissionDialog": {
-                "title": "カメラとマイクの許可",
-                "message": "{{origin}} が{{capability}}を使用しようとしています。",
-                "camera": "カメラ",
-                "microphone": "マイク",
-                "cameraAndMicrophone": "カメラとマイク",
-                "allow": "許可",
-                "deny": "拒否"
-            }
+            "emptyHint": "まず会話内のファイルカードをクリックしてファイルを選択すると、ここにプレビューが表示されます。",
+            "fullscreenLabel": "ファイルの全画面プレビュー"
         }
     },
     "filePreview": {
         "tabs": {
             "source": "ソース",
-            "preview": "プレビュー",
-            "changes": "変更",
-            "info": "情報"
+            "preview": "プレビュー"
         },
         "actions": {
             "save": "保存",
@@ -162,12 +113,11 @@
             "revert": "元に戻す",
             "openInFinder": "ファイルマネージャーで表示",
             "openDirectly": "直接開く",
-            "close": "閉じる"
-        },
-        "info": {
-            "path": "パス",
-            "size": "サイズ",
-            "type": "種類"
+            "close": "閉じる",
+            "enterFullscreen": "全画面表示",
+            "exitFullscreen": "全画面表示を終了",
+            "openHtmlExternally": "HTML をシステムブラウザで開く",
+            "retry": "再試行"
         },
         "toast": {
             "saved": "ディスクに保存しました",
@@ -183,19 +133,17 @@
             "notFound": "ファイルが見つかりません",
             "loadFailed": "読み込みに失敗しました: {{error}}",
             "noPreview": "このファイルにはプレビューがありません",
-            "unsupportedFormatTitle": "このファイル形式は内蔵プレビューまたは差分表示に未対応です",
-            "unsupportedFormatHint": "現在、内蔵プレビューと差分表示は直接読み取れるテキスト/Markdown 系ファイルのみ対応しています。ファイルマネージャーで開いてください。",
+            "unsupportedFormatTitle": "このファイル形式は内蔵プレビューに未対応です",
+            "unsupportedFormatHint": "現在、内蔵プレビューは直接読み取れるテキスト/Markdown 系ファイルのみ対応しています。ファイルマネージャーで開いてください。",
             "largeBinaryOpenTitle": "このファイルは大きいため内蔵プレビューできません",
             "largeBinaryOpenHint": "このファイルは {{size}} です。ClawX では内蔵プレビューできませんが、確認後にシステム既定のアプリで開けます。",
             "openInFinderFailed": "ファイルマネージャーで表示できません",
-            "openFailed": "開けませんでした: {{error}}"
+            "openFailed": "開けませんでした: {{error}}",
+            "htmlLoadFailed": "HTML プレビューを読み込めませんでした",
+            "openHtmlExternallyFailed": "HTML をシステムブラウザで開けませんでした"
         },
-        "diff": {
-            "noChanges": "表示する変更はありません",
-            "newFile": "新規ファイルのため比較対象がありません",
-            "tooLarge": "ファイルが大きすぎるため diff ビューは無効化されました。完全な内容は「ソース」タブで確認してください",
-            "unavailable": "この会話ではこのファイルの正確な変更ベースラインを取得できなかったため、差分を生成できません。",
-            "unavailableHint": "「プレビュー」で現在の内容を確認するか、Git などで正確な差分を参照してください。"
+        "html": {
+            "crashed": "HTML プレビューが停止しました"
         },
         "confirmOpen": {
             "title": "ファイルを開く",
@@ -252,35 +200,8 @@
             "openRootInFinder": "ルートをファイルマネージャーで表示"
         }
     },
-    "taskPanel": {
-        "eyebrow": "実行ビュー",
-        "title": "タスクの流れ",
-        "emptyTitle": "まだ構造化されたステップはありません",
-        "emptyBody": "実行が始まると、ClawX は思考・ツール呼び出し・最終化の状態をここに表示します。",
-        "status": {
-            "idle": "待機中",
-            "running_one": "進行中 1 件",
-            "running_other": "進行中 {{count}} 件"
-        },
-        "stepStatus": {
-            "running": "実行中",
-            "completed": "完了",
-            "error": "エラー"
-        }
-    },
-    "executionGraph": {
-        "title": "実行グラフ",
-        "branchLabel": "branch",
-        "thinkingLabel": "考え中",
-        "errorLabel": "エラー",
-        "imageGenerateLabel": "画像生成",
-        "agentRun": "{{agent}} の実行",
-        "collapsedSummary": "ツール呼び出し {{toolCount}} 件 · プロセスメッセージ {{processCount}} 件",
-        "collapseAction": "実行グラフを折りたたむ"
-    },
     "imageGeneration": {
         "generating": "画像を生成しています。しばらくお待ちください…",
-        "previewLoading": "画像プレビューを読み込み中…",
         "previewUnavailable": "画像生成は完了しましたが、プレビューを読み込めませんでした。",
         "generatedReady": "生成された画像の準備ができました。",
         "generatedReadyWithMissing": "生成された画像の準備ができましたが、一部の画像を読み込めませんでした。"
@@ -306,7 +227,7 @@
         "thinking": "考え中…",
         "gatewayConnected": "接続済み",
         "gatewayStarting": "起動中",
-        "gatewayStatus": "ゲートウェイ {{state}} | ポート: {{port}} | PID: {{pid}}",
+        "gatewayStatus": "ゲートウェイ {{state}}",
         "retryFailedAttachments": "失敗した添付を再試行",
         "workspacePrefix": "{{workspace}}",
         "workspacePickerTitle": "ワークスペースフォルダーを選択",

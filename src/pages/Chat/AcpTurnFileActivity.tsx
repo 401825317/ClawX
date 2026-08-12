@@ -23,6 +23,10 @@ export function AcpTurnFileActivity({
       {summaries.map((summary) => {
         const focus = { relativePath: summary.relativePath, turnId: summary.turnId };
         const actionLabel = t(`fileActivity.${summary.action}`);
+        const workspaceTarget = {
+          kind: 'workspace' as const,
+          ref: { workspaceRoot, relativePath: summary.relativePath },
+        };
         return (
           <AcpFileCard
             key={summary.relativePath}
@@ -40,10 +44,13 @@ export function AcpTurnFileActivity({
               ? undefined
               : {
                   target: {
-                    kind: 'workspace',
-                    ref: { workspaceRoot, relativePath: summary.relativePath },
+                    ...workspaceTarget,
                   },
                   name: summary.relativePath,
+                  previewTarget: buildWorkspacePreviewTarget({
+                    workspaceRoot,
+                    relativePath: summary.relativePath,
+                  }),
                 }}
             trailing={(
               <button

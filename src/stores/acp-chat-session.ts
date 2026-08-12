@@ -40,9 +40,11 @@ import { hashOpenClawMediaDiagnostic, type OpenClawMediaCandidate } from '@/lib/
 import { openClawResourceLinkPromptText } from '@/lib/acp/openclaw-prompt-compat';
 import { fetchOpenClawTranscriptSupplement } from '@/lib/acp/transcript-supplement';
 import { alignHistoricalTurnTimings, type AcpTurnTiming } from '@/lib/acp/turn-timings';
+import { buildCronHistoryAcpNotifications, fetchCronSessionHistory } from '@/lib/cron-session-history';
 import { hostApi } from '@/lib/host-api';
 import { hostEvents } from '@/lib/host-events';
 import type { AcpTimelineSnapshot, MessageSegmentItem, PermissionItem, RenderPart } from '@/lib/acp/timeline-types';
+import { isCronSessionKey } from './chat/cron-session-utils';
 
 const EMPTY_SESSION_ID = '';
 const CANCEL_PERMISSION_OPTION_ID = '__cancelled__';
@@ -220,6 +222,34 @@ function captureLiveSession(state: AcpChatSessionState): void {
     deferredImageUpdates: existing?.deferredImageUpdates ?? [],
     deferredImageCompletions: existing?.deferredImageCompletions ?? [],
   });
+}
+
+function restoreImageGenerationProjections(
+  timeline: AcpTimelineSnapshot,
+  snapshot: AcpTimelineSnapshot,
+): AcpTimelineSnapshot {
+  let restored = timeline;
+  const restoredIds = new Set(timeline.itemOrder);
+  for (const [index, itemId] of snapshot.itemOrder.entries()) {
+    const item = snapshot.itemsById[itemId];
+    if (item?.kind !== 'message-segment' || item.compat?.source !== 'image-generation') continue;
+    let afterItemId: string | undefined;
+    for (let priorIndex = index - 1; priorIndex >= 0; priorIndex -= 1) {
+      const priorItemId = snapshot.itemOrder[priorIndex];
+      if (priorItemId && restoredIds.has(priorItemId)) {
+        afterItemId = priorItemId;
+        break;
+      }
+    }
+    restored = appendSyntheticAssistantMessage(restored, {
+      messageId: item.messageId,
+      evidenceId: item.compat.evidenceId,
+      parts: item.parts,
+      afterItemId,
+    });
+    restoredIds.add(itemId);
+  }
+  return restored;
 }
 
 function compatSession(sessionKey: string): ImageGenerationCompatSession {
@@ -605,6 +635,7 @@ async function resolveOpenClawMediaCandidate(
   if (!isCurrent()) return;
 
   let result: ResolveAttachmentResult;
+  const attachmentName = safeAttachmentName(candidate.name ?? candidate.uri);
   try {
     result = await hostApi.files.resolveAttachment({
       ref: {
@@ -613,10 +644,12 @@ async function resolveOpenClawMediaCandidate(
         uri: candidate.uri,
         ...(candidate.transcriptMessageId ? { transcriptMessageId: candidate.transcriptMessageId } : {}),
       },
-      name: safeAttachmentName(candidate.uri),
+      name: attachmentName,
+      ...(candidate.mimeType ? { mimeType: candidate.mimeType } : {}),
+      ...(candidate.size !== undefined ? { size: candidate.size } : {}),
     });
   } catch {
-    result = { ok: false, displayName: safeAttachmentName(candidate.uri), error: 'operationFailed' };
+    result = { ok: false, displayName: attachmentName, error: 'operationFailed' };
   }
 
   const evidenceHash = hashOpenClawMediaDiagnostic(candidate.evidenceId);
@@ -644,7 +677,9 @@ async function resolveOpenClawMediaCandidate(
     segmentIndex: 0,
     blockIndex: candidate.order,
     uri: candidate.uri,
-    name: safeAttachmentName(candidate.uri),
+    name: attachmentName,
+    ...(candidate.mimeType ? { mimeType: candidate.mimeType } : {}),
+    ...(candidate.size !== undefined ? { size: candidate.size } : {}),
     ...(candidate.transcriptMessageId ? { transcriptMessageId: candidate.transcriptMessageId } : {}),
     source: 'openclaw-media',
     evidenceId: candidate.evidenceId,
@@ -694,12 +729,21 @@ async function runTranscriptSupplement(operation: TranscriptSupplementOperation)
   });
   if (!result || !isCurrent()) return;
 
-  if (!operation.liveUserMessageId && result.turnTimings.length > 0) {
-    useAcpChatSessionStore.setState((current) => (
-      isCurrentTranscriptSupplement(current, operation)
-        ? { turnTimingsByUserMessageId: alignHistoricalTurnTimings(current.timeline, result.turnTimings) }
-        : {}
-    ));
+  if (result.turnTimings.length > 0) {
+    useAcpChatSessionStore.setState((current) => {
+      if (!isCurrentTranscriptSupplement(current, operation)) return {};
+      const transcriptTimings = alignHistoricalTurnTimings(current.timeline, result.turnTimings);
+      if (!operation.liveUserMessageId) {
+        return { turnTimingsByUserMessageId: transcriptTimings };
+      }
+      if (!transcriptTimings[operation.liveUserMessageId]) return {};
+      return {
+        turnTimingsByUserMessageId: {
+          ...current.turnTimingsByUserMessageId,
+          ...transcriptTimings,
+        },
+      };
+    });
   }
 
   for (const start of result.imageGeneration.starts) {
@@ -1063,6 +1107,22 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       }
 
       const generation = result.generation ?? state.generation;
+      let cronHistoryNotifications: ReturnType<typeof buildCronHistoryAcpNotifications> = [];
+      if (!input.createIfMissing && isCronSessionKey(input.sessionKey)) {
+        try {
+          const cronMessages = await fetchCronSessionHistory(input.sessionKey, 200);
+          cronHistoryNotifications = buildCronHistoryAcpNotifications(input.sessionKey, cronMessages);
+        } catch {
+          // ACP replay remains authoritative; cron history is best-effort only.
+        }
+        state = get();
+        if (
+          loadRequestSeq !== requestId
+          || state.activeSessionKey !== input.sessionKey
+          || state.workspaceRoot !== input.workspaceRoot
+          || state.cwd !== input.cwd
+        ) return false;
+      }
       const sessionUpdates = [
         ...(result.sessionUpdates ?? []),
         ...(pendingLoadUpdates.get(generation) ?? []),
@@ -1088,6 +1148,14 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         : createEmptyAcpTimeline(input.sessionKey, generation);
       for (const event of sessionUpdates) {
         timeline = applyAcpSessionUpdate(timeline, event.notification, { historical: !!event.historical });
+      }
+      if (timeline.itemOrder.length === 0) {
+        for (const notification of cronHistoryNotifications) {
+          timeline = applyAcpSessionUpdate(timeline, notification, { historical: true });
+        }
+      }
+      if (!currentResumedSnapshot && restorableBackgroundSnapshot) {
+        timeline = restoreImageGenerationProjections(timeline, restorableBackgroundSnapshot.timeline);
       }
       const pendingAttachments = newPendingAttachments(
         createEmptyAcpTimeline(input.sessionKey, generation),
@@ -1759,7 +1827,7 @@ export function ensureAcpChatSubscriptions(): void {
     const state = useAcpChatSessionStore.getState();
     if (
       evidence
-      && !deferInactiveImageGenerationCompletion(state.activeSessionKey, evidence)
+      && !deferInactiveImageGenerationCompletion(state.loading ? null : state.activeSessionKey, evidence)
     ) void state.projectImageGenerationCompletion(evidence);
   });
   hostEvents.onChatRuntimeEvent((event) => {
@@ -1767,7 +1835,7 @@ export function ensureAcpChatSubscriptions(): void {
     const state = useAcpChatSessionStore.getState();
     if (
       evidence
-      && !deferInactiveImageGenerationCompletion(state.activeSessionKey, evidence)
+      && !deferInactiveImageGenerationCompletion(state.loading ? null : state.activeSessionKey, evidence)
     ) void state.projectImageGenerationCompletion(evidence);
   });
 }

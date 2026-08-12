@@ -1,3 +1,4 @@
+import type { ElectronApplication } from '@playwright/test';
 import { closeElectronApp, expect, getStableWindow, installIpcMocks, test } from './fixtures/electron';
 
 const SESSION_KEY = 'agent:main:main';
@@ -11,27 +12,30 @@ function stableStringify(value: unknown): string {
   return `{${entries.join(',')}}`;
 }
 
+async function openChatWithInstalledMocks(app: ElectronApplication) {
+  const page = await getStableWindow(app);
+  try {
+    await page.reload();
+  } catch (error) {
+    if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
+  }
+  await expect(page.getByTestId('main-layout')).toBeVisible();
+  return page;
+}
+
 test.describe('ClawX chat skill trigger', () => {
   test('renders the localized Chinese skill label after the @ trigger', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 
     try {
       await installIpcMocks(app, {
-        gatewayStatus: { state: 'running', port: 18789, pid: 12345 },
+        gatewayStatus: { state: 'running', gatewayReady: true, port: 18789, pid: 12345 },
         gatewayRpc: {
           [stableStringify(['sessions.list', {}])]: {
             success: true,
             result: {
               sessions: [{ key: SESSION_KEY, displayName: 'main' }],
             },
-          },
-          [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
-            success: true,
-            result: { messages: [] },
-          },
-          [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 1000, maxChars: 500000 }])]: {
-            success: true,
-            result: { messages: [] },
           },
         },
         hostApi: {
@@ -40,7 +44,7 @@ test.describe('ClawX chat skill trigger', () => {
             data: {
               status: 200,
               ok: true,
-              json: { state: 'running', port: 18789, pid: 12345 },
+              json: { state: 'running', gatewayReady: true, port: 18789, pid: 12345 },
             },
           },
           [stableStringify(['/api/settings', 'GET'])]: {
@@ -91,7 +95,7 @@ test.describe('ClawX chat skill trigger', () => {
         },
       });
 
-      const page = await getStableWindow(app);
+      const page = await openChatWithInstalledMocks(app);
 
       await expect(page.getByTestId('main-layout')).toBeVisible();
       await expect(page.getByTestId('chat-composer-input')).toBeVisible({ timeout: 30_000 });
@@ -120,6 +124,9 @@ test.describe('ClawX chat skill trigger', () => {
       await page.getByText('/create-skill', { exact: true }).click();
       await expect(page.getByTestId('chat-composer-input')).toHaveValue('Draft /create-skill  a new helper');
       await expect(page.getByTestId('chat-composer-skill-token')).toHaveText('/create-skill');
+      await expect(page.getByTestId('chat-composer-skill-token')).toHaveJSProperty('tagName', 'SPAN');
+      await expect(page.getByTestId('chat-composer-input')).not.toHaveClass(/text-transparent/);
+      await expect(page.getByTestId('chat-composer-highlight')).toHaveClass(/text-transparent/);
     } finally {
       await closeElectronApp(app);
     }
@@ -130,21 +137,13 @@ test.describe('ClawX chat skill trigger', () => {
 
     try {
       await installIpcMocks(app, {
-        gatewayStatus: { state: 'running', port: 18789, pid: 12345 },
+        gatewayStatus: { state: 'running', gatewayReady: true, port: 18789, pid: 12345 },
         gatewayRpc: {
           [stableStringify(['sessions.list', {}])]: {
             success: true,
             result: {
               sessions: [{ key: SESSION_KEY, displayName: 'main' }],
             },
-          },
-          [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
-            success: true,
-            result: { messages: [] },
-          },
-          [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 1000, maxChars: 500000 }])]: {
-            success: true,
-            result: { messages: [] },
           },
         },
         hostApi: {
@@ -153,7 +152,7 @@ test.describe('ClawX chat skill trigger', () => {
             data: {
               status: 200,
               ok: true,
-              json: { state: 'running', port: 18789, pid: 12345 },
+              json: { state: 'running', gatewayReady: true, port: 18789, pid: 12345 },
             },
           },
           [stableStringify(['/api/settings', 'GET'])]: {
@@ -208,7 +207,7 @@ test.describe('ClawX chat skill trigger', () => {
         },
       });
 
-      const page = await getStableWindow(app);
+      const page = await openChatWithInstalledMocks(app);
 
       await expect(page.getByTestId('chat-composer-input')).toBeVisible({ timeout: 30_000 });
       await page.getByTestId('chat-composer-input').fill('Hello ');

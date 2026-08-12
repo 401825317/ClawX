@@ -23,7 +23,6 @@ import {
   X,
   Cpu,
   ImagePlus,
-  Moon,
   ChevronRight,
   ChevronsUpDown,
   ChevronsDownUp,
@@ -34,7 +33,7 @@ import { cn } from '@/lib/utils';
 import { isGatewayRestarting } from '@/lib/gateway-status';
 import { rendererExtensionRegistry } from '@/extensions/registry';
 import { useSettingsStore } from '@/stores/settings';
-import { useChatStore, type ChatSession } from '@/stores/chat';
+import { useChatStore } from '@/stores/chat';
 import { useSessionAttentionStore } from '@/stores/session-attention';
 import { useGatewayStore } from '@/stores/gateway';
 import { useAgentsStore } from '@/stores/agents';
@@ -54,7 +53,7 @@ import { useNewChatAction } from './use-new-chat-action';
 import { isDefaultWorkspacePath } from '@/lib/workspace-context';
 import { useWorkspaceAvailability } from '@/hooks/use-workspace-availability';
 import { projectSessionRunState } from '@/stores/chat/session-status';
-import { isOpenClawSessionIdFallbackTitle } from '@shared/chat/session-title';
+import { getSessionDisplayTitle } from '@shared/chat/session-title';
 
 interface NavItemProps {
   to: string;
@@ -144,6 +143,7 @@ export function Sidebar() {
   const setSidebarWidth = useSettingsStore((state) => state.setSidebarWidth);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
   const chatWorkspacePath = useSettingsStore((state) => state.chatWorkspacePath);
+  const recentWorkspacePaths = useSettingsStore((state) => state.recentWorkspacePaths);
   const workspaceLabels = useSettingsStore((state) => state.workspaceLabels);
   const setWorkspaceLabel = useSettingsStore((state) => state.setWorkspaceLabel);
   const removeWorkspace = useSettingsStore((state) => state.removeWorkspace);
@@ -159,7 +159,6 @@ export function Sidebar() {
   const deleteSessions = useChatStore((s) => s.deleteSessions);
   const renameSession = useChatStore((s) => s.renameSession);
   const loadSessions = useChatStore((s) => s.loadSessions);
-  const loadHistory = useChatStore((s) => s.loadHistory);
   const sessionAttentionByKey = useSessionAttentionStore((s) => s.bySessionKey);
   const markRead = useSessionAttentionStore((s) => s.markRead);
   const handleNewChat = useNewChatAction();
@@ -170,26 +169,10 @@ export function Sidebar() {
   const gatewayRestarting = isGatewayRestarting(gatewayStatus);
   const gatewayRuntimeKey = `${gatewayStatus.pid ?? 'none'}:${gatewayStatus.connectedAt ?? 'none'}:${gatewayStatus.port}`;
 
-  const hasLoadedCurrentRuntimeRef = useRef(false);
-
-  useEffect(() => {
-    hasLoadedCurrentRuntimeRef.current = false;
-  }, [gatewayRuntimeKey]);
-
   useEffect(() => {
     if (!isGatewayReady) return;
-    let cancelled = false;
-    (async () => {
-      await loadSessions();
-      if (cancelled) return;
-      if (hasLoadedCurrentRuntimeRef.current) return;
-      hasLoadedCurrentRuntimeRef.current = true;
-      await loadHistory(false);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [gatewayRuntimeKey, isGatewayReady, loadHistory, loadSessions]);
+    void loadSessions();
+  }, [gatewayRuntimeKey, isGatewayReady, loadSessions]);
   const agents = useAgentsStore((s) => s.agents);
   const fetchAgents = useAgentsStore((s) => s.fetchAgents);
 
@@ -201,22 +184,9 @@ export function Sidebar() {
   const navigate = useNavigate();
   const isOnChat = useLocation().pathname === '/';
 
-  const getSessionLabel = (session: ChatSession) => {
-    const candidates = [
-      sessionLabels[session.key],
-      session.label,
-      session.derivedTitle,
-      session.displayName,
-    ];
-    return candidates.find((candidate) => (
-      candidate?.trim()
-      && !isOpenClawSessionIdFallbackTitle(candidate, session.sessionId)
-    ))?.trim() ?? session.key;
-  };
-
-  const openControlUi = async (view?: 'dreams', label = 'OpenClaw Page') => {
+  const openControlUi = async (label = 'OpenClaw Page') => {
     try {
-      const result = await hostApi.gateway.controlUi(view);
+      const result = await hostApi.gateway.controlUi();
       if (result.success && result.url) {
         await window.electron.openExternal(result.url);
       } else {
@@ -228,7 +198,7 @@ export function Sidebar() {
   };
 
   const openDevConsole = async () => {
-    await openControlUi(undefined, 'OpenClaw Page');
+    await openControlUi('OpenClaw Page');
   };
 
   const { t, i18n } = useTranslation(['common', 'chat']);
@@ -412,6 +382,11 @@ export function Sidebar() {
     t('chat:workspace.defaultLabel'),
     chatWorkspacePath,
     workspaceLabels,
+    [
+      ...recentWorkspacePaths,
+      chatWorkspacePath,
+      ...sessions.map((session) => session.workspacePath).filter((path): path is string => !!path),
+    ],
   );
   const workspaceAvailability = useWorkspaceAvailability(
     workspaceSessionGroups.map((group) => group.workspacePath),
@@ -471,12 +446,6 @@ export function Sidebar() {
             icon: <ImagePlus className="h-4 w-4" strokeWidth={2} />,
             label: t('common:sidebar.imageGeneration'),
             testId: 'sidebar-nav-image-generation',
-          },
-          {
-            to: '/dreams',
-            icon: <Moon className="h-4 w-4" strokeWidth={2} />,
-            label: t('common:sidebar.openClawDreams'),
-            testId: 'sidebar-nav-dreams',
           },
         ]
       : []),
@@ -720,7 +689,7 @@ export function Sidebar() {
                         const agentName = agentNameById[agentId] || agentId;
                         const isEditing = editingSessionKey === s.key;
                         const isCurrentSession = isOnChat && currentSessionKey === s.key;
-                        const sessionLabel = getSessionLabel(s);
+                        const sessionLabel = getSessionDisplayTitle(s, sessionLabels);
                         const relativeTime = formatSessionRelativeTime(activityMs, nowMs, i18n.language);
                         const runState = projectSessionRunState(s);
                         const attention = sessionAttentionByKey[s.key];
@@ -779,9 +748,7 @@ export function Sidebar() {
                                   aria-current={isCurrentSession ? 'page' : undefined}
                                   onClick={() => {
                                     markRead(s.key);
-                                    if (currentSessionKey === s.key) {
-                                      void loadHistory(false);
-                                    } else {
+                                    if (currentSessionKey !== s.key) {
                                       switchSession(s.key);
                                     }
                                     navigate('/');
@@ -1002,7 +969,8 @@ export function Sidebar() {
         onConfirm={async () => {
           const targetSession = sessionToDelete;
           if (!targetSession) return;
-          await deleteSession(targetSession.key);
+          const result = await deleteSession(targetSession.key);
+          if (!result.success) return;
           if (currentSessionKey === targetSession.key) navigate('/');
           setDeleteDialogOpen(false);
         }}

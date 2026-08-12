@@ -1,9 +1,8 @@
 /**
  * Chat Page
- * ACP-native runtime rendering. The legacy Gateway execution graph remains in
- * the codebase but is no longer part of the primary Chat render path.
+ * ACP-native runtime rendering through the ordered inline timeline.
  */
-import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, ArrowDownToLine, FolderOpen } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
@@ -26,8 +25,10 @@ import {
 import { useStickToBottomInstant } from '@/hooks/use-stick-to-bottom-instant';
 import { getAcpUserMessageAnchorId } from '@/lib/acp/timeline-anchors';
 import type { MessageSegmentItem, RenderPart } from '@/lib/acp/timeline-types';
+import { createEmptyAcpTimeline } from '@/lib/acp/reducer';
 import { projectOpenClawFileActivities, type AcpFileActivityProjection } from '@/lib/acp/openclaw-file-activities';
 import { hostApi } from '@/lib/host-api';
+import { getSessionDisplayTitle } from '@shared/chat/session-title';
 import { ChatInput, type ChatWorkspaceOption, type FileAttachment } from './ChatInput';
 import { ChatToolbar } from './ChatToolbar';
 import { AcpTimeline } from './AcpTimeline';
@@ -93,12 +94,12 @@ function QuestionDirectory({ items }: { items: QuestionDirectoryItem[] }) {
       id="chat-question-directory"
       data-testid="chat-question-directory"
       aria-label={t('questionDirectory.title')}
-      className="flex max-h-[40vh] w-full shrink-0 flex-col overflow-hidden rounded-2xl border border-black/10 bg-surface-input p-3 dark:border-white/10 lg:max-h-none lg:w-64 xl:w-72"
+      className="absolute right-0 top-0 z-30 flex max-h-[min(32rem,calc(100%-1rem))] w-[min(18rem,calc(100%-1rem))] flex-col overflow-hidden rounded-2xl border border-black/10 bg-surface-modal/95 p-3 shadow-xl shadow-black/10 backdrop-blur-xl dark:border-white/10 dark:shadow-black/30"
     >
       <h2 className="px-1 pb-2 text-sm font-medium text-foreground">{t('questionDirectory.title')}</h2>
       <nav
         ref={navRef}
-        className="min-h-0 max-h-[calc(40vh-5rem)] flex-1 space-y-1 overflow-y-auto lg:max-h-[calc(100vh-13rem)]"
+        className="min-h-0 flex-1 space-y-1 overflow-y-auto"
         aria-label={t('questionDirectory.title')}
       >
         {visibleItems.map((item) => (
@@ -179,6 +180,7 @@ export function Chat() {
 
   const currentSessionKey = useChatStore((s) => s.currentSessionKey);
   const sessions = useChatStore((s) => s.sessions);
+  const sessionLabels = useChatStore((s) => s.sessionLabels);
   const currentAgentId = useChatStore((s) => s.currentAgentId);
   const loadSessions = useChatStore((s) => s.loadSessions);
   const selectAcpSession = useChatStore((s) => s.selectAcpSession);
@@ -204,15 +206,17 @@ export function Chat() {
     () => sessions.find((session) => session.key === currentSessionKey) ?? null,
     [currentSessionKey, sessions],
   );
+  const currentSessionTitle = currentSession
+    ? getSessionDisplayTitle(currentSession, sessionLabels)
+    : currentSessionKey;
   const effectiveWorkspace = useMemo(
     () => resolveEffectiveWorkspace({ session: currentSession, globalWorkspace: chatWorkspacePath }),
     [chatWorkspacePath, currentSession],
   );
   const cwd = effectiveWorkspace.cwd;
-  const workspaceLabel = getWorkspaceDisplayLabel(cwd, t('workspace.defaultLabel'), workspaceLabels);
-  const workspaceOptions = useMemo<ChatWorkspaceOption[]>(() => {
+  const allWorkspacePaths = useMemo(() => {
     const seen = new Set<string>();
-    const options: ChatWorkspaceOption[] = [];
+    const paths: string[] = [];
     const candidatePaths = [
       ...recentWorkspacePaths,
       chatWorkspacePath,
@@ -225,19 +229,43 @@ export function Chat() {
       const identity = /^[A-Za-z]:\//.test(slashedPath) ? slashedPath.toLowerCase() : slashedPath;
       if (seen.has(identity)) continue;
       seen.add(identity);
-      options.push({
-        path: normalized,
-        label: getWorkspaceDisplayLabel(normalized, t('workspace.defaultLabel'), workspaceLabels),
-      });
+      paths.push(normalized);
     }
-    return options;
-  }, [chatWorkspacePath, recentWorkspacePaths, sessions, t, workspaceLabels]);
+    return paths;
+  }, [chatWorkspacePath, recentWorkspacePaths, sessions]);
+  const workspaceLabel = getWorkspaceDisplayLabel(
+    cwd,
+    t('workspace.defaultLabel'),
+    workspaceLabels,
+    allWorkspacePaths,
+  );
+  const workspaceOptions = useMemo<ChatWorkspaceOption[]>(() => {
+    return allWorkspacePaths.map((normalized) => ({
+      path: normalized,
+      label: getWorkspaceDisplayLabel(
+        normalized,
+        t('workspace.defaultLabel'),
+        workspaceLabels,
+        allWorkspacePaths,
+      ),
+    }));
+  }, [allWorkspacePaths, t, workspaceLabels]);
   const currentAgent = useMemo(
     () => (agents ?? []).find((agent) => agent.id === currentAgentId) ?? null,
     [agents, currentAgentId],
   );
 
   const acpTimeline = useAcpChatSessionStore((s) => s.timeline);
+  const renderedAcpTimeline = useDeferredValue(acpTimeline);
+  const emptyCurrentTimeline = useMemo(
+    () => createEmptyAcpTimeline(currentSessionKey ?? '', 0),
+    [currentSessionKey],
+  );
+  const visibleAcpTimeline = renderedAcpTimeline.sessionId === currentSessionKey
+    ? renderedAcpTimeline
+    : acpTimeline.sessionId === currentSessionKey
+      ? acpTimeline
+      : emptyCurrentTimeline;
   const acpTurnTimings = useAcpChatSessionStore((s) => s.turnTimingsByUserMessageId);
   const acpLoading = useAcpChatSessionStore((s) => s.loading);
   const acpSending = useAcpChatSessionStore((s) => s.sending);
@@ -353,6 +381,7 @@ export function Chat() {
     if (currentSession?.createdLocally) return;
     const createIfMissing = !currentSession;
     acpLoadInFlightKeyRef.current = acpLoadKey;
+    if (createIfMissing) selectAcpSession(currentSessionKey, cwd);
     void loadAcpSession({
       sessionKey: currentSessionKey,
       workspaceRoot: cwd,
@@ -360,20 +389,20 @@ export function Chat() {
       ...(createIfMissing ? { createIfMissing: true } : {}),
     }).then((loaded) => {
       if (loaded && createIfMissing) {
-        acknowledgeAcpSessionCreated(currentSessionKey);
+        acknowledgeAcpSessionCreated(currentSessionKey, cwd);
       }
     }).finally(() => {
       if (acpLoadInFlightKeyRef.current === acpLoadKey) {
         acpLoadInFlightKeyRef.current = null;
       }
     });
-  }, [acknowledgeAcpSessionCreated, acpActiveSessionKey, acpCwd, acpWorkspaceRoot, currentSessionKey, cwd, loadAcpSession, sessionDiscoveryAttempted, sessions, workspaceContextAvailable]);
+  }, [acknowledgeAcpSessionCreated, acpActiveSessionKey, acpCwd, acpWorkspaceRoot, currentSessionKey, cwd, loadAcpSession, selectAcpSession, sessionDiscoveryAttempted, sessions, workspaceContextAvailable]);
 
   const platform = window.electron?.platform;
   const isMac = platform === 'darwin';
   const isWindows = platform === 'win32';
   const composerBusy = acpSending || acpCancelling;
-  const showScrollToLatest = acpTimeline.itemOrder.length > 0 && !isAtBottom;
+  const showScrollToLatest = visibleAcpTimeline.itemOrder.length > 0 && !isAtBottom;
   const hasAttemptedAcpPromptForCurrentSession = lastPromptAttemptSessionKey === currentSessionKey;
   const visibleAcpError = !workspaceUnavailable && acpError
     && !(acpTimeline.itemOrder.length === 0 && !hasAttemptedAcpPromptForCurrentSession && isRecoverableInitialAcpLoadError(acpError))
@@ -398,24 +427,24 @@ export function Chat() {
       || resolvedWorkspaceContext?.key !== workspaceContextKey
       || resolvedWorkspaceContext.sessionKey !== currentSessionKey
       || acpActiveSessionKey !== currentSessionKey
-      || acpTimeline.sessionId !== currentSessionKey
+      || visibleAcpTimeline.sessionId !== currentSessionKey
     ) return EMPTY_FILE_ACTIVITY;
     return projectOpenClawFileActivities({
-      timeline: acpTimeline,
+      timeline: visibleAcpTimeline,
       workspaceRoot: resolvedWorkspaceContext.workspaceRoot,
       executionCwd: resolvedWorkspaceContext.executionCwd,
     });
-  }, [acpActiveSessionKey, acpTimeline, currentSessionKey, resolvedWorkspaceContext, workspaceContextKey]);
+  }, [acpActiveSessionKey, currentSessionKey, resolvedWorkspaceContext, visibleAcpTimeline, workspaceContextKey]);
   const questionDirectoryItems = useMemo(() => {
-    const userItems = acpTimeline.itemOrder
-      .map((itemId) => acpTimeline.itemsById[itemId])
+    const userItems = visibleAcpTimeline.itemOrder
+      .map((itemId) => visibleAcpTimeline.itemsById[itemId])
       .filter((item): item is MessageSegmentItem => item?.kind === 'message-segment' && item.role === 'user');
     return userItems.map((item, index) => ({
       itemId: item.id,
       anchorId: getAcpUserMessageAnchorId(item.id),
       title: buildQuestionDirectoryTitle(item, t('questionDirectory.fallback', { number: index + 1 })),
     }));
-  }, [acpTimeline, t]);
+  }, [t, visibleAcpTimeline]);
   const questionDirectoryVisible = questionDirectoryOpenSessionKey === currentSessionKey
     && questionDirectoryItems.length > 1;
 
@@ -432,8 +461,22 @@ export function Chat() {
       style={{ height: isMac ? 'calc(100vh - 1px)' : 'calc(100vh - 2.5rem)' }}
     >
       <div className="flex min-w-0 flex-1 flex-col">
-        <div className="relative flex shrink-0 items-center justify-end px-4 py-2">
+        <div className={cn(
+          'relative flex shrink-0 items-center px-4 py-2',
+          isWindows ? 'gap-4' : 'justify-end',
+        )}>
           <div data-testid="chat-toolbar-drag-region" className="drag-region absolute inset-0 z-0" aria-hidden="true" />
+          {isWindows && (
+            <div className="drag-region relative z-10 min-w-0 flex-1">
+              <h1
+                data-testid="chat-session-title"
+                title={currentSessionTitle}
+                className="truncate text-sm font-medium text-foreground"
+              >
+                {currentSessionTitle}
+              </h1>
+            </div>
+          )}
           <div data-testid="chat-toolbar-actions" className="no-drag relative z-10">
             <ChatToolbar
               questionDirectoryOpen={questionDirectoryVisible}
@@ -447,7 +490,7 @@ export function Chat() {
         </div>
 
         <div className="relative min-h-0 flex-1 overflow-hidden px-4 py-4">
-          <div className="mx-auto flex h-full min-h-0 w-full max-w-7xl flex-col gap-4 lg:flex-row lg:items-stretch">
+          <div className="relative mx-auto flex h-full min-h-0 w-full max-w-7xl flex-col">
             <div data-testid="chat-scroll-column" className="relative min-h-0 min-w-0 flex-1">
               <div ref={scrollRef} className="h-full min-h-0 min-w-0 overflow-y-auto" data-testid="chat-scroll-container">
                 <div ref={contentRef} className="mx-auto max-w-4xl space-y-4">
@@ -463,11 +506,12 @@ export function Chat() {
                     <div className="flex min-h-[40vh] items-center justify-center" data-testid="acp-chat-loading">
                       <LoadingSpinner size="md" />
                     </div>
-                  ) : acpTimeline.itemOrder.length === 0 ? (
+                  ) : visibleAcpTimeline.itemOrder.length === 0 ? (
                     <AcpEmptyState />
                   ) : (
                     <AcpTimeline
-                      snapshot={acpTimeline}
+                      snapshot={visibleAcpTimeline}
+                      isStreaming={acpSending || acpCancelling}
                       turnTimingsByUserMessageId={acpTurnTimings}
                       fileActivity={fileActivity}
                       workspaceRoot={resolvedWorkspaceContext?.key === workspaceContextKey
@@ -509,6 +553,7 @@ export function Chat() {
             const sessionKey = targetAgent
               ? targetAgent.mainSessionKey || `agent:${targetAgent.id}:main`
               : currentSessionKey;
+            const existingSession = sessions.find((session) => session.key === sessionKey);
             setLastPromptAttemptSessionKey(sessionKey);
             const promptCwd = targetAgent?.workspace || cwd;
             const media = attachments
@@ -519,7 +564,7 @@ export function Chat() {
                 fileName: file.fileName,
                 mimeType: file.mimeType,
               }));
-            if (targetAgent) {
+            if (targetAgent || !existingSession) {
               selectAcpSession(sessionKey, promptCwd);
             }
             void (async () => {
@@ -530,7 +575,6 @@ export function Chat() {
                 }).catch(() => ({ ok: false }));
                 if (!promptWorkspace.ok) return;
               }
-              const existingSession = sessions.find((session) => session.key === sessionKey);
               const createIfMissing = !existingSession || !!existingSession.createdLocally;
               if (
                 createIfMissing

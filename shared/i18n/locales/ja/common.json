@@ -12,7 +12,6 @@
         "models": "モデル",
         "deleteSessionConfirm": "「{{label}}」を削除しますか？",
         "openClawPage": "OpenClaw ページ",
-        "openClawDreams": "夢",
         "renameSession": "名前を変更",
         "deleteSession": "削除",
         "renameSessionPlaceholder": "セッションタイトル",
@@ -43,6 +42,9 @@
         "show": "表示",
         "hide": "非表示",
         "clear": "クリア"
+    },
+    "markdown": {
+        "copyCode": "コードをコピー"
     },
     "status": {
         "running": "実行中",

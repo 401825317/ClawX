@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { FilePreviewBody } from '@/components/file-preview/FilePreviewBody';
 import type { FilePreviewTarget } from '@/components/file-preview/types';
+import { MAC_TRAFFIC_LIGHT_SAFE_INSET } from '@shared/sidebar-layout';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -90,7 +91,20 @@ describe('FilePreviewBody', () => {
     statWorkspaceFile.mockResolvedValue({ ok: true, size: 1024, isFile: true });
   });
 
-  it('renders html files as sandboxed HTML preview instead of raw source by default', async () => {
+  it('applies an optional native-chrome safe inset only to the file header', () => {
+    render(
+      <FilePreviewBody
+        file={makePreviewTarget()}
+        headerLeftInset={MAC_TRAFFIC_LIGHT_SAFE_INSET}
+      />,
+    );
+
+    expect(screen.getByTestId('file-preview-header')).toHaveStyle({
+      paddingLeft: `${MAC_TRAFFIC_LIGHT_SAFE_INSET}px`,
+    });
+  });
+
+  it('renders HTML through the dedicated Preview anchor instead of an iframe', async () => {
     readTextFile.mockResolvedValueOnce({
       ok: true,
       content: '<!doctype html><html><body><h1>Rendered HTML</h1><script>document.body.dataset.scriptRan = "yes";</script></body></html>',
@@ -112,17 +126,14 @@ describe('FilePreviewBody', () => {
       />,
     );
 
-    const frame = await screen.findByTestId('html-preview-frame');
+    const anchor = await screen.findByTestId('html-preview-anchor');
     const header = screen.getByText('demo.html').closest('header');
     expect(header).not.toBeNull();
     const viewTabs = within(header!).getByRole('tablist');
     expect(within(viewTabs).getByRole('tab', { name: 'Preview' })).toHaveAttribute('data-state', 'active');
     expect(within(viewTabs).getByRole('tab', { name: 'Source' })).toBeVisible();
-    expect(frame).toBeVisible();
-    expect(frame).toHaveAttribute(
-      'sandbox',
-      'allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-presentation allow-downloads',
-    );
+    expect(anchor).toBeVisible();
+    expect(screen.queryByTestId('html-preview-frame')).not.toBeInTheDocument();
     expect(screen.queryByText('<!doctype html>')).not.toBeInTheDocument();
   });
 
@@ -151,7 +162,7 @@ describe('FilePreviewBody', () => {
       />,
     );
 
-    expect(await screen.findByTestId('html-preview-frame')).toHaveAttribute('srcdoc', '<h1>Scoped HTML</h1>');
+    expect(await screen.findByTestId('html-preview-anchor')).toBeVisible();
     expect(readAttachmentText).toHaveBeenCalledWith(attachmentFileRef);
     expect(readWorkspaceText).not.toHaveBeenCalled();
     expect(readTextFile).not.toHaveBeenCalled();
@@ -492,7 +503,7 @@ describe('FilePreviewBody', () => {
       />,
     );
 
-    expect(await screen.findByText('This file format is not supported for inline preview or diff')).toBeVisible();
+    expect(await screen.findByText('This file format is not supported for inline preview')).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Open directly' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Show in file manager' })).not.toBeInTheDocument();
     expect(dialogMessageMock).not.toHaveBeenCalled();
@@ -518,14 +529,11 @@ describe('FilePreviewBody', () => {
     });
 
     const { rerender } = render(<FilePreviewBody file={makeHtmlTarget(firstRef)} mode="preview" />);
-    expect(await screen.findByTestId('html-preview-frame')).toHaveAttribute(
-      'srcdoc',
-      '<p>workspace-a</p>',
-    );
+    expect(await screen.findByTestId('html-preview-anchor')).toBeVisible();
 
     rerender(<FilePreviewBody file={makeHtmlTarget(secondRef)} mode="preview" />);
 
-    expect(screen.queryByTestId('html-preview-frame')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('html-preview-anchor')).not.toBeInTheDocument();
     expect(readWorkspaceText).toHaveBeenLastCalledWith(secondRef);
   });
 });

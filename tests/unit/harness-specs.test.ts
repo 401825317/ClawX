@@ -62,15 +62,10 @@ describe('harness specs', () => {
     }
   });
 
-  it('defines the Web Browser harness contract', async () => {
+  it('defines the local HTML preview harness contract', async () => {
     const expectedRules = [
       'renderer-main-boundary',
-      'backend-communication-boundary',
-      'api-client-transport-policy',
-      'host-api-fallback-policy',
-      'ui-i18n-design-tokens',
       'web-browser-security-and-lifecycle',
-      'comms-regression',
       'docs-sync',
     ];
     const [task, rules, scenarios, browserReference] = await Promise.all([
@@ -88,33 +83,26 @@ describe('harness specs', () => {
       id: 'web-browser',
       scenario: 'gateway-backend-communication',
       taskType: 'runtime-bridge',
-      requiredProfiles: ['fast', 'comms', 'e2e'],
+      requiredProfiles: ['fast'],
       requiredRules: expectedRules,
       docs: { required: true },
     });
     expect(expectedRules.filter((ruleId) => !ruleIds.has(ruleId))).toEqual([]);
     expect(workspaceScenario?.data.ownedPaths).toEqual(expect.arrayContaining([
       'src/components/web-browser/**',
-      'tests/e2e/web-browser-navigation.spec.ts',
-      'tests/e2e/web-browser-lifecycle.spec.ts',
-      'tests/e2e/web-browser-policy.spec.ts',
+      'tests/e2e/chat-acp-attachments.spec.ts',
+      'tests/e2e/chat-file-changes.spec.ts',
     ]));
     expect(workspaceScenario?.body).toContain('harness/reference/web-browser.md');
 
     for (const contractAnchor of [
       'persist:clawx-web-browser',
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.7559.236 Electron/40.8.4 Safari/537.36',
-      '`http:`',
-      '`https:`',
       '`file:///`',
-      'single registered guest',
-      '| Permission | Check path | Request path | Persistence |',
-      'Clear Cookies',
-      'Clear Site Data',
-      '`window.opener`',
-      'Electron default download',
-      'system proxy',
-      '## Validation Anchors',
+      'one-live-guest registry',
+      'All links are inert',
+      'denies all permissions',
+      'cancels downloads',
+      'blocks network protocols',
     ]) {
       expect(browserReference).toContain(contractAnchor);
     }
@@ -161,6 +149,60 @@ describe('harness specs', () => {
     expect(workspaceScenario?.body).toContain('single mounted PPTX viewer');
   });
 
+  it('defines the Streamdown Markdown rendering harness contract', async () => {
+    const referencePath = 'harness/reference/markdown-rendering.md';
+    const focusedTests = [
+      'tests/unit/streamdown-config.test.tsx',
+      'tests/unit/markdown-preview.test.tsx',
+      'tests/unit/acp-chat-components.test.tsx',
+      'tests/e2e/markdown-file-preview.spec.ts',
+      'tests/e2e/chat-streamdown-rendering.spec.ts',
+    ];
+    const [task, rules, scenarios, markdownReference] = await Promise.all([
+      loadSpec('harness/specs/tasks/replace-markdown-renderer-with-streamdown.md'),
+      loadRuleSpecs(),
+      loadScenarioSpecs(),
+      readFile(referencePath, 'utf8'),
+    ]);
+    const markdownRule = rules.find(
+      (rule) => rule.data.id === 'markdown-rendering-safety-and-performance',
+    );
+    const scenarioById = new Map(scenarios.map((scenario) => [scenario.data.id, scenario]));
+    const requiredTests = task.data.requiredTests as string[];
+
+    expect(task.data).toMatchObject({
+      id: 'replace-markdown-renderer-with-streamdown',
+      scenario: 'acp-chat-experience',
+      taskType: 'runtime-bridge',
+      requiredProfiles: ['fast', 'e2e'],
+      docs: { required: true },
+    });
+    expect(task.data.requiredRules).toContain('markdown-rendering-safety-and-performance');
+    expect(task.body).toContain(referencePath);
+    expect(markdownRule?.data.appliesTo).toEqual(expect.arrayContaining([
+      'acp-chat-experience',
+      'chat-workspace-and-navigation',
+    ]));
+    expect(markdownRule?.body).toContain(referencePath);
+    expect(markdownReference).toContain('word-level');
+    expect(markdownReference).toContain('before/after');
+
+    const scenarioTests = new Map([
+      ['acp-chat-experience', 'tests/e2e/chat-streamdown-rendering.spec.ts'],
+      ['chat-workspace-and-navigation', 'tests/e2e/markdown-file-preview.spec.ts'],
+    ]);
+    for (const [scenarioId, testPath] of scenarioTests) {
+      const scenario = scenarioById.get(scenarioId);
+      expect(scenario?.data.requiredRules).toContain('markdown-rendering-safety-and-performance');
+      expect(scenario?.data.ownedPaths).toContain(testPath);
+      expect(scenario?.body).toContain(referencePath);
+    }
+    for (const testPath of focusedTests) {
+      expect(requiredTests.join('\n')).toContain(testPath);
+    }
+    expect(requiredTests).toContain('pnpm run perf:chat');
+  });
+
   it('keeps implemented design decisions in topic-based Harness references', async () => {
     const [
       browserReference,
@@ -179,11 +221,11 @@ describe('harness specs', () => {
     ]);
 
     for (const anchor of [
-      'Trust Model And Ownership',
-      'numeric port',
-      'Main Startup And Attachment Ordering',
-      'Failure Semantics And Crash Recovery',
-      'Rejected Alternatives',
+      'User flow',
+      'Link behavior',
+      'Renderer flow',
+      'Main boundary',
+      'Security consequence',
     ]) {
       expect(browserReference).toContain(anchor);
     }
@@ -268,6 +310,24 @@ describe('harness specs', () => {
     expect(acpChatScenario?.data.ownedPaths).toContain('tests/e2e/chat-acp-attachments.spec.ts');
   });
 
+  it('keeps the structural task example on current ACP session catalog behavior', async () => {
+    const example = await loadSpec('harness/specs/tasks/maintain-session-catalog-reconciliation.example.md');
+
+    expect(example.data).toMatchObject({
+      id: 'maintain-session-catalog-reconciliation',
+      scenario: 'gateway-backend-communication',
+      taskType: 'runtime-bridge',
+      requiredProfiles: ['fast', 'comms'],
+      docs: { required: false },
+    });
+    expect(example.data.requiredTests).toEqual([
+      'tests/unit/session-catalog.test.ts',
+      'tests/unit/chat-session-management.test.ts',
+    ]);
+    expect(example.body).toContain('session catalog alongside ACP Chat');
+    expect(example.body).not.toMatch(/chat\.history|sendMessage|activeRunId|pendingFinal/);
+  });
+
   it('parses Markdown frontmatter with arrays and nested docs', () => {
     const spec = parseFrontmatter(`---
 id: example
@@ -286,7 +346,7 @@ Body`);
   });
 
   it('matches repository glob paths', () => {
-    expect(pathMatchesAny('src/stores/chat/history-actions.ts', ['src/stores/chat/**'])).toBe(true);
+    expect(pathMatchesAny('src/stores/chat/runtime-graph.ts', ['src/stores/chat/**'])).toBe(true);
     expect(pathMatchesAny('src/lib/host-api.ts', ['src/lib/host-api.ts'])).toBe(true);
     expect(pathMatchesAny('src/pages/Chat/index.tsx', ['electron/gateway/**'])).toBe(false);
   });

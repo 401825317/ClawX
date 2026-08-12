@@ -3,8 +3,8 @@
  * Textarea with send button and universal file upload support.
  * Enter to send, Shift+Enter for new line.
  * Supports: native file picker, clipboard paste, drag & drop.
- * Files are staged to disk via IPC — only lightweight path references
- * are sent with the message (no base64 over WebSocket).
+ * Files are staged through the typed Host API and included as local media
+ * references in the ACP session/prompt request.
  */
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { SendHorizontal, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, FolderOpen, Loader2, AtSign, Search, ChevronDown, Check } from 'lucide-react';
@@ -36,7 +36,7 @@ export interface FileAttachment {
   fileName: string;
   mimeType: string;
   fileSize: number;
-  stagedPath: string;        // disk path for gateway
+  stagedPath: string;        // Host-staged path included in ACP prompt media
   preview: string | null;    // data URL for images, null for others
   status: 'staging' | 'ready' | 'error';
   error?: string;
@@ -104,8 +104,8 @@ function removeSkillToken(value: string, skillName: string): string {
   return `${value.slice(0, range.start)}${value.slice(range.end)}`;
 }
 
-const SKILL_TOKEN_BUTTON_CLASS =
-  'rounded-md bg-skill-bg/14 text-skill-fg [-webkit-box-decoration-break:clone] [box-decoration-break:clone] [text-shadow:0_0_10px_rgba(47,107,255,0.38)] dark:bg-skill-bg/18 dark:text-skill-fg-dark dark:[text-shadow:0_0_12px_rgba(37,99,235,0.42)]';
+const SKILL_TOKEN_CLASS =
+  'clawx-skill-token-overlay pointer-events-auto cursor-pointer rounded-md text-skill-fg underline-offset-2 hover:underline [-webkit-box-decoration-break:clone] [box-decoration-break:clone] [text-shadow:0_0_10px_rgba(47,107,255,0.38)] dark:text-skill-fg-dark dark:[text-shadow:0_0_12px_rgba(37,99,235,0.42)]';
 
 function renderHighlightedComposerText(
   value: string,
@@ -129,19 +129,12 @@ function renderHighlightedComposerText(
       chunks.push(value.slice(cursor, tokenRange.start));
     }
     chunks.push(
-      <button
+      <span
         key={`skill-token-${tokenRange.start}`}
-        type="button"
         data-testid="chat-composer-skill-token"
         data-skill-name={skillName}
         title={options.previewTooltip}
-        className={cn(
-          'inline h-auto border-0 p-0 font-inherit leading-inherit',
-          'pointer-events-auto cursor-pointer underline-offset-2 hover:underline',
-          'text-left align-baseline shadow-none transition-colors',
-          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-0',
-          SKILL_TOKEN_BUTTON_CLASS,
-        )}
+        className={SKILL_TOKEN_CLASS}
         onMouseDown={(event) => {
           // Keep focus in the textarea while still receiving the click.
           event.preventDefault();
@@ -153,7 +146,7 @@ function renderHighlightedComposerText(
         }}
       >
         {tokenLabel}
-      </button>,
+      </span>,
       tokenTrailingSpace,
     );
     cursor = tokenRange.end;
@@ -876,7 +869,7 @@ export function ChatInput({
   return (
     <div
       className={cn(
-        "p-4 pb-6 w-full mx-auto max-w-3xl"
+        "shrink-0 p-4 pb-6 w-full mx-auto max-w-3xl"
       )}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -959,7 +952,8 @@ export function ChatInput({
             {skillTokenRanges.length > 0 && (
               <div
                 aria-hidden="true"
-                className="pointer-events-none absolute inset-0 z-20 overflow-hidden whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground"
+                data-testid="chat-composer-highlight"
+                className="pointer-events-none absolute inset-0 z-20 overflow-hidden whitespace-pre-wrap break-words text-sm leading-relaxed text-transparent"
               >
                 {renderHighlightedComposerText(input, skillTokenRanges, {
                   onPreviewSkill: (name) => {
@@ -987,8 +981,8 @@ export function ChatInput({
               disabled={inputDisabled}
               data-testid="chat-composer-input"
               className={cn(
-                'relative min-h-[48px] max-h-[240px] resize-none border-0 focus-visible:ring-0 focus-visible:ring-offset-0 shadow-none bg-transparent p-0 text-sm leading-relaxed placeholder:text-muted-foreground/60',
-                skillTokenRanges.length > 0 ? 'z-0 text-transparent caret-foreground selection:bg-primary/20' : 'z-10',
+                'relative z-10 min-h-[48px] max-h-[240px] resize-none border-0 focus-visible:ring-0 focus-visible:ring-offset-0 shadow-none bg-transparent p-0 text-sm leading-relaxed placeholder:text-muted-foreground/60',
+                skillTokenRanges.length > 0 && 'selection:bg-primary/20',
               )}
               rows={1}
             />
@@ -1313,8 +1307,6 @@ export function ChatInput({
                     : gatewayStatus.state === 'running'
                       ? t('composer.gatewayStarting')
                       : gatewayStatus.state,
-                  port: gatewayStatus.port,
-                  pid: gatewayStatus.pid ?? '',
                 })}
               </span>
               {chatComposerStatusComponents.map((Component, index) => (

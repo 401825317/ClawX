@@ -22,6 +22,7 @@ import {
   assignChannelAccountToAgent,
   clearAllBindingsForChannel,
   clearChannelBinding,
+  ensureScopedChannelBinding as ensureAgentScopedChannelBinding,
   listAgentsSnapshot,
   listAgentsSnapshotFromConfig,
 } from '../utils/agent-config';
@@ -152,11 +153,6 @@ let lastChannelsStatusFailureAt: number | undefined;
 const CHANNEL_TARGET_CACHE_TTL_MS = 60_000;
 const CHANNEL_TARGET_CACHE_ENABLED = process.env.VITEST !== 'true';
 const channelTargetCache = new Map<string, { expiresAt: number; targets: ChannelTargetOptionView[] }>();
-
-const FORCE_RESTART_CHANNELS = new Set([
-  'dingtalk', 'wecom', 'whatsapp', 'feishu', 'qqbot', OPENCLAW_WECHAT_CHANNEL_TYPE,
-  'discord', 'telegram', 'signal', 'imessage', 'matrix', 'line', 'msteams', 'googlechat', 'mattermost',
-]);
 
 function requireString(payload: unknown, key: string): string {
   if (!isRecord(payload) || typeof payload[key] !== 'string' || !payload[key].trim()) {
@@ -924,83 +920,8 @@ async function listChannelTargetOptions(params: {
   return targets;
 }
 
-async function readChannelBindingOwner(channelType: string, accountId?: string): Promise<string | null> {
-  const config = await readOpenClawConfig();
-  const bindings = Array.isArray((config as { bindings?: unknown }).bindings)
-    ? (config as { bindings: unknown[] }).bindings
-    : [];
-  for (const binding of bindings) {
-    if (!binding || typeof binding !== 'object') continue;
-    const candidate = binding as {
-      agentId?: unknown;
-      match?: { channel?: unknown; accountId?: unknown } | unknown;
-    };
-    if (typeof candidate.agentId !== 'string' || !candidate.agentId.trim()) continue;
-    if (!candidate.match || typeof candidate.match !== 'object' || Array.isArray(candidate.match)) continue;
-    const match = candidate.match as { channel?: unknown; accountId?: unknown };
-    if (match.channel !== channelType) continue;
-    const bindingAccountId = typeof match.accountId === 'string' ? match.accountId.trim() : '';
-    if ((accountId?.trim() || '') !== bindingAccountId) continue;
-    return candidate.agentId;
-  }
-  return null;
-}
-
-async function migrateLegacyChannelWideBinding(channelType: string): Promise<void> {
-  const explicitDefaultOwner = await readChannelBindingOwner(channelType, 'default');
-  const legacyOwner = await readChannelBindingOwner(channelType);
-  if (!legacyOwner) return;
-
-  const agents = await listAgentsSnapshot();
-  const validAgentIds = new Set(agents.agents.map((agent) => agent.id));
-  const defaultOwner = explicitDefaultOwner && validAgentIds.has(explicitDefaultOwner)
-    ? explicitDefaultOwner
-    : (legacyOwner && validAgentIds.has(legacyOwner) ? legacyOwner : null);
-
-  if (defaultOwner) {
-    await assignChannelAccountToAgent(defaultOwner, channelType, 'default');
-  }
-  await clearChannelBinding(channelType);
-}
-
 async function ensureScopedChannelBinding(channelType: string, accountId?: string): Promise<void> {
-  const storedChannelType = resolveStoredChannelType(channelType);
-  if (!accountId) return;
-  const agents = await listAgentsSnapshot();
-  if (!agents.agents || agents.agents.length === 0) return;
-
-  if (accountId === 'default') {
-    if (agents.agents.some((entry) => entry.id === 'main')) {
-      await assignChannelAccountToAgent('main', storedChannelType, 'default');
-    }
-    return;
-  }
-
-  if (agents.agents.some((entry) => entry.id === accountId)) {
-    await migrateLegacyChannelWideBinding(storedChannelType);
-    await assignChannelAccountToAgent(accountId, storedChannelType, accountId);
-    return;
-  }
-
-  await migrateLegacyChannelWideBinding(storedChannelType);
-}
-
-function scheduleGatewayChannelRestart(ctx: ChannelsApiContext, reason: string): void {
-  if (ctx.gatewayManager.getStatus().state === 'stopped') return;
-  ctx.gatewayManager.debouncedRestart();
-  void reason;
-}
-
-function scheduleGatewayChannelSaveRefresh(ctx: ChannelsApiContext, channelType: string, reason: string): void {
-  const storedChannelType = resolveStoredChannelType(channelType);
-  if (ctx.gatewayManager.getStatus().state === 'stopped') return;
-  if (FORCE_RESTART_CHANNELS.has(storedChannelType)) {
-    ctx.gatewayManager.debouncedRestart(150);
-    void reason;
-    return;
-  }
-  ctx.gatewayManager.debouncedReload(150);
-  void reason;
+  await ensureAgentScopedChannelBinding(resolveStoredChannelType(channelType), accountId);
 }
 
 function toComparableConfig(input: Record<string, unknown>): Record<string, string> {
@@ -1044,6 +965,40 @@ function emitChannelEvent(
   }
 }
 
+const CHANNEL_PLUGIN_INSTALLERS: Record<
+  string,
+  () => MaybePromise<{ installed: boolean; warning?: string }>
+> = {
+  dingtalk: ensureDingTalkPluginInstalled,
+  wecom: ensureWeComPluginInstalled,
+  discord: ensureDiscordPluginInstalled,
+  qqbot: ensureQQBotPluginInstalled,
+  whatsapp: ensureWhatsAppPluginInstalled,
+  feishu: ensureFeishuPluginInstalled,
+  [OPENCLAW_WECHAT_CHANNEL_TYPE]: ensureWeChatPluginInstalled,
+};
+
+function isPluginBackedChannel(storedChannelType: string): boolean {
+  return Object.hasOwn(CHANNEL_PLUGIN_INSTALLERS, storedChannelType);
+}
+
+function shouldRestartRunningGateway(ctx: ChannelsApiContext, storedChannelType: string): boolean {
+  return isPluginBackedChannel(storedChannelType)
+    && ctx.gatewayManager.getStatus().state === 'running';
+}
+
+function scheduleGatewayRestartForPluginChannel(
+  ctx: ChannelsApiContext,
+  storedChannelType: string,
+): void {
+  logger.info(`[channels.saveConfig] scheduling Gateway restart to activate plugin channel=${storedChannelType}`);
+  // The config and scoped binding are already committed. Let the host request
+  // return while the guarded lifecycle path performs stop/start/readiness.
+  // GatewayManager owns error logging, status propagation, and restart
+  // coalescing, so the Channels page can show the normal connecting state.
+  ctx.gatewayManager.debouncedRestart(0);
+}
+
 async function awaitWeChatQrLogin(
   ctx: ChannelsApiContext,
   sessionKey: string,
@@ -1070,9 +1025,12 @@ async function awaitWeChatQrLogin(
       baseUrl: result.baseUrl,
       userId: result.userId,
     });
+    const restartGateway = shouldRestartRunningGateway(ctx, OPENCLAW_WECHAT_CHANNEL_TYPE);
     await saveChannelConfig(UI_WECHAT_CHANNEL_TYPE, { enabled: true }, normalizedAccountId);
     await ensureScopedChannelBinding(UI_WECHAT_CHANNEL_TYPE, normalizedAccountId);
-    scheduleGatewayChannelSaveRefresh(ctx, OPENCLAW_WECHAT_CHANNEL_TYPE, `wechat:loginSuccess:${normalizedAccountId}`);
+    if (restartGateway) {
+      scheduleGatewayRestartForPluginChannel(ctx, OPENCLAW_WECHAT_CHANNEL_TYPE);
+    }
 
     if (activeQrLogins.get(loginKey) !== sessionKey) return;
     emitChannelEvent(ctx, UI_WECHAT_CHANNEL_TYPE, 'success', {
@@ -1090,16 +1048,7 @@ async function awaitWeChatQrLogin(
 }
 
 async function ensureChannelPluginInstalled(storedChannelType: string): Promise<void> {
-  const installers: Record<string, () => MaybePromise<{ installed: boolean; warning?: string }>> = {
-    dingtalk: ensureDingTalkPluginInstalled,
-    wecom: ensureWeComPluginInstalled,
-    discord: ensureDiscordPluginInstalled,
-    qqbot: ensureQQBotPluginInstalled,
-    whatsapp: ensureWhatsAppPluginInstalled,
-    feishu: ensureFeishuPluginInstalled,
-    [OPENCLAW_WECHAT_CHANNEL_TYPE]: ensureWeChatPluginInstalled,
-  };
-  const install = installers[storedChannelType];
+  const install = CHANNEL_PLUGIN_INSTALLERS[storedChannelType];
   if (!install) return;
   const result = await install();
   if (!result.installed) {
@@ -1135,7 +1084,6 @@ export function createChannelsApi(ctx: ChannelsApiContext): CompleteHostServiceR
       const accountId = requireString(payload, 'accountId');
       await validateCanonicalAccountId(channelType, accountId, { allowLegacyConfiguredId: true });
       await setChannelDefaultAccount(channelType, accountId);
-      scheduleGatewayChannelSaveRefresh(ctx, channelType, `channel:setDefaultAccount:${channelType}`);
       return { success: true };
     },
     bindingSave: async (payload) => {
@@ -1148,11 +1096,16 @@ export function createChannelsApi(ctx: ChannelsApiContext): CompleteHostServiceR
         throw new Error(`Agent "${agentId}" not found`);
       }
       const storedChannelType = resolveStoredChannelType(channelType);
-      if (accountId !== 'default') {
-        await migrateLegacyChannelWideBinding(storedChannelType);
+      if (accountId === 'default') {
+        await assignChannelAccountToAgent(agentId, storedChannelType, accountId);
+      } else {
+        await assignChannelAccountToAgent(
+          agentId,
+          storedChannelType,
+          accountId,
+          { migrateLegacy: true },
+        );
       }
-      await assignChannelAccountToAgent(agentId, storedChannelType, accountId);
-      scheduleGatewayChannelSaveRefresh(ctx, channelType, `channel:setBinding:${channelType}`);
       return { success: true };
     },
     bindingDelete: async (payload) => {
@@ -1160,7 +1113,6 @@ export function createChannelsApi(ctx: ChannelsApiContext): CompleteHostServiceR
       const accountId = optionalString(payload, 'accountId');
       await validateCanonicalAccountId(channelType, accountId, { allowLegacyConfiguredId: true });
       await clearChannelBinding(resolveStoredChannelType(channelType), accountId);
-      scheduleGatewayChannelSaveRefresh(ctx, channelType, `channel:clearBinding:${channelType}`);
       return { success: true };
     },
     validateConfig: async (payload) => {
@@ -1178,23 +1130,29 @@ export function createChannelsApi(ctx: ChannelsApiContext): CompleteHostServiceR
       const accountId = optionalString(payload, 'accountId');
       await validateCanonicalAccountId(channelType, accountId, { allowLegacyConfiguredId: true });
       const storedChannelType = resolveStoredChannelType(channelType);
-      await ensureChannelPluginInstalled(storedChannelType);
-      const existingValues = await getChannelFormValues(channelType, accountId);
+      const restartGateway = shouldRestartRunningGateway(ctx, storedChannelType);
+      const [, existingValues] = await Promise.all([
+        ensureChannelPluginInstalled(storedChannelType),
+        getChannelFormValues(channelType, accountId),
+      ]);
       if (isSameConfigValues(existingValues, config)) {
         await ensureScopedChannelBinding(channelType, accountId);
-        scheduleGatewayChannelSaveRefresh(ctx, storedChannelType, `channel:saveConfigNoChange:${storedChannelType}`);
-        return { success: true, noChange: true };
+        if (restartGateway) {
+          scheduleGatewayRestartForPluginChannel(ctx, storedChannelType);
+        }
+        return { success: true, noChange: true, ...(restartGateway ? { activationPending: true } : {}) };
       }
       await saveChannelConfig(channelType, config, accountId);
       await ensureScopedChannelBinding(channelType, accountId);
-      scheduleGatewayChannelSaveRefresh(ctx, storedChannelType, `channel:saveConfig:${storedChannelType}`);
-      return { success: true };
+      if (restartGateway) {
+        scheduleGatewayRestartForPluginChannel(ctx, storedChannelType);
+      }
+      return { success: true, ...(restartGateway ? { activationPending: true } : {}) };
     },
     setEnabled: async (payload) => {
       const channelType = requireString(payload, 'channelType');
       const enabled = isRecord(payload) && payload.enabled === true;
       await setChannelEnabled(channelType, enabled);
-      scheduleGatewayChannelRestart(ctx, `channel:setEnabled:${resolveStoredChannelType(channelType)}`);
       return { success: true };
     },
     formValues: async (payload) => {
@@ -1209,11 +1167,9 @@ export function createChannelsApi(ctx: ChannelsApiContext): CompleteHostServiceR
       if (accountId) {
         await deleteChannelAccountConfig(channelType, accountId);
         await clearChannelBinding(storedChannelType, accountId);
-        scheduleGatewayChannelSaveRefresh(ctx, storedChannelType, `channel:deleteAccount:${storedChannelType}`);
       } else {
         await deleteChannelConfig(channelType);
         await clearAllBindingsForChannel(storedChannelType);
-        scheduleGatewayChannelRestart(ctx, `channel:deleteConfig:${storedChannelType}`);
       }
       return { success: true };
     },

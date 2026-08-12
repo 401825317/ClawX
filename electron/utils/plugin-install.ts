@@ -7,12 +7,19 @@
  */
 import { app } from 'electron';
 import path from 'node:path';
-import { existsSync, cpSync, copyFileSync, statSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync, realpathSync } from 'node:fs';
+import { existsSync, cpSync, copyFileSync, statSync, lstatSync, mkdirSync, readFileSync, writeFileSync, readdirSync, realpathSync, symlinkSync, unlinkSync } from 'node:fs';
 import { readdir, stat, copyFile, mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { logger } from './logger';
-import { upsertPluginInstallRecordsIntoSqlite, ensureOpenClawStateDirExists } from './plugin-install-index';
+import { getOpenClawResolvedDir } from './paths';
+import { safeRmSync } from './safe-fs';
+import {
+  upsertPluginInstallRecordsIntoSqlite,
+  removePluginInstallRecordsFromSqlite,
+  ensureOpenClawStateDirExists,
+} from './plugin-install-index';
+import { mutateOpenClawConfig } from '../gateway/config-delivery';
 
 function normalizeFsPathForWindows(filePath: string): string {
   if (process.platform !== 'win32') return filePath;
@@ -122,7 +129,7 @@ const MANIFEST_ID_FIXES: Record<string, string> = {
 /**
  * After a plugin has been copied to ~/.openclaw/extensions/<dir>, fix any
  * known manifest-ID mismatches so the Gateway can load the plugin.
- * Also patches package.json fields that the Gateway uses as "entry hints".
+ * Also keeps package.json npm metadata usable by OpenClaw's repair planner.
  */
 export function fixupPluginManifest(targetDir: string): void {
   // 1. Fix openclaw.plugin.json id
@@ -131,45 +138,64 @@ export function fixupPluginManifest(targetDir: string): void {
     const raw = readFileSync(fsPath(manifestPath), 'utf-8');
     const manifest = JSON.parse(raw);
     const oldId = manifest.id as string | undefined;
+    let modified = false;
     if (oldId && MANIFEST_ID_FIXES[oldId]) {
       const newId = MANIFEST_ID_FIXES[oldId];
       manifest.id = newId;
-      writeFileSync(fsPath(manifestPath), JSON.stringify(manifest, null, 2) + '\n', 'utf-8');
+      modified = true;
       logger.info(`[plugin] Fixed manifest ID: ${oldId} → ${newId}`);
+    }
+
+    // OpenClaw 2026.7.1 treats configured channel plugins without a static
+    // channelConfigs descriptor as stale/missing and invokes its npm repair
+    // flow. The WeCom package has no descriptor upstream, so provide a
+    // permissive schema that preserves ClawX's existing channel config fields.
+    if (manifest.id === 'wecom' && !manifest.channelConfigs?.wecom) {
+      manifest.channelConfigs = {
+        ...(manifest.channelConfigs ?? {}),
+        wecom: {
+          schema: {
+            type: 'object',
+            additionalProperties: true,
+          },
+        },
+      };
+      modified = true;
+      logger.info('[plugin] Added WeCom channelConfigs compatibility descriptor');
+    }
+
+    if (modified) {
+      writeFileSync(fsPath(manifestPath), JSON.stringify(manifest, null, 2) + '\n', 'utf-8');
     }
   } catch {
     // manifest may not exist yet — ignore
   }
 
-  // 2. Fix package.json fields that Gateway uses as "entry hints"
+  // 2. Keep package.json package-manager metadata valid
   const pkgPath = join(targetDir, 'package.json');
   try {
     const raw = readFileSync(fsPath(pkgPath), 'utf-8');
     const pkg = JSON.parse(raw);
     let modified = false;
 
-    // Check if the package name contains a legacy ID that needs fixing
-    for (const [oldId, newId] of Object.entries(MANIFEST_ID_FIXES)) {
-      if (typeof pkg.name === 'string' && pkg.name.includes(oldId)) {
-        pkg.name = pkg.name.replace(oldId, newId);
-        modified = true;
-      }
-      const install = pkg.openclaw?.install;
-      if (install) {
-        if (typeof install.npmSpec === 'string' && install.npmSpec.includes(oldId)) {
-          install.npmSpec = install.npmSpec.replace(oldId, newId);
-          modified = true;
-        }
-        if (typeof install.localPath === 'string' && install.localPath.includes(oldId)) {
-          install.localPath = install.localPath.replace(oldId, newId);
-          modified = true;
-        }
-      }
+    // Keep the real upstream npm package name/spec even though ClawX patches
+    // the effective plugin id. Rewriting these to the non-existent
+    // `@wecom/wecom` package makes OpenClaw's repair planner fail before the
+    // Gateway starts. Restore metadata previously rewritten by older ClawX
+    // compatibility code.
+    if (pkg.name === '@wecom/wecom') {
+      pkg.name = '@wecom/wecom-openclaw-plugin';
+      modified = true;
+    }
+    const install = pkg.openclaw?.install;
+    if (install?.npmSpec === '@wecom/wecom') {
+      install.npmSpec = '@wecom/wecom-openclaw-plugin';
+      modified = true;
     }
 
     if (modified) {
       writeFileSync(fsPath(pkgPath), JSON.stringify(pkg, null, 2) + '\n', 'utf-8');
-      logger.info(`[plugin] Fixed package.json entry hints in ${targetDir}`);
+      logger.info(`[plugin] Restored package.json npm metadata in ${targetDir}`);
     }
   } catch {
     // ignore
@@ -239,28 +265,57 @@ const PLUGIN_NPM_NAMES: Record<string, string> = {
   'openclaw-weixin': '@tencent-weixin/openclaw-weixin',
 };
 
-const OPENCLAW_CONFIG_PATH = join(homedir(), '.openclaw', 'openclaw.json');
-
 /**
- * Official @openclaw/* channel plugins that ClawX mirrors into
- * ~/.openclaw/extensions/. OpenClaw 2026.6+ requires matching
- * plugins.installs metadata so trustedOfficialInstall is true and
- * runtime APIs such as openKeyedStore are available.
+ * Channel plugins whose ClawX-managed mirrors need synchronized install
+ * metadata. OpenClaw 2026.6+ reads these records from SQLite for trust checks;
+ * OpenClaw 2026.7.1 also uses them to decide whether startup migrations should
+ * update an installed plugin.
  */
-const TRUSTED_OFFICIAL_EXTENSION_PLUGINS: Record<string, string> = {
-  whatsapp: '@openclaw/whatsapp',
-  discord: '@openclaw/discord',
-  qqbot: '@openclaw/qqbot',
+type TrustedOfficialExtensionPlugin = {
+  npmName: string;
+  /** Effective manifest/config id when it differs from the mirror directory. */
+  pluginId?: string;
+  /** Path records keep OpenClaw from replacing a ClawX-patched mirror. */
+  recordSource?: 'npm' | 'path';
+  legacyPluginIds?: string[];
 };
 
-type TrustedOfficialPluginInstallRecord = {
-  source: 'npm';
+const TRUSTED_OFFICIAL_EXTENSION_PLUGINS: Record<string, TrustedOfficialExtensionPlugin> = {
+  dingtalk: { npmName: '@soimy/dingtalk' },
+  // WeCom intentionally runs under ClawX's legacy-compatible `wecom` id even
+  // though the upstream package manifest still declares
+  // `wecom-openclaw-plugin`. Keep it path-owned so startup migration does not
+  // replace the compatibility-patched mirror with the raw npm package.
+  wecom: {
+    npmName: '@wecom/wecom-openclaw-plugin',
+    recordSource: 'path',
+    legacyPluginIds: ['wecom-openclaw-plugin'],
+  },
+  // @larksuite/openclaw-lark 2026.7.9 declares ./dist/index.js as `main`, but
+  // publishes its runtime entry as ./index.js. OpenClaw 2026.7.1 rejects old
+  // managed npm records during its post-core smoke check. Make ClawX's complete
+  // mirror the canonical path-owned payload instead.
+  'feishu-openclaw-plugin': {
+    npmName: '@larksuite/openclaw-lark',
+    pluginId: 'openclaw-lark',
+    recordSource: 'path',
+    legacyPluginIds: ['feishu-openclaw-plugin', 'feishu'],
+  },
+  whatsapp: { npmName: '@openclaw/whatsapp' },
+  discord: { npmName: '@openclaw/discord' },
+  qqbot: { npmName: '@openclaw/qqbot' },
+  'openclaw-weixin': { npmName: '@tencent-weixin/openclaw-weixin' },
+  'clawx-openai-image': {
+    npmName: 'clawx-openai-image-plugin',
+    recordSource: 'path',
+  },
+};
+
+type TrustedOfficialPluginInstallRecord = Record<string, unknown> & {
+  source: 'npm' | 'path';
   spec: string;
   installPath: string;
   version: string;
-  resolvedName: string;
-  resolvedVersion: string;
-  resolvedSpec: string;
   installedAt: string;
 };
 
@@ -277,24 +332,180 @@ function normalizePluginInstallPathForRecord(targetDir: string): string | null {
 function buildTrustedOfficialPluginInstallRecord(
   pluginDirName: string,
   targetDir: string,
-): TrustedOfficialPluginInstallRecord | null {
-  const npmName = TRUSTED_OFFICIAL_EXTENSION_PLUGINS[pluginDirName];
-  if (!npmName) return null;
+): { pluginId: string; record: TrustedOfficialPluginInstallRecord } | null {
+  const definition = TRUSTED_OFFICIAL_EXTENSION_PLUGINS[pluginDirName];
+  if (!definition) return null;
 
   const version = readPluginVersion(join(targetDir, 'package.json'));
   const installPath = normalizePluginInstallPathForRecord(targetDir);
   if (!version || !installPath) return null;
 
+  const pluginId = definition.pluginId ?? pluginDirName;
+  const installedAt = new Date().toISOString();
+  if (definition.recordSource === 'path') {
+    return {
+      pluginId,
+      record: {
+        source: 'path',
+        spec: targetDir,
+        sourcePath: targetDir,
+        installPath,
+        version,
+        installedAt,
+      },
+    };
+  }
+
   return {
-    source: 'npm',
-    spec: npmName,
-    installPath,
-    version,
-    resolvedName: npmName,
-    resolvedVersion: version,
-    resolvedSpec: `${npmName}@${version}`,
-    installedAt: new Date().toISOString(),
+    pluginId,
+    record: {
+      source: 'npm',
+      spec: definition.npmName,
+      installPath,
+      version,
+      resolvedName: definition.npmName,
+      resolvedVersion: version,
+      resolvedSpec: `${definition.npmName}@${version}`,
+      installedAt,
+    },
   };
+}
+
+function pluginInstallRecordIds(pluginDirName: string): string[] {
+  const definition = TRUSTED_OFFICIAL_EXTENSION_PLUGINS[pluginDirName];
+  return [...new Set([
+    pluginDirName,
+    definition?.pluginId,
+    ...(definition?.legacyPluginIds ?? []),
+  ].filter((value): value is string => Boolean(value)))];
+}
+
+async function removeLegacyPluginInstallMetadataFromConfig(pluginIds: string[]): Promise<boolean> {
+  const removedIds = new Set<string>();
+  const changed = await mutateOpenClawConfig((config) => {
+    removedIds.clear();
+    const plugins = config.plugins;
+    if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) return;
+    const pluginsRecord = plugins as Record<string, unknown>;
+    const installs = pluginsRecord.installs;
+    if (!installs || typeof installs !== 'object' || Array.isArray(installs)) return;
+
+    const installsRecord = installs as Record<string, unknown>;
+    for (const pluginId of pluginIds) {
+      if (!Object.hasOwn(installsRecord, pluginId)) continue;
+      delete installsRecord[pluginId];
+      removedIds.add(pluginId);
+    }
+    if (removedIds.size > 0 && Object.keys(installsRecord).length === 0) {
+      delete pluginsRecord.installs;
+    }
+  });
+  if (removedIds.size > 0) {
+    logger.info(`[plugin] Removed legacy config install metadata for: ${[...removedIds].join(', ')}`);
+  }
+  return changed;
+}
+
+function canonicalComparablePath(filePath: string): string {
+  let resolved: string;
+  try {
+    resolved = realpathSync(fsPath(filePath));
+  } catch {
+    resolved = path.resolve(filePath);
+  }
+  const withoutLongPathPrefix = resolved.replace(/^\\\\\?\\UNC\\/i, '\\\\').replace(/^\\\\\?\\/i, '');
+  return process.platform === 'win32' ? withoutLongPathPrefix.toLowerCase() : withoutLongPathPrefix;
+}
+
+/**
+ * Materialized mirrors live outside the bundled OpenClaw package tree, so
+ * Node's normal package lookup cannot resolve their declared `openclaw` peer.
+ * OpenClaw 2026.7.1 also audits this exact link before reporting Gateway ready.
+ */
+export function repairPluginOpenClawPeerLink(
+  targetDir: string,
+  openclawDir = getOpenClawResolvedDir(),
+): boolean {
+  let packageJson: Record<string, unknown>;
+  try {
+    packageJson = JSON.parse(readFileSync(fsPath(join(targetDir, 'package.json')), 'utf-8')) as Record<string, unknown>;
+  } catch {
+    return false;
+  }
+
+  const peerDependencies = packageJson.peerDependencies;
+  if (
+    !peerDependencies
+    || typeof peerDependencies !== 'object'
+    || Array.isArray(peerDependencies)
+    || typeof (peerDependencies as Record<string, unknown>).openclaw !== 'string'
+  ) {
+    return true;
+  }
+
+  if (!existsSync(fsPath(join(openclawDir, 'package.json')))) {
+    logger.warn(`[plugin] Cannot link OpenClaw peer for ${targetDir}: runtime package missing at ${openclawDir}`);
+    return false;
+  }
+
+  const nodeModulesDir = join(targetDir, 'node_modules');
+  const linkPath = join(nodeModulesDir, 'openclaw');
+  try {
+    mkdirSync(fsPath(nodeModulesDir), { recursive: true });
+    const nodeModulesStat = lstatSync(fsPath(nodeModulesDir));
+    if (!nodeModulesStat.isDirectory() || nodeModulesStat.isSymbolicLink()) {
+      logger.warn(`[plugin] Cannot link OpenClaw peer because ${nodeModulesDir} is not a real directory`);
+      return false;
+    }
+
+    try {
+      if (canonicalComparablePath(linkPath) === canonicalComparablePath(openclawDir)) {
+        return true;
+      }
+    } catch {
+      // Fall through to lstat/creation for a missing or broken link.
+    }
+
+    let existing: ReturnType<typeof lstatSync> | null = null;
+    try {
+      existing = lstatSync(fsPath(linkPath));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    if (existing) {
+      if (existing.isSymbolicLink()) {
+        unlinkSync(fsPath(linkPath));
+      } else if (existing.isDirectory()) {
+        let existingPackageName: unknown;
+        try {
+          existingPackageName = JSON.parse(
+            readFileSync(fsPath(join(linkPath, 'package.json')), 'utf-8'),
+          ).name;
+        } catch {
+          existingPackageName = null;
+        }
+        if (existingPackageName !== 'openclaw') {
+          logger.warn(`[plugin] Cannot replace non-OpenClaw peer directory at ${linkPath}`);
+          return false;
+        }
+        safeRmSync(fsPath(linkPath));
+      } else {
+        logger.warn(`[plugin] Cannot replace non-directory OpenClaw peer at ${linkPath}`);
+        return false;
+      }
+    }
+
+    symlinkSync(openclawDir, fsPath(linkPath), 'junction');
+    if (canonicalComparablePath(linkPath) !== canonicalComparablePath(openclawDir)) {
+      logger.warn(`[plugin] OpenClaw peer link audit failed after creating ${linkPath}`);
+      return false;
+    }
+    logger.info(`[plugin] Linked OpenClaw peer: ${linkPath} → ${openclawDir}`);
+    return true;
+  } catch (error) {
+    logger.warn(`[plugin] Failed to link OpenClaw peer for ${targetDir}:`, error);
+    return false;
+  }
 }
 
 function persistTrustedOfficialPluginInstallRecordsToSqlite(
@@ -303,32 +514,16 @@ function persistTrustedOfficialPluginInstallRecordsToSqlite(
   return upsertPluginInstallRecordsIntoSqlite(records);
 }
 
-function trustedInstallRecordMatches(
-  existing: unknown,
-  expected: TrustedOfficialPluginInstallRecord,
-): boolean {
-  if (!existing || typeof existing !== 'object' || Array.isArray(existing)) {
-    return false;
-  }
-  const record = existing as Record<string, unknown>;
-  return record.source === expected.source
-    && record.spec === expected.spec
-    && record.installPath === expected.installPath
-    && record.version === expected.version
-    && record.resolvedName === expected.resolvedName
-    && record.resolvedVersion === expected.resolvedVersion
-    && record.resolvedSpec === expected.resolvedSpec;
-}
-
 /**
- * Write or refresh plugins.installs.<id> for a ClawX-mirrored official plugin.
- * Also persists the record into openclaw.sqlite for OpenClaw 2026.6+ trust checks.
+ * Persist a ClawX-mirrored plugin install record in OpenClaw's canonical SQLite
+ * index. OpenClaw 2026.7.1 treats config-level plugins.installs as legacy
+ * migration input, so remove that transient copy instead of recreating it.
  * Safe to call repeatedly; no-ops when metadata is already current.
  */
-export function syncTrustedOfficialPluginInstallRecord(
+export async function syncTrustedOfficialPluginInstallRecord(
   pluginDirName: string,
   targetDir: string,
-): boolean {
+): Promise<boolean> {
   const expected = buildTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
   if (!expected) return false;
 
@@ -336,58 +531,60 @@ export function syncTrustedOfficialPluginInstallRecord(
     return false;
   }
 
+  // Repair this even when install metadata already matches. A copied plugin's
+  // node_modules intentionally excludes host peers, and OpenClaw's migration
+  // smoke check runs before the Gateway can supply any runtime fallback.
+  repairPluginOpenClawPeerLink(targetDir);
+
+  const recordIds = pluginInstallRecordIds(pluginDirName);
   let jsonChanged = false;
   try {
     ensureOpenClawStateDirExists();
-    if (!existsSync(fsPath(OPENCLAW_CONFIG_PATH))) {
-      return false;
-    }
-
-    const raw = readFileSync(fsPath(OPENCLAW_CONFIG_PATH), 'utf-8');
-    const config = JSON.parse(raw) as Record<string, unknown>;
-    let plugins = config.plugins;
-    if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) {
-      plugins = { enabled: true, installs: {} };
-      config.plugins = plugins;
-    }
-
-    const pluginsRecord = plugins as Record<string, unknown>;
-    const installs = pluginsRecord.installs;
-    const installsRecord = installs && typeof installs === 'object' && !Array.isArray(installs)
-      ? installs as Record<string, unknown>
-      : {};
-
-    const existing = installsRecord[pluginDirName];
-    if (!trustedInstallRecordMatches(existing, expected)) {
-      installsRecord[pluginDirName] = expected;
-      pluginsRecord.installs = installsRecord;
-      writeFileSync(
-        fsPath(OPENCLAW_CONFIG_PATH),
-        `${JSON.stringify(config, null, 2)}\n`,
-        'utf-8',
-      );
-      logger.info(`[plugin] Synced trusted install metadata for ${pluginDirName}`);
-      jsonChanged = true;
-    }
+    jsonChanged = await removeLegacyPluginInstallMetadataFromConfig(recordIds);
   } catch (error) {
-    logger.warn(`[plugin] Failed to sync trusted install metadata for ${pluginDirName}:`, error);
-    return false;
+    // Keep the canonical SQLite repair available even if legacy config cleanup
+    // cannot be completed in this pass.
+    logger.warn(`[plugin] Failed to remove legacy install metadata for ${pluginDirName}:`, error);
   }
 
+  // Remove aliases left by older ClawX/OpenClaw ownership conventions, but do
+  // not delete the canonical id first: upsert can replace npm/path ownership
+  // atomically without creating a missing-record window.
+  const staleRecordIds = recordIds.filter((pluginId) => pluginId !== expected.pluginId);
+  const removedLegacyRecord = removePluginInstallRecordsFromSqlite(staleRecordIds);
   const sqliteChanged = persistTrustedOfficialPluginInstallRecordsToSqlite({
-    [pluginDirName]: expected,
+    [expected.pluginId]: expected.record,
   });
+  return jsonChanged || removedLegacyRecord || sqliteChanged;
+}
+
+/**
+ * Remove metadata for a ClawX mirror that is no longer configured. This must
+ * run even when its extension directory is already missing: stale records are
+ * themselves enough to fail OpenClaw's post-core payload smoke check.
+ */
+export async function removeTrustedOfficialPluginInstallRecord(pluginDirName: string): Promise<boolean> {
+  const recordIds = pluginInstallRecordIds(pluginDirName);
+  if (recordIds.length === 0) return false;
+
+  let jsonChanged = false;
+  try {
+    jsonChanged = await removeLegacyPluginInstallMetadataFromConfig(recordIds);
+  } catch (error) {
+    logger.warn(`[plugin] Failed to remove stale config install metadata for ${pluginDirName}:`, error);
+  }
+  const sqliteChanged = removePluginInstallRecordsFromSqlite(recordIds);
   return jsonChanged || sqliteChanged;
 }
 
-/** Repair trusted install metadata for all mirrored official plugins on disk. */
-export function repairTrustedOfficialPluginInstallRecords(): void {
+/** Repair managed install metadata and host peer links for all mirrors on disk. */
+export async function repairTrustedOfficialPluginInstallRecords(): Promise<void> {
   for (const pluginDirName of Object.keys(TRUSTED_OFFICIAL_EXTENSION_PLUGINS)) {
     const targetDir = join(homedir(), '.openclaw', 'extensions', pluginDirName);
     if (!existsSync(fsPath(join(targetDir, 'openclaw.plugin.json')))) {
       continue;
     }
-    syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
+    await syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
   }
 }
 
@@ -464,7 +661,7 @@ export function copyPluginFromNodeModules(npmPkgPath: string, targetDir: string,
   }
 
   // 1. Copy plugin package itself
-  rmSync(fsPath(targetDir), { recursive: true, force: true });
+  safeRmSync(fsPath(targetDir));
   mkdirSync(fsPath(targetDir), { recursive: true });
   cpSyncSafe(realPath, targetDir);
 
@@ -526,11 +723,11 @@ export function copyPluginFromNodeModules(npmPkgPath: string, targetDir: string,
 
 // ── Core install / upgrade logic ─────────────────────────────────────────────
 
-export function ensurePluginInstalled(
+export async function ensurePluginInstalled(
   pluginDirName: string,
   candidateSources: string[],
   pluginLabel: string,
-): { installed: boolean; warning?: string } {
+): Promise<{ installed: boolean; warning?: string }> {
   const targetDir = join(homedir(), '.openclaw', 'extensions', pluginDirName);
   const targetManifest = join(targetDir, 'openclaw.plugin.json');
   const targetPkgJson = join(targetDir, 'package.json');
@@ -540,13 +737,13 @@ export function ensurePluginInstalled(
   // If already installed, check whether an upgrade is available
   if (existsSync(fsPath(targetManifest))) {
     if (!sourceDir) {
-      syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
+      await syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
       return { installed: true }; // no bundled source to compare, keep existing
     }
     const installedVersion = readPluginVersion(targetPkgJson);
     const sourceVersion = readPluginVersion(join(sourceDir, 'package.json'));
     if (!sourceVersion || !installedVersion || sourceVersion === installedVersion) {
-      syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
+      await syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
       return { installed: true }; // same version or unable to compare
     }
     // Version differs — fall through to overwrite install
@@ -564,13 +761,13 @@ export function ensurePluginInstalled(
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         mkdirSync(fsPath(extensionsRoot), { recursive: true });
-        rmSync(fsPath(targetDir), { recursive: true, force: true });
+        safeRmSync(fsPath(targetDir));
         cpSyncSafe(sourceDir, targetDir);
         if (!existsSync(fsPath(join(targetDir, 'openclaw.plugin.json')))) {
           return { installed: false, warning: `Failed to install ${pluginLabel} plugin mirror (manifest missing).` };
         }
         fixupPluginManifest(targetDir);
-        syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
+        await syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
         logger.info(`Installed ${pluginLabel} plugin from bundled mirror: ${sourceDir}`);
         return { installed: true };
       } catch (error) {
@@ -578,7 +775,7 @@ export function ensurePluginInstalled(
         attempts.push({ attempt, ...diagnostic });
         if (attempt < maxAttempts) {
           try {
-            rmSync(fsPath(targetDir), { recursive: true, force: true });
+            safeRmSync(fsPath(targetDir));
           } catch {
             // Ignore cleanup failures before retry.
           }
@@ -619,7 +816,7 @@ export function ensurePluginInstalled(
             copyPluginFromNodeModules(npmPkgPath, targetDir, npmName);
             fixupPluginManifest(targetDir);
             if (existsSync(fsPath(join(targetDir, 'openclaw.plugin.json')))) {
-              syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
+              await syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
               return { installed: true };
             }
           } catch (err) {
@@ -637,7 +834,7 @@ export function ensurePluginInstalled(
             );
           }
         } else if (existsSync(fsPath(targetManifest))) {
-          syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
+          await syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
           return { installed: true }; // same version, already installed
         }
       }
@@ -673,15 +870,15 @@ export function buildCandidateSources(pluginDirName: string): string[] {
 
 // ── Per-channel plugin helpers ───────────────────────────────────────────────
 
-export function ensureDingTalkPluginInstalled(): { installed: boolean; warning?: string } {
+export function ensureDingTalkPluginInstalled(): Promise<{ installed: boolean; warning?: string }> {
   return ensurePluginInstalled('dingtalk', buildCandidateSources('dingtalk'), 'DingTalk');
 }
 
-export function ensureWeComPluginInstalled(): { installed: boolean; warning?: string } {
+export function ensureWeComPluginInstalled(): Promise<{ installed: boolean; warning?: string }> {
   return ensurePluginInstalled('wecom', buildCandidateSources('wecom'), 'WeCom');
 }
 
-export function ensureFeishuPluginInstalled(): { installed: boolean; warning?: string } {
+export function ensureFeishuPluginInstalled(): Promise<{ installed: boolean; warning?: string }> {
   return ensurePluginInstalled(
     'feishu-openclaw-plugin',
     buildCandidateSources('feishu-openclaw-plugin'),
@@ -691,23 +888,23 @@ export function ensureFeishuPluginInstalled(): { installed: boolean; warning?: s
 
 
 
-export function ensureWeChatPluginInstalled(): { installed: boolean; warning?: string } {
+export function ensureWeChatPluginInstalled(): Promise<{ installed: boolean; warning?: string }> {
   return ensurePluginInstalled('openclaw-weixin', buildCandidateSources('openclaw-weixin'), 'WeChat');
 }
 
-export function ensureDiscordPluginInstalled(): { installed: boolean; warning?: string } {
+export function ensureDiscordPluginInstalled(): Promise<{ installed: boolean; warning?: string }> {
   return ensurePluginInstalled('discord', buildCandidateSources('discord'), 'Discord');
 }
 
-export function ensureQQBotPluginInstalled(): { installed: boolean; warning?: string } {
+export function ensureQQBotPluginInstalled(): Promise<{ installed: boolean; warning?: string }> {
   return ensurePluginInstalled('qqbot', buildCandidateSources('qqbot'), 'QQBot');
 }
 
-export function ensureWhatsAppPluginInstalled(): { installed: boolean; warning?: string } {
+export function ensureWhatsAppPluginInstalled(): Promise<{ installed: boolean; warning?: string }> {
   return ensurePluginInstalled('whatsapp', buildCandidateSources('whatsapp'), 'WhatsApp');
 }
 
-export function ensureClawXOpenAiImagePluginInstalled(): { installed: boolean; warning?: string } {
+export function ensureClawXOpenAiImagePluginInstalled(): Promise<{ installed: boolean; warning?: string }> {
   return ensurePluginInstalled(
     'clawx-openai-image',
     buildCandidateSources('clawx-openai-image'),
@@ -740,7 +937,7 @@ const ALL_BUNDLED_PLUGINS = [
 export async function ensureAllBundledPluginsInstalled(): Promise<void> {
   for (const { fn, label } of ALL_BUNDLED_PLUGINS) {
     try {
-      const result = fn();
+      const result = await fn();
       if (result.warning) {
         logger.warn(`[plugin] ${label}: ${result.warning}`);
       }
@@ -748,5 +945,5 @@ export async function ensureAllBundledPluginsInstalled(): Promise<void> {
       logger.warn(`[plugin] Failed to install/upgrade ${label} plugin:`, error);
     }
   }
-  repairTrustedOfficialPluginInstallRecords();
+  await repairTrustedOfficialPluginInstallRecords();
 }

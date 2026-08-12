@@ -32,8 +32,16 @@ const loggerMock = vi.hoisted(() => ({
   error: vi.fn(),
 }));
 
+const storeMock = vi.hoisted(() => ({
+  getSetting: vi.fn(),
+}));
+
 vi.mock('@electron/utils/logger', () => ({
   logger: loggerMock,
+}));
+
+vi.mock('@electron/utils/store', () => ({
+  getSetting: storeMock.getSetting,
 }));
 
 vi.mock('@agentclientprotocol/sdk', () => ({
@@ -143,6 +151,7 @@ describe('AcpChatService', () => {
     vi.clearAllMocks();
     acpSdkMock.state.connectionForSpawn = undefined;
     childProcessMock.state.child = undefined;
+    storeMock.getSetting.mockResolvedValue('clawx-test-gateway-token');
   });
 
   it('forks the embedded OpenClaw entry for ACP instead of spawning a public CLI wrapper', async () => {
@@ -166,6 +175,26 @@ describe('AcpChatService', () => {
           OPENCLAW_NO_RESPAWN: '1',
           OPENCLAW_EMBEDDED_IN: 'ClawX',
           OPENCLAW_EXEC_SHELL_SNAPSHOT: '0',
+        }),
+      }),
+    );
+  });
+
+  it('passes the authoritative ClawX Gateway token to the ACP child environment', async () => {
+    const { service } = await createSpawnedService();
+
+    await expect(service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' })).resolves.toEqual({
+      success: true,
+      generation: 1,
+    });
+
+    expect(storeMock.getSetting).toHaveBeenCalledWith('gatewayToken');
+    expect(childProcessMock.fork).toHaveBeenCalledWith(
+      expect.stringContaining('openclaw.mjs'),
+      ['acp'],
+      expect.objectContaining({
+        env: expect.objectContaining({
+          OPENCLAW_GATEWAY_TOKEN: 'clawx-test-gateway-token',
         }),
       }),
     );
@@ -239,8 +268,28 @@ describe('AcpChatService', () => {
     expect(connection.prompt).toHaveBeenCalledWith({
       sessionId: 'acp-session-1',
       prompt: [{ type: 'text', text: 'hello' }],
-      messageId: 'msg-1',
-      _meta: { sessionKey: 'agent:pi:session-123', prefixCwd: true },
+      _meta: { sessionKey: 'agent:pi:session-123', prefixCwd: true, messageId: 'msg-1' },
+    });
+  });
+
+  it.each([
+    '/status',
+    '  /compact',
+  ])('disables the ACP cwd prefix for %s', async (message) => {
+    const { service, connection } = await createService();
+
+    await service.loadSession({ sessionKey: 'agent:pi:session-123', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true });
+    await expect(service.sendPrompt({
+      sessionKey: 'agent:pi:session-123',
+      cwd: '/repo',
+      message,
+      messageId: 'msg-command',
+    })).resolves.toEqual({ success: true, generation: 1 });
+
+    expect(connection.prompt).toHaveBeenCalledWith({
+      sessionId: 'acp-session-1',
+      prompt: [{ type: 'text', text: message.trim() }],
+      _meta: { sessionKey: 'agent:pi:session-123', prefixCwd: false, messageId: 'msg-command' },
     });
   });
 
@@ -285,7 +334,9 @@ describe('AcpChatService', () => {
         sessionUpdate: 'agent_message_chunk',
         messageId: 'msg-1',
         content: { type: 'text', text: 'hello' },
+        futureExtensionField: { retained: true },
       },
+      _meta: { futureTopLevelMetadata: 'retained' },
     } as never);
     await service.client.sessionUpdate({
       sessionId: 'agent:other:s2',
@@ -306,7 +357,9 @@ describe('AcpChatService', () => {
           sessionUpdate: 'agent_message_chunk',
           messageId: 'msg-1',
           content: { type: 'text', text: 'hello' },
+          futureExtensionField: { retained: true },
         },
+        _meta: { futureTopLevelMetadata: 'retained' },
       },
     });
   });
@@ -1139,7 +1192,6 @@ describe('AcpChatService', () => {
 
       expect(connection.prompt).toHaveBeenCalledWith({
         sessionId: 'agent:pi:s1',
-        messageId: 'msg-user-1',
         prompt: [
           { type: 'text', text: 'Inspect attachments' },
           {
@@ -1157,7 +1209,7 @@ describe('AcpChatService', () => {
             _meta: { clawx: { stagingId: 'staged-notes' } },
           },
         ],
-        _meta: { sessionKey: 'agent:pi:s1', prefixCwd: true },
+        _meta: { sessionKey: 'agent:pi:s1', prefixCwd: true, messageId: 'msg-user-1' },
       });
     } finally {
       rmSync(imagePath, { force: true });

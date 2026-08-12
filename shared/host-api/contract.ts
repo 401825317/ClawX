@@ -135,7 +135,6 @@ export type SettingsSetPayload = { key: SettingsKey; value: SettingsValue };
 export type SettingsSetManyPayload = { patch: Partial<SettingsSnapshot> };
 export type SettingsResetResult = HostSuccess & { settings: SettingsSnapshot };
 
-export type GatewayControlUiPayload = { view?: 'dreams' };
 export type GatewayControlUiResult = HostSuccess & {
   url?: string;
   token?: string;
@@ -244,6 +243,8 @@ export type ChannelSaveConfigPayload = ChannelTypePayload & {
 };
 export type ChannelSaveConfigResult = HostSuccess & {
   noChange?: boolean;
+  /** Configuration is committed; a guarded Gateway restart is continuing asynchronously. */
+  activationPending?: boolean;
   warning?: string;
 };
 export type ChannelConfiguredResult = HostSuccess & { channels?: Array<string | JsonRecord> };
@@ -388,6 +389,7 @@ export type ProviderDefaultAccountResult = { accountId: string | null };
 export type ProviderValidationOptions = {
   baseUrl?: string;
   apiProtocol?: string;
+  modelId?: string;
 };
 export type ProviderValidationPayload = {
   accountId?: string;
@@ -476,6 +478,7 @@ export type ResolveAttachmentResult =
         | {
             kind: 'local';
             scope: 'workspace' | 'openclaw-media' | 'staging';
+            entryKind: 'file' | 'directory';
             ref: AttachmentFileRef;
           }
         | { kind: 'remote'; ref: AttachmentRemoteRef; url: string };
@@ -716,18 +719,6 @@ export type SessionSummariesResult = HostSuccess & {
 export type SessionDeletePayload = { id: string };
 export type SessionRenamePayload = { id: string; title: string };
 
-export type ChatMediaItem = { filePath: string; mimeType?: string; fileName?: string };
-export type ChatSendWithMediaPayload = {
-  sessionKey: string;
-  message?: string;
-  deliver?: boolean;
-  idempotencyKey: string;
-  media?: ChatMediaItem[];
-};
-export type ChatSendWithMediaResult = HostSuccess & {
-  result?: { runId?: string };
-};
-
 export type CronUpdatePayload = { id: string; input: CronJobUpdateInput };
 export type CronIdPayload = { id: string };
 export type CronTogglePayload = CronIdPayload & { enabled: boolean };
@@ -832,9 +823,7 @@ export type HostApiContract = {
   };
   webBrowser: {
     navigate: (payload: WebBrowserNavigatePayload) => void;
-    clearCookies: () => void;
-    clearSiteData: () => void;
-    openExternal: () => void;
+    openExternal: (payload: WebBrowserNavigatePayload) => void;
   };
   dialog: {
     open: (payload: DialogOpenPayload) => DialogOpenResult;
@@ -873,7 +862,7 @@ export type HostApiContract = {
     stop: () => HostSuccess;
     restart: () => HostSuccess;
     health: (payload?: GatewayHealthPayload) => GatewayHealth;
-    controlUi: (payload?: GatewayControlUiPayload) => GatewayControlUiResult;
+    controlUi: () => GatewayControlUiResult;
     rpc: (payload: GatewayRpcPayload) => unknown;
   };
   logs: {
@@ -988,7 +977,6 @@ export type HostApiContract = {
     turnTimings: (payload: SessionTurnTimingsPayload) => SessionTurnTimingsResult;
   };
   chat: {
-    sendWithMedia: (payload: ChatSendWithMediaPayload) => ChatSendWithMediaResult;
     loadAcpSession: (payload: AcpChatLoadPayload) => AcpChatOperationResult;
     sendAcpPrompt: (payload: AcpChatPromptPayload) => AcpChatOperationResult;
     cancelAcpSession: (payload: AcpChatCancelPayload) => AcpChatOperationResult;

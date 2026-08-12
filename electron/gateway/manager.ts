@@ -24,7 +24,9 @@ import {
   type GatewayLifecycleState,
   getReconnectScheduleDecision,
   getReconnectSkipReason,
+  isOpenClawFatalConfigExitCode,
 } from './process-policy';
+import { removeOpenClaw2026_7_1UpgradeSnapshot } from '../utils/openclaw-upgrade-snapshot';
 import {
   clearPendingGatewayRequests,
   rejectPendingGatewayRequest,
@@ -49,11 +51,6 @@ import { launchGatewayProcess } from './process-launcher';
 import { GatewayRestartController } from './restart-controller';
 import { GatewayRestartGovernor } from './restart-governor';
 import {
-  DEFAULT_GATEWAY_RELOAD_POLICY,
-  loadGatewayReloadPolicy,
-  type GatewayReloadPolicy,
-} from './reload-policy';
-import {
   classifyGatewayStderrMessage,
   GATEWAY_STARTUP_SLOW_STAGE_MS,
   GATEWAY_STARTUP_SLOW_TOTAL_MS,
@@ -61,6 +58,11 @@ import {
   recordGatewayStartupStderrLine,
 } from './startup-stderr';
 import { runGatewayStartupSequence } from './startup-orchestrator';
+import {
+  hasFatalRuntimeFailureSignal,
+  hasInvalidConfigFailureSignal,
+  hasStartupMigrationLockSignal,
+} from './startup-recovery';
 import {
   GatewayCapabilityMonitor,
   type GatewayCapabilityName,
@@ -188,21 +190,15 @@ export class GatewayManager extends EventEmitter {
   private readonly lifecycleController = new GatewayLifecycleController();
   private readonly restartController = new GatewayRestartController();
   private readonly restartGovernor = new GatewayRestartGovernor();
-  private reloadDebounceTimer: NodeJS.Timeout | null = null;
-  private initialReadyHeartbeatRecoveryTimer: NodeJS.Timeout | null = null;
-  private reloadPolicy: GatewayReloadPolicy = { ...DEFAULT_GATEWAY_RELOAD_POLICY };
-  private reloadPolicyLoadedAt = 0;
-  private reloadPolicyRefreshPromise: Promise<void> | null = null;
+  private upgradeSnapshotCleanupAttempted = false;
   private externalShutdownSupported: boolean | null = null;
   private reconnectAttemptsTotal = 0;
   private reconnectSuccessTotal = 0;
-  private static readonly RELOAD_POLICY_REFRESH_MS = 15_000;
   private static readonly HEARTBEAT_INTERVAL_MS = 60_000;
   private static readonly HEARTBEAT_TIMEOUT_MS = 30_000;
-  private static readonly HEARTBEAT_MAX_MISSES = 4;
+  private static readonly HEARTBEAT_MAX_MISSES = 10;
   public static readonly RESTART_COOLDOWN_MS = 5_000;
   private static readonly GATEWAY_READY_FALLBACK_PROBE_DELAYS_MS = [1_500, 3_000, 5_000, 8_000, 12_000, 30_000] as const;
-  private static readonly INITIAL_READY_HEARTBEAT_RECOVERY_GRACE_MS = 5 * 60_000;
   private lastRestartAt = 0;
   /** Set by scheduleReconnect() before calling start() to signal auto-reconnect. */
   private isAutoReconnectStart = false;
@@ -246,11 +242,11 @@ export class GatewayManager extends EventEmitter {
 
     this.on('gateway:ready', () => {
       this.resetGatewayReadyFallback();
-      this.clearInitialReadyHeartbeatRecoveryTimer();
       if (this.status.state === 'running' && !this.status.gatewayReady) {
         logger.info('Gateway subsystems ready (event received)');
         this.setStatus({ gatewayReady: true });
       }
+      void this.cleanupOpenClawUpgradeSnapshot();
     });
     this.on('gateway:health', (payload) => {
       this.capabilityMonitor.recordOpenClawHealth(payload);
@@ -334,8 +330,6 @@ export class GatewayManager extends EventEmitter {
     logger.info(`Gateway start requested (port=${this.status.port})`);
     this.lastSpawnSummary = null;
     this.shouldReconnect = true;
-    await this.refreshReloadPolicy(true);
-
     // Lazily load device identity (async file I/O + key generation).
     // Must happen before connect() which uses the identity for the handshake.
     await this.initDeviceIdentity();
@@ -462,7 +456,17 @@ export class GatewayManager extends EventEmitter {
         error
       );
       this.setStatus({ state: 'error', error: String(error) });
-      if (this.shouldReconnect) {
+      const fatalStartupFailure = isOpenClawFatalConfigExitCode(this.processExitCode)
+        || hasFatalRuntimeFailureSignal(error, this.recentStartupStderrLines)
+        || hasStartupMigrationLockSignal(error, this.recentStartupStderrLines)
+        || hasInvalidConfigFailureSignal(error, this.recentStartupStderrLines);
+      if (fatalStartupFailure) {
+        // OpenClaw 2026.7.1 uses EX_CONFIG for fatal configuration failures.
+        // Runtime and SQLite compatibility failures are likewise not repaired
+        // by restarting the same binary, so leave recovery to a manual start.
+        this.shouldReconnect = false;
+        logger.error('Gateway startup failed fatally; automatic reconnect disabled');
+      } else if (this.shouldReconnect) {
         logger.warn('Gateway start failed; scheduling auto-reconnect recovery');
         this.scheduleReconnect();
       }
@@ -669,138 +673,6 @@ export class GatewayManager extends EventEmitter {
   }
 
   /**
-   * Ask the Gateway process to reload config in-place when possible.
-   * Falls back to restart on unsupported platforms or signaling failures.
-   */
-  async reload(): Promise<void> {
-    await this.refreshReloadPolicy();
-
-    if (this.reloadPolicy.mode === 'off' || this.reloadPolicy.mode === 'restart') {
-      logger.info(
-        `[gateway-refresh] mode=reload result=policy_forced_restart policy=${this.reloadPolicy.mode}`,
-      );
-      await this.restart();
-      return;
-    }
-
-    if (this.restartController.isRestartDeferred({
-      state: this.status.state,
-      startLock: this.startLock,
-    })) {
-      this.restartController.markDeferredRestart('reload', {
-        state: this.status.state,
-        startLock: this.startLock,
-      });
-      return;
-    }
-
-    const pidBefore = this.process?.pid;
-    logger.info(`[gateway-refresh] mode=reload requested pid=${pidBefore ?? 'n/a'} state=${this.status.state}`);
-
-    if (!this.process?.pid || this.status.state !== 'running') {
-      logger.warn('[gateway-refresh] mode=reload result=fallback_restart cause=not_running');
-      logger.warn('Gateway reload requested while not running; falling back to restart');
-      await this.restart();
-      return;
-    }
-
-    const connectedForMs = this.status.connectedAt
-      ? Date.now() - this.status.connectedAt
-      : Number.POSITIVE_INFINITY;
-
-    // Avoid signaling a process that just came up; it will already read latest config.
-    if (connectedForMs < 8000) {
-      logger.info(
-        `[gateway-refresh] mode=reload result=skipped_recent_connect connectedForMs=${connectedForMs} pid=${this.process.pid}`,
-      );
-      logger.info(`Gateway connected ${connectedForMs}ms ago, skipping reload signal`);
-      return;
-    }
-
-    if (process.platform === 'win32') {
-      // Windows does not support SIGUSR1 for in-process reload.
-      // Fall back to a full restart.  The connectedForMs < 8000 guard above
-      // already skips unnecessary restarts for recently-started processes.
-      logger.warn('[gateway-refresh] mode=reload result=fallback_restart cause=windows');
-      await this.restart();
-      return;
-    }
-
-    try {
-      process.kill(this.process.pid, 'SIGUSR1');
-      logger.info(`Sent SIGUSR1 to Gateway for config reload (pid=${this.process.pid})`);
-      // Some gateway builds do not handle SIGUSR1 as an in-process reload.
-      // If process state doesn't recover quickly, fall back to restart.
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      if (this.status.state !== 'running' || !this.process?.pid) {
-        logger.warn('[gateway-refresh] mode=reload result=fallback_restart cause=post_signal_unhealthy');
-        logger.warn('Gateway did not stay running after reload signal, falling back to restart');
-        await this.restart();
-      } else {
-        const pidAfter = this.process.pid;
-        logger.info(
-          `[gateway-refresh] mode=reload result=applied_in_place pidBefore=${pidBefore} pidAfter=${pidAfter}`,
-        );
-      }
-    } catch (error) {
-      logger.warn('[gateway-refresh] mode=reload result=fallback_restart cause=signal_error');
-      logger.warn('Gateway reload signal failed, falling back to restart:', error);
-      await this.restart();
-    }
-  }
-
-  /**
-   * Debounced reload — coalesces multiple rapid config-change events into one
-   * in-process reload when possible.
-   */
-  debouncedReload(delayMs?: number): void {
-    void this.refreshReloadPolicy();
-    const effectiveDelay = delayMs ?? this.reloadPolicy.debounceMs;
-    if (this.reloadPolicy.mode === 'off' || this.reloadPolicy.mode === 'restart') {
-      logger.debug(
-        `Gateway reload policy=${this.reloadPolicy.mode}; routing debouncedReload to debouncedRestart (${effectiveDelay}ms)`,
-      );
-      this.debouncedRestart(effectiveDelay);
-      return;
-    }
-
-    if (this.reloadDebounceTimer) {
-      clearTimeout(this.reloadDebounceTimer);
-    }
-    logger.debug(`Gateway reload debounced (will fire in ${effectiveDelay}ms)`);
-    this.reloadDebounceTimer = setTimeout(() => {
-      this.reloadDebounceTimer = null;
-      void this.reload().catch((err) => {
-        logger.warn('Debounced Gateway reload failed:', err);
-      });
-    }, effectiveDelay);
-  }
-
-  private async refreshReloadPolicy(force = false): Promise<void> {
-    const now = Date.now();
-    if (!force && now - this.reloadPolicyLoadedAt < GatewayManager.RELOAD_POLICY_REFRESH_MS) {
-      return;
-    }
-
-    if (this.reloadPolicyRefreshPromise) {
-      await this.reloadPolicyRefreshPromise;
-      return;
-    }
-
-    this.reloadPolicyRefreshPromise = (async () => {
-      const nextPolicy = await loadGatewayReloadPolicy();
-      this.reloadPolicy = nextPolicy;
-      this.reloadPolicyLoadedAt = Date.now();
-    })();
-
-    try {
-      await this.reloadPolicyRefreshPromise;
-    } finally {
-      this.reloadPolicyRefreshPromise = null;
-    }
-  }
-
-  /**
    * Clear all active timers
    */
   private clearAllTimers(): void {
@@ -810,12 +682,7 @@ export class GatewayManager extends EventEmitter {
     }
     this.connectionMonitor.clear();
     this.restartController.clearDebounceTimer();
-    if (this.reloadDebounceTimer) {
-      clearTimeout(this.reloadDebounceTimer);
-      this.reloadDebounceTimer = null;
-    }
     this.resetGatewayReadyFallback();
-    this.clearInitialReadyHeartbeatRecoveryTimer();
   }
 
   private clearGatewayReadyFallbackTimer(): void {
@@ -1022,7 +889,6 @@ export class GatewayManager extends EventEmitter {
   }
 
   private recordGatewayAlive(): void {
-    this.clearInitialReadyHeartbeatRecoveryTimer();
     this.diagnostics.lastAliveAt = Date.now();
     this.diagnostics.consecutiveHeartbeatMisses = 0;
   }
@@ -1121,16 +987,23 @@ export class GatewayManager extends EventEmitter {
           this.setStatus({ state: 'stopped' });
         }
 
-        // Always attempt reconnect from process exit.  scheduleReconnect()
-        // internally checks shouldReconnect and reconnect-timer guards, so
-        // calling it unconditionally is safe — intentional stop() calls set
-        // shouldReconnect=false which makes scheduleReconnect() no-op.
-        //
-        // On Windows, the WS close handler intentionally skips reconnect
-        // (to avoid racing with this exit handler).  However, WS close
-        // fires *before* process exit and sets state='stopped', which
-        // previously caused this handler to also skip reconnect — leaving
-        // the gateway permanently dead with no recovery path.
+        const orchestratedStartupFailure = isOpenClawFatalConfigExitCode(code)
+          || hasFatalRuntimeFailureSignal(undefined, this.recentStartupStderrLines)
+          || hasStartupMigrationLockSignal(undefined, this.recentStartupStderrLines)
+          || hasInvalidConfigFailureSignal(undefined, this.recentStartupStderrLines);
+        if (orchestratedStartupFailure) {
+          // During startup the orchestrator may still perform its one bounded
+          // doctor repair. Do not race it with an independent reconnect timer.
+          // If orchestration cannot recover, start() disables reconnect in its
+          // catch path so migration/config failures cannot create an outer loop.
+          if (this.status.state !== 'starting') this.shouldReconnect = false;
+          logger.error(`Gateway process reported a non-retriable startup condition (code=${String(code)}); reconnect not scheduled`);
+          return;
+        }
+
+        // Always attempt reconnect from non-fatal process exits.
+        // scheduleReconnect() internally checks shouldReconnect and timer
+        // guards, so intentional stop() remains a no-op.
         this.scheduleReconnect();
       },
       onError: () => {
@@ -1262,7 +1135,7 @@ export class GatewayManager extends EventEmitter {
   }
 
   /**
-   * Start ping interval to keep connection alive
+   * Observe Gateway control-plane responsiveness and recover after a sustained outage.
    */
   private startPing(): void {
     this.connectionMonitor.startPing({
@@ -1286,16 +1159,7 @@ export class GatewayManager extends EventEmitter {
           logger.warn('Gateway heartbeat recovery skipped (lifecycle is not in auto-recoverable running state)');
           return;
         }
-        const initialReadyRecoveryDelayMs = this.getInitialReadyHeartbeatRecoveryDelayMs();
-        if (initialReadyRecoveryDelayMs > 0) {
-          logger.warn(
-            `Gateway heartbeat recovery deferred while waiting for initial gateway.ready ` +
-            `(retryAfterMs=${initialReadyRecoveryDelayMs})`,
-          );
-          this.scheduleInitialReadyHeartbeatRecovery(initialReadyRecoveryDelayMs);
-          return;
-        }
-        logger.warn('Gateway heartbeat recovery: restarting unresponsive gateway process');
+        logger.warn('Gateway heartbeat recovery: restarting persistently unresponsive gateway process');
         void this.restart().catch((error) => {
           logger.warn('Gateway heartbeat recovery failed:', error);
         });
@@ -1303,34 +1167,18 @@ export class GatewayManager extends EventEmitter {
     });
   }
 
-  private getInitialReadyHeartbeatRecoveryDelayMs(now = Date.now()): number {
-    if (this.status.gatewayReady || !this.status.connectedAt) return 0;
-    const connectedForMs = Math.max(0, now - this.status.connectedAt);
-    return Math.max(0, GatewayManager.INITIAL_READY_HEARTBEAT_RECOVERY_GRACE_MS - connectedForMs);
-  }
+  private async cleanupOpenClawUpgradeSnapshot(): Promise<void> {
+    if (this.upgradeSnapshotCleanupAttempted) return;
+    this.upgradeSnapshotCleanupAttempted = true;
 
-  private scheduleInitialReadyHeartbeatRecovery(delayMs: number): void {
-    if (this.initialReadyHeartbeatRecoveryTimer) return;
-    this.initialReadyHeartbeatRecoveryTimer = setTimeout(() => {
-      this.initialReadyHeartbeatRecoveryTimer = null;
-      if (
-        !this.shouldReconnect
-        || this.status.state !== 'running'
-        || this.status.gatewayReady
-      ) {
-        return;
+    try {
+      const result = await removeOpenClaw2026_7_1UpgradeSnapshot();
+      if (result.status === 'removed') {
+        logger.info(`[upgrade] Removed OpenClaw 2026.7.1 pre-migration snapshot: ${result.snapshotDir}`);
       }
-      logger.warn('Gateway heartbeat recovery: initial gateway.ready grace expired, restarting unresponsive gateway process');
-      void this.restart().catch((error) => {
-        logger.warn('Gateway heartbeat recovery failed:', error);
-      });
-    }, delayMs);
-  }
-
-  private clearInitialReadyHeartbeatRecoveryTimer(): void {
-    if (!this.initialReadyHeartbeatRecoveryTimer) return;
-    clearTimeout(this.initialReadyHeartbeatRecoveryTimer);
-    this.initialReadyHeartbeatRecoveryTimer = null;
+    } catch (error) {
+      logger.warn('[upgrade] Failed to remove OpenClaw 2026.7.1 pre-migration snapshot:', error);
+    }
   }
 
   /**

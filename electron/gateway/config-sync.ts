@@ -1,6 +1,6 @@
 import { app } from 'electron';
 import path from 'path';
-import { existsSync, readFileSync, mkdirSync, readdirSync, rmSync, symlinkSync } from 'fs';
+import { existsSync, readFileSync, mkdirSync, readdirSync, symlinkSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 
@@ -33,8 +33,10 @@ import { buildProxyEnv, resolveProxySettings } from '../utils/proxy';
 import { syncProxyConfigToOpenClaw } from '../utils/openclaw-proxy';
 import { logger } from '../utils/logger';
 import { prependPathEntry } from '../utils/env-path';
-import { copyPluginFromNodeModules, fixupPluginManifest, cpSyncSafe, buildCandidateSources, repairTrustedOfficialPluginInstallRecords, syncTrustedOfficialPluginInstallRecord, resolvePluginNpmPackagePath } from '../utils/plugin-install';
+import { copyPluginFromNodeModules, fixupPluginManifest, cpSyncSafe, buildCandidateSources, repairTrustedOfficialPluginInstallRecords, removeTrustedOfficialPluginInstallRecord, resolvePluginNpmPackagePath } from '../utils/plugin-install';
+import { safeRmSync } from '../utils/safe-fs';
 import { CLAWX_OPENAI_IMAGE_PROVIDER_KEY } from '../utils/openclaw-image-relay-constants';
+import { ensureOpenClaw2026_7_1UpgradeSnapshot } from '../utils/openclaw-upgrade-snapshot';
 import { stripSystemdSupervisorEnv } from './config-sync-env';
 import { cleanupAgentsSymlinkedSkills, cleanupStalePluginRuntimeDeps } from './skills-symlink-cleanup';
 import {
@@ -119,7 +121,7 @@ function cleanupStaleBuiltInExtensions(): void {
     if (existsSync(fsPath(extDir))) {
       logger.info(`[plugin] Removing stale built-in extension copy: ${ext}`);
       try {
-        rmSync(fsPath(extDir), { recursive: true, force: true });
+        safeRmSync(fsPath(extDir));
       } catch (err) {
         logger.warn(`[plugin] Failed to remove stale extension ${ext}:`, err);
       }
@@ -191,10 +193,9 @@ function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): boolean 
         logger.info(`[plugin] ${isInstalled ? 'Auto-upgrading' : 'Installing'} ${channelType} plugin${isInstalled ? `: ${installedVersion} → ${sourceVersion}` : `: ${sourceVersion}`} (bundled)`);
         try {
           mkdirSync(fsPath(join(homedir(), '.openclaw', 'extensions')), { recursive: true });
-          rmSync(fsPath(targetDir), { recursive: true, force: true });
+          safeRmSync(fsPath(targetDir));
           cpSyncSafe(bundledDir, targetDir);
           fixupPluginManifest(targetDir);
-          syncTrustedOfficialPluginInstallRecord(dirName, targetDir);
         } catch (err) {
           logger.warn(`[plugin] Failed to ${isInstalled ? 'auto-upgrade' : 'install'} ${channelType} plugin:`, err);
           succeeded = false;
@@ -203,7 +204,6 @@ function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): boolean 
         // Same version already installed — still patch manifest ID in case it was
         // never corrected (e.g. installed before MANIFEST_ID_FIXES included this plugin).
         fixupPluginManifest(targetDir);
-        syncTrustedOfficialPluginInstallRecord(dirName, targetDir);
       }
       continue;
     }
@@ -217,7 +217,6 @@ function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): boolean 
         // Skip only if installed AND same version — but still patch manifest ID.
         if (isInstalled && installedVersion && sourceVersion === installedVersion) {
           fixupPluginManifest(targetDir);
-          syncTrustedOfficialPluginInstallRecord(dirName, targetDir);
           continue;
         }
 
@@ -227,7 +226,6 @@ function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): boolean 
           mkdirSync(fsPath(join(homedir(), '.openclaw', 'extensions')), { recursive: true });
           copyPluginFromNodeModules(npmPkgPath, targetDir, npmName);
           fixupPluginManifest(targetDir);
-          syncTrustedOfficialPluginInstallRecord(dirName, targetDir);
         } catch (err) {
           logger.warn(`[plugin] Failed to ${isInstalled ? 'auto-upgrade' : 'install'} ${channelType} plugin from node_modules:`, err);
           succeeded = false;
@@ -257,13 +255,25 @@ function cleanupUnconfiguredChannelPlugins(configuredChannels: string[]): boolea
 
     logger.info(`[plugin] Removing unconfigured channel plugin: ${channelType} (${dirName})`);
     try {
-      rmSync(fsPath(targetDir), { recursive: true, force: true });
+      safeRmSync(fsPath(targetDir));
     } catch (err) {
       logger.warn(`[plugin] Failed to remove unconfigured channel plugin ${channelType}:`, err);
       succeeded = false;
     }
   }
   return succeeded;
+}
+
+async function cleanupUnconfiguredChannelPluginInstallRecords(configuredChannels: string[]): Promise<void> {
+  const configuredSet = new Set(configuredChannels);
+  for (const [channelType, { dirName }] of Object.entries(CHANNEL_PLUGIN_MAP)) {
+    if (configuredSet.has(channelType)) continue;
+    // Metadata can outlive the directory (for example after an interrupted
+    // 2026.6.10 → 2026.7.1 migration). OpenClaw validates tracked records even
+    // when the channel is no longer configured, so reconcile this on every
+    // launch rather than hiding it behind the directory-maintenance cache.
+    await removeTrustedOfficialPluginInstallRecord(dirName);
+  }
 }
 
 function resolveImageGenerationPrimary(config: unknown): string | null {
@@ -526,7 +536,10 @@ export async function syncGatewayConfigBeforeLaunch(
     // Always refresh trusted install metadata through ClawX — this must not
     // be skipped when plugin-maintenance is cache-hit, otherwise official
     // external plugins like WhatsApp fail openKeyedStore at runtime.
-    measureSync(timingsMs, 'trustedPluginInstallSyncMs', repairTrustedOfficialPluginInstallRecords);
+    await measureAsync(timingsMs, 'trustedPluginInstallSyncMs', async () => {
+      await cleanupUnconfiguredChannelPluginInstallRecords(configuredChannels);
+      await repairTrustedOfficialPluginInstallRecords();
+    });
   } catch (err) {
     logger.warn('Failed to auto-upgrade plugins:', err);
   }
@@ -624,6 +637,19 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
   if (!isOpenClawPresent()) {
     throw new Error(`OpenClaw package not found at: ${openclawDir}`);
   }
+
+  await measureAsync(timingsMs, 'upgradeSnapshotMs', async () => {
+    try {
+      const snapshot = await ensureOpenClaw2026_7_1UpgradeSnapshot();
+      if (snapshot.status === 'created') {
+        logger.info(`[upgrade] Created OpenClaw 2026.7.1 pre-migration snapshot (${snapshot.files.length} files): ${snapshot.snapshotDir}`);
+      }
+    } catch (error) {
+      // OpenClaw also maintains migration-specific backups. Keep startup
+      // available if the additional ClawX safety snapshot cannot be written.
+      logger.warn('[upgrade] Failed to create OpenClaw 2026.7.1 pre-migration snapshot:', error);
+    }
+  });
 
   const appSettings = await measureAsync(timingsMs, 'settingsMs', getAllSettings);
   const prelaunchSummary = await measureAsync(timingsMs, 'prelaunchSyncMs', async () => (

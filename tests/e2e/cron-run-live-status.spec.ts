@@ -1,5 +1,12 @@
 import type { ElectronApplication } from '@playwright/test';
-import { closeElectronApp, expect, getStableWindow, installIpcMocks, test } from './fixtures/electron';
+import {
+  closeElectronApp,
+  expect,
+  getRecordedHostInvocations,
+  getStableWindow,
+  installIpcMocks,
+  test,
+} from './fixtures/electron';
 
 const MAIN_SESSION_KEY = 'agent:main:main';
 const CRON_BASE_KEY = 'agent:main:cron:job-cron-live';
@@ -126,11 +133,9 @@ test.describe('ClawX cron run live status', () => {
       await expect(cronSidebarButton).toBeVisible({ timeout: 30_000 });
       await cronSidebarButton.click();
 
-      // Transcript replay now arrives through ACP; the legacy execution graph stays absent.
       await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible({ timeout: 30_000 });
       await emitAcpSessionUpdates(app, CRON_BASE_KEY, [cronTriggerUpdate], true);
       await expect(page.getByText(CRON_TRIGGER_TEXT)).toBeVisible({ timeout: 30_000 });
-      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
 
       await emitAcpSessionUpdates(app, CRON_BASE_KEY, [{
         sessionUpdate: 'tool_call',
@@ -143,7 +148,6 @@ test.describe('ClawX cron run live status', () => {
 
       await expect(page.getByTestId('acp-tool-call-card')).toBeVisible({ timeout: 30_000 });
       await expect(page.getByTestId('acp-tool-call-card')).toContainText('web_search');
-      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
 
       await emitAcpSessionUpdates(app, CRON_BASE_KEY, [{
         sessionUpdate: 'tool_call_update',
@@ -155,6 +159,78 @@ test.describe('ClawX cron run live status', () => {
       }]);
 
       await expect(page.getByText(CRON_TRIGGER_TEXT)).toBeVisible();
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('shows cron run summaries when ACP replay is empty', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const completeCronReply = `该喝水了！💧\n\n${'补充说明 '.repeat(500)}\n\n完整回复结尾`;
+
+    try {
+      const cronSession = {
+        key: CRON_BASE_KEY,
+        displayName: 'Cron: 喝水提醒',
+        label: 'Cron: 喝水提醒',
+        updatedAt: Date.now(),
+      };
+
+      await installIpcMocks(app, {
+        recordHostInvocations: true,
+        gatewayStatus: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
+        gatewayRpc: {
+          [stableStringify(['sessions.list', {}])]: {
+            success: true,
+            result: {
+              sessions: [
+                { key: MAIN_SESSION_KEY, displayName: 'main' },
+                cronSession,
+              ],
+            },
+          },
+        },
+        hostApi: {
+          ...acpLoadMocks(MAIN_SESSION_KEY),
+          ...acpLoadMocks(CRON_BASE_KEY),
+          [stableStringify(['cron', 'sessionHistory', { sessionKey: CRON_BASE_KEY, limit: 200 }])]: {
+            messages: [
+              { id: 'cron-prompt', role: 'user', content: '提醒我喝水', timestamp: Date.now() - 5000 },
+              { id: 'cron-result', role: 'assistant', content: completeCronReply, timestamp: Date.now() },
+            ],
+          },
+          [stableStringify(['/api/gateway/status', 'GET'])]: {
+            ok: true,
+            data: { status: 200, ok: true, json: { state: 'running', port: 18789, pid: 12345, gatewayReady: true } },
+          },
+          [stableStringify(['/api/agents', 'GET'])]: {
+            ok: true,
+            data: { status: 200, ok: true, json: { success: true, agents: [{ id: 'main', name: 'Main', workspace: DEFAULT_WORKSPACE, mainSessionKey: MAIN_SESSION_KEY }] } },
+          },
+        },
+      });
+
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
+      }
+
+      await expect(page.getByTestId('main-layout')).toBeVisible({ timeout: 30_000 });
+      const cronSidebarButton = page.getByTestId(`sidebar-session-${CRON_BASE_KEY}`);
+      await expect(cronSidebarButton).toBeVisible({ timeout: 30_000 });
+      await cronSidebarButton.click();
+
+      await expect.poll(async () => (await getRecordedHostInvocations(app)).some((call) => (
+        call.module === 'cron'
+        && call.action === 'sessionHistory'
+        && call.payload?.sessionKey === CRON_BASE_KEY
+      ))).toBe(true);
+      await expect(page.getByText('提醒我喝水')).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByText('该喝水了！💧')).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByText('完整回复结尾')).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByTestId('acp-chat-empty-state')).toHaveCount(0);
     } finally {
       await closeElectronApp(app);
     }
@@ -214,7 +290,6 @@ test.describe('ClawX cron run live status', () => {
       await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible({ timeout: 30_000 });
       await emitAcpSessionUpdates(app, CRON_BASE_KEY, [cronTriggerUpdate], true);
       await expect(page.getByText(CRON_TRIGGER_TEXT)).toBeVisible({ timeout: 30_000 });
-      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
 
       // Simulate joining a run already in progress: the first ACP update the
       // renderer sees is a tool card, and it still renders live in the current session.
@@ -229,7 +304,6 @@ test.describe('ClawX cron run live status', () => {
 
       await expect(page.getByTestId('acp-tool-call-card')).toBeVisible({ timeout: 30_000 });
       await expect(page.getByTestId('acp-tool-call-card')).toContainText('read');
-      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
 
       await emitAcpSessionUpdates(app, CRON_BASE_KEY, [{
         sessionUpdate: 'tool_call_update',

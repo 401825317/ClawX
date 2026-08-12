@@ -9,6 +9,7 @@ import {
   installIpcMocks,
   test,
 } from './fixtures/electron';
+import { expectVisibleToolCallCards } from './fixtures/acp-timeline';
 
 const MAIN_SESSION_KEY = 'agent:main:main';
 const OTHER_SESSION_KEY = 'agent:main:other';
@@ -156,10 +157,6 @@ async function installFileActivityMocks(app: ElectronApplication, options: {
           })),
         },
       },
-      [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
-        success: true,
-        result: { messages: [] },
-      },
     },
     hostApi,
     hostApiErrors: options.scopedReadError ? { [scopedReadKey]: options.scopedReadError } : undefined,
@@ -252,34 +249,35 @@ async function openChanges(page: Page) {
 }
 
 test.describe('ClawX chat file changes', () => {
-  test('opens HTML file activity in the Web Browser from Open with', async ({ launchElectronApp }) => {
+  test('opens HTML file activity in the Preview tab from its primary action', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
     try {
       await installFileActivityMocks(app, {
         liveByPrompt: {
           'Create HTML': writeSequence('write-html', 'site/demo.html', '<h1>Demo</h1>'),
         },
+        scopedRead: {
+          'site/demo.html': {
+            ok: true,
+            content: '<h1>Demo</h1>',
+            size: 13,
+            mimeType: 'text/html',
+            readOnly: true,
+          },
+        },
       });
       const page = await openChat(app);
       await sendPrompt(page, 'Create HTML');
 
-      const openWith = page.getByRole('button', { name: 'Open site/demo.html with' });
-      await expect(openWith).toBeVisible({ timeout: 30_000 });
-      await openWith.click();
-      const menu = page.getByTestId('acp-attachment-open-with-menu');
-      await expect(menu).toBeVisible();
-      const browserItem = page.getByTestId('acp-file-open-in-built-in-browser');
-      await expect(menu).toContainText('Open in built-in browser');
-      await expect(page.getByRole('menuitem').first()).toHaveAttribute(
-        'data-testid',
-        'acp-file-open-in-built-in-browser',
-      );
-      await browserItem.click();
+      const fileActivity = page.getByRole('button', { name: 'Created site/demo.html' });
+      await expect(fileActivity).toBeVisible({ timeout: 30_000 });
+      await fileActivity.click();
 
       const panel = page.getByTestId('artifact-panel');
       await expect(panel).toBeVisible();
-      await expect(panel.getByTestId('artifact-panel-tab-web-browser')).toHaveClass(/bg-foreground\/10/);
-      await expect(page.getByTestId('web-browser-host')).toHaveAttribute('aria-hidden', 'false');
+      await expect(panel.getByTestId('artifact-panel-tab-preview')).toHaveClass(/bg-foreground\/10/);
+      await expect(panel.getByTestId('artifact-panel-tab-web-browser')).toHaveCount(0);
+      await expect(page.getByTestId('html-preview-host')).toHaveAttribute('aria-hidden', 'false');
       await expect.poll(async () => (await getRecordedHostInvocations(app)).some((request) => (
         request.module === 'webBrowser'
         && request.action === 'navigate'
@@ -419,7 +417,7 @@ test.describe('ClawX chat file changes', () => {
       const page = await openChat(app);
       await sendPrompt(page, 'Run non-file activity');
 
-      await expect(page.getByTestId('acp-tool-call-card')).toHaveCount(2, { timeout: 30_000 });
+      await expectVisibleToolCallCards(page, 2);
       const failedWrite = page.getByTestId('acp-tool-call-card').filter({ hasText: 'Write: failed.ts' });
       const unsupportedRead = page.getByTestId('acp-tool-call-card').filter({ hasText: 'Read: unsupported.ts' });
       await expect(failedWrite).toContainText('Failed');

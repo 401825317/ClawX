@@ -2,7 +2,6 @@ import electronBinaryPath from 'electron';
 import { _electron as electron, expect, test as base, type ElectronApplication, type Page } from '@playwright/test';
 import { build as buildWithEsbuild } from 'esbuild';
 import { access, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -60,6 +59,7 @@ export type AttachmentHostFixture = {
   openClawMediaDir: string;
   outsideDir: string;
   createWorkspaceFile: (relativePath: string, data: string | Uint8Array) => Promise<string>;
+  createWorkspaceDirectory: (relativePath: string) => Promise<string>;
   createOpenClawMediaFile: (relativePath: string, data: string | Uint8Array) => Promise<string>;
   createOutsideFile: (relativePath: string, data: string | Uint8Array) => Promise<string>;
   registerStagedAttachment: (id: string, stagedPath: string, displayPath?: string) => Promise<void>;
@@ -138,28 +138,6 @@ function productionAttachmentBundle(): Promise<string> {
   return productionAttachmentBundlePromise;
 }
 
-async function allocatePort(): Promise<number> {
-  return await new Promise((resolvePort, reject) => {
-    const server = createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      if (!address || typeof address === 'string') {
-        server.close(() => reject(new Error('Failed to allocate an ephemeral port')));
-        return;
-      }
-      const { port } = address;
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolvePort(port);
-      });
-    });
-  });
-}
-
 async function getStableWindow(app: ElectronApplication): Promise<Page> {
   const deadline = Date.now() + 30_000;
   let page = await app.firstWindow();
@@ -173,9 +151,14 @@ async function getStableWindow(app: ElectronApplication): Promise<Page> {
         await currentWindow.waitForLoadState('domcontentloaded', { timeout: 2_000 });
         return currentWindow;
       } catch (error) {
-        if (!String(error).includes('has been closed')) {
+        const message = String(error);
+        if (!message.includes('has been closed') && !message.includes('Timeout')) {
           throw error;
         }
+        // The renderer can transiently navigate or replace its execution
+        // context while Electron is restoring the main window. Keep polling
+        // within the outer deadline instead of turning the 2s probe into the
+        // effective timeout for every E2E test.
       }
     }
 
@@ -248,7 +231,10 @@ async function launchClawXElectron(
     throw new Error('Electron E2E must not bypass application media permission prompts');
   }
   await seedE2eSettings(userDataDir);
-  const hostApiPort = await allocatePort();
+  const inheritedEnv = { ...process.env };
+  delete inheritedEnv.CLAWX_E2E_SKIP_SETUP;
+  delete inheritedEnv.CLAWX_REMOTE_DEBUGGING_PORT;
+  delete inheritedEnv.VITE_DEV_SERVER_URL;
   const electronEnv = process.platform === 'linux'
     ? {
       ELECTRON_DISABLE_SANDBOX: '1',
@@ -259,7 +245,7 @@ async function launchClawXElectron(
     executablePath: electronBinaryPath,
     args: ['--lang=en-US', ...(options.additionalArgs ?? []), electronEntry],
     env: {
-      ...process.env,
+      ...inheritedEnv,
       ...electronEnv,
       HOME: homeDir,
       USERPROFILE: homeDir,
@@ -271,8 +257,9 @@ async function launchClawXElectron(
       LANGUAGE: 'en',
       CLAWX_E2E: '1',
       CLAWX_USER_DATA_DIR: userDataDir,
+      OPENCLAW_STATE_DIR: join(homeDir, '.openclaw'),
+      OPENCLAW_CONFIG_PATH: join(homeDir, '.openclaw', 'openclaw.json'),
       ...(options.skipSetup ? { CLAWX_E2E_SKIP_SETUP: '1' } : {}),
-      CLAWX_PORT_CLAWX_HOST_API: String(hostApiPort),
     },
     timeout: 90_000,
   });
@@ -335,6 +322,91 @@ export async function completeSetup(page: Page): Promise<void> {
 export { closeElectronApp };
 export { getStableWindow };
 export { expect };
+
+export async function emitAcpSessionUpdates(
+  app: ElectronApplication,
+  input: {
+    sessionKey: string;
+    updates: Array<Record<string, unknown> & { sessionUpdate: string }>;
+    generation?: number;
+    historical?: boolean;
+    intervalMs?: number;
+  },
+): Promise<void> {
+  await app.evaluate(async ({ app: _app }, event) => {
+    const { BrowserWindow } = process.mainModule!.require('electron') as typeof import('electron');
+    for (const update of event.updates) {
+      for (const window of BrowserWindow.getAllWindows()) {
+        window.webContents.send('chat:acp-session-update', {
+          sessionKey: event.sessionKey,
+          generation: event.generation ?? 1,
+          ...(event.historical ? { historical: true } : {}),
+          notification: { sessionId: event.sessionKey, update },
+        });
+      }
+      if (event.intervalMs && event.intervalMs > 0) {
+        await new Promise((resolveWait) => setTimeout(resolveWait, event.intervalMs));
+      }
+    }
+  }, input);
+}
+
+export async function startMainCpuProfile(app: ElectronApplication): Promise<void> {
+  await app.evaluate(async () => {
+    const inspector = process.mainModule!.require('node:inspector') as typeof import('node:inspector');
+    const globals = globalThis as unknown as { __e2eMainCpuProfiler?: import('node:inspector').Session };
+    if (globals.__e2eMainCpuProfiler) throw new Error('Main CPU profiler is already running');
+
+    const session = new inspector.Session();
+    session.connect();
+    const post = (method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> => (
+      new Promise((resolvePost, rejectPost) => {
+        session.post(method, params ?? {}, (error, result) => {
+          if (error) rejectPost(error);
+          else resolvePost((result ?? {}) as Record<string, unknown>);
+        });
+      })
+    );
+
+    try {
+      await post('Profiler.enable');
+      await post('Profiler.setSamplingInterval', { interval: 1_000 });
+      await post('Profiler.start');
+      globals.__e2eMainCpuProfiler = session;
+    } catch (error) {
+      session.disconnect();
+      throw error;
+    }
+  });
+}
+
+export async function stopMainCpuProfile(app: ElectronApplication): Promise<Record<string, unknown>> {
+  return await app.evaluate(async () => {
+    const globals = globalThis as unknown as { __e2eMainCpuProfiler?: import('node:inspector').Session };
+    const session = globals.__e2eMainCpuProfiler;
+    if (!session) throw new Error('Main CPU profiler is not running');
+    delete globals.__e2eMainCpuProfiler;
+
+    const post = (method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> => (
+      new Promise((resolvePost, rejectPost) => {
+        session.post(method, params ?? {}, (error, result) => {
+          if (error) rejectPost(error);
+          else resolvePost((result ?? {}) as Record<string, unknown>);
+        });
+      })
+    );
+
+    try {
+      const result = await post('Profiler.stop');
+      await post('Profiler.disable');
+      const profile = result.profile;
+      if (!profile || typeof profile !== 'object') throw new Error('Main CPU profiler returned no profile');
+      return profile as Record<string, unknown>;
+    } finally {
+      session.disconnect();
+    }
+  });
+}
 
 export async function installIpcMocks(
   app: ElectronApplication,
@@ -652,7 +724,6 @@ export async function installAttachmentHostFixture(
     gatewayRpc: {
       [stableStringify(['sessions.list', {}])]: sessionsList,
       [stableStringify(['sessions.list', { includeDerivedTitles: true, includeLastMessage: true }])]: sessionsList,
-      [stableStringify(['chat.history', null])]: { success: true, result: { messages: [] } },
     },
     hostApi: {
       [stableStringify(['settings', 'getAll', null])]: {
@@ -948,6 +1019,11 @@ export async function installAttachmentHostFixture(
     openClawMediaDir,
     outsideDir,
     createWorkspaceFile: async (path, data) => await writeFixtureFile(workspaceDir, path, data),
+    createWorkspaceDirectory: async (path) => {
+      const directoryPath = join(workspaceDir, path);
+      await mkdir(directoryPath, { recursive: true });
+      return realpath(directoryPath);
+    },
     createOpenClawMediaFile: async (path, data) => await writeFixtureFile(openClawMediaDir, path, data),
     createOutsideFile: async (path, data) => await writeFixtureFile(outsideDir, path, data),
     registerStagedAttachment: async (id, stagedPath, displayPath) => {

@@ -25,8 +25,6 @@ import { resolveAgentIdFromChannel } from '../utils/agent-config';
 import { resolveAccountIdFromSessionHistory } from '../utils/session-util';
 import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { getProviderConfig } from '../utils/provider-registry';
-import { deviceOAuthManager } from '../utils/device-oauth';
-import { browserOAuthManager } from '../utils/browser-oauth';
 import { applyProxySettings } from './proxy';
 import { syncLaunchAtStartupSettingFromStore } from './launch-at-startup';
 import { getRecentTokenUsageHistory } from '../utils/token-usage';
@@ -42,7 +40,6 @@ import {
 } from '../services/providers/provider-runtime-sync';
 import { validateApiKeyWithProvider } from '../services/providers/provider-validation';
 import { appUpdater } from './updater';
-import { GatewayRpcBackpressure } from '../gateway/rpc-backpressure';
 import { HostApiRegistry, registerHostInvokeHandler } from './ipc/host-invoke';
 import { createAppApi } from '../services/app-api';
 import { createOpenClawApi } from '../services/openclaw-api';
@@ -77,8 +74,6 @@ import {
   type AppResponse,
 } from './ipc/request-helpers';
 import { createMenu } from './menu';
-
-const gatewayRpcBackpressure = new GatewayRpcBackpressure();
 
 /**
  * Register all IPC handlers
@@ -167,7 +162,7 @@ function registerTypedHostHandlers(
     updates: createUpdatesApi(appUpdater),
     uv: createUvApi(),
     settings: createSettingsApi(gatewayManager),
-    gateway: createGatewayApi(gatewayManager, gatewayRpcBackpressure),
+    gateway: createGatewayApi(gatewayManager),
     logs: createLogsApi(),
     channels: createChannelsApi({ gatewayManager, mainWindow }),
     agents: createAgentsApi({ gatewayManager }),
@@ -298,11 +293,7 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
                 }
               }
 
-              try {
-                await syncSavedProviderToRuntime(config, apiKey, gatewayManager);
-              } catch (err) {
-                console.warn('Failed to sync openclaw provider config:', err);
-              }
+              await syncSavedProviderToRuntime(config, apiKey, gatewayManager);
 
               data = { success: true };
             } catch (error) {
@@ -317,14 +308,10 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
 
             try {
               const existing = await providerService.getLegacyProvider(providerId);
-              await providerService.deleteLegacyProvider(providerId);
               if (existing?.type) {
-                try {
-                  await syncDeletedProviderToRuntime(existing, providerId, gatewayManager);
-                } catch (err) {
-                  console.warn('Failed to completely remove provider from OpenClaw:', err);
-                }
+                await syncDeletedProviderToRuntime(existing, providerId, gatewayManager);
               }
+              await providerService.deleteLegacyProvider(providerId);
               data = { success: true };
             } catch (error) {
               data = { success: false, error: String(error) };
@@ -345,11 +332,7 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
               const provider = await providerService.getLegacyProvider(providerId);
               const providerType = provider?.type || providerId;
               const ock = getOpenClawProviderKey(providerType, providerId);
-              try {
-                await saveProviderKeyToOpenClaw(ock, apiKey);
-              } catch (err) {
-                console.warn('Failed to save key to OpenClaw auth-profiles:', err);
-              }
+              await saveProviderKeyToOpenClaw(ock, apiKey);
               data = { success: true };
             } catch (error) {
               data = { success: false, error: String(error) };
@@ -395,11 +378,7 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
                 }
               }
 
-              try {
-                await syncUpdatedProviderToRuntime(nextConfig, apiKey, gatewayManager);
-              } catch (err) {
-                console.warn('Failed to sync openclaw config after provider update:', err);
-              }
+              await syncUpdatedProviderToRuntime(nextConfig, apiKey, gatewayManager);
 
               data = { success: true };
             } catch (error) {
@@ -429,12 +408,8 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
               const provider = await providerService.getLegacyProvider(providerId);
               const providerType = provider?.type || providerId;
               const ock = getOpenClawProviderKey(providerType, providerId);
-              try {
-                if (ock) {
-                  await removeProviderFromOpenClaw(ock);
-                }
-              } catch (err) {
-                console.warn('Failed to completely remove provider from OpenClaw:', err);
+              if (ock) {
+                await removeProviderFromOpenClaw(ock);
               }
               data = { success: true };
             } catch (error) {
@@ -451,11 +426,7 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
               await providerService.setDefaultLegacyProvider(providerId);
               const provider = await providerService.getLegacyProvider(providerId);
               if (provider) {
-                try {
-                  await syncDefaultProviderToRuntime(providerId, gatewayManager);
-                } catch (err) {
-                  console.warn('Failed to set OpenClaw default model:', err);
-                }
+                await syncDefaultProviderToRuntime(providerId, gatewayManager);
               }
 
               data = { success: true };
@@ -724,12 +695,7 @@ function registerGatewayHandlers(gatewayManager: GatewayManager): void {
   // Gateway RPC call
   ipcMain.handle('gateway:rpc', async (_, method: string, params?: unknown, timeoutMs?: number) => {
     try {
-      const result = await gatewayRpcBackpressure.run(
-        method,
-        params,
-        timeoutMs,
-        (rpcMethod, rpcParams, rpcTimeoutMs) => gatewayManager.rpc(rpcMethod, rpcParams, rpcTimeoutMs),
-      );
+      const result = await gatewayManager.rpc(method, params, timeoutMs);
       return { success: true, result };
     } catch (error) {
       logger.warn(`[gateway:rpc] ${method} failed (timeoutMs=${timeoutMs ?? 30000}): ${String(error)}`);
@@ -818,18 +784,6 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
     );
   };
 
-  // Listen for OAuth success to automatically restart the Gateway with new tokens/configs.
-  // Keep a longer debounce (8s) so provider config writes and OAuth token persistence
-  // can settle before applying the process-level refresh.
-  deviceOAuthManager.on('oauth:success', ({ provider, accountId }) => {
-    logger.info(`[IPC] Scheduling Gateway restart after ${provider} OAuth success for ${accountId}...`);
-    gatewayManager.debouncedRestart(8000);
-  });
-  browserOAuthManager.on('oauth:success', ({ provider, accountId }) => {
-    logger.info(`[IPC] Scheduling Gateway restart after ${provider} OAuth success for ${accountId}...`);
-    gatewayManager.debouncedRestart(8000);
-  });
-
   // Get all providers with key info
   ipcMain.handle('provider:list', async () => {
     logLegacyProviderChannel('provider:list');
@@ -856,20 +810,12 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
           await providerService.setLegacyProviderApiKey(config.id, trimmedKey);
 
           // Also write to OpenClaw auth-profiles.json so the gateway can use it
-          try {
-            await syncProviderApiKeyToRuntime(config.type, config.id, trimmedKey);
-          } catch (err) {
-            console.warn('Failed to save key to OpenClaw auth-profiles:', err);
-          }
+          await syncProviderApiKeyToRuntime(config.type, config.id, trimmedKey);
         }
       }
 
       // Sync the provider configuration to openclaw.json so Gateway knows about it
-      try {
-        await syncSavedProviderToRuntime(config, apiKey, gatewayManager);
-      } catch (err) {
-        console.warn('Failed to sync openclaw provider config:', err);
-      }
+      await syncSavedProviderToRuntime(config, apiKey, gatewayManager);
 
       return { success: true };
     } catch (error) {
@@ -882,16 +828,10 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
     logLegacyProviderChannel('provider:delete');
     try {
       const existing = await providerService.getLegacyProvider(providerId);
-      await providerService.deleteLegacyProvider(providerId);
-
-      // Best-effort cleanup in OpenClaw auth profiles & openclaw.json config
       if (existing?.type) {
-        try {
-          await syncDeletedProviderToRuntime(existing, providerId, gatewayManager);
-        } catch (err) {
-          console.warn('Failed to completely remove provider from OpenClaw:', err);
-        }
+        await syncDeletedProviderToRuntime(existing, providerId, gatewayManager);
       }
+      await providerService.deleteLegacyProvider(providerId);
 
       return { success: true };
     } catch (error) {
@@ -908,11 +848,7 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
       // Also write to OpenClaw auth-profiles.json
       const provider = await providerService.getLegacyProvider(providerId);
       const providerType = provider?.type || providerId;
-      try {
-        await syncProviderApiKeyToRuntime(providerType, providerId, apiKey);
-      } catch (err) {
-        console.warn('Failed to save key to OpenClaw auth-profiles:', err);
-      }
+      await syncProviderApiKeyToRuntime(providerType, providerId, apiKey);
 
       return { success: true };
     } catch (error) {
@@ -961,11 +897,7 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
         }
 
         // Sync the provider configuration to openclaw.json so Gateway knows about it
-        try {
-          await syncUpdatedProviderToRuntime(nextConfig, apiKey, gatewayManager);
-        } catch (err) {
-          console.warn('Failed to sync openclaw config after provider update:', err);
-        }
+        await syncUpdatedProviderToRuntime(nextConfig, apiKey, gatewayManager);
 
         return { success: true };
       } catch (error) {
@@ -996,11 +928,7 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
 
       // Keep OpenClaw auth-profiles.json in sync with local key storage
       const provider = await providerService.getLegacyProvider(providerId);
-      try {
-        await syncDeletedProviderApiKeyToRuntime(provider, providerId);
-      } catch (err) {
-        console.warn('Failed to completely remove provider from OpenClaw:', err);
-      }
+      await syncDeletedProviderApiKeyToRuntime(provider, providerId);
 
       return { success: true };
     } catch (error) {
@@ -1027,11 +955,7 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
       await providerService.setDefaultLegacyProvider(providerId);
 
       // Update OpenClaw config to use this provider's default model
-      try {
-        await syncDefaultProviderToRuntime(providerId, gatewayManager);
-      } catch (err) {
-        console.warn('Failed to set OpenClaw default model:', err);
-      }
+      await syncDefaultProviderToRuntime(providerId, gatewayManager);
 
       return { success: true };
     } catch (error) {

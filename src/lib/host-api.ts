@@ -7,7 +7,6 @@ import type {
   ChannelAccountsPayload,
   ChannelSaveConfigPayload,
   ChannelTargetsPayload,
-  ChatSendWithMediaPayload,
   ClawHubSearchPayload,
   CronSessionHistoryPayload,
   DialogMessagePayload,
@@ -65,7 +64,6 @@ export type {
   ChannelSaveConfigResult,
   ChannelTargetOption,
   ChannelTargetsResult,
-  ChatSendWithMediaResult,
   ClawHubInstalledSkill,
   ClawHubListResult,
   ClawHubSearchResult,
@@ -124,9 +122,9 @@ export const hostApi = {
   },
   webBrowser: {
     navigate: (url: string) => invokeHost('webBrowser', 'navigate', { url } satisfies WebBrowserNavigatePayload),
-    clearCookies: () => invokeHost('webBrowser', 'clearCookies'),
-    clearSiteData: () => invokeHost('webBrowser', 'clearSiteData'),
-    openExternal: () => invokeHost('webBrowser', 'openExternal'),
+    openExternal: (url: string) => (
+      invokeHost('webBrowser', 'openExternal', { url } satisfies WebBrowserNavigatePayload)
+    ),
   },
   dialog: {
     open: (input: DialogOpenPayload) => invokeHost('dialog', 'open', input),
@@ -169,7 +167,7 @@ export const hostApi = {
     stop: () => invokeHost('gateway', 'stop'),
     restart: () => invokeHost('gateway', 'restart'),
     health: (probe = false) => invokeHost('gateway', 'health', { probe }),
-    controlUi: (view?: 'dreams') => invokeHost('gateway', 'controlUi', { view }),
+    controlUi: () => invokeHost('gateway', 'controlUi'),
     rpc: <T = unknown>(method: string, params?: unknown, timeoutMs?: number) => (
       invokeHost('gateway', 'rpc', { method, params, timeoutMs }) as Promise<T>
     ),
@@ -365,7 +363,6 @@ export const hostApi = {
     ),
   },
   chat: {
-    sendWithMedia: (input: ChatSendWithMediaPayload) => invokeHost('chat', 'sendWithMedia', input),
     loadAcpSession: (input: AcpChatLoadPayload) => invokeHost('chat', 'loadAcpSession', input),
     sendAcpPrompt: (input: AcpChatPromptPayload) => invokeHost('chat', 'sendAcpPrompt', input),
     cancelAcpSession: (input: AcpChatCancelPayload) => invokeHost('chat', 'cancelAcpSession', input),

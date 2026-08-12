@@ -1,9 +1,8 @@
 /**
  * Tests for openclaw.json config sanitization before Gateway start.
  *
- * The sanitizeOpenClawConfig() function in openclaw-auth.ts relies on
- * Electron-specific helpers (readOpenClawJson / writeOpenClawJson) that
- * read from ~/.openclaw/openclaw.json.  To avoid mocking Electron + the
+ * The sanitizeOpenClawConfig() function in openclaw-auth.ts relies on the
+ * Main-owned config-delivery coordinator. To avoid mocking Electron + the
  * real HOME directory, this test uses a standalone version of the
  * sanitization logic that mirrors the production code exactly, operating
  * on a temp directory with real file I/O.
@@ -16,6 +15,16 @@ import { tmpdir } from 'os';
 
 let tempDir: string;
 let configPath: string;
+
+const CLAWX_DESKTOP_TOOL_DENY = [
+  'skill_workshop',
+  'web_search',
+  'gateway',
+  'nodes',
+  'create_goal',
+  'get_goal',
+  'update_goal',
+];
 
 async function writeConfig(data: unknown): Promise<void> {
   await writeFile(configPath, JSON.stringify(data, null, 2), 'utf-8');
@@ -50,7 +59,10 @@ function withClawXToolDefaults<T extends Record<string, unknown>>(config: T): T 
   tools.profile = 'full';
   tools.sessions = sessions;
   tools.exec = exec;
-  tools.deny = deny.includes('skill_workshop') ? deny : [...deny, 'skill_workshop'];
+  tools.deny = CLAWX_DESKTOP_TOOL_DENY.reduce<string[]>(
+    (result, entry) => result.includes(entry) ? result : [...result, entry],
+    deny,
+  );
 
   const gateway = (config.gateway && typeof config.gateway === 'object' && !Array.isArray(config.gateway))
     ? { ...(config.gateway as Record<string, unknown>) }
@@ -61,7 +73,10 @@ function withClawXToolDefaults<T extends Record<string, unknown>>(config: T): T 
   const gatewayDeny = Array.isArray(gatewayTools.deny)
     ? (gatewayTools.deny as unknown[]).filter((value): value is string => typeof value === 'string')
     : [];
-  gatewayTools.deny = gatewayDeny.includes('skill_workshop') ? gatewayDeny : [...gatewayDeny, 'skill_workshop'];
+  gatewayTools.deny = CLAWX_DESKTOP_TOOL_DENY.reduce<string[]>(
+    (result, entry) => result.includes(entry) ? result : [...result, entry],
+    gatewayDeny,
+  );
   gateway.tools = gatewayTools;
 
   const skills = (config.skills && typeof config.skills === 'object' && !Array.isArray(config.skills))
@@ -406,11 +421,16 @@ async function sanitizeConfig(
   const deny = Array.isArray(toolsConfig.deny)
     ? toolsConfig.deny.filter((value): value is string => typeof value === 'string')
     : [];
-  if (!deny.includes('skill_workshop')) {
-    toolsConfig.deny = [...deny, 'skill_workshop'];
-    toolsModified = true;
-  } else if (!Array.isArray(toolsConfig.deny) || toolsConfig.deny.length !== deny.length) {
-    toolsConfig.deny = deny;
+  const requiredDeny = CLAWX_DESKTOP_TOOL_DENY.reduce<string[]>(
+    (result, entry) => result.includes(entry) ? result : [...result, entry],
+    deny,
+  );
+  if (
+    !Array.isArray(toolsConfig.deny)
+    || toolsConfig.deny.length !== requiredDeny.length
+    || toolsConfig.deny.some((entry, index) => entry !== requiredDeny[index])
+  ) {
+    toolsConfig.deny = requiredDeny;
     toolsModified = true;
   }
 
@@ -452,8 +472,16 @@ async function sanitizeConfig(
   const gatewayDeny = Array.isArray(gatewayTools.deny)
     ? gatewayTools.deny.filter((value): value is string => typeof value === 'string')
     : [];
-  if (!gatewayDeny.includes('skill_workshop')) {
-    gatewayTools.deny = [...gatewayDeny, 'skill_workshop'];
+  const requiredGatewayDeny = CLAWX_DESKTOP_TOOL_DENY.reduce<string[]>(
+    (result, entry) => result.includes(entry) ? result : [...result, entry],
+    gatewayDeny,
+  );
+  if (
+    !Array.isArray(gatewayTools.deny)
+    || gatewayTools.deny.length !== requiredGatewayDeny.length
+    || gatewayTools.deny.some((entry, index) => entry !== requiredGatewayDeny[index])
+  ) {
+    gatewayTools.deny = requiredGatewayDeny;
     gateway.tools = gatewayTools;
     config.gateway = gateway;
     modified = true;

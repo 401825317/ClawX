@@ -10,7 +10,14 @@ import { hostEvents } from '@/lib/host-events';
 import { ChannelConfigModal } from '@/components/channels/ChannelConfigModal';
 import { isGatewayStopped } from '@/lib/gateway-status';
 import { cn } from '@/lib/utils';
-import { CHANNEL_ICONS, CHANNEL_NAMES, CHANNEL_META, getPrimaryChannels, type ChannelType } from '@/types/channel';
+import {
+  CHANNEL_ICONS,
+  CHANNEL_NAMES,
+  CHANNEL_META,
+  getPrimaryChannels,
+  isSupportedChannelType,
+  type ChannelType,
+} from '@/types/channel';
 import { usesPluginManagedQrAccounts } from '@/lib/channel-alias';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
@@ -131,7 +138,14 @@ export function Channels() {
   const displayedGatewayHealth = isStaleNotRunningHealthForRunningGateway(gatewayHealth, gatewayStatus.state)
     ? DEFAULT_GATEWAY_HEALTH
     : gatewayHealth;
-  const visibleChannelGroups = channelGroups;
+  const visibleChannelGroups = useMemo(
+    () => channelGroups.filter(
+      (group): group is ChannelGroupItem & { channelType: ChannelType } => (
+        isSupportedChannelType(group.channelType)
+      ),
+    ),
+    [channelGroups],
+  );
   const visibleAgents = agents;
   const hasStableValue = visibleChannelGroups.length > 0 || visibleAgents.length > 0;
   const isUsingStableValue = hasStableValue && (loading || Boolean(error));
@@ -326,14 +340,10 @@ export function Channels() {
   }, [visibleChannelGroups]);
 
   const configuredGroups = useMemo(() => {
-    const known = displayedChannelTypes
+    return displayedChannelTypes
       .map((type) => groupedByType[type])
-      .filter((group): group is ChannelGroupItem => Boolean(group));
-    const unknown = visibleChannelGroups.filter(
-      (group) => !displayedChannelTypes.includes(group.channelType as ChannelType),
-    );
-    return [...known, ...unknown];
-  }, [visibleChannelGroups, displayedChannelTypes, groupedByType]);
+      .filter((group): group is ChannelGroupItem & { channelType: ChannelType } => Boolean(group));
+  }, [displayedChannelTypes, groupedByType]);
 
   const unsupportedGroups = displayedChannelTypes.filter((type) => !configuredTypes.includes(type));
 
@@ -439,19 +449,23 @@ export function Channels() {
 
   const handleDelete = async () => {
     if (!deleteTarget) return;
+    const target = deleteTarget;
+
+    // Close the dialog and update the list before waiting for OpenClaw's
+    // coordinated config delivery. Main still owns the durable mutation; on
+    // failure, reload the file-backed view to restore the actual state.
+    setDeleteTarget(null);
+    setChannelGroups((prev) => removeDeletedTarget(prev, target));
+
     try {
-      await hostApi.channels.deleteConfig(deleteTarget.channelType, deleteTarget.accountId);
-      setChannelGroups((prev) => removeDeletedTarget(prev, deleteTarget));
-      toast.success(deleteTarget.accountId ? t('toast.accountDeleted') : t('toast.channelDeleted'));
-      // Channel reload is debounced in main process; pull again shortly to
-      // converge with runtime state without flashing deleted rows back in.
+      await hostApi.channels.deleteConfig(target.channelType, target.accountId);
+      toast.success(target.accountId ? t('toast.accountDeleted') : t('toast.channelDeleted'));
       window.setTimeout(() => {
         void fetchPageData();
       }, 1200);
     } catch (deleteError) {
       toast.error(t('toast.configFailed', { error: String(deleteError) }));
-    } finally {
-      setDeleteTarget(null);
+      void fetchPageData({ configOnly: true });
     }
   };
 
@@ -841,7 +855,10 @@ export function Channels() {
             setInitialConfigValuesForModal(undefined);
           }}
           onChannelSaved={async () => {
-            await fetchPageData({ probe: true });
+            // The host may still be restarting Gateway for plugin activation.
+            // Read the committed file-backed view immediately and let the
+            // existing convergence loop refresh runtime status asynchronously.
+            await fetchPageData({ configOnly: true });
             scheduleConvergenceRefresh();
             setShowConfigModal(false);
             setSelectedChannelType(null);

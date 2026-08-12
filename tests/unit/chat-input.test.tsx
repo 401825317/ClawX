@@ -119,7 +119,7 @@ function translate(key: string, vars?: Record<string, unknown>): string {
     case 'composer.gatewayStarting':
       return 'starting';
     case 'composer.gatewayStatus':
-      return `gateway ${String(vars?.state ?? '')} | port: ${String(vars?.port ?? '')} ${String(vars?.pid ?? '')}`.trim();
+      return `gateway ${String(vars?.state ?? '')}`;
     case 'composer.retryFailedAttachments':
       return 'Retry failed attachments';
     case 'composer.workspacePrefix':
@@ -347,7 +347,7 @@ describe('ChatInput agent targeting', () => {
     );
 
     const workspaceSelector = screen.getByTestId('chat-workspace-selector');
-    const gatewayStatus = screen.getByText(/gateway connected \| port: 18789/i);
+    const gatewayStatus = screen.getByText(/gateway connected/i);
 
     expect(workspaceSelector.compareDocumentPosition(gatewayStatus) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
@@ -693,7 +693,7 @@ describe('ChatInput agent targeting', () => {
     fireEvent.keyDown(searchInput, { key: 'Escape' });
 
     expect(screen.queryByPlaceholderText('Search skills')).not.toBeInTheDocument();
-    expect(await screen.findByText('gateway connected | port: 18789')).toBeInTheDocument();
+    expect(await screen.findByText('gateway connected')).toBeInTheDocument();
   });
 
   it('read-only workspace selector does not open the native picker', () => {
@@ -982,7 +982,7 @@ describe('ChatInput agent targeting', () => {
 
     renderChatInput();
 
-    expect(screen.getByText(/gateway starting \| port: 18789/i)).toBeInTheDocument();
+    expect(screen.getByText(/gateway starting/i)).toBeInTheDocument();
   });
 
   it('renders the skill trigger after the @ agent picker', () => {
@@ -1063,6 +1063,8 @@ describe('ChatInput agent targeting', () => {
     expect(screen.getByTestId('chat-composer-skill')).toHaveTextContent('Skill');
     expect(textbox).toHaveValue('Draft /create-skill  a new helper');
     expect(screen.getByTestId('chat-composer-skill-token')).toHaveTextContent('/create-skill');
+    expect(textbox.className).not.toContain('text-transparent');
+    expect(screen.getByTestId('chat-composer-highlight').className).toContain('text-transparent');
 
     fireEvent.click(screen.getByTitle('Send'));
 

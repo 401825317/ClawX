@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AcpToolCallCard } from '@/pages/Chat/AcpToolCallCard';
 import { AcpAttachmentPart } from '@/pages/Chat/AcpAttachmentPart';
-import { AcpTimeline } from '@/pages/Chat/AcpTimeline';
+import { AcpTimeline, streamingMessageSegmentIds } from '@/pages/Chat/AcpTimeline';
 import { AcpTurnFileActivity } from '@/pages/Chat/AcpTurnFileActivity';
 import type { AcpTimelineSnapshot, AttachmentRenderPart, ToolCallItem } from '@/lib/acp/timeline-types';
 import type { AcpFileActivityProjection } from '@/lib/acp/openclaw-file-activities';
@@ -16,6 +16,7 @@ const listWorkspaceOpenHandlersMock = vi.hoisted(() => vi.fn());
 const openWorkspaceWithMock = vi.hoisted(() => vi.fn());
 const revealWorkspaceFileMock = vi.hoisted(() => vi.fn());
 const thumbnailsMock = vi.hoisted(() => vi.fn());
+const openHtmlExternalMock = vi.hoisted(() => vi.fn());
 const toastErrorMock = vi.hoisted(() => vi.fn());
 const i18nLanguage = vi.hoisted(() => ({ value: 'en' }));
 
@@ -32,6 +33,9 @@ vi.mock('@/lib/host-api', () => ({
     },
     media: {
       thumbnails: thumbnailsMock,
+    },
+    webBrowser: {
+      openExternal: openHtmlExternalMock,
     },
   },
 }));
@@ -52,6 +56,9 @@ vi.mock('react-i18next', () => ({
         'acp.tool': 'Tool',
         'acp.expandTool': 'Expand tool result',
         'acp.collapseTool': 'Collapse tool result',
+        'acp.expandToolGroup': 'Expand tool calls',
+        'acp.collapseToolGroup': 'Collapse tool calls',
+        'acp.toolGroupSummary': '{{count}} tool calls',
         'acp.permission': 'Permission',
         'acp.plan': 'Plan',
         'acp.running': 'Running',
@@ -72,7 +79,8 @@ vi.mock('react-i18next', () => ({
         'acp.attachment.openFailed': 'Could not open attachment',
         'fileCard.openWith': 'Open with',
         'fileCard.openWithFile': 'Open {{name}} with',
-        'fileCard.openInBuiltInBrowser': 'Open in built-in browser',
+        'fileCard.openInBuiltInBrowser': 'Open in ClawX Preview',
+        'fileCard.openInSystemBrowser': 'Open in system browser',
         'fileCard.searchingApplications': 'Searching for applications',
         'fileCard.showInFinder': 'Show in Finder',
         'fileCard.showInExplorer': 'Show in File Explorer',
@@ -177,12 +185,12 @@ describe('ACP chat timeline components', () => {
     openWorkspaceWithMock.mockResolvedValue({ ok: true });
     revealWorkspaceFileMock.mockResolvedValue({ ok: true });
     thumbnailsMock.mockResolvedValue({});
+    openHtmlExternalMock.mockResolvedValue(undefined);
     useArtifactPanel.setState({
       open: false,
       tab: 'changes',
       focusedFile: null,
-      webBrowserNavigation: null,
-      webBrowserNavigationId: 0,
+      htmlPreviewAnchor: null,
     });
   });
 
@@ -207,6 +215,309 @@ describe('ACP chat timeline components', () => {
 
     expect(blockCode).not.toHaveClass('bg-black/5');
     expect(inlineCode).not.toHaveClass('bg-black/5');
+  });
+
+  it('renders user input as literal text instead of Markdown', () => {
+    const userText = '**bold** and `inlineCode()`\n# heading\n- list item';
+    const state = snapshot({
+      itemOrder: ['msg-u:0'],
+      itemsById: {
+        'msg-u:0': {
+          kind: 'message-segment',
+          id: 'msg-u:0',
+          role: 'user',
+          messageId: 'msg-u',
+          segmentIndex: 0,
+          parts: [{ kind: 'markdown', text: userText }],
+        },
+      },
+    });
+
+    render(<AcpTimeline snapshot={state} />);
+
+    const userMessage = screen.getByTestId('acp-user-message');
+    const paragraph = userMessage.querySelector('p');
+    expect(paragraph?.textContent).toBe(userText);
+    expect(paragraph).toHaveClass('whitespace-pre-wrap');
+    expect(userMessage.querySelector('strong')).not.toBeInTheDocument();
+    expect(userMessage.querySelector('code')).not.toBeInTheDocument();
+    expect(userMessage.querySelector('h1')).not.toBeInTheDocument();
+    expect(userMessage.querySelector('li')).not.toBeInTheDocument();
+  });
+
+  it('repairs only the active final assistant Markdown part and scopes animation markers to it', async () => {
+    const state = snapshot({
+      itemOrder: ['msg-a:0', 'thought:msg-a', 'msg-a:1'],
+      itemsById: {
+        'msg-a:0': {
+          kind: 'message-segment', id: 'msg-a:0', role: 'assistant', messageId: 'msg-a', segmentIndex: 0,
+          parts: [{ kind: 'markdown', text: 'Earlier **literal assistant' }],
+        },
+        'thought:msg-a': {
+          kind: 'thought', id: 'thought:msg-a', messageId: 'msg-a',
+          parts: [{ kind: 'markdown', text: 'Private *literal thought' }],
+        },
+        'msg-a:1': {
+          kind: 'message-segment', id: 'msg-a:1', role: 'assistant', messageId: 'msg-a', segmentIndex: 1,
+          parts: [
+            { kind: 'markdown', text: 'Completed part.' },
+            { kind: 'markdown', text: 'Stable paragraph.\n\n**streamed bold' },
+          ],
+        },
+      },
+      openMessageSegments: { 'msg-a': 'msg-a:1' },
+      segmentCounts: { 'msg-a': 2 },
+    });
+
+    const { container, rerender } = render(<AcpTimeline snapshot={state} isStreaming />);
+    const earlierSegment = container.querySelector('[data-acp-item-id="msg-a:0"]');
+    const activeSegment = container.querySelector('[data-acp-item-id="msg-a:1"]');
+    const thought = screen.getByTestId('acp-thought-block');
+    const activeStreamdownRoot = activeSegment?.querySelectorAll('.clawx-streamdown')[1];
+    const activeParagraph = activeStreamdownRoot?.querySelector('p');
+
+    expect(activeSegment?.querySelector('strong')).toHaveTextContent('streamed bold');
+    expect(activeParagraph).toHaveTextContent('Stable paragraph.');
+    expect(activeSegment?.querySelectorAll('[data-sd-animate]').length).toBeGreaterThan(0);
+    expect(earlierSegment).toHaveTextContent('Earlier **literal assistant');
+    expect(earlierSegment?.querySelector('strong')).not.toBeInTheDocument();
+    expect(earlierSegment?.querySelector('[data-sd-animate]')).not.toBeInTheDocument();
+    expect(thought).toHaveTextContent('Private *literal thought');
+    expect(thought.querySelector('em')).not.toBeInTheDocument();
+    expect(thought.querySelector('[data-sd-animate]')).not.toBeInTheDocument();
+    expect(activeStreamdownRoot).not.toHaveClass('space-y-0');
+
+    rerender(<AcpTimeline snapshot={state} isStreaming={false} />);
+    const settledStreamdownRoot = activeSegment?.querySelectorAll('.clawx-streamdown')[1];
+    expect(settledStreamdownRoot).toBe(activeStreamdownRoot);
+    expect(settledStreamdownRoot?.querySelector('p')).toBe(activeParagraph);
+    expect(activeParagraph).toHaveTextContent('Stable paragraph.');
+    expect(activeSegment).toHaveTextContent('**streamed bold');
+    expect(activeSegment?.querySelector('strong')).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(container.querySelector('[data-sd-animate]')).not.toBeInTheDocument();
+    });
+  });
+
+  it('renders completed GFM and all supported math delimiters', () => {
+    const state = snapshot({
+      itemOrder: ['msg-a:0'],
+      itemsById: {
+        'msg-a:0': {
+          kind: 'message-segment', id: 'msg-a:0', role: 'assistant', messageId: 'msg-a', segmentIndex: 0,
+          parts: [{
+            kind: 'markdown',
+            text: [
+              '| Item | Done |',
+              '| --- | --- |',
+              '| Tests | yes |',
+              '',
+              '- [x] migrated',
+              '',
+              '$x$ and \\(y\\)',
+              '',
+              '$$',
+              'z',
+              '$$',
+              '',
+              '\\[w\\]',
+            ].join('\n'),
+          }],
+        },
+      },
+    });
+
+    const { container } = render(<AcpTimeline snapshot={state} />);
+
+    expect(container.querySelector('table')).toBeInTheDocument();
+    expect(container.querySelector('input[type="checkbox"]')).toBeChecked();
+    expect(container.querySelectorAll('.katex')).toHaveLength(4);
+    expect(container.querySelectorAll('.katex-display')).toHaveLength(2);
+  });
+
+  it('keeps raw HTML literal, links inert, CJK punctuation outside autolinks, and images safe', () => {
+    const source = [
+      '<script>alert(1)</script>',
+      '',
+      '[label](https://example.com/path)',
+      '',
+      'https://example.com。后续',
+      '',
+      '![safe](https://example.com/safe.png)',
+      '![unsafe](javascript:alert(1))',
+    ].join('\n');
+    const state = snapshot({
+      itemOrder: ['msg-a:0'],
+      itemsById: {
+        'msg-a:0': {
+          kind: 'message-segment', id: 'msg-a:0', role: 'assistant', messageId: 'msg-a', segmentIndex: 0,
+          parts: [{ kind: 'markdown', text: source }],
+        },
+      },
+    });
+
+    const { container } = render(<AcpTimeline snapshot={state} />);
+
+    expect(container).toHaveTextContent('<script>alert(1)</script>');
+    expect(container.querySelector('script')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link')).not.toBeInTheDocument();
+    expect(screen.getByText('https://example.com', { selector: 'span' })).toBeInTheDocument();
+    expect(container).toHaveTextContent('。后续');
+    expect(container.querySelectorAll('img')).toHaveLength(1);
+    expect(container.querySelector('img')).toHaveAttribute('src', 'https://example.com/safe.png');
+  });
+
+  it('highlights JavaScript and keeps Mermaid fences as code', async () => {
+    const state = snapshot({
+      itemOrder: ['msg-a:0'],
+      itemsById: {
+        'msg-a:0': {
+          kind: 'message-segment', id: 'msg-a:0', role: 'assistant', messageId: 'msg-a', segmentIndex: 0,
+          parts: [{
+            kind: 'markdown',
+            text: [
+              '```javascript',
+              'const answer = 42;',
+              '```',
+              '',
+              '```mermaid',
+              'graph TD; A-->B;',
+              '```',
+            ].join('\n'),
+          }],
+        },
+      },
+    });
+
+    const { container } = render(<AcpTimeline snapshot={state} />);
+
+    await waitFor(() => {
+      expect(container.querySelector('pre span[style*="--sdm-c"]')).toBeInTheDocument();
+    });
+    const codeBlocks = container.querySelectorAll('[data-streamdown="code-block"]');
+    expect(codeBlocks).toHaveLength(2);
+    expect(container.querySelector('[data-streamdown="mermaid-block"]')).not.toBeInTheDocument();
+    expect(codeBlocks[1]?.querySelector('[data-streamdown="code-block-body"] svg')).not.toBeInTheDocument();
+    expect(container).toHaveTextContent('graph TD; A-->B;');
+  });
+
+  it('keeps tool Markdown output literal and outside Streamdown', () => {
+    const state = snapshot({
+      itemOrder: ['tool:read-file'],
+      itemsById: {
+        'tool:read-file': toolCallItem({
+          outputParts: [{ kind: 'markdown', text: '**literal tool output**' }],
+        }),
+      },
+    });
+
+    render(<AcpTimeline snapshot={state} />);
+
+    const output = screen.getByTestId('acp-tool-output-pre');
+    expect(output).toHaveTextContent('**literal tool output**');
+    expect(output.querySelector('strong')).not.toBeInTheDocument();
+    expect(output.querySelector('[data-streamdown]')).not.toBeInTheDocument();
+  });
+
+  it('derives only the open assistant segment while the renderer is streaming', () => {
+    const state = snapshot({
+      itemOrder: ['msg-u:0', 'msg-a:0', 'tool:read-file', 'msg-a:1'],
+      itemsById: {
+        'msg-u:0': {
+          kind: 'message-segment', id: 'msg-u:0', role: 'user', messageId: 'msg-u', segmentIndex: 0,
+          parts: [{ kind: 'markdown', text: 'Read the file' }],
+        },
+        'msg-a:0': {
+          kind: 'message-segment', id: 'msg-a:0', role: 'assistant', messageId: 'msg-a', segmentIndex: 0,
+          parts: [{ kind: 'markdown', text: 'I will inspect it.' }],
+        },
+        'tool:read-file': toolCallItem({}),
+        'msg-a:1': {
+          kind: 'message-segment', id: 'msg-a:1', role: 'assistant', messageId: 'msg-a', segmentIndex: 1,
+          parts: [{ kind: 'markdown', text: 'The file contains' }],
+        },
+      },
+      openMessageSegments: { 'msg-a': 'msg-a:1' },
+      segmentCounts: { 'msg-u': 1, 'msg-a': 2 },
+    });
+
+    expect([...streamingMessageSegmentIds(state, true)]).toEqual(['msg-a:1']);
+    expect(streamingMessageSegmentIds(state, true)).not.toContain('msg-u:0');
+    expect(streamingMessageSegmentIds(state, true)).not.toContain('msg-a:0');
+    expect(streamingMessageSegmentIds(state, false).size).toBe(0);
+  });
+
+  it('does not reactivate a stale open assistant when an optimistic user segment is terminal', () => {
+    const state = snapshot({
+      itemOrder: ['msg-a:0', 'msg-u:0'],
+      itemsById: {
+        'msg-a:0': {
+          kind: 'message-segment', id: 'msg-a:0', role: 'assistant', messageId: 'msg-a', segmentIndex: 0,
+          parts: [{ kind: 'markdown', text: 'Previous answer.' }],
+        },
+        'msg-u:0': {
+          kind: 'message-segment', id: 'msg-u:0', role: 'user', messageId: 'msg-u', segmentIndex: 0,
+          parts: [{ kind: 'markdown', text: 'Follow up' }], optimistic: true,
+        },
+      },
+      openMessageSegments: { 'msg-a': 'msg-a:0', 'msg-u': 'msg-u:0' },
+      segmentCounts: { 'msg-a': 1, 'msg-u': 1 },
+    });
+
+    expect(streamingMessageSegmentIds(state, true).size).toBe(0);
+  });
+
+  it('returns only the current open assistant appended after the optimistic user segment', () => {
+    const state = snapshot({
+      itemOrder: ['msg-a:0', 'msg-u:0', 'msg-b:0'],
+      itemsById: {
+        'msg-a:0': {
+          kind: 'message-segment', id: 'msg-a:0', role: 'assistant', messageId: 'msg-a', segmentIndex: 0,
+          parts: [{ kind: 'markdown', text: 'Previous answer.' }],
+        },
+        'msg-u:0': {
+          kind: 'message-segment', id: 'msg-u:0', role: 'user', messageId: 'msg-u', segmentIndex: 0,
+          parts: [{ kind: 'markdown', text: 'Follow up' }], optimistic: true,
+        },
+        'msg-b:0': {
+          kind: 'message-segment', id: 'msg-b:0', role: 'assistant', messageId: 'msg-b', segmentIndex: 0,
+          parts: [{ kind: 'markdown', text: 'Current answer' }],
+        },
+      },
+      openMessageSegments: {
+        'msg-a': 'msg-a:0',
+        'msg-u': 'msg-u:0',
+        'msg-b': 'msg-b:0',
+      },
+      segmentCounts: { 'msg-a': 1, 'msg-u': 1, 'msg-b': 1 },
+    });
+
+    expect([...streamingMessageSegmentIds(state, true)]).toEqual(['msg-b:0']);
+  });
+
+  it('excludes an open assistant whose original final part is an attachment', () => {
+    const state = snapshot({
+      itemOrder: ['msg-a:0'],
+      itemsById: {
+        'msg-a:0': {
+          kind: 'message-segment', id: 'msg-a:0', role: 'assistant', messageId: 'msg-a', segmentIndex: 0,
+          parts: [
+            { kind: 'markdown', text: 'Attached result.' },
+            {
+              kind: 'attachment',
+              attachmentId: 'attachment:msg-a:0:1',
+              reference: { uri: 'file:///workspace/result.txt', name: 'result.txt' },
+              source: 'acp-resource',
+              access: { status: 'pending' },
+            },
+          ],
+        },
+      },
+      openMessageSegments: { 'msg-a': 'msg-a:0' },
+      segmentCounts: { 'msg-a': 1 },
+    });
+
+    expect(streamingMessageSegmentIds(state, true).size).toBe(0);
   });
 
   it('shows a fixed whole-turn duration on the ACP-replayed assistant turn', () => {
@@ -460,20 +771,52 @@ describe('ACP chat timeline components', () => {
 
     await openAttachmentMenu('site/report #1.html');
     const items = screen.getAllByRole('menuitem');
-    expect(items[0]).toHaveTextContent('Open in built-in browser');
+    expect(items[0]).toHaveTextContent('Open in ClawX Preview');
+    expect(items[1]).toHaveTextContent('Open in system browser');
     fireEvent.click(items[0]);
 
     expect(useArtifactPanel.getState()).toMatchObject({
       open: true,
-      tab: 'web-browser',
-      webBrowserInitialized: true,
-      webBrowserNavigation: {
-        url: 'file:///workspace/demo/site/report%20%231.html',
+      tab: 'preview',
+      focusedFile: {
+        workspaceFileRef: {
+          workspaceRoot: '/workspace/demo',
+          relativePath: 'site/report #1.html',
+        },
       },
     });
     expect(listWorkspaceOpenHandlersMock).toHaveBeenCalledWith({
       workspaceRoot: '/workspace/demo',
       relativePath: 'site/report #1.html',
+    });
+  });
+
+  it('opens HTML file activity in the built-in browser from its primary action', () => {
+    render(
+      <AcpTurnFileActivity
+        workspaceRoot="/workspace/demo"
+        summaries={[{
+          turnId: 'turn-html-primary',
+          relativePath: 'site/report #1.html',
+          action: 'created',
+          activities: [],
+          added: 1,
+          removed: 0,
+        }]}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId('acp-file-button'));
+
+    expect(useArtifactPanel.getState()).toMatchObject({
+      open: true,
+      tab: 'preview',
+      focusedFile: {
+        workspaceFileRef: {
+          workspaceRoot: '/workspace/demo',
+          relativePath: 'site/report #1.html',
+        },
+      },
     });
   });
 
@@ -559,6 +902,86 @@ describe('ACP chat timeline components', () => {
     expect(screen.getByTestId('acp-tool-call-card')).toHaveTextContent('File contents loaded.');
     expect(screen.getByTestId('acp-plan-item')).toHaveTextContent('Update component tests');
     expect(screen.getByText('Second assistant segment.')).toBeInTheDocument();
+  });
+
+  it('collapses multiple completed tool calls into one group after the turn settles', () => {
+    const state = snapshot({
+      itemOrder: ['tool:exec-1', 'tool:image-1', 'tool:process-1', 'msg-a:0'],
+      itemsById: {
+        'tool:exec-1': toolCallItem({ id: 'tool:exec-1', toolCallId: 'exec-1', title: 'exec' }),
+        'tool:image-1': toolCallItem({ id: 'tool:image-1', toolCallId: 'image-1', title: 'image', outputParts: [] }),
+        'tool:process-1': toolCallItem({ id: 'tool:process-1', toolCallId: 'process-1', title: 'process', outputParts: [] }),
+        'msg-a:0': {
+          kind: 'message-segment',
+          id: 'msg-a:0',
+          role: 'assistant',
+          messageId: 'msg-a',
+          segmentIndex: 0,
+          parts: [{ kind: 'markdown', text: 'All done.' }],
+        },
+      },
+    });
+
+    render(<AcpTimeline snapshot={state} />);
+
+    const group = screen.getByTestId('acp-tool-calls-group');
+    expect(group).toHaveAttribute('data-collapsed', 'true');
+    expect(group).toHaveTextContent('3 tool calls');
+    expect(screen.queryByTestId('acp-tool-call-card')).not.toBeInTheDocument();
+  });
+
+  it('expands the tool group to show individual tool cards when clicked', () => {
+    const state = snapshot({
+      itemOrder: ['tool:exec-1', 'tool:image-1', 'msg-a:0'],
+      itemsById: {
+        'tool:exec-1': toolCallItem({ id: 'tool:exec-1', toolCallId: 'exec-1', title: 'exec' }),
+        'tool:image-1': toolCallItem({ id: 'tool:image-1', toolCallId: 'image-1', title: 'image', outputParts: [] }),
+        'msg-a:0': {
+          kind: 'message-segment',
+          id: 'msg-a:0',
+          role: 'assistant',
+          messageId: 'msg-a',
+          segmentIndex: 0,
+          parts: [{ kind: 'markdown', text: 'Done.' }],
+        },
+      },
+    });
+
+    render(<AcpTimeline snapshot={state} />);
+
+    fireEvent.click(screen.getByTestId('acp-tool-calls-group'));
+    expect(screen.getByTestId('acp-tool-calls-group')).toHaveAttribute('data-collapsed', 'false');
+    expect(screen.getAllByTestId('acp-tool-call-card')).toHaveLength(2);
+    expect(screen.getByText('exec')).toBeInTheDocument();
+    expect(screen.getByText('image')).toBeInTheDocument();
+  });
+
+  it('keeps a running turn tool group expanded until the turn completes', () => {
+    const state = snapshot({
+      itemOrder: ['user-a:0', 'tool:exec-1', 'tool:image-1'],
+      itemsById: {
+        'user-a:0': {
+          kind: 'message-segment',
+          id: 'user-a:0',
+          role: 'user',
+          messageId: 'user-a',
+          segmentIndex: 0,
+          parts: [{ kind: 'markdown', text: 'Generate assets' }],
+        },
+        'tool:exec-1': toolCallItem({ id: 'tool:exec-1', toolCallId: 'exec-1', title: 'exec', status: 'running', outputParts: [] }),
+        'tool:image-1': toolCallItem({ id: 'tool:image-1', toolCallId: 'image-1', title: 'image', status: 'completed', outputParts: [] }),
+      },
+    });
+
+    render(<AcpTimeline
+      snapshot={state}
+      turnTimingsByUserMessageId={{
+        'user-a': { source: 'live', status: 'running', startedAtMs: Date.now() - 2_000 },
+      }}
+    />);
+
+    expect(screen.getByTestId('acp-tool-calls-group')).toHaveAttribute('data-collapsed', 'false');
+    expect(screen.getAllByTestId('acp-tool-call-card')).toHaveLength(2);
   });
 
   it('keeps completed tool results expanded until the delayed auto-collapse runs', () => {
@@ -803,15 +1226,40 @@ describe('ACP chat timeline components', () => {
 
     await openAttachmentMenu('site one.html');
     const items = screen.getAllByRole('menuitem');
-    expect(items[0]).toHaveTextContent('Open in built-in browser');
+    expect(items[0]).toHaveTextContent('Open in ClawX Preview');
+    expect(items[1]).toHaveTextContent('Open in system browser');
     fireEvent.click(items[0]);
 
     expect(useArtifactPanel.getState()).toMatchObject({
       open: true,
-      tab: 'web-browser',
-      webBrowserInitialized: true,
-      webBrowserNavigation: {
-        url: 'file:///workspace/site%20one.html',
+      tab: 'preview',
+      focusedFile: {
+        attachmentFileRef: {
+          uri: '/workspace/site one.html',
+        },
+      },
+    });
+  });
+
+  it('opens a local HTML attachment in the built-in browser from its primary action', () => {
+    render(<AcpAttachmentPart part={availableAttachment({
+      name: 'site one.html',
+      mimeType: 'text/html',
+      ref: {
+        ...attachmentRef,
+        uri: '/workspace/site one.html',
+      },
+    })} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Preview site one.html' }));
+
+    expect(useArtifactPanel.getState()).toMatchObject({
+      open: true,
+      tab: 'preview',
+      focusedFile: {
+        attachmentFileRef: {
+          uri: '/workspace/site one.html',
+        },
       },
     });
   });

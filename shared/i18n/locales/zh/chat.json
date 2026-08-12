@@ -12,19 +12,13 @@
     },
     "noLogs": "（暂无日志）",
     "scrollToLatest": "回到底部",
-    "loadMoreHistory": "加载更早的消息",
-    "loadingMoreHistory": "加载更多中…",
     "toolbar": {
         "refresh": "刷新聊天",
-        "currentAgent": "当前对话对象：{{agent}}",
+        "currentAgent": "{{agent}}",
         "workspace": "工作空间"
     },
     "generatedFiles": {
-        "title": "文件变更（{{count}} 个）",
-        "created": "新增",
-        "modified": "修改",
-        "openFolder": "打开文件夹",
-        "viewAll": "查看文件变更"
+        "openFolder": "打开文件夹"
     },
     "fileActivity": {
         "created": "已创建",
@@ -38,7 +32,8 @@
     "fileCard": {
         "openWith": "打开方式",
         "openWithFile": "选择打开 {{name}} 的应用",
-        "openInBuiltInBrowser": "在内置浏览器中打开",
+        "openInBuiltInBrowser": "在 ClawX 预览中打开",
+        "openInSystemBrowser": "在系统浏览器中打开",
         "searchingApplications": "正在查找应用",
         "showInFinder": "在访达中显示",
         "showInExplorer": "在文件资源管理器中显示",
@@ -54,6 +49,9 @@
         "tool": "工具",
         "expandTool": "展开工具结果",
         "collapseTool": "折叠工具结果",
+        "expandToolGroup": "展开工具调用",
+        "collapseToolGroup": "折叠工具调用",
+        "toolGroupSummary": "{{count}} 个工具调用",
         "permission": "权限",
         "plan": "计划",
         "running": "进行中",
@@ -86,8 +84,7 @@
         "tabs": {
             "changes": "变更",
             "preview": "预览",
-            "browser": "工作空间",
-            "webBrowser": "网页浏览器"
+            "browser": "工作空间"
         },
         "actions": {
             "back": "返回列表"
@@ -101,60 +98,14 @@
         },
         "preview": {
             "emptyTitle": "尚未选择文件",
-            "emptyHint": "请先点击对话里的文件卡片，侧栏会选中该文件后在此预览。"
-        },
-        "webBrowser": {
-            "actions": {
-                "back": "后退",
-                "forward": "前进",
-                "refresh": "刷新",
-                "more": "更多",
-                "forceRefresh": "强制刷新",
-                "clearCookies": "清除 Cookie",
-                "clearSiteData": "清除网站数据",
-                "openExternal": "在系统浏览器中打开"
-            },
-            "address": {
-                "label": "网页地址",
-                "placeholder": "输入网址"
-            },
-            "errors": {
-                "empty": "请输入网页地址。",
-                "absolutePath": "本地路径必须使用 file:/// 网址。",
-                "invalidUrl": "网页地址无效。",
-                "unsupportedProtocol": "不支持此网址协议。",
-                "reservedUrl": "无法打开此内部网址。",
-                "loadFailed": "网页加载失败。",
-                "clearCookiesFailed": "清除 Cookie 失败。",
-                "clearSiteDataFailed": "清除网站数据失败。",
-                "openExternalFailed": "无法在系统浏览器中打开网页。"
-            },
-            "success": {
-                "cookiesCleared": "Cookie 已清除。",
-                "siteDataCleared": "网站数据已清除。"
-            },
-            "crash": {
-                "title": "网页浏览器已停止运行",
-                "message": "浏览器页面意外关闭，浏览历史和页面状态已丢失。",
-                "recover": "恢复浏览器"
-            },
-            "permissionDialog": {
-                "title": "摄像头和麦克风权限",
-                "message": "{{origin}} 想要使用你的{{capability}}。",
-                "camera": "摄像头",
-                "microphone": "麦克风",
-                "cameraAndMicrophone": "摄像头和麦克风",
-                "allow": "允许",
-                "deny": "拒绝"
-            }
+            "emptyHint": "请先点击对话里的文件卡片，侧栏会选中该文件后在此预览。",
+            "fullscreenLabel": "全屏文件预览"
         }
     },
     "filePreview": {
         "tabs": {
             "source": "源码",
-            "preview": "预览",
-            "changes": "变更",
-            "info": "信息"
+            "preview": "预览"
         },
         "actions": {
             "save": "保存",
@@ -162,12 +113,11 @@
             "revert": "撤销",
             "openInFinder": "在文件管理器中显示",
             "openDirectly": "直接打开",
-            "close": "关闭"
-        },
-        "info": {
-            "path": "路径",
-            "size": "大小",
-            "type": "类型"
+            "close": "关闭",
+            "enterFullscreen": "全屏预览",
+            "exitFullscreen": "退出全屏",
+            "openHtmlExternally": "在系统浏览器中打开 HTML",
+            "retry": "重试"
         },
         "toast": {
             "saved": "已保存到磁盘",
@@ -183,19 +133,17 @@
             "notFound": "文件不存在",
             "loadFailed": "加载失败：{{error}}",
             "noPreview": "该文件没有预览",
-            "unsupportedFormatTitle": "此文件格式暂不支持内置预览或变更",
-            "unsupportedFormatHint": "当前仅支持文本/Markdown 等可直接读取的文件进行内置预览与变更对比。请在文件管理器中打开该文件。",
+            "unsupportedFormatTitle": "此文件格式暂不支持内置预览",
+            "unsupportedFormatHint": "当前仅支持文本/Markdown 等可直接读取的文件进行内置预览。请在文件管理器中打开该文件。",
             "largeBinaryOpenTitle": "该文件较大，暂不支持内置预览",
             "largeBinaryOpenHint": "当前文件为 {{size}}，ClawX 不提供内置预览。你可以确认后直接使用系统默认应用打开。",
             "openInFinderFailed": "无法在文件管理器中显示",
-            "openFailed": "打开失败：{{error}}"
+            "openFailed": "打开失败：{{error}}",
+            "htmlLoadFailed": "无法加载 HTML 预览",
+            "openHtmlExternallyFailed": "无法在系统浏览器中打开 HTML"
         },
-        "diff": {
-            "noChanges": "没有可显示的变更",
-            "newFile": "这是新增文件，无对比内容",
-            "tooLarge": "文件过大，已禁用 diff 视图，请到「源码」标签查看完整内容",
-            "unavailable": "本会话没有抓到这个文件的精确变更基线，无法生成 diff。",
-            "unavailableHint": "可点击顶部「预览」查看当前文件内容；若需精确差异，请在 Git 等工具中对比版本。"
+        "html": {
+            "crashed": "HTML 预览已停止运行"
         },
         "confirmOpen": {
             "title": "打开文件",
@@ -252,35 +200,8 @@
             "openRootInFinder": "在文件管理器中显示根目录"
         }
     },
-    "taskPanel": {
-        "eyebrow": "运行视图",
-        "title": "任务脉络",
-        "emptyTitle": "还没有结构化步骤",
-        "emptyBody": "当一次运行开始后，ClawX 会在这里展示思考、工具调用和收尾状态。",
-        "status": {
-            "idle": "空闲",
-            "running_one": "1 个活动步骤",
-            "running_other": "{{count}} 个活动步骤"
-        },
-        "stepStatus": {
-            "running": "进行中",
-            "completed": "完成",
-            "error": "错误"
-        }
-    },
-    "executionGraph": {
-        "title": "执行关系图",
-        "branchLabel": "分支",
-        "thinkingLabel": "思考中",
-        "errorLabel": "模型调用失败",
-        "imageGenerateLabel": "图片生成",
-        "agentRun": "{{agent}} 执行",
-        "collapsedSummary": "{{toolCount}} 个工具调用，{{processCount}} 条过程消息",
-        "collapseAction": "收起执行关系图"
-    },
     "imageGeneration": {
         "generating": "图片生成中，请稍候…",
-        "previewLoading": "正在加载图片预览…",
         "previewUnavailable": "图片生成已完成，但无法加载预览。",
         "generatedReady": "生成的图片已准备好。",
         "generatedReadyWithMissing": "生成的图片已准备好，但有部分图片无法加载。"
@@ -306,7 +227,7 @@
         "thinking": "思考中…",
         "gatewayConnected": "已连接",
         "gatewayStarting": "启动中",
-        "gatewayStatus": "网关{{state}} ｜ 端口：{{port}} ｜ 进程 ID：{{pid}}",
+        "gatewayStatus": "网关{{state}}",
         "retryFailedAttachments": "重试失败的附件",
         "workspacePrefix": "{{workspace}}",
         "workspacePickerTitle": "选择工作空间文件夹",
