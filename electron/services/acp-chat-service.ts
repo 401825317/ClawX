@@ -80,6 +80,20 @@ type AcpPromptBuildResult = {
   };
 };
 
+const ACP_GATEWAY_READY_WAIT_TIMEOUT_MS = 90_000;
+const ACP_GATEWAY_READY_POLL_INTERVAL_MS = 250;
+
+function gatewayNeedsReadinessWait(status: ReturnType<NonNullable<GatewayPairingRpcClient['getStatus']>>): boolean {
+  return status?.state === 'stopped'
+    || status?.state === 'starting'
+    || status?.state === 'reconnecting'
+    || (status?.state === 'running' && status.gatewayReady === false);
+}
+
+function waitForDelay(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
 function ok(generation?: number, sessionUpdates?: AcpSessionUpdateEnvelope[]): AcpChatOperationResult {
   return {
     success: true,
@@ -541,6 +555,9 @@ export class AcpChatService {
   }
 
   private async initializeConnection(): Promise<AcpConnection> {
+    if (this.gateway?.getStatus) {
+      await this.waitForGatewayReady();
+    }
     await this.approveLocalDeviceRequests();
 
     for (let attempt = 1; attempt <= 2; attempt++) {
@@ -600,6 +617,45 @@ export class AcpChatService {
     } catch (error) {
       logger.debug(`[acp-chat] Local device auto-approve skipped: ${String(error)}`);
     }
+  }
+
+  private async waitForGatewayReady(): Promise<void> {
+    if (!this.gateway?.getStatus) return;
+
+    const initialStatus = this.gateway.getStatus();
+    if (!gatewayNeedsReadinessWait(initialStatus)) return;
+
+    const startedAt = Date.now();
+    this.trace('connection/wait-for-gateway-ready:start', {
+      details: {
+        state: initialStatus?.state,
+        gatewayReady: initialStatus?.gatewayReady,
+      },
+    });
+
+    while (Date.now() - startedAt < ACP_GATEWAY_READY_WAIT_TIMEOUT_MS) {
+      await waitForDelay(ACP_GATEWAY_READY_POLL_INTERVAL_MS);
+      const status = this.gateway.getStatus();
+      if (gatewayNeedsReadinessWait(status)) continue;
+
+      this.trace('connection/wait-for-gateway-ready:success', {
+        details: {
+          waitedMs: Date.now() - startedAt,
+          state: status?.state,
+          gatewayReady: status?.gatewayReady,
+        },
+      });
+      return;
+    }
+
+    const status = this.gateway.getStatus();
+    this.trace('connection/wait-for-gateway-ready:timeout', {
+      details: {
+        waitedMs: Date.now() - startedAt,
+        state: status?.state,
+        gatewayReady: status?.gatewayReady,
+      },
+    });
   }
 
   private waitForChildExit(child: AcpChildProcess | null): Promise<number | null> {

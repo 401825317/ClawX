@@ -219,6 +219,30 @@ describe('AcpChatService', () => {
     );
   });
 
+  it('waits for a restarting Gateway to become ready before spawning ACP', async () => {
+    vi.useFakeTimers();
+    const gateway = {
+      getStatus: vi.fn()
+        .mockReturnValueOnce({ port: 60792, state: 'starting', gatewayReady: false })
+        .mockReturnValueOnce({ port: 60792, state: 'running', gatewayReady: true })
+        .mockReturnValue({ port: 60792, state: 'running', gatewayReady: true }),
+      getGatewayToken: vi.fn().mockResolvedValue('test-gateway-token'),
+    };
+    const { service } = await createSpawnedService(createConnection(), gateway);
+
+    try {
+      const load = service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+      expect(childProcessMock.fork).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(250);
+      await expect(load).resolves.toMatchObject({ success: true, generation: 1 });
+      expect(gateway.getStatus.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(childProcessMock.fork).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('filters non-JSON stdout diagnostics before the ACP SDK parser sees them', async () => {
     const { service, child } = await createSpawnedService();
 
