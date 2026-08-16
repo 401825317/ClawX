@@ -242,6 +242,8 @@ ClawX employs a **dual-process architecture** with a unified host API layer. The
 
 Chat uses an ACP stdio bridge owned by Electron Main. Renderer receives typed host events and renders an in-memory ACP timeline. Gateway remains responsible for non-Chat capabilities such as providers, models, skills, workspace, settings, diagnostics, and media configuration.
 
+After Gateway becomes ready, Electron Main warms the ACP connection in the background and reuses matching in-flight session loads. Main records bounded, content-free phase timings through the first visible assistant text so cold-start latency can be diagnosed without storing prompt content.
+
 Managed UClaw account actions use the typed `managedAuth` Host API. Renderer never receives access, refresh, or relay credentials and does not directly start or reload Gateway as part of authentication.
 
 The Shrimp Store uses a separate typed `billing` Host API. Electron Main owns authenticated billing requests and token refresh; the flow does not write Provider or OpenClaw configuration and does not alter Chat, ACP, or Gateway lifecycle behavior.

@@ -242,6 +242,8 @@ ClawXは、**デュアルプロセス + Host API 統一アクセス**構成を�
 
 Chat は Electron Main が所有する ACP stdio bridge を使用します。Renderer は型付き host event を受け取り、メモリ上の ACP timeline を描画します。Gateway は providers、models、skills、workspace、settings、diagnostics、media configuration などの非 Chat 機能を引き続き担当します。
 
+Gateway の準備完了後、Electron Main はバックグラウンドで ACP 接続をウォームアップし、一致する進行中のセッション読み込みを再利用します。Main は prompt の内容を保存せず、最初に表示される assistant テキストまでの範囲を限定したフェーズ時間を記録し、コールドスタート遅延の診断に使用します。
+
 UClaw 管理アカウントの操作には型付き `managedAuth` Host API を使用します。Renderer が access token、refresh token、relay credential を受け取ることはなく、認証 UI が Gateway を直接起動またはリロードすることもありません。
 
 シュリンプストアは独立した型付き `billing` Host API を使用します。認証付きの課金リクエストとトークン更新は Electron Main が管理し、Provider または OpenClaw の設定を書き換えず、Chat、ACP、Gateway のライフサイクル動作にも影響しません。

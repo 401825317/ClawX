@@ -51,6 +51,9 @@ export function createChatApi({
   acpSessionAccessRegistry: AcpSessionAccessRegistry;
 }): CompleteHostServiceRegistry['chat'] {
   const acpChat = createAcpChatService(mainWindow, acpSessionAccessRegistry, gatewayManager);
+  if (typeof gatewayManager.getStatus === 'function') {
+    void acpChat.warmupConnection();
+  }
 
   return {
     sendWithMedia: async (payload) => {

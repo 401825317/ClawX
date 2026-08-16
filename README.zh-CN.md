@@ -243,6 +243,8 @@ ClawX 采用 **双进程 + Host API 统一接入架构**。渲染进程只调用
 
 Chat 使用由 Electron Main 持有的 ACP stdio bridge。Renderer 接收类型化 host events，并渲染内存中的 ACP timeline。Gateway 仍负责 providers、models、skills、workspace、settings、diagnostics 和 media configuration 等非 Chat 能力。
 
+Gateway 就绪后，Electron Main 会在后台预热 ACP 连接，并复用匹配的进行中会话加载。Main 会记录截至首段可见 assistant 文本的有界、无内容阶段耗时，以便在不保存提示词内容的前提下诊断冷启动延迟。
+
 UClaw 托管账号操作通过类型化 `managedAuth` Host API 完成。Renderer 不会收到 access token、refresh token 或 relay credential，认证界面也不会直接启动或重载 Gateway。
 
 虾粮商店使用独立的类型化 `billing` Host API。带认证的计费请求和令牌刷新均由 Electron Main 持有；该流程不会写入 Provider 或 OpenClaw 配置，也不会改变 Chat、ACP 或 Gateway 生命周期行为。

@@ -2433,6 +2433,7 @@ describe('ACP Chat store', () => {
       message: 'hello',
       media: [{ filePath: '/repo/image.png', stagingId: 'stage-image', fileName: 'image.png', mimeType: 'image/png' }],
       messageId: expect.any(String),
+      clientStartedAtMs: expect.any(Number),
     });
     const sentMessageId = (hostApiMock.sendAcpPrompt.mock.calls[0]?.[0] as { messageId: string }).messageId;
     expect(useAcpChatSessionStore.getState()).toMatchObject({ sending: false, error: null });
@@ -2499,6 +2500,7 @@ describe('ACP Chat store', () => {
       message: 'hello from user',
       media: [{ filePath: '/repo/notes.txt', stagingId: 'stage-notes', fileName: 'notes.txt', mimeType: 'text/plain' }],
       messageId: expect.any(String),
+      clientStartedAtMs: expect.any(Number),
     });
 
     prompt.resolve({ success: true });

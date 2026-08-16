@@ -43,6 +43,8 @@ export type AcpChatPromptPayload = AcpSessionKeyPayload & {
   message?: string;
   media?: AcpPromptMediaItem[];
   messageId?: string;
+  /** Renderer-observed prompt start used only for bounded latency diagnostics. */
+  clientStartedAtMs?: number;
   /** Applied only if the model elects to call OpenClaw's image_generate tool. */
   imageOptions?: AcpImageGenerationOptions;
   /** Applied only if the model elects to call OpenClaw's video_generate tool. */

@@ -3,11 +3,15 @@
  * ACP-native runtime rendering. The legacy Gateway execution graph remains in
  * the codebase but is no longer part of the primary Chat render path.
  */
-import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, ArrowDownToLine, FolderOpen } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-import type { AcpImageGenerationOptions, AcpVideoGenerationOptions } from '@shared/acp-chat/types';
+import type {
+  AcpChatLoadPayload,
+  AcpImageGenerationOptions,
+  AcpVideoGenerationOptions,
+} from '@shared/acp-chat/types';
 import { DEFAULT_SESSION_KEY } from '@shared/chat/types';
 import { Button } from '@/components/ui/button';
 import { useAgentsStore } from '@/stores/agents';
@@ -62,6 +66,20 @@ type WorkspaceContextCheck = {
   key: string;
   available: boolean;
 };
+
+type AcpLoadInFlight = {
+  key: string;
+  promise: Promise<boolean>;
+};
+
+function acpLoadIntentKey(input: AcpChatLoadPayload): string {
+  return [
+    input.sessionKey,
+    input.workspaceRoot,
+    input.cwd,
+    input.createIfMissing ? 'create' : 'load',
+  ].join('\0');
+}
 
 function buildQuestionDirectoryTitle(item: MessageSegmentItem, fallback: string): string {
   const markdown = item.parts.find(
@@ -275,8 +293,21 @@ export function Chat() {
   const panelWidthPct = useArtifactPanel((s) => s.widthPct);
   const closeArtifactPanel = useArtifactPanel((s) => s.close);
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
-  const acpLoadInFlightKeyRef = useRef<string | null>(null);
   const loadedGatewayRuntimeRef = useRef<string | null>(null);
+  const acpLoadInFlightRef = useRef<AcpLoadInFlight | null>(null);
+  const loadAcpSessionDeduped = useCallback((input: AcpChatLoadPayload): Promise<boolean> => {
+    const key = `${gatewayRuntimeIdentity ?? 'not-ready'}\0${acpLoadIntentKey(input)}`;
+    const inFlight = acpLoadInFlightRef.current;
+    if (inFlight?.key === key) return inFlight.promise;
+
+    const promise = loadAcpSession(input).finally(() => {
+      if (acpLoadInFlightRef.current?.promise === promise) {
+        acpLoadInFlightRef.current = null;
+      }
+    });
+    acpLoadInFlightRef.current = { key, promise };
+    return promise;
+  }, [gatewayRuntimeIdentity, loadAcpSession]);
   const { contentRef, scrollRef, scrollToBottom, isAtBottom } = useStickToBottomInstant(
     currentSessionKey,
     acpSending || acpCancelling,
@@ -353,7 +384,7 @@ export function Chat() {
 
   useEffect(() => {
     if (!currentSessionKey || !cwd || !currentSession?.createdLocally) return;
-    acpLoadInFlightKeyRef.current = null;
+    acpLoadInFlightRef.current = null;
     const hasStaleTimeline = acpTimeline.sessionId !== currentSessionKey || acpTimeline.itemOrder.length > 0;
     if (acpActiveSessionKey === currentSessionKey && acpWorkspaceRoot === cwd && acpCwd === cwd && !hasStaleTimeline) return;
     prepareLocalAcpSession({ sessionKey: currentSessionKey, workspaceRoot: cwd, cwd });
@@ -368,13 +399,10 @@ export function Chat() {
       && acpWorkspaceRoot === cwd
       && acpCwd === cwd
     ) return;
-    const acpLoadKey = `${gatewayRuntimeIdentity}\0${currentSessionKey}\0${cwd}`;
-    if (acpLoadInFlightKeyRef.current === acpLoadKey) return;
     const currentSession = sessions.find((session) => session.key === currentSessionKey);
     if (currentSession?.createdLocally) return;
     const createIfMissing = !currentSession;
-    acpLoadInFlightKeyRef.current = acpLoadKey;
-    void loadAcpSession({
+    void loadAcpSessionDeduped({
       sessionKey: currentSessionKey,
       workspaceRoot: cwd,
       cwd,
@@ -384,12 +412,8 @@ export function Chat() {
       if (loaded && createIfMissing) {
         acknowledgeAcpSessionCreated(currentSessionKey);
       }
-    }).finally(() => {
-      if (acpLoadInFlightKeyRef.current === acpLoadKey) {
-        acpLoadInFlightKeyRef.current = null;
-      }
     });
-  }, [acknowledgeAcpSessionCreated, acpActiveSessionKey, acpCwd, acpLoading, acpWorkspaceRoot, currentSessionKey, cwd, gatewayRuntimeIdentity, loadAcpSession, sessionDiscoveryAttempted, sessions, workspaceContextAvailable]);
+  }, [acknowledgeAcpSessionCreated, acpActiveSessionKey, acpCwd, acpLoading, acpWorkspaceRoot, currentSessionKey, cwd, gatewayRuntimeIdentity, loadAcpSessionDeduped, sessionDiscoveryAttempted, sessions, workspaceContextAvailable]);
 
   const platform = window.electron?.platform;
   const isMac = platform === 'darwin';
@@ -585,22 +609,12 @@ export function Chat() {
                 || acpWorkspaceRoot !== promptCwd
                 || acpCwd !== promptCwd
               ) {
-                const acpLoadKey = `${sessionKey}\0${promptCwd}`;
-                acpLoadInFlightKeyRef.current = acpLoadKey;
-                const loaded = await (async () => {
-                  try {
-                    return await loadAcpSession({
-                      sessionKey,
-                      workspaceRoot: promptCwd,
-                      cwd: promptCwd,
-                      ...(createIfMissing ? { createIfMissing: true } : {}),
-                    });
-                  } finally {
-                    if (acpLoadInFlightKeyRef.current === acpLoadKey) {
-                      acpLoadInFlightKeyRef.current = null;
-                    }
-                  }
-                })();
+                const loaded = await loadAcpSessionDeduped({
+                  sessionKey,
+                  workspaceRoot: promptCwd,
+                  cwd: promptCwd,
+                  ...(createIfMissing ? { createIfMissing: true } : {}),
+                });
                 if (loaded && pendingAcpConfirmation) {
                   acknowledgeAcpSessionCreated(sessionKey, promptCwd, text);
                 }

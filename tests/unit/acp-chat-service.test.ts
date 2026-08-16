@@ -298,6 +298,26 @@ describe('AcpChatService', () => {
     expect(connection.prompt).toHaveBeenCalledTimes(1);
   });
 
+  it('warms the ACP connection once and reuses it for the first session load', async () => {
+    const { service, connection } = await createSpawnedService();
+
+    await expect(service.warmupConnection()).resolves.toBeUndefined();
+
+    expect(connection.initialize).toHaveBeenCalledTimes(1);
+    expect(connection.loadSession).not.toHaveBeenCalled();
+    expect(connection.newSession).not.toHaveBeenCalled();
+
+    await expect(service.loadSession({
+      sessionKey: 'agent:pi:s1',
+      workspaceRoot: '/repo',
+      cwd: '/repo',
+    })).resolves.toEqual({ success: true, generation: 1 });
+
+    expect(connection.initialize).toHaveBeenCalledTimes(1);
+    expect(childProcessMock.fork).toHaveBeenCalledTimes(1);
+    expect(connection.loadSession).toHaveBeenCalledTimes(1);
+  });
+
   it('filters non-JSON stdout diagnostics before the ACP SDK parser sees them', async () => {
     const { service, child } = await createSpawnedService();
 
@@ -776,6 +796,67 @@ describe('AcpChatService', () => {
         source: 'main',
         event: 'session-update:forwarded',
         direction: 'downstream',
+      }),
+    ]));
+  });
+
+  it('records one content-free first-text timing entry for a live prompt', async () => {
+    const { clearAcpTraceForTests, getAcpTraceSnapshot } = await import('../../electron/services/acp-trace');
+    clearAcpTraceForTests();
+    const connection = createConnection();
+    const prompt = createDeferred<{ stopReason: string }>();
+    connection.prompt.mockReturnValueOnce(prompt.promise);
+    const { service } = await createService(connection);
+
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    const sendPrompt = service.sendPrompt({
+      sessionKey: 'agent:pi:s1',
+      cwd: '/repo',
+      message: 'private latency probe',
+      messageId: 'msg-user',
+      clientStartedAtMs: Date.now() - 25,
+    });
+    await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(1));
+
+    const assistantUpdate = {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'msg-assistant',
+        content: { type: 'text', text: 'hello' },
+      },
+    } as never;
+    await service.client.sessionUpdate(assistantUpdate);
+    await service.client.sessionUpdate(assistantUpdate);
+
+    prompt.resolve({ stopReason: 'end_turn' });
+    await expect(sendPrompt).resolves.toEqual({ success: true, generation: 1 });
+
+    const entries = getAcpTraceSnapshot().entries;
+    const firstTextEntries = entries.filter((entry) => entry.event === 'session/prompt:first-text');
+    expect(firstTextEntries).toHaveLength(1);
+    expect(firstTextEntries[0]).toEqual(expect.objectContaining({
+      source: 'main',
+      direction: 'downstream',
+      sessionKey: 'agent:pi:s1',
+      generation: 1,
+      details: expect.objectContaining({
+        clientToMainMs: expect.any(Number),
+        mainToDispatchMs: expect.any(Number),
+        dispatchToFirstTextMs: expect.any(Number),
+        clientToFirstTextMs: expect.any(Number),
+      }),
+    }));
+    expect(JSON.stringify(firstTextEntries[0]?.details)).not.toContain('private latency probe');
+    expect(entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: 'session/prompt:complete',
+        details: expect.objectContaining({
+          outcome: 'success',
+          firstTextObserved: true,
+          clientToCompleteMs: expect.any(Number),
+          firstTextToCompleteMs: expect.any(Number),
+        }),
       }),
     ]));
   });

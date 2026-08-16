@@ -2820,9 +2820,9 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
     const generation = startState.generation;
     if (startState.activeSessionKey !== sessionKey) return false;
 
-    const messageId = input.messageId ?? createOptimisticMessageId();
-    const payload = { ...input, messageId };
     const startedAtMs = Date.now();
+    const messageId = input.messageId ?? createOptimisticMessageId();
+    const payload = { ...input, messageId, clientStartedAtMs: startedAtMs };
     const transcriptOperation = beginTranscriptSupplement(sessionKey, generation, input.cwd, messageId);
 
     set((state) => (

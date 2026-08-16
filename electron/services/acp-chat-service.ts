@@ -65,6 +65,10 @@ type AcpLivePromptContext = {
   acpSessionId: string;
   generation: number;
   accessGrant: AcpSessionAccessContext;
+  clientStartedAtMs: number;
+  mainReceivedAtMs: number;
+  dispatchedAtMs: number | null;
+  firstTextAtMs: number | null;
 };
 type AcpChildProcess = ChildProcess & {
   stdin: NonNullable<ChildProcess['stdin']>;
@@ -129,6 +133,43 @@ function isValidSessionKey(value: unknown): value is string {
 function sessionUpdateType(notification: SessionNotification): string | undefined {
   const update = (notification as { update?: { sessionUpdate?: unknown } }).update;
   return typeof update?.sessionUpdate === 'string' ? update.sessionUpdate : undefined;
+}
+
+function normalizedClientStartedAtMs(value: unknown, mainReceivedAtMs: number): number {
+  return typeof value === 'number'
+    && Number.isFinite(value)
+    && value > 0
+    && value <= mainReceivedAtMs
+    ? value
+    : mainReceivedAtMs;
+}
+
+function elapsedMs(startedAtMs: number, endedAtMs: number): number {
+  return Math.max(0, Math.round(endedAtMs - startedAtMs));
+}
+
+function isVisibleAgentText(notification: SessionNotification): boolean {
+  const update = (notification as {
+    update?: {
+      sessionUpdate?: unknown;
+      content?: { type?: unknown; text?: unknown };
+    };
+  }).update;
+  return update?.sessionUpdate === 'agent_message_chunk'
+    && update.content?.type === 'text'
+    && typeof update.content.text === 'string'
+    && update.content.text.trim().length > 0;
+}
+
+function promptCompletionDurations(context: AcpLivePromptContext, completedAtMs: number): Record<string, unknown> {
+  return {
+    clientToMainMs: elapsedMs(context.clientStartedAtMs, context.mainReceivedAtMs),
+    ...(context.dispatchedAtMs != null ? {
+      mainToDispatchMs: elapsedMs(context.mainReceivedAtMs, context.dispatchedAtMs),
+      dispatchToCompleteMs: elapsedMs(context.dispatchedAtMs, completedAtMs),
+      clientToCompleteMs: elapsedMs(context.clientStartedAtMs, completedAtMs),
+    } : {}),
+  };
 }
 
 // OpenClaw can emit clack/doctor diagnostics to stdout during ACP startup.
@@ -227,6 +268,20 @@ export class AcpChatService {
       });
     } catch (error) {
       logger.warn(`[acp-chat] trace failed: ${String(error)}`);
+    }
+  }
+
+  async warmupConnection(): Promise<void> {
+    this.trace('connection/warmup:start', { sessionKey: null });
+    try {
+      await this.ensureConnection();
+      this.trace('connection/warmup:success', { sessionKey: null });
+    } catch (error) {
+      logger.warn(`[acp-chat] ACP connection warmup failed; normal session loading will retry: ${String(error)}`);
+      this.trace('connection/warmup:failed', {
+        sessionKey: null,
+        details: { error: error instanceof Error ? error.message : String(error) },
+      });
     }
   }
 
@@ -408,6 +463,7 @@ export class AcpChatService {
   }
 
   async sendPrompt(payload: AcpChatPromptPayload): Promise<AcpChatOperationResult> {
+    const mainReceivedAtMs = Date.now();
     if (!isValidSessionKey(payload.sessionKey) || !payload.cwd) return fail('Invalid ACP prompt payload');
     if (!this.activeSessionKey) return fail('No active ACP session');
     if (payload.sessionKey !== this.activeSessionKey) return fail('ACP prompt session is not active');
@@ -417,11 +473,16 @@ export class AcpChatService {
     const acpSessionId = this.loadedAcpSessionId;
     const accessGrant = this.accessRegistry.get(payload.sessionKey, generation);
     if (!accessGrant) return fail('ACP session access grant is not active');
+    const clientStartedAtMs = normalizedClientStartedAtMs(payload.clientStartedAtMs, mainReceivedAtMs);
     const promptContext: AcpLivePromptContext = {
       sessionKey: payload.sessionKey,
       acpSessionId,
       generation,
       accessGrant,
+      clientStartedAtMs,
+      mainReceivedAtMs,
+      dispatchedAtMs: null,
+      firstTextAtMs: null,
     };
     this.livePrompts.set(payload.sessionKey, promptContext);
     let imagePreferenceId: string | undefined;
@@ -439,7 +500,11 @@ export class AcpChatService {
       this.trace('session/prompt:start', {
         sessionKey: payload.sessionKey,
         generation,
-        details: { messageLength: payload.message?.length ?? 0, mediaCount: payload.media?.length ?? 0 },
+        details: {
+          messageLength: payload.message?.length ?? 0,
+          mediaCount: payload.media?.length ?? 0,
+          clientToMainMs: elapsedMs(clientStartedAtMs, mainReceivedAtMs),
+        },
       });
       const connection = await this.ensureConnection(runtimeIdentity);
       this.requireSameGatewayRuntime(runtimeIdentity);
@@ -479,6 +544,16 @@ export class AcpChatService {
       }
       this.permissionsEnabled = true;
       this.requireSameGatewayRuntime(runtimeIdentity);
+      promptContext.dispatchedAtMs = Date.now();
+      this.trace('session/prompt:dispatched', {
+        sessionKey: payload.sessionKey,
+        generation,
+        details: {
+          clientToMainMs: elapsedMs(clientStartedAtMs, mainReceivedAtMs),
+          mainToDispatchMs: elapsedMs(mainReceivedAtMs, promptContext.dispatchedAtMs),
+          clientToDispatchMs: elapsedMs(clientStartedAtMs, promptContext.dispatchedAtMs),
+        },
+      });
       await connection.prompt({
         sessionId: acpSessionId,
         prompt,
@@ -486,6 +561,19 @@ export class AcpChatService {
         _meta: { sessionKey: payload.sessionKey, prefixCwd: true },
       });
       this.requireSameGatewayRuntime(runtimeIdentity);
+      const completedAtMs = Date.now();
+      this.trace('session/prompt:complete', {
+        sessionKey: payload.sessionKey,
+        generation,
+        details: {
+          outcome: 'success',
+          firstTextObserved: promptContext.firstTextAtMs != null,
+          ...promptCompletionDurations(promptContext, completedAtMs),
+          ...(promptContext.firstTextAtMs != null ? {
+            firstTextToCompleteMs: elapsedMs(promptContext.firstTextAtMs, completedAtMs),
+          } : {}),
+        },
+      });
       this.trace('session/prompt:success', {
         sessionKey: payload.sessionKey,
         generation,
@@ -504,6 +592,19 @@ export class AcpChatService {
         });
       }
       logger.error(`[acp-chat] prompt failed: ${String(error)}`);
+      const completedAtMs = Date.now();
+      this.trace('session/prompt:complete', {
+        sessionKey: payload.sessionKey,
+        generation,
+        details: {
+          outcome: 'failure',
+          firstTextObserved: promptContext.firstTextAtMs != null,
+          ...promptCompletionDurations(promptContext, completedAtMs),
+          ...(promptContext.firstTextAtMs != null ? {
+            firstTextToCompleteMs: elapsedMs(promptContext.firstTextAtMs, completedAtMs),
+          } : {}),
+        },
+      });
       this.trace('session/prompt:failed', {
         sessionKey: payload.sessionKey,
         details: { error: error instanceof Error ? error.message : String(error) },
@@ -839,6 +940,26 @@ export class AcpChatService {
       return;
     }
     this.mainWindow.webContents.send(HOST_EVENT_CHANNELS.chat.acpSessionUpdate, envelope);
+    if (
+      livePrompt
+      && livePrompt.dispatchedAtMs != null
+      && livePrompt.firstTextAtMs == null
+      && isVisibleAgentText(notification)
+    ) {
+      const firstTextAtMs = Date.now();
+      livePrompt.firstTextAtMs = firstTextAtMs;
+      this.trace('session/prompt:first-text', {
+        direction: 'downstream',
+        sessionKey,
+        generation,
+        details: {
+          clientToMainMs: elapsedMs(livePrompt.clientStartedAtMs, livePrompt.mainReceivedAtMs),
+          mainToDispatchMs: elapsedMs(livePrompt.mainReceivedAtMs, livePrompt.dispatchedAtMs),
+          dispatchToFirstTextMs: elapsedMs(livePrompt.dispatchedAtMs, firstTextAtMs),
+          clientToFirstTextMs: elapsedMs(livePrompt.clientStartedAtMs, firstTextAtMs),
+        },
+      });
+    }
     this.trace('session-update:forwarded', {
       direction: 'downstream',
       sessionKey,
