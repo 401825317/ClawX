@@ -35,6 +35,7 @@ const { agentsState, chatState, gatewayState, providersState, managedClientConfi
   managedClientConfigState: {
     textModelPolicy: {
       defaultModel: 'smart-latest',
+      defaultThinkingLevel: 'medium',
       models: [
         { id: 'smart-latest', label: 'Smart' },
         { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
@@ -396,6 +397,7 @@ describe('ChatInput agent targeting', () => {
     providersState.refreshProviderSnapshot.mockReset();
     managedClientConfigState.textModelPolicy = {
       defaultModel: 'smart-latest',
+      defaultThinkingLevel: 'medium',
       models: [
         { id: 'smart-latest', label: 'Smart' },
         { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
@@ -650,6 +652,7 @@ describe('ChatInput agent targeting', () => {
 
   it('combines model and reasoning into one selector before image mode', () => {
     configureAgentAndModelPickers();
+    managedClientConfigState.textModelPolicy.defaultThinkingLevel = 'high';
     renderChatInput();
 
     const leadingActions = screen.getByTestId('chat-composer-leading-actions');
@@ -658,7 +661,7 @@ describe('ChatInput agent targeting', () => {
 
     expect(leadingActions).toContainElement(settingsPicker);
     expect(settingsPicker).toHaveTextContent('Smart');
-    expect(settingsPicker).toHaveTextContent('Medium');
+    expect(settingsPicker).toHaveTextContent('High');
     expect(settingsPicker).toHaveAttribute('aria-expanded', 'false');
     expect(settingsPicker).not.toHaveClass('bg-black/[0.07]');
     expect(settingsPicker).not.toHaveClass('dark:bg-white/10');
@@ -970,6 +973,7 @@ describe('ChatInput agent targeting', () => {
     configureAgentAndModelPickers();
     managedClientConfigState.textModelPolicy = {
       defaultModel: 'smart-latest',
+      defaultThinkingLevel: 'medium',
       models: [
         { id: 'smart-latest', label: 'Smart' },
         { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },

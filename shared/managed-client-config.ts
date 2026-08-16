@@ -1,4 +1,5 @@
 import {
+  UCLAW_DEFAULT_THINKING_LEVEL,
   UCLAW_DEFAULT_MODEL,
   UCLAW_MANAGED_PROVIDER_ID,
   UCLAW_VIDEO_DEFAULT_DURATION_SECONDS,
@@ -8,6 +9,7 @@ import {
   UCLAW_VIDEO_MODELS,
 } from './junfeiai-endpoints';
 import type {
+  UclawThinkingLevel,
   UclawVideoAspectRatio,
   UclawVideoMode,
   UclawVideoResolution,
@@ -21,6 +23,7 @@ export type ManagedClientTextModel = {
 
 export type ManagedClientTextModelPolicy = {
   defaultModel: string;
+  defaultThinkingLevel: UclawThinkingLevel;
   models: ManagedClientTextModel[];
 };
 
@@ -58,6 +61,7 @@ export type ManagedClientVideoModelRequest = {
 export function createDefaultManagedClientTextModelPolicy(): ManagedClientTextModelPolicy {
   return {
     defaultModel: UCLAW_DEFAULT_MODEL,
+    defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
     models: [{ id: UCLAW_DEFAULT_MODEL }],
   };
 }

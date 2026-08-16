@@ -10,12 +10,14 @@ import {
 } from '../../shared/managed-client-config';
 import {
   UCLAW_COMPATIBILITY_PROVIDER_ID,
+  UCLAW_DEFAULT_THINKING_LEVEL,
   UCLAW_MANAGED_PROVIDER_ID,
   UCLAW_SUPPORT_REQUEST_TIMEOUT_MS,
   UCLAW_SUPPORT_ROUTES,
   UCLAW_VIDEO_MODELS,
 } from '../../shared/junfeiai-endpoints';
 import type {
+  UclawThinkingLevel,
   UclawVideoAspectRatio,
   UclawVideoMode,
   UclawVideoResolution,
@@ -41,7 +43,7 @@ type ManagedClientConfigStore = {
 };
 
 type ManagedClientTextModelCache = {
-  version: 2;
+  version: 3;
   policiesByOrigin: Record<string, ManagedClientTextModelPolicy>;
 };
 
@@ -77,6 +79,7 @@ function stringValue(value: unknown): string {
 function clonePolicy(policy: ManagedClientTextModelPolicy): ManagedClientTextModelPolicy {
   return {
     defaultModel: policy.defaultModel,
+    defaultThinkingLevel: policy.defaultThinkingLevel,
     models: policy.models.map((model) => ({ ...model })),
   };
 }
@@ -126,6 +129,22 @@ function normalizeModel(value: unknown): ManagedClientTextModel | null {
   };
 }
 
+const UCLAW_THINKING_LEVELS = new Set<UclawThinkingLevel>([
+  'off',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+]);
+
+function normalizeThinkingLevel(value: unknown): UclawThinkingLevel {
+  const normalized = stringValue(value).toLowerCase() as UclawThinkingLevel;
+  return UCLAW_THINKING_LEVELS.has(normalized)
+    ? normalized
+    : UCLAW_DEFAULT_THINKING_LEVEL;
+}
+
 function textModelOptionsFromPayload(payload: unknown): unknown {
   if (!isRecord(payload)) return undefined;
   if (isRecord(payload.modelOptions)) return payload.modelOptions.text;
@@ -159,7 +178,11 @@ function normalizeTextModelOptions(value: unknown): ManagedClientTextModelPolicy
   const defaultModel = models.some((model) => model.id === configuredDefault)
     ? configuredDefault
     : models[0].id;
-  return { defaultModel, models };
+  return {
+    defaultModel,
+    defaultThinkingLevel: normalizeThinkingLevel(value.defaultThinkingLevel),
+    models,
+  };
 }
 
 function normalizeVideoResolution(value: unknown): UclawVideoResolution | null {
@@ -311,7 +334,11 @@ function normalizeVideoModelOptions(value: unknown): ManagedClientVideoModelPoli
 }
 
 function normalizedCachedPolicies(value: unknown): Record<string, ManagedClientTextModelPolicy> {
-  if (!isRecord(value) || value.version !== 2 || !isRecord(value.policiesByOrigin)) return {};
+  if (
+    !isRecord(value)
+    || (value.version !== 2 && value.version !== 3)
+    || !isRecord(value.policiesByOrigin)
+  ) return {};
   const policies: Record<string, ManagedClientTextModelPolicy> = {};
   for (const [origin, policy] of Object.entries(value.policiesByOrigin)) {
     const normalized = normalizeTextModelOptions(policy);
@@ -372,7 +399,7 @@ async function persistPolicy(origin: string, policy: ManagedClientTextModelPolic
     const policiesByOrigin = normalizedCachedPolicies(store.get(CACHE_KEY));
     policiesByOrigin[origin] = clonePolicy(policy);
     const cache: ManagedClientTextModelCache = {
-      version: 2,
+      version: 3,
       policiesByOrigin,
     };
     store.set(CACHE_KEY, cache);

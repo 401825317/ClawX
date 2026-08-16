@@ -125,6 +125,7 @@ describe('managed runtime config transaction', () => {
   it('installs the same server-owned model catalog for both managed Providers', async () => {
     const policy = {
       defaultModel: 'smart-latest',
+      defaultThinkingLevel: 'high' as const,
       models: [
         { id: 'smart-latest', label: 'Smart' },
         { id: 'standard-chat', label: 'Standard Chat' },
@@ -201,6 +202,8 @@ describe('managed runtime config transaction', () => {
     expect(installed.agents.defaults).toEqual(expect.objectContaining({
       workspace: '/tmp/keep',
       model: { primary: 'openai/smart-latest', fallbacks: [] },
+      thinkingDefault: 'high',
+      reasoningDefault: 'on',
       videoGenerationModel: {
         primary: 'uclaw-video/grok-image-video',
         fallbacks: [],

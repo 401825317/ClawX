@@ -32,7 +32,6 @@ import { collectDroppedFiles } from '@/lib/collect-dropped-files';
 import { fetchQuickAccessSkills } from '@/lib/quick-access-skills';
 import { DEFAULT_WORKSPACE_CWD, isDefaultWorkspacePath, normalizeWorkspacePath } from '@/lib/workspace-context';
 import type { AcpImageGenerationOptions, AcpVideoGenerationOptions } from '@shared/acp-chat/types';
-import { UCLAW_DEFAULT_THINKING_LEVEL } from '@shared/junfeiai-endpoints';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -515,12 +514,12 @@ export function ChatInput({
     t(`composer.thinkingLevels.${id}`, { defaultValue: fallback || id })
   ), [t]);
   const inheritedThinkingLabel = useMemo(() => {
-    const defaultLevel = currentSession?.thinkingDefault || UCLAW_DEFAULT_THINKING_LEVEL;
+    const defaultLevel = currentSession?.thinkingDefault || textModelPolicy.defaultThinkingLevel;
     return thinkingLevelLabel(
       defaultLevel,
       thinkingOptions.find((option) => option.id === defaultLevel)?.label,
     );
-  }, [currentSession?.thinkingDefault, thinkingLevelLabel, thinkingOptions]);
+  }, [currentSession?.thinkingDefault, textModelPolicy.defaultThinkingLevel, thinkingLevelLabel, thinkingOptions]);
   const thinkingButtonLabel = useMemo(() => {
     if (!selectedThinkingLevel) return inheritedThinkingLabel;
     return thinkingLevelLabel(

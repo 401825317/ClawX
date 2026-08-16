@@ -10,7 +10,6 @@ import {
   UCLAW_DEFAULT_API_PROTOCOL,
   UCLAW_DEFAULT_MODEL,
   UCLAW_DEFAULT_MODEL_CONTEXT_WINDOW,
-  UCLAW_DEFAULT_THINKING_LEVEL,
   UCLAW_MANAGED_PROVIDER_BASE_URL,
   UCLAW_MANAGED_PROVIDER_ID,
   UCLAW_PROVIDER_REQUEST_TIMEOUT_SECONDS,
@@ -513,7 +512,7 @@ export async function installManagedRuntimeProviderState(
       primary: `${UCLAW_MANAGED_PROVIDER_ID}/${policy.defaultModel}`,
       fallbacks: [],
     };
-    defaults.thinkingDefault = UCLAW_DEFAULT_THINKING_LEVEL;
+    defaults.thinkingDefault = policy.defaultThinkingLevel;
     defaults.reasoningDefault = 'on';
     defaults.videoGenerationModel = {
       primary: `${UCLAW_VIDEO_PROVIDER_ID}/${videoPolicy.defaultModel}`,

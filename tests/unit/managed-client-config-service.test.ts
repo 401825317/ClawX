@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   UCLAW_DEFAULT_MODEL,
+  UCLAW_DEFAULT_THINKING_LEVEL,
   UCLAW_SUPPORT_ROUTES,
 } from '@shared/junfeiai-endpoints';
 
@@ -70,6 +71,7 @@ describe('managed client-config service', () => {
         modelOptions: {
           text: {
             defaultModel: 'disabled-model',
+            defaultThinkingLevel: 'HIGH',
             models: [
               { id: 'smart-latest', label: 'Smart', enabled: true },
               { id: 'disabled-model', label: 'Disabled', enabled: false },
@@ -84,15 +86,19 @@ describe('managed client-config service', () => {
 
     await expect(getManagedClientTextModelPolicy({ refresh: true })).resolves.toEqual({
       defaultModel: 'smart-latest',
+      defaultThinkingLevel: 'high',
       models: [
         { id: 'smart-latest', label: 'Smart' },
         { id: 'deepseek-v4-pro', description: 'Reasoning' },
       ],
     });
     expect(mocks.store.get('textModelPolicy')).toEqual({
-      version: 2,
+      version: 3,
       policiesByOrigin: {
-        'https://uclaw.example.test': expect.objectContaining({ defaultModel: 'smart-latest' }),
+        'https://uclaw.example.test': expect.objectContaining({
+          defaultModel: 'smart-latest',
+          defaultThinkingLevel: 'high',
+        }),
       },
     });
   });
@@ -221,6 +227,7 @@ describe('managed client-config service', () => {
 
     await expect(getManagedClientTextModelPolicy({ refresh: true })).resolves.toEqual({
       defaultModel: 'smart-latest',
+      defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
       models: [{ id: 'smart-latest', label: 'Smart' }],
     });
   });
@@ -235,6 +242,7 @@ describe('managed client-config service', () => {
 
     await expect(getManagedClientTextModelPolicy({ refresh: true })).resolves.toEqual({
       defaultModel: UCLAW_DEFAULT_MODEL,
+      defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
       models: [{ id: UCLAW_DEFAULT_MODEL }],
     });
     expect(mocks.fetch).toHaveBeenCalledTimes(1);
@@ -260,6 +268,7 @@ describe('managed client-config service', () => {
 
     await expect(getManagedClientTextModelPolicy({ refresh: true })).resolves.toEqual({
       defaultModel: 'reasoning-pro',
+      defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
       models: [
         { id: 'smart-latest', label: 'Smart' },
         { id: 'reasoning-pro', label: 'Reasoning' },
@@ -286,6 +295,7 @@ describe('managed client-config service', () => {
 
     await expect(getManagedClientTextModelPolicy({ refresh: true })).resolves.toEqual({
       defaultModel: 'deepseek-v4-pro',
+      defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
       models: [{ id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' }],
     });
     expect(mocks.fetch).toHaveBeenNthCalledWith(
@@ -310,6 +320,7 @@ describe('managed client-config service', () => {
 
     await expect(getManagedClientTextModelPolicy({ refresh: true })).resolves.toEqual({
       defaultModel: 'cached-model',
+      defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
       models: [{ id: 'cached-model', label: 'Cached' }],
     });
   });
@@ -320,6 +331,7 @@ describe('managed client-config service', () => {
 
     await expect(getManagedClientTextModelPolicy({ refresh: true })).resolves.toEqual({
       defaultModel: UCLAW_DEFAULT_MODEL,
+      defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
       models: [{ id: UCLAW_DEFAULT_MODEL }],
     });
   });
@@ -340,6 +352,7 @@ describe('managed client-config service', () => {
 
     expect(policy).toEqual({
       defaultModel: 'smart-latest',
+      defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
       models: [{ id: 'smart-latest', label: 'Smart' }],
     });
     expect(JSON.stringify([...mocks.store.values()])).not.toContain('secret-access-token');
@@ -362,6 +375,7 @@ describe('managed client-config service', () => {
       accessToken: 'secret-access-token',
     })).resolves.toEqual({
       defaultModel: 'login-current-model',
+      defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
       models: [{ id: 'login-current-model', label: 'Current' }],
     });
     expect(mocks.fetch).toHaveBeenCalledWith(
@@ -386,6 +400,7 @@ describe('managed client-config service', () => {
     const { getManagedClientTextModelPolicy } = await loadService();
     await expect(getManagedClientTextModelPolicy({ refresh: true })).resolves.toEqual({
       defaultModel: 'first-model',
+      defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
       models: [{ id: 'first-model' }],
     });
 
@@ -393,12 +408,14 @@ describe('managed client-config service', () => {
     mocks.fetch.mockRejectedValueOnce(new Error('second origin offline'));
     await expect(getManagedClientTextModelPolicy({ refresh: true })).resolves.toEqual({
       defaultModel: UCLAW_DEFAULT_MODEL,
+      defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
       models: [{ id: UCLAW_DEFAULT_MODEL }],
     });
 
     mocks.origin = 'https://first.example.test';
     await expect(getManagedClientTextModelPolicy()).resolves.toEqual({
       defaultModel: 'first-model',
+      defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
       models: [{ id: 'first-model' }],
     });
   });
@@ -426,6 +443,7 @@ describe('managed client-config service', () => {
       },
     })).resolves.toEqual({
       defaultModel: 'embedded-new',
+      defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
       models: [{ id: 'embedded-new', label: 'Embedded New' }],
     });
 
@@ -442,10 +460,12 @@ describe('managed client-config service', () => {
 
     await expect(refresh).resolves.toEqual({
       defaultModel: 'embedded-new',
+      defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
       models: [{ id: 'embedded-new', label: 'Embedded New' }],
     });
     await expect(getManagedClientTextModelPolicy()).resolves.toEqual({
       defaultModel: 'embedded-new',
+      defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
       models: [{ id: 'embedded-new', label: 'Embedded New' }],
     });
   });
@@ -478,6 +498,7 @@ describe('managed client-config service', () => {
     releaseStoreLoad();
     await expect(embedded).resolves.toEqual({
       defaultModel: 'embedded-new',
+      defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
       models: [{ id: 'embedded-new', label: 'Embedded New' }],
     });
     await vi.waitFor(() => expect(mocks.fetch).toHaveBeenCalledOnce());
@@ -495,10 +516,12 @@ describe('managed client-config service', () => {
 
     await expect(refresh).resolves.toEqual({
       defaultModel: 'embedded-new',
+      defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
       models: [{ id: 'embedded-new', label: 'Embedded New' }],
     });
     await expect(getManagedClientTextModelPolicy()).resolves.toEqual({
       defaultModel: 'embedded-new',
+      defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
       models: [{ id: 'embedded-new', label: 'Embedded New' }],
     });
   });
