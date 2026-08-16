@@ -57,6 +57,33 @@ describe('OpenClaw bundled skill shims', () => {
     expect(readFileSync(join(existingDir, 'SKILL.md'), 'utf8')).toBe('user-selected bundled implementation\n');
   });
 
+  it('verifies every OpenClaw-owned skill file is preserved byte-for-byte', async () => {
+    const module = await import('../../scripts/install-openclaw-skill-shims.mjs');
+    const sourceSkillsRoot = mkdtempSync(join(tmpdir(), 'uclaw-openclaw-source-skills-'));
+    const bundledSkillsRoot = mkdtempSync(join(tmpdir(), 'uclaw-openclaw-bundled-skills-'));
+    tempRoots.push(sourceSkillsRoot, bundledSkillsRoot);
+
+    for (const skillId of ['skill-creator', 'native-extra']) {
+      mkdirSync(join(sourceSkillsRoot, skillId, 'references'), { recursive: true });
+      mkdirSync(join(bundledSkillsRoot, skillId, 'references'), { recursive: true });
+      writeFileSync(join(sourceSkillsRoot, skillId, 'SKILL.md'), `${skillId}\n`, 'utf8');
+      writeFileSync(join(bundledSkillsRoot, skillId, 'SKILL.md'), `${skillId}\n`, 'utf8');
+      writeFileSync(join(sourceSkillsRoot, skillId, 'references', 'guide.md'), 'same content\n', 'utf8');
+      writeFileSync(join(bundledSkillsRoot, skillId, 'references', 'guide.md'), 'same content\n', 'utf8');
+    }
+
+    expect(module.verifyOpenClawSkillsPreserved({ sourceSkillsRoot, bundledSkillsRoot }))
+      .toEqual(['native-extra', 'skill-creator']);
+
+    writeFileSync(join(bundledSkillsRoot, 'native-extra', 'references', 'guide.md'), 'changed\n', 'utf8');
+    expect(() => module.verifyOpenClawSkillsPreserved({ sourceSkillsRoot, bundledSkillsRoot }))
+      .toThrow('Bundled OpenClaw skill file was modified: native-extra/references/guide.md');
+
+    rmSync(join(bundledSkillsRoot, 'native-extra'), { recursive: true, force: true });
+    expect(() => module.verifyOpenClawSkillsPreserved({ sourceSkillsRoot, bundledSkillsRoot }))
+      .toThrow('Bundled OpenClaw skill is missing: native-extra');
+  });
+
   it('wires development and packaged OpenClaw preparation to the same installer', () => {
     const packageJson = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf8')) as {
       scripts?: Record<string, string>;
@@ -66,6 +93,7 @@ describe('OpenClaw bundled skill shims', () => {
     expect(packageJson.scripts?.postinstall).toContain('install-openclaw-skill-shims.mjs');
     expect(packageJson.scripts?.predev).toContain('install-openclaw-skill-shims.mjs');
     expect(bundleSource).toContain('installOpenClawSkillShims');
+    expect(bundleSource).toContain('verifyOpenClawSkillsPreserved');
   });
 
   it('keeps blender-maker eligible when Blender is installed outside PATH', () => {

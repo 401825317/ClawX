@@ -92,10 +92,10 @@ describe('openclaw bundle config', () => {
       resolve(process.cwd(), 'scripts/bundle-openclaw.mjs'),
       'utf8',
     );
-
     expect(JSON.stringify(builderConfig.extraResources)).not.toContain('preinstalled-skills');
     expect(JSON.stringify(packageJson.scripts)).not.toContain('preinstalled-skills');
     expect(bundleSource).not.toContain('trimBundledOpenClawSkills');
+    expect(bundleSource).toContain('verifyOpenClawSkillsPreserved');
   });
 
   it('declares every managed video request timeout in the plugin config schema', () => {

@@ -18,7 +18,10 @@
 
 import 'zx/globals';
 import { ELECTRON_MAIN_RUNTIME_PACKAGES, EXTRA_BUNDLED_PACKAGES } from './openclaw-bundle-config.mjs';
-import { installOpenClawSkillShims } from './install-openclaw-skill-shims.mjs';
+import {
+  installOpenClawSkillShims,
+  verifyOpenClawSkillsPreserved,
+} from './install-openclaw-skill-shims.mjs';
 import { patchOpenClawAcpStreamingRuntime } from './openclaw-acp-streaming-patch.mjs';
 import { patchOpenClawAcpTerminalErrorRuntime } from './openclaw-acp-terminal-error-patch.mjs';
 import { patchOpenClawMediaGenerationRuntime } from './openclaw-media-generation-patch.mjs';
@@ -1055,6 +1058,10 @@ if (openclawSelfImportPatch.specifiersPatched > 0) {
 // 8. Verify the bundle
 const entryExists = fs.existsSync(path.join(OUTPUT, 'openclaw.mjs'));
 const distExists = fs.existsSync(path.join(OUTPUT, 'dist', 'entry.js'));
+const preservedOpenClawSkillIds = verifyOpenClawSkillsPreserved({
+  sourceSkillsRoot: path.join(openclawReal, 'skills'),
+  bundledSkillsRoot: path.join(OUTPUT, 'skills'),
+});
 
 echo``;
 echo`✅ Bundle complete: ${OUTPUT}`;
@@ -1064,6 +1071,7 @@ echo`   Duplicate versions skipped: ${skippedDupes}`;
 echo`   Total discovered: ${collected.size}`;
 echo`   openclaw.mjs: ${entryExists ? '✓' : '✗'}`;
 echo`   dist/entry.js: ${distExists ? '✓' : '✗'}`;
+echo`   OpenClaw skills preserved: ${preservedOpenClawSkillIds.length} (${preservedOpenClawSkillIds.join(', ')})`;
 
 if (!entryExists || !distExists) {
   echo`❌ Bundle verification failed!`;
