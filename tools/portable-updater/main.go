@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,9 +30,22 @@ const (
 	moveRetryDelay    = 500 * time.Millisecond
 	startupReadyWait  = 45 * time.Second
 	startupReadyGrace = time.Second
+	copyHeartbeat     = time.Second
+	copyLogInterval   = 5 * time.Second
+	copyBufferSize    = 1024 * 1024
+	maxCopyWorkers    = 4
 )
 
-var startUpdatedApp = defaultStartUpdatedApp
+var (
+	startUpdatedApp                 = defaultStartUpdatedApp
+	tryFastMoveReplacement          = defaultTryFastMoveReplacement
+	replacementProgressEmitInterval = 200 * time.Millisecond
+	replacementCopyBufferPool       = sync.Pool{
+		New: func() any {
+			return make([]byte, copyBufferSize)
+		},
+	}
+)
 
 type updateTask struct {
 	ZipPath       string `json:"zipPath"`
@@ -75,6 +89,47 @@ type updater struct {
 	taskPath string
 	logFile  *os.File
 	progress *progressReporter
+}
+
+type replacementCopyProgress struct {
+	Percent        int
+	CurrentEntry   string
+	CompletedFiles int64
+	TotalFiles     int64
+	CompletedBytes int64
+	TotalBytes     int64
+}
+
+type replacementDirectory struct {
+	dst  string
+	perm os.FileMode
+}
+
+type replacementFile struct {
+	src  string
+	dst  string
+	perm os.FileMode
+	size int64
+}
+
+type replacementSymlink struct {
+	dst    string
+	target string
+}
+
+type replacementCopyPlan struct {
+	directories []replacementDirectory
+	files       []replacementFile
+	symlinks    []replacementSymlink
+	totalFiles  int64
+	totalBytes  int64
+}
+
+type replacementWork struct {
+	name string
+	src  string
+	dst  string
+	plan replacementCopyPlan
 }
 
 func main() {
@@ -326,12 +381,26 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 		return u.rollbackAfterFailure(backupDir, stagingDir, nil, moved, err)
 	}
 
-	copied, err := copyReplacementFiles(stagingDir, u.task.RootDir, u.task.DataDirName, func(percent int, detail string) {
+	lastCopyLog := time.Time{}
+	copied, err := copyReplacementFiles(stagingDir, u.task.RootDir, u.task.DataDirName, func(copyProgress replacementCopyProgress) {
 		u.progress.Update(progressState{
 			Title:   "正在安装新版文件",
-			Detail:  detail,
-			Percent: clampProgressPercent(percent, 70, 92),
+			Detail:  formatReplacementProgressDetail(copyProgress),
+			Percent: clampProgressPercent(copyProgress.Percent, 70, 92),
 		})
+		now := time.Now()
+		if lastCopyLog.IsZero() || now.Sub(lastCopyLog) >= copyLogInterval || copyProgress.Percent >= 100 {
+			u.logf(
+				"install progress: entry=%s files=%d/%d bytes=%d/%d percent=%d",
+				copyProgress.CurrentEntry,
+				copyProgress.CompletedFiles,
+				copyProgress.TotalFiles,
+				copyProgress.CompletedBytes,
+				copyProgress.TotalBytes,
+				copyProgress.Percent,
+			)
+			lastCopyLog = now
+		}
 	})
 	if err != nil {
 		return u.rollbackAfterFailure(backupDir, stagingDir, copied, moved, err)
@@ -725,46 +794,196 @@ func shouldSkipRootEntry(name string, dataDirName string) bool {
 	return name == dataDirName || name == backupDirName
 }
 
-func copyReplacementFiles(stagingDir string, rootDir string, dataDirName string, onProgress func(percent int, detail string)) ([]string, error) {
-	entries, err := os.ReadDir(stagingDir)
-	if err != nil {
-		return nil, err
-	}
-	copied := make([]string, 0, len(entries))
-	replacementEntries := make([]os.DirEntry, 0, len(entries))
-	for _, entry := range entries {
-		name := entry.Name()
-		if shouldSkipRootEntry(name, dataDirName) {
-			continue
-		}
-		replacementEntries = append(replacementEntries, entry)
-	}
-	total := len(replacementEntries)
-	if total == 0 && onProgress != nil {
-		onProgress(100, "没有需要替换的文件。")
-	}
-	for index, entry := range replacementEntries {
-		name := entry.Name()
-		src := filepath.Join(stagingDir, name)
-		dst := filepath.Join(rootDir, name)
-		if onProgress != nil {
-			onProgress(index*100/total, fmt.Sprintf("正在替换 %d/%d: %s", index+1, total, name))
-		}
-		// Record the entry before copyPath starts. A newly introduced top-level
-		// directory can be partially written before copyPath returns an error,
-		// and it has no old counterpart for moveEntriesBack to overwrite.
-		copied = append(copied, name)
-		if err := copyPath(src, dst); err != nil {
-			return copied, err
-		}
-	}
-	if onProgress != nil {
-		onProgress(100, "新版文件已安装。")
-	}
-	return copied, nil
+type replacementProgressTracker struct {
+	mu             sync.Mutex
+	totalFiles     int64
+	totalBytes     int64
+	completedFiles int64
+	completedBytes int64
+	currentEntry   string
+	lastEmit       time.Time
+	onProgress     func(replacementCopyProgress)
 }
 
-func copyPath(src string, dst string) error {
+func newReplacementProgressTracker(
+	totalFiles int64,
+	totalBytes int64,
+	onProgress func(replacementCopyProgress),
+) *replacementProgressTracker {
+	return &replacementProgressTracker{
+		totalFiles: totalFiles,
+		totalBytes: totalBytes,
+		onProgress: onProgress,
+	}
+}
+
+func progressBasisPoints(completed int64, total int64) int64 {
+	if total <= 0 {
+		return -1
+	}
+	if completed <= 0 {
+		return 0
+	}
+	if completed >= total {
+		return 10_000
+	}
+	return completed * 10_000 / total
+}
+
+func replacementProgressPercent(completedFiles int64, totalFiles int64, completedBytes int64, totalBytes int64) int {
+	fileProgress := progressBasisPoints(completedFiles, totalFiles)
+	byteProgress := progressBasisPoints(completedBytes, totalBytes)
+	var combined int64
+	switch {
+	case fileProgress >= 0 && byteProgress >= 0:
+		// Bytes represent transfer volume while file count captures the real
+		// filesystem overhead of tens of thousands of small runtime files.
+		combined = (byteProgress*7 + fileProgress*3) / 10
+	case byteProgress >= 0:
+		combined = byteProgress
+	case fileProgress >= 0:
+		combined = fileProgress
+	default:
+		return 100
+	}
+	return int(combined / 100)
+}
+
+func (t *replacementProgressTracker) snapshotLocked() replacementCopyProgress {
+	return replacementCopyProgress{
+		Percent: replacementProgressPercent(
+			t.completedFiles,
+			t.totalFiles,
+			t.completedBytes,
+			t.totalBytes,
+		),
+		CurrentEntry:   t.currentEntry,
+		CompletedFiles: t.completedFiles,
+		TotalFiles:     t.totalFiles,
+		CompletedBytes: t.completedBytes,
+		TotalBytes:     t.totalBytes,
+	}
+}
+
+func (t *replacementProgressTracker) emitLocked(force bool) {
+	if t.onProgress == nil {
+		return
+	}
+	now := time.Now()
+	if !force && !t.lastEmit.IsZero() && now.Sub(t.lastEmit) < replacementProgressEmitInterval {
+		return
+	}
+	t.lastEmit = now
+	t.onProgress(t.snapshotLocked())
+}
+
+func (t *replacementProgressTracker) setCurrentEntry(name string) {
+	t.mu.Lock()
+	t.currentEntry = name
+	t.emitLocked(true)
+	t.mu.Unlock()
+}
+
+func (t *replacementProgressTracker) addBytes(count int64) {
+	if count <= 0 {
+		return
+	}
+	t.mu.Lock()
+	t.completedBytes += count
+	if t.completedBytes > t.totalBytes {
+		t.completedBytes = t.totalBytes
+	}
+	t.emitLocked(false)
+	t.mu.Unlock()
+}
+
+func (t *replacementProgressTracker) completeFile() {
+	t.mu.Lock()
+	t.completedFiles++
+	if t.completedFiles > t.totalFiles {
+		t.completedFiles = t.totalFiles
+	}
+	t.emitLocked(false)
+	t.mu.Unlock()
+}
+
+func (t *replacementProgressTracker) completeMovedEntry(files int64, bytes int64) {
+	t.mu.Lock()
+	t.completedFiles += files
+	t.completedBytes += bytes
+	if t.completedFiles > t.totalFiles {
+		t.completedFiles = t.totalFiles
+	}
+	if t.completedBytes > t.totalBytes {
+		t.completedBytes = t.totalBytes
+	}
+	t.emitLocked(true)
+	t.mu.Unlock()
+}
+
+func (t *replacementProgressTracker) finish() {
+	t.mu.Lock()
+	t.completedFiles = t.totalFiles
+	t.completedBytes = t.totalBytes
+	t.emitLocked(true)
+	t.mu.Unlock()
+}
+
+func (t *replacementProgressTracker) startHeartbeat() func() {
+	if t.onProgress == nil {
+		return func() {}
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(copyHeartbeat)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				t.mu.Lock()
+				t.emitLocked(true)
+				t.mu.Unlock()
+			case <-stop:
+				return
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
+}
+
+func formatByteCount(value int64) string {
+	const kib = 1024
+	const mib = 1024 * kib
+	if value < mib {
+		return fmt.Sprintf("%.1f KiB", float64(value)/float64(kib))
+	}
+	return fmt.Sprintf("%.1f MiB", float64(value)/float64(mib))
+}
+
+func formatReplacementProgressDetail(progress replacementCopyProgress) string {
+	entry := progress.CurrentEntry
+	if entry == "" {
+		entry = "新版文件"
+	}
+	if progress.TotalBytes <= 0 {
+		return fmt.Sprintf("%s：%d/%d 个文件", entry, progress.CompletedFiles, progress.TotalFiles)
+	}
+	return fmt.Sprintf(
+		"%s：%d/%d 个文件，%s/%s",
+		entry,
+		progress.CompletedFiles,
+		progress.TotalFiles,
+		formatByteCount(progress.CompletedBytes),
+		formatByteCount(progress.TotalBytes),
+	)
+}
+
+func appendReplacementPlan(plan *replacementCopyPlan, src string, dst string) error {
 	info, err := os.Lstat(src)
 	if err != nil {
 		return err
@@ -774,28 +993,256 @@ func copyPath(src string, dst string) error {
 		if err != nil {
 			return err
 		}
-		_ = os.Remove(dst)
-		return os.Symlink(target, dst)
+		plan.symlinks = append(plan.symlinks, replacementSymlink{dst: dst, target: target})
+		plan.totalFiles++
+		return nil
 	}
 	if info.IsDir() {
-		if runtime.GOOS == "darwin" && strings.HasSuffix(strings.ToLower(src), ".app") {
-			return copyMacAppBundleWithDitto(src, dst)
-		}
-		if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
-			return err
-		}
+		plan.directories = append(plan.directories, replacementDirectory{dst: dst, perm: info.Mode().Perm()})
 		entries, err := os.ReadDir(src)
 		if err != nil {
 			return err
 		}
 		for _, entry := range entries {
-			if err := copyPath(filepath.Join(src, entry.Name()), filepath.Join(dst, entry.Name())); err != nil {
+			if err := appendReplacementPlan(
+				plan,
+				filepath.Join(src, entry.Name()),
+				filepath.Join(dst, entry.Name()),
+			); err != nil {
 				return err
 			}
 		}
-		return preserveFileMode(dst, info.Mode().Perm())
+		return nil
 	}
-	return copyFile(src, dst, info.Mode().Perm())
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("unsupported update entry type: %s", src)
+	}
+	plan.files = append(plan.files, replacementFile{
+		src:  src,
+		dst:  dst,
+		perm: info.Mode().Perm(),
+		size: info.Size(),
+	})
+	plan.totalFiles++
+	plan.totalBytes += info.Size()
+	return nil
+}
+
+func buildReplacementWork(stagingDir string, rootDir string, dataDirName string) ([]replacementWork, int64, int64, error) {
+	entries, err := os.ReadDir(stagingDir)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	work := make([]replacementWork, 0, len(entries))
+	var totalFiles int64
+	var totalBytes int64
+	for _, entry := range entries {
+		name := entry.Name()
+		if shouldSkipRootEntry(name, dataDirName) {
+			continue
+		}
+		src := filepath.Join(stagingDir, name)
+		dst := filepath.Join(rootDir, name)
+		plan := replacementCopyPlan{}
+		if err := appendReplacementPlan(&plan, src, dst); err != nil {
+			return nil, 0, 0, err
+		}
+		work = append(work, replacementWork{name: name, src: src, dst: dst, plan: plan})
+		totalFiles += plan.totalFiles
+		totalBytes += plan.totalBytes
+	}
+	return work, totalFiles, totalBytes, nil
+}
+
+func defaultTryFastMoveReplacement(src string, dst string) (bool, error) {
+	if runtime.GOOS != "windows" {
+		return false, nil
+	}
+	srcVolume := filepath.VolumeName(src)
+	dstVolume := filepath.VolumeName(dst)
+	if srcVolume == "" || dstVolume == "" || !strings.EqualFold(srcVolume, dstVolume) {
+		return false, nil
+	}
+	if err := os.Rename(src, dst); err != nil {
+		// Antivirus can briefly retain a handle even on the same volume. The
+		// normal copy path remains a safe fallback because dst is still absent.
+		return false, nil
+	}
+	return true, nil
+}
+
+func copyWorkerCount(fileCount int) int {
+	if fileCount <= 1 {
+		return fileCount
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if workers > maxCopyWorkers {
+		workers = maxCopyWorkers
+	}
+	if workers < 2 {
+		workers = 2
+	}
+	if workers > fileCount {
+		workers = fileCount
+	}
+	return workers
+}
+
+func copyReplacementFile(file replacementFile, tracker *replacementProgressTracker) error {
+	input, err := os.Open(file.src)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	if err := os.MkdirAll(filepath.Dir(file.dst), 0o755); err != nil {
+		return err
+	}
+	output, err := os.OpenFile(file.dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, file.perm)
+	if err != nil {
+		return err
+	}
+	buffer := replacementCopyBufferPool.Get().([]byte)
+	writer := &replacementProgressWriter{writer: output, tracker: tracker}
+	_, copyErr := io.CopyBuffer(writer, input, buffer)
+	replacementCopyBufferPool.Put(buffer)
+	closeErr := output.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := preserveFileMode(file.dst, file.perm); err != nil {
+		return err
+	}
+	tracker.completeFile()
+	return nil
+}
+
+type replacementProgressWriter struct {
+	writer  io.Writer
+	tracker *replacementProgressTracker
+}
+
+func (w *replacementProgressWriter) Write(data []byte) (int, error) {
+	written, err := w.writer.Write(data)
+	if written > 0 {
+		w.tracker.addBytes(int64(written))
+	}
+	return written, err
+}
+
+func copyReplacementRegularFiles(files []replacementFile, tracker *replacementProgressTracker) error {
+	workers := copyWorkerCount(len(files))
+	if workers == 0 {
+		return nil
+	}
+	var wg sync.WaitGroup
+	var taskMu sync.Mutex
+	nextTask := 0
+	var firstErr error
+	worker := func() {
+		defer wg.Done()
+		for {
+			taskMu.Lock()
+			if firstErr != nil || nextTask >= len(files) {
+				taskMu.Unlock()
+				return
+			}
+			file := files[nextTask]
+			nextTask++
+			taskMu.Unlock()
+
+			if err := copyReplacementFile(file, tracker); err != nil {
+				taskMu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("copy %s: %w", file.dst, err)
+				}
+				taskMu.Unlock()
+				return
+			}
+		}
+	}
+	wg.Add(workers)
+	for index := 0; index < workers; index++ {
+		go worker()
+	}
+	wg.Wait()
+	return firstErr
+}
+
+func executeReplacementCopyPlan(plan replacementCopyPlan, tracker *replacementProgressTracker) error {
+	for _, directory := range plan.directories {
+		if err := os.MkdirAll(directory.dst, 0o755); err != nil {
+			return err
+		}
+	}
+	if err := copyReplacementRegularFiles(plan.files, tracker); err != nil {
+		return err
+	}
+	for _, symlink := range plan.symlinks {
+		if err := os.Remove(symlink.dst); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if err := os.Symlink(symlink.target, symlink.dst); err != nil {
+			return err
+		}
+		tracker.completeFile()
+	}
+	for index := len(plan.directories) - 1; index >= 0; index-- {
+		directory := plan.directories[index]
+		if err := preserveFileMode(directory.dst, directory.perm); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyReplacementFiles(
+	stagingDir string,
+	rootDir string,
+	dataDirName string,
+	onProgress func(replacementCopyProgress),
+) ([]string, error) {
+	work, totalFiles, totalBytes, err := buildReplacementWork(stagingDir, rootDir, dataDirName)
+	if err != nil {
+		return nil, err
+	}
+	tracker := newReplacementProgressTracker(totalFiles, totalBytes, onProgress)
+	stopHeartbeat := tracker.startHeartbeat()
+	defer stopHeartbeat()
+	if len(work) == 0 {
+		tracker.finish()
+		return []string{}, nil
+	}
+
+	copied := make([]string, 0, len(work))
+	for _, item := range work {
+		tracker.setCurrentEntry(item.name)
+		// Record before installation. A failed parallel copy can leave a partial
+		// top-level tree that rollback must remove before restoring the backup.
+		copied = append(copied, item.name)
+		moved, err := tryFastMoveReplacement(item.src, item.dst)
+		if err != nil {
+			return copied, err
+		}
+		if moved {
+			tracker.completeMovedEntry(item.plan.totalFiles, item.plan.totalBytes)
+			continue
+		}
+		if runtime.GOOS == "darwin" && strings.HasSuffix(strings.ToLower(item.src), ".app") {
+			if err := copyMacAppBundleWithDitto(item.src, item.dst); err != nil {
+				return copied, err
+			}
+			tracker.completeMovedEntry(item.plan.totalFiles, item.plan.totalBytes)
+			continue
+		}
+		if err := executeReplacementCopyPlan(item.plan, tracker); err != nil {
+			return copied, err
+		}
+	}
+	tracker.finish()
+	return copied, nil
 }
 
 func copyMacAppBundleWithDitto(src string, dst string) error {
@@ -804,30 +1251,6 @@ func copyMacAppBundleWithDitto(src string, dst string) error {
 		return fmt.Errorf("failed to copy macOS app bundle with ditto: %w (%s)", err, strings.TrimSpace(string(output)))
 	}
 	return nil
-}
-
-func copyFile(src string, dst string, perm os.FileMode) error {
-	input, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer input.Close()
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	output, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm)
-	if err != nil {
-		return err
-	}
-	_, copyErr := io.Copy(output, input)
-	closeErr := output.Close()
-	if copyErr != nil {
-		return copyErr
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	return preserveFileMode(dst, perm)
 }
 
 func moveEntriesBack(backupDir string, rootDir string, entries []string) error {

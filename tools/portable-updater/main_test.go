@@ -83,6 +83,130 @@ func TestCreateBackupDirUsesUniqueAttemptPaths(t *testing.T) {
 	}
 }
 
+func TestReplacementProgressWeightsBytesAndFileCount(t *testing.T) {
+	percent := replacementProgressPercent(50, 100, 75, 100)
+	if percent != 67 {
+		t.Fatalf("expected weighted progress 67, got %d", percent)
+	}
+	if percent := replacementProgressPercent(0, 0, 0, 0); percent != 100 {
+		t.Fatalf("expected empty replacement to be complete, got %d", percent)
+	}
+}
+
+func TestCopyReplacementFilesReportsNestedProgress(t *testing.T) {
+	previousFastMove := tryFastMoveReplacement
+	previousInterval := replacementProgressEmitInterval
+	tryFastMoveReplacement = func(string, string) (bool, error) {
+		return false, nil
+	}
+	replacementProgressEmitInterval = 0
+	t.Cleanup(func() {
+		tryFastMoveReplacement = previousFastMove
+		replacementProgressEmitInterval = previousInterval
+	})
+
+	dir := t.TempDir()
+	stagingDir := filepath.Join(dir, "staging")
+	rootDir := filepath.Join(dir, "portable")
+	for _, path := range []string{
+		filepath.Join(stagingDir, "resources", "openclaw"),
+		filepath.Join(stagingDir, "UClawData"),
+		filepath.Join(rootDir, "UClawData"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files := map[string]string{
+		filepath.Join(stagingDir, "resources", "app.asar"):                 strings.Repeat("a", 1024*1024+17),
+		filepath.Join(stagingDir, "resources", "openclaw", "package.json"): "new runtime",
+		filepath.Join(stagingDir, "portable.flag"):                         "portable",
+		filepath.Join(stagingDir, "UClawData", ".keep"):                    "",
+		filepath.Join(rootDir, "UClawData", "account.json"):                "preserve me",
+	}
+	for path, content := range files {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	progress := make([]replacementCopyProgress, 0, 16)
+	copied, err := copyReplacementFiles(stagingDir, rootDir, "UClawData", func(snapshot replacementCopyProgress) {
+		progress = append(progress, snapshot)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(copied) != 2 {
+		t.Fatalf("expected two copied top-level entries, got %v", copied)
+	}
+	if len(progress) < 4 {
+		t.Fatalf("expected internal copy progress, got %d updates", len(progress))
+	}
+	final := progress[len(progress)-1]
+	if final.Percent != 100 || final.CompletedFiles != final.TotalFiles || final.CompletedBytes != final.TotalBytes {
+		t.Fatalf("expected complete final progress, got %+v", final)
+	}
+	foundNestedProgress := false
+	for _, snapshot := range progress {
+		if snapshot.CurrentEntry == "resources" && snapshot.CompletedBytes > 0 && snapshot.CompletedBytes < snapshot.TotalBytes {
+			foundNestedProgress = true
+			break
+		}
+	}
+	if !foundNestedProgress {
+		t.Fatalf("expected byte-level progress while resources was being copied: %+v", progress)
+	}
+	if raw, err := os.ReadFile(filepath.Join(rootDir, "resources", "openclaw", "package.json")); err != nil || string(raw) != "new runtime" {
+		t.Fatalf("expected nested runtime file, got %q err=%v", string(raw), err)
+	}
+	if raw, err := os.ReadFile(filepath.Join(rootDir, "UClawData", "account.json")); err != nil || string(raw) != "preserve me" {
+		t.Fatalf("expected user data preserved, got %q err=%v", string(raw), err)
+	}
+}
+
+func TestCopyReplacementFilesUsesFastMove(t *testing.T) {
+	previousFastMove := tryFastMoveReplacement
+	tryFastMoveReplacement = func(src string, dst string) (bool, error) {
+		if err := os.Rename(src, dst); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	t.Cleanup(func() {
+		tryFastMoveReplacement = previousFastMove
+	})
+
+	dir := t.TempDir()
+	stagingDir := filepath.Join(dir, "staging")
+	rootDir := filepath.Join(dir, "portable")
+	if err := os.MkdirAll(filepath.Join(stagingDir, "resources"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rootDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stagingDir, "resources", "app.asar"), []byte("new app"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var final replacementCopyProgress
+	if _, err := copyReplacementFiles(stagingDir, rootDir, "UClawData", func(snapshot replacementCopyProgress) {
+		final = snapshot
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(stagingDir, "resources")); !os.IsNotExist(err) {
+		t.Fatalf("expected staging resources to be moved, got %v", err)
+	}
+	if raw, err := os.ReadFile(filepath.Join(rootDir, "resources", "app.asar")); err != nil || string(raw) != "new app" {
+		t.Fatalf("expected moved app.asar, got %q err=%v", string(raw), err)
+	}
+	if final.Percent != 100 || final.CompletedFiles != 1 || final.CompletedBytes != int64(len("new app")) {
+		t.Fatalf("expected fast move to report complete progress, got %+v", final)
+	}
+}
+
 func TestWaitForUpdatedAppReadyAcceptsMatchingLiveProcess(t *testing.T) {
 	readyPath := filepath.Join(t.TempDir(), "ready.json")
 	cmd := exec.Command(os.Args[0], "-test.run=TestPortableUpdaterProcessHelper")
@@ -228,11 +352,19 @@ func TestApplyReplacesPackageEntriesAndPreservesUserFiles(t *testing.T) {
 
 func TestApplyRollsBackWhenUpdatedAppFailsToStart(t *testing.T) {
 	previousStartUpdatedApp := startUpdatedApp
+	previousFastMove := tryFastMoveReplacement
 	startUpdatedApp = func(string, string, string) (*exec.Cmd, error) {
 		return nil, errors.New("launch failed")
 	}
+	tryFastMoveReplacement = func(src string, dst string) (bool, error) {
+		if err := os.Rename(src, dst); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
 	t.Cleanup(func() {
 		startUpdatedApp = previousStartUpdatedApp
+		tryFastMoveReplacement = previousFastMove
 	})
 
 	dir := t.TempDir()
