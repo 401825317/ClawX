@@ -228,7 +228,7 @@ export async function syncProviderApiKeyToRuntime(
   apiKey: string,
 ): Promise<void> {
   const ock = getOpenClawProviderKey(providerType, providerId);
-  await saveProviderKeyToOpenClaw(ock, apiKey);
+  await saveProviderKeyToOpenClaw(ock, apiKey, { resetFailureState: true });
 }
 
 export async function syncAllProviderAuthToRuntime(
@@ -318,7 +318,7 @@ async function syncProviderSecretToRuntime(
   if (apiKey !== undefined) {
     const trimmedKey = apiKey.trim();
     if (trimmedKey) {
-      await saveProviderKeyToOpenClaw(runtimeProviderKey, trimmedKey);
+      await saveProviderKeyToOpenClaw(runtimeProviderKey, trimmedKey, { resetFailureState: true });
     } else {
       // An explicit empty string means the caller wants to clear the key.
       // Mirror that intent into OpenClaw auth-profiles so the gateway no

@@ -2,6 +2,7 @@ import { openSync, closeSync, fstatSync, readSync } from 'node:fs';
 import { access } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { CompleteHostServiceRegistry } from '../main/ipc/host-contract';
+import type { GatewayManager } from '../gateway/manager';
 import { stripAcpWorkingDirectoryPrefix } from '@shared/chat/session-title';
 import { isOpenClawHeartbeatPollText } from '@shared/chat/openclaw-internal';
 import type { RawMessage } from '@shared/chat/types';
@@ -52,6 +53,17 @@ type SessionPayload = {
   sessionId?: unknown;
   limit?: unknown;
   sessionKeys?: unknown;
+};
+
+type SessionsApiContext = {
+  gatewayManager?: Pick<GatewayManager, 'getStatus' | 'rpc'>;
+};
+
+type GatewaySessionPatchResult = {
+  ok?: boolean;
+  entry?: {
+    label?: unknown;
+  };
 };
 
 function extractMessageText(content: unknown): string {
@@ -583,7 +595,11 @@ async function deleteSession(sessionKey: string): Promise<{ success: boolean; er
   return { success: true };
 }
 
-async function renameSession(sessionKey: string, label: string): Promise<{ success: boolean; error?: string }> {
+async function renameSession(
+  sessionKey: string,
+  label: string,
+  gatewayManager?: SessionsApiContext['gatewayManager'],
+): Promise<{ success: boolean; error?: string }> {
   if (!sessionKey || !sessionKey.startsWith('agent:')) {
     return { success: false, error: `Invalid sessionKey: ${sessionKey}` };
   }
@@ -601,9 +617,34 @@ async function renameSession(sessionKey: string, label: string): Promise<{ succe
 
   const sessionsJsonPath = join(resolveOpenClawStateDir(), 'agents', agentId, 'sessions', 'sessions.json');
   const fsP = await import('node:fs/promises');
+  const trimmedLabel = label.trim();
+
+  if (gatewayManager) {
+    const gatewayState = gatewayManager.getStatus().state;
+    if (gatewayState === 'running') {
+      try {
+        const patched = await gatewayManager.rpc<GatewaySessionPatchResult>('sessions.patch', {
+          key: sessionKey,
+          label: trimmedLabel,
+        }, 10_000);
+        if (patched?.ok !== true || patched.entry?.label !== trimmedLabel) {
+          return { success: false, error: `Gateway did not persist the session label: ${sessionKey}` };
+        }
+        logger.info(`[session:rename] key=${sessionKey} label=${trimmedLabel} owner=gateway`);
+        return { success: true };
+      } catch (error) {
+        logger.warn(`[session:rename] Gateway patch failed for "${sessionKey}": ${String(error)}`);
+        return { success: false, error: `Could not rename the running Gateway session: ${String(error)}` };
+      }
+    }
+
+    if (gatewayState !== 'stopped') {
+      return { success: false, error: `Gateway is ${gatewayState}; retry the rename when it is ready` };
+    }
+  }
+
   const raw = await fsP.readFile(sessionsJsonPath, 'utf8');
   const json = JSON.parse(raw) as Record<string, unknown>;
-  const trimmedLabel = label.trim();
 
   let found = false;
   if (json[sessionKey] && typeof json[sessionKey] === 'object') {
@@ -624,11 +665,11 @@ async function renameSession(sessionKey: string, label: string): Promise<{ succe
   }
 
   await fsP.writeFile(sessionsJsonPath, JSON.stringify(json, null, 2), 'utf8');
-  logger.info(`[session:rename] key=${sessionKey} label=${trimmedLabel}`);
+  logger.info(`[session:rename] key=${sessionKey} label=${trimmedLabel} owner=disk`);
   return { success: true };
 }
 
-export function createSessionsApi(): CompleteHostServiceRegistry['sessions'] {
+export function createSessionsApi(ctx: SessionsApiContext = {}): CompleteHostServiceRegistry['sessions'] {
   return {
     delete: async (payload) => deleteSession(getSessionKey(payload)),
     rename: async (payload) => {
@@ -638,7 +679,7 @@ export function createSessionsApi(): CompleteHostServiceRegistry['sessions'] {
       if (typeof label !== 'string') {
         throw new Error('Label cannot be empty');
       }
-      return renameSession(sessionKey, label);
+      return renameSession(sessionKey, label, ctx.gatewayManager);
     },
     summaries: async (payload) => {
       const body = isRecord(payload) ? payload as SessionPayload : {};

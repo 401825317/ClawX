@@ -524,6 +524,11 @@ interface OAuthProfileEntry {
 
 type AuthProfilesStore = PersistedAuthProfilesStore;
 
+export interface SaveProviderKeyToOpenClawOptions {
+  agentId?: string;
+  resetFailureState?: boolean;
+}
+
 function removeProfilesForProvider(store: AuthProfilesStore, provider: string): boolean {
   const removedProfileIds = new Set<string>();
 
@@ -1709,13 +1714,16 @@ export async function getOAuthTokenFromOpenClaw(
 export async function saveProviderKeyToOpenClaw(
   provider: string,
   apiKey: string,
-  agentId?: string
+  agentIdOrOptions?: string | SaveProviderKeyToOpenClawOptions,
 ): Promise<void> {
   if (isOAuthProviderType(provider) && !apiKey) {
     console.log(`Skipping auth-profiles write for OAuth provider "${provider}" (no API key provided, using OAuth)`);
     return;
   }
-  const agentIds = agentId ? [agentId] : await discoverAgentIds();
+  const options = typeof agentIdOrOptions === 'string'
+    ? { agentId: agentIdOrOptions }
+    : (agentIdOrOptions ?? {});
+  const agentIds = options.agentId ? [options.agentId] : await discoverAgentIds();
   if (agentIds.length === 0) agentIds.push('main');
 
   for (const id of agentIds) {
@@ -1732,6 +1740,13 @@ export async function saveProviderKeyToOpenClaw(
 
     if (!store.lastGood) store.lastGood = {};
     store.lastGood[provider] = profileId;
+
+    if (options.resetFailureState && store.usageStats && Object.hasOwn(store.usageStats, profileId)) {
+      delete store.usageStats[profileId];
+      if (Object.keys(store.usageStats).length === 0) {
+        delete store.usageStats;
+      }
+    }
 
     await writeAuthProfiles(store, id);
   }

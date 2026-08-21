@@ -213,6 +213,131 @@ describe('saveProviderKeyToOpenClaw', () => {
 
     logSpy.mockRestore();
   });
+
+  it('clears only the current provider default usage stats when failure state reset is requested', async () => {
+    await writeAgentAuthProfiles('main', {
+      version: 1,
+      profiles: {
+        'openai:default': {
+          type: 'api_key',
+          provider: 'openai',
+          key: 'stale-openai-key',
+        },
+        'openai:backup': {
+          type: 'api_key',
+          provider: 'openai',
+          key: 'backup-openai-key',
+        },
+        'deepseek:default': {
+          type: 'api_key',
+          provider: 'deepseek',
+          key: 'deepseek-key',
+        },
+      },
+      usageStats: {
+        'openai:default': { cooldownUntil: 99_999, errorCount: 3 },
+        'openai:backup': { cooldownUntil: 88_888, errorCount: 2 },
+        'deepseek:default': { lastUsed: 7 },
+      },
+    });
+    const { readAuthProfilesFromSqlite } = await import('@electron/utils/openclaw-auth-sqlite');
+    const { saveProviderKeyToOpenClaw } = await import('@electron/utils/openclaw-auth');
+
+    await saveProviderKeyToOpenClaw('openai', 'fresh-openai-key', {
+      agentId: 'main',
+      resetFailureState: true,
+    });
+
+    const jsonStore = await readAuthProfiles('main');
+    expect((jsonStore.profiles as Record<string, { key: string }>)['openai:default'].key)
+      .toBe('fresh-openai-key');
+    expect(jsonStore.usageStats).toEqual({
+      'openai:backup': { cooldownUntil: 88_888, errorCount: 2 },
+      'deepseek:default': { lastUsed: 7 },
+    });
+    expect(readAuthProfilesFromSqlite('main')).toEqual(jsonStore);
+  });
+
+  it('preserves usage stats during default startup synchronization', async () => {
+    const usageStats = {
+      'openai:default': { cooldownUntil: 99_999, errorCount: 3 },
+      'deepseek:default': { lastUsed: 7 },
+    };
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    await writeAgentAuthProfiles('main', {
+      version: 1,
+      profiles: {
+        'openai:default': {
+          type: 'api_key',
+          provider: 'openai',
+          key: 'stale-openai-key',
+        },
+        'deepseek:default': {
+          type: 'api_key',
+          provider: 'deepseek',
+          key: 'deepseek-key',
+        },
+      },
+      usageStats,
+    });
+    const { readAuthProfilesFromSqlite } = await import('@electron/utils/openclaw-auth-sqlite');
+    const { saveProviderKeyToOpenClaw } = await import('@electron/utils/openclaw-auth');
+
+    await saveProviderKeyToOpenClaw('openai', 'startup-openai-key');
+
+    const jsonStore = await readAuthProfiles('main');
+    expect(jsonStore.usageStats).toEqual(usageStats);
+    expect(readAuthProfilesFromSqlite('main')).toEqual(jsonStore);
+
+    await saveProviderKeyToOpenClaw('openai', 'startup-openai-key-2', { agentId: 'main' });
+
+    const explicitlyScopedJsonStore = await readAuthProfiles('main');
+    expect(explicitlyScopedJsonStore.usageStats).toEqual(usageStats);
+    expect(readAuthProfilesFromSqlite('main')).toEqual(explicitlyScopedJsonStore);
+  });
+
+  it('accepts a string agent id without clearing that agent failure state', async () => {
+    await writeAgentAuthProfiles('main', {
+      version: 1,
+      profiles: {
+        'openai:default': {
+          type: 'api_key',
+          provider: 'openai',
+          key: 'main-openai-key',
+        },
+      },
+      usageStats: {
+        'openai:default': { cooldownUntil: 77_777, errorCount: 1 },
+      },
+    });
+    await writeAgentAuthProfiles('worker', {
+      version: 1,
+      profiles: {
+        'openai:default': {
+          type: 'api_key',
+          provider: 'openai',
+          key: 'worker-stale-key',
+        },
+      },
+      usageStats: {
+        'openai:default': { cooldownUntil: 66_666, errorCount: 2 },
+      },
+    });
+    const originalMainStore = await readFile(getAgentAuthProfilesPath('main'), 'utf8');
+    const { readAuthProfilesFromSqlite } = await import('@electron/utils/openclaw-auth-sqlite');
+    const { saveProviderKeyToOpenClaw } = await import('@electron/utils/openclaw-auth');
+
+    await saveProviderKeyToOpenClaw('openai', 'worker-fresh-key', 'worker');
+
+    expect(await readFile(getAgentAuthProfilesPath('main'), 'utf8')).toBe(originalMainStore);
+    const workerStore = await readAuthProfiles('worker');
+    expect((workerStore.profiles as Record<string, { key: string }>)['openai:default'].key)
+      .toBe('worker-fresh-key');
+    expect(workerStore.usageStats).toEqual({
+      'openai:default': { cooldownUntil: 66_666, errorCount: 2 },
+    });
+    expect(readAuthProfilesFromSqlite('worker')).toEqual(workerStore);
+  });
 });
 
 describe('managed auth profiles transaction', () => {

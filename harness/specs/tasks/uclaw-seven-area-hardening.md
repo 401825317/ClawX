@@ -24,6 +24,7 @@ touchedAreas:
   - electron/main/**
   - electron/services/**
   - electron/utils/logger.ts
+  - electron/utils/openclaw-auth.ts
   - electron/utils/telemetry.ts
   - electron/utils/sqlite-path.ts
   - electron/utils/openclaw-auth-sqlite.ts
@@ -105,6 +106,8 @@ acceptance:
   - HTML auto-open accepts only a newly completed webpage artifact whose canonical path is within the active workspace; the last successful HTML wins and same-path writes refresh.
   - Session model resolution preserves the model selected for personal and custom Providers and cannot silently replace it with the managed `openai/smart-latest` default.
   - A terminal `insufficient_user_quota` response produces one Provider attempt, an `INSUFFICIENT_QUOTA` recharge failure card, and an idle composer without being lost across a queued Gateway restart.
+  - Session rename uses `sessions.patch` while Gateway owns the live session store, rejects transitional Gateway states as retryable, and only writes `sessions.json` directly while Gateway is fully stopped.
+  - Explicit Provider credential replacement clears only that auth profile's persisted failure cooldown in both SQLite and compatibility JSON, while startup synchronization preserves failure state; packaged recovery must reach the Provider again.
   - Structured successful tool results with safe artifact paths are de-duplicated into file attachments; failed, malformed, or unsafe tool output never creates an attachment.
   - Long-term rules use an atomic local store and an independently owned AGENTS.md block with global and per-Agent scopes, versioning, timestamps, startup repair, and bounded undo.
   - Ecommerce main-image classification and the versioned skill are covered without hard-coded model, quality, or size policy in the client.

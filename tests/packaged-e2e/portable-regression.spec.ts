@@ -1485,7 +1485,14 @@ test('runs the packaged UClaw regression matrix', async () => {
         expect(transcript.success).toBe(true);
         expect(transcript.messages?.length ?? 0).toBeGreaterThan(0);
         const label = `QA ${runId.slice(-10)}`;
-        await hostInvokeJson(page, 'sessions', 'rename', { id: createdKey, title: label });
+        const renameResult = await hostInvokeJson(page, 'sessions', 'rename', { id: createdKey, title: label });
+        expect(renameResult.success).toBe(true);
+        await expect.poll(async () => {
+          const session = (await listGatewaySessions(page)).find((entry) => (
+            String(entry.key ?? entry.sessionKey ?? '') === createdKey
+          ));
+          return String(session?.label ?? '');
+        }, { timeout: 30_000 }).toBe(label);
         await page.reload({ waitUntil: 'domcontentloaded' });
         await expect(page.getByTestId(`sidebar-session-${createdKey}`)).toContainText(label, { timeout: 60_000 });
         await hostInvokeJson(page, 'sessions', 'delete', { id: createdKey });
@@ -1766,8 +1773,16 @@ test('runs the packaged UClaw regression matrix', async () => {
       'reselect the local model and complete a healthy turn after authentication recovery',
       async () => {
         const page = contextOrThrow(context).page;
+        const beforeAttempts = provider?.requests.filter((request) => request.scenario === 'RECOVERY').length ?? 0;
         await startNewChat(page);
-        return { latencyMs: await sendChat(page, '[REGRESSION:RECOVERY] verify authentication recovery', 'UCLAW_REGRESSION_RECOVERY_OK') };
+        const latencyMs = await sendChat(
+          page,
+          '[REGRESSION:RECOVERY] verify authentication recovery',
+          'UCLAW_REGRESSION_RECOVERY_OK',
+        );
+        const attempts = (provider?.requests.filter((request) => request.scenario === 'RECOVERY').length ?? 0) - beforeAttempts;
+        expect(attempts).toBeGreaterThanOrEqual(1);
+        return { latencyMs, providerAttempts: attempts };
       },
       { skip: profile !== 'full' ? 'Requires the deterministic local Provider.' : undefined },
     );

@@ -126,6 +126,7 @@ import {
   syncDefaultProviderToRuntime,
   syncDeletedProviderApiKeyToRuntime,
   syncDeletedProviderToRuntime,
+  syncProviderApiKeyToRuntime,
   syncSavedProviderToRuntime,
   syncUpdatedProviderToRuntime,
 } from '@electron/services/providers/provider-runtime-sync';
@@ -309,6 +310,41 @@ describe('provider-runtime-sync refresh strategy', () => {
     expect(mocks.reconcileManagedProviderRuntimeForStartup).not.toHaveBeenCalled();
     expect(mocks.saveProviderKeyToOpenClaw).toHaveBeenCalledWith('moonshot', 'moonshot-key');
     expect(mocks.saveProviderKeyToOpenClaw).toHaveBeenCalledTimes(1);
+  });
+
+  it('resets failure state only for an explicit Provider key update', async () => {
+    await syncProviderApiKeyToRuntime('moonshot', 'moonshot', 'replacement-key');
+
+    expect(mocks.saveProviderKeyToOpenClaw).toHaveBeenCalledWith(
+      'moonshot',
+      'replacement-key',
+      { resetFailureState: true },
+    );
+
+    mocks.saveProviderKeyToOpenClaw.mockClear();
+    mocks.listProviderAccounts.mockResolvedValue([{
+      id: 'moonshot',
+      vendorId: 'moonshot',
+      authMode: 'api_key',
+      label: 'Moonshot',
+      enabled: true,
+      isDefault: true,
+      createdAt: '2026-07-24T00:00:00.000Z',
+      updatedAt: '2026-07-24T00:00:00.000Z',
+    }]);
+    mocks.getProviderSecret.mockResolvedValue({
+      type: 'api_key',
+      accountId: 'moonshot',
+      apiKey: 'moonshot-key',
+    });
+    await syncAllProviderAuthToRuntime();
+
+    expect(mocks.saveProviderKeyToOpenClaw).toHaveBeenCalledWith('moonshot', 'moonshot-key');
+    expect(mocks.saveProviderKeyToOpenClaw).not.toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      expect.objectContaining({ resetFailureState: true }),
+    );
   });
 
   it('fails closed before ordinary Provider sync when managed reconciliation fails', async () => {

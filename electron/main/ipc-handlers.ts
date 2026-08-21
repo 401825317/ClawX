@@ -259,7 +259,7 @@ function registerTypedHostHandlers(
       stagedAttachments,
     }),
     media: createMediaApi({ attachmentAccess }),
-    sessions: createSessionsApi(),
+    sessions: createSessionsApi({ gatewayManager }),
     chat: createChatApi({ gatewayManager, mainWindow, acpSessionAccessRegistry }),
     cron: createCronApi({ gatewayManager }),
     skills: createSkillsApi({ clawHubService, gatewayManager }),
@@ -447,7 +447,7 @@ export function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): 
               const providerType = provider?.type || providerId;
               const ock = getOpenClawProviderKey(providerType, providerId);
               try {
-                await saveProviderKeyToOpenClaw(ock, apiKey);
+                await saveProviderKeyToOpenClaw(ock, apiKey, { resetFailureState: true });
               } catch (err) {
                 console.warn('Failed to save key to OpenClaw auth-profiles:', err);
               }
@@ -494,7 +494,7 @@ export function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): 
                 const trimmedKey = apiKey.trim();
                 if (trimmedKey) {
                   await providerService.setLegacyProviderApiKey(providerId, trimmedKey);
-                  await saveProviderKeyToOpenClaw(ock, trimmedKey);
+                  await saveProviderKeyToOpenClaw(ock, trimmedKey, { resetFailureState: true });
                 } else {
                   await providerService.deleteLegacyProviderApiKey(providerId);
                   await removeProviderFromOpenClaw(ock);

@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
@@ -78,6 +78,14 @@ function seedTranscriptRecords(sessionKey: string, records: unknown[]) {
     records.map((record) => JSON.stringify(record)).join('\n'),
     'utf8',
   );
+}
+
+function seedSessionStore(sessionKey: string, entry: Record<string, unknown>) {
+  const sessionsDir = join(testOpenClawDir, 'agents', 'main', 'sessions');
+  const sessionsJsonPath = join(sessionsDir, 'sessions.json');
+  mkdirSync(sessionsDir, { recursive: true });
+  writeFileSync(sessionsJsonPath, JSON.stringify({ [sessionKey]: entry }, null, 2), 'utf8');
+  return sessionsJsonPath;
 }
 
 describe('sessions API workspace summaries', () => {
@@ -396,5 +404,160 @@ describe('sessions API workspace summaries', () => {
       lastTimestamp: 9_001_000,
     });
     expect(result.summaries?.[0]?.heartbeatOnly).toBeUndefined();
+  });
+});
+
+describe('sessions API rename ownership', () => {
+  beforeEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(testOpenClawDir, { recursive: true, force: true });
+    rmSync(testOpenClawConfigDir, { recursive: true, force: true });
+  });
+
+  it('patches the running Gateway without writing the session store directly', async () => {
+    const sessionKey = 'agent:main:session-running';
+    const sessionsJsonPath = seedSessionStore(sessionKey, {
+      sessionId: 'running-id',
+      label: 'Original label',
+    });
+    const originalStore = readFileSync(sessionsJsonPath, 'utf8');
+    const rpc = vi.fn().mockResolvedValue({
+      ok: true,
+      entry: { label: 'Gateway label' },
+    });
+    const gatewayManager = {
+      getStatus: vi.fn(() => ({ state: 'running' })),
+      rpc,
+    };
+    const { createSessionsApi } = await import('@electron/services/sessions-api');
+
+    const result = await createSessionsApi({ gatewayManager: gatewayManager as never }).rename({
+      id: sessionKey,
+      title: '  Gateway label  ',
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(rpc).toHaveBeenCalledOnce();
+    expect(rpc).toHaveBeenCalledWith('sessions.patch', {
+      key: sessionKey,
+      label: 'Gateway label',
+    }, 10_000);
+    expect(readFileSync(sessionsJsonPath, 'utf8')).toBe(originalStore);
+  });
+
+  it('writes the session store when the Gateway is stopped', async () => {
+    const sessionKey = 'agent:main:session-stopped';
+    const sessionsJsonPath = seedSessionStore(sessionKey, {
+      sessionId: 'stopped-id',
+      label: 'Original label',
+    });
+    const rpc = vi.fn();
+    const gatewayManager = {
+      getStatus: vi.fn(() => ({ state: 'stopped' })),
+      rpc,
+    };
+    const { createSessionsApi } = await import('@electron/services/sessions-api');
+
+    const result = await createSessionsApi({ gatewayManager: gatewayManager as never }).rename({
+      id: sessionKey,
+      title: '  Disk label  ',
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(rpc).not.toHaveBeenCalled();
+    expect(JSON.parse(readFileSync(sessionsJsonPath, 'utf8'))).toMatchObject({
+      [sessionKey]: {
+        sessionId: 'stopped-id',
+        label: 'Disk label',
+      },
+    });
+  });
+
+  it.each(['starting', 'reconnecting', 'error'] as const)(
+    'returns a retryable failure without RPC or disk writes while the Gateway is %s',
+    async (state) => {
+      const sessionKey = `agent:main:session-${state}`;
+      const sessionsJsonPath = seedSessionStore(sessionKey, {
+        sessionId: `${state}-id`,
+        label: 'Original label',
+      });
+      const originalStore = readFileSync(sessionsJsonPath, 'utf8');
+      const rpc = vi.fn();
+      const gatewayManager = {
+        getStatus: vi.fn(() => ({ state })),
+        rpc,
+      };
+      const { createSessionsApi } = await import('@electron/services/sessions-api');
+
+      const result = await createSessionsApi({ gatewayManager: gatewayManager as never }).rename({
+        id: sessionKey,
+        title: 'Deferred label',
+      });
+
+      expect(result).toEqual({
+        success: false,
+        error: `Gateway is ${state}; retry the rename when it is ready`,
+      });
+      expect(rpc).not.toHaveBeenCalled();
+      expect(readFileSync(sessionsJsonPath, 'utf8')).toBe(originalStore);
+    },
+  );
+
+  it.each([
+    ['missing success flag', { entry: { label: 'Gateway label' } }],
+    ['missing persisted entry', { ok: true }],
+    ['different persisted label', { ok: true, entry: { label: 'Different label' } }],
+  ])('fails when the running Gateway returns %s', async (_caseName, rpcResult) => {
+    const sessionKey = 'agent:main:session-inconsistent-rpc';
+    const sessionsJsonPath = seedSessionStore(sessionKey, {
+      sessionId: 'inconsistent-rpc-id',
+      label: 'Original label',
+    });
+    const originalStore = readFileSync(sessionsJsonPath, 'utf8');
+    const rpc = vi.fn().mockResolvedValue(rpcResult);
+    const gatewayManager = {
+      getStatus: vi.fn(() => ({ state: 'running' })),
+      rpc,
+    };
+    const { createSessionsApi } = await import('@electron/services/sessions-api');
+
+    const result = await createSessionsApi({ gatewayManager: gatewayManager as never }).rename({
+      id: sessionKey,
+      title: 'Gateway label',
+    });
+
+    expect(result).toEqual({
+      success: false,
+      error: `Gateway did not persist the session label: ${sessionKey}`,
+    });
+    expect(rpc).toHaveBeenCalledOnce();
+    expect(readFileSync(sessionsJsonPath, 'utf8')).toBe(originalStore);
+  });
+
+  it('fails without a disk fallback when the running Gateway patch throws', async () => {
+    const sessionKey = 'agent:main:session-rpc-error';
+    const sessionsJsonPath = seedSessionStore(sessionKey, {
+      sessionId: 'rpc-error-id',
+      label: 'Original label',
+    });
+    const originalStore = readFileSync(sessionsJsonPath, 'utf8');
+    const rpc = vi.fn().mockRejectedValue(new Error('RPC unavailable'));
+    const gatewayManager = {
+      getStatus: vi.fn(() => ({ state: 'running' })),
+      rpc,
+    };
+    const { createSessionsApi } = await import('@electron/services/sessions-api');
+
+    const result = await createSessionsApi({ gatewayManager: gatewayManager as never }).rename({
+      id: sessionKey,
+      title: 'Gateway label',
+    });
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Could not rename the running Gateway session: Error: RPC unavailable',
+    });
+    expect(rpc).toHaveBeenCalledOnce();
+    expect(readFileSync(sessionsJsonPath, 'utf8')).toBe(originalStore);
   });
 });
