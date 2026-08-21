@@ -8,6 +8,7 @@ import { constants } from 'fs';
 import { join } from 'path';
 import { createHash } from 'crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { toSqlitePath } from './sqlite-path';
 import { resolveOpenClawStateDir } from './paths';
 
 const AUTH_PROFILE_FILENAME = 'auth-profiles.json';
@@ -303,7 +304,7 @@ function hasPersistedProfiles(store: PersistedAuthProfilesStore | null | undefin
 
 function openAgentDatabase(agentId: string, sqlitePath: string): DatabaseSync {
   ensureAgentAuthDir(agentId);
-  const db = new DatabaseSync(sqlitePath);
+  const db = new DatabaseSync(toSqlitePath(sqlitePath));
   try {
     db.exec('PRAGMA synchronous = NORMAL;');
     db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS};`);
@@ -416,7 +417,7 @@ export function snapshotAuthProfilesSqlitePrimaryRows(
     };
   }
 
-  const db = new DatabaseSync(sqlitePath, { readOnly: true });
+  const db = new DatabaseSync(toSqlitePath(sqlitePath), { readOnly: true });
   try {
     db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS};`);
     return runSqliteTransaction(
@@ -519,7 +520,7 @@ function removeCreatedSqliteDatabase(snapshot: AuthProfilesSqlitePrimaryRowsSnap
     throw new Error(`Missing rollback guard for newly created auth database for agent "${snapshot.agentId}"`);
   }
 
-  const db = new DatabaseSync(snapshot.sqlitePath);
+  const db = new DatabaseSync(toSqlitePath(snapshot.sqlitePath));
   try {
     db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS};`);
     runSqliteTransaction(
@@ -573,7 +574,7 @@ export function restoreAuthProfilesSqlitePrimaryRows(
   }
 
   const db = databaseExists
-    ? new DatabaseSync(snapshot.sqlitePath)
+    ? new DatabaseSync(toSqlitePath(snapshot.sqlitePath))
     : openAgentDatabase(snapshot.agentId, snapshot.sqlitePath);
   try {
     db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS};`);
@@ -614,7 +615,7 @@ export function readAuthProfilesFromSqlite(agentId: string): PersistedAuthProfil
     return null;
   }
 
-  const db = new DatabaseSync(sqlitePath, { readOnly: true });
+  const db = new DatabaseSync(toSqlitePath(sqlitePath), { readOnly: true });
   try {
     db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS};`);
     const storeRow = db.prepare(

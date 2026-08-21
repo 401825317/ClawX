@@ -24,7 +24,7 @@ node scripts/windows-support/run-packaged-regression.mjs --zip C:\path\UClaw-x.y
 | 档位 | 是否默认 | 覆盖范围 |
 | --- | --- | --- |
 | `core` | 否 | 包身份、SHA-512、静态自检、空白便携目录、首次启动、设置持久化、核心导航、真实 Gateway 启停、端口冲突恢复、单实例和托管未登录状态 |
-| `full` | 是 | `core` 加双本地确定性 Provider 的真实 fallback/删除、会话全生命周期、真实 OpenClaw 文本流、Markdown/Unicode/多轮、429/500 自动重试、额度不足不重试及充值路由、畸形流、401 凭证恢复、取消、文件/浏览器/Office 工具、Skills 用户目录保护、Doctor、日志、Control UI、Agent 和 Cron |
+| `full` | 是 | `core` 加双本地确定性 Provider 的真实 Gateway fallback/删除、会话全生命周期、真实 OpenClaw 文本流、Markdown/Unicode/多轮、429/500 自动重试、额度不足不重试及充值路由、畸形流、401 凭证恢复、取消、文件/浏览器/Office 工具、Skills 用户目录保护、Doctor、日志、Control UI、Agent 和 Cron |
 | `live` | 显式执行 | 使用专用测试账号执行登录、激活/Relay 状态、Responses、真实图片/视频和充值只读查询；不创建支付订单，外部渠道发送仍需额外授权 |
 
 ## 完整能力矩阵
@@ -34,11 +34,11 @@ node scripts/windows-support/run-packaged-regression.mjs --zip C:\path\UClaw-x.y
 | 安装/便携 | ZIP 解压、带空格路径、JSON/SHA、x64 PE、空 `UClawData`、静态自检、便携身份文件、LOCALAPPDATA Runtime profile 和版本化快照 | 缺文件、混合版本、错误架构、脏用户数据、快照未完成或路径越界直接失败 | `core` |
 | 启动 | 首次启动、跳过引导、重启持久化、单实例 | Gateway 端口被外部进程占用时只报告冲突且不得结束外部进程；释放端口后恢复启动；托管未登录 | `core` |
 | UI | Chat、Models、Agents、Channels、Skills、Cron、Settings；图片控件可用；取得托管视频能力合同后视频控件按合同显示 | Gateway 停止时仍可导航；离线空白 profile 没有已验证视频能力合同时，视频模式必须禁用 | `core`/`live` |
-| Provider | 本地兼容 Provider 校验、保存、设为默认、真实 fallback、删除、重启后保留 | 无效 API Key 必须被拒绝；401 后重新校验并替换凭证会清除该账号的持久化认证失败状态；删除 fallback 不得残留引用 | `full` |
-| 文本聊天 | 简单、中文、多语言、Markdown、表格、代码、多轮上下文 | 瞬时 429/500 自动重试、畸形流失败、慢请求在到达 Provider 后取消、401 凭证修复后恢复 | `full` |
+| Provider | 本地兼容 Provider 校验、保存、设为默认、通过真实 Gateway RPC 执行 fallback、删除、重启后保留；普通聊天模型选择器仍只展示服务端下发的托管模型 | 无效 API Key 必须被拒绝；401 后重新校验并替换凭证会清除该账号的持久化认证失败状态；删除 fallback 不得残留引用 | `full` |
+| 文本聊天 | 以当前会话和本地确定性 Provider 通过真实 Gateway RPC 执行简单、多语言、Markdown、表格、代码、多轮上下文，并验证 Renderer 历史投影 | 瞬时 429/500 自动重试、畸形流失败、慢请求在到达 Provider 后取消、401 凭证修复后恢复 | `full` |
 | 会话 | 新会话落盘、转录读取、重命名、重启保留、硬删除 | 删除后会话、转录和侧车产物不得残留 | `full` |
 | 工具 | OpenClaw 写文件、浏览器打开与 snapshot、DOCX/XLSX/PPTX 真实生成；直接或嵌套结构化 toolResult 均恢复为可见附件卡，并检查 Office ZIP 内容 | 工具缺失、文件缺失、附件卡缺失、内容证据缺失或没有真实副作用均失败 | `full` |
-| Skills | 本地发现、启停配置持久化、Quick Access、市场能力探测；托管 Skill 使用带指纹的复制副本和 ownership manifest；成品中制造同名用户目录后重启 Gateway 验证保留 | 普通用户 Skill 目录不得被递归删除；刷新现有托管副本时目录不得出现不可读窗口；无有效工作区的非权威扫描不得清理；只有带有效 ownership manifest 的旧托管副本可以清理；公网安装默认不执行 | `full` |
+| Skills | 本地发现、启停配置持久化、Quick Access、市场能力探测；在 `openclaw-state/skills` 制造同名用户 Skill，验证其优先于 bundled shim，删除后恢复 bundled 来源 | 用户 Skill 不得被 bundled `openclaw/skills` 中的 `.uclaw-skill-shim.json` 覆盖或删除；bundled shim 本身不得被运行态刷新修改；公网安装默认不执行 | `full` |
 | Agent | 创建、展示、重命名、删除 | 删除后残留配置失败 | `core` |
 | Cron | 创建、禁用、查询、删除 | 非法 Cron 表达式必须被拒绝 | `core` |
 | 额度异常 | 真实或确定性 `insufficient_user_quota`/预扣费失败显示余额不足和充值入口，并验证后续手动请求立即抵达 Provider | 额度不足不得显示误导性的“重试本轮”，不得污染认证档案或写入 cooldown；429 临时限流仍保留重试语义 | `full`/`live` |
@@ -101,7 +101,7 @@ release/regression/<version>-<timestamp>/
 
 失败时保留临时解压沙箱，便于复现；成功时默认删除。使用 `--keep` 可以保留成功运行的沙箱。
 
-`deterministic-provider-requests.json` 会记录每次本地 Provider 调用的场景、尝试次数、模型、消息角色和工具名，不记录 API Key。聊天、取消和异常场景必须同时具有 UI 状态与真实 Provider 请求证据，不能因为前序熔断而假通过。
+`deterministic-provider-requests.json` 会记录每次本地 Provider 调用的场景、尝试次数、模型、消息角色和工具名，不记录 API Key。个人 Provider 不会被注入只展示托管模型的普通聊天选择器；`full` 通过当前可见会话的真实 Gateway RPC 发起确定性请求，再验证 Renderer 历史、错误和产物投影。聊天、取消和异常场景必须同时具有运行态或 UI 状态与真实 Provider 请求证据，不能因为前序熔断而假通过。
 
 便携 Runtime 的成品证据还必须确认：`UClawData` 只保存便携身份、用户数据和已验证快照；高频 OpenClaw 状态位于隔离的 `%LOCALAPPDATA%/UClawRuntime/profiles/<portable-id>/openclaw-state`；快照缺少 `snapshot-complete.json` 时不会被恢复。媒体成功与回复送达分别记录为 execution、artifact、delivery 三种状态，报告不能把 delivery 失败写成 provider execution 失败。
 

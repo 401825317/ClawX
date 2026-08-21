@@ -237,7 +237,8 @@ async function readOpenClawAcpSessionCwds(sessionKeys: string[]): Promise<Map<st
     await access(databasePath);
     const sqliteSpecifier = 'node:sqlite';
     const { DatabaseSync } = await import(/* @vite-ignore */ sqliteSpecifier);
-    const db = new DatabaseSync(databasePath, { readOnly: true });
+    const { toSqlitePath } = await import('../utils/sqlite-path');
+    const db = new DatabaseSync(toSqlitePath(databasePath), { readOnly: true });
     try {
       for (const sessionKey of normalizedKeys) {
         const cwd = readAcpReplayCwd(db, sessionKey) ?? readAcpRuntimeMetaCwd(db, sessionKey);

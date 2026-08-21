@@ -25,6 +25,7 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 import { backup as backupSqlite, DatabaseSync } from 'node:sqlite';
+import { toSqlitePath } from './sqlite-path';
 
 export const PORTABLE_SNAPSHOT_V2_SCHEMA = 'uclaw.portable-runtime-snapshot/v2' as const;
 
@@ -680,7 +681,7 @@ async function verifySqliteFile(
     signal?.throwIfAborted();
     let database: DatabaseSync | undefined;
     try {
-      database = new DatabaseSync(databaseFile.sourcePath, { readOnly: true });
+      database = new DatabaseSync(toSqlitePath(databaseFile.sourcePath), { readOnly: true });
       if (sqliteIntegrityOk(database)) return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).name === 'AbortError') throw error;
@@ -713,14 +714,14 @@ async function captureSqliteDatabase(
     );
     let database: DatabaseSync | undefined;
     try {
-      database = new DatabaseSync(databaseFile.sourcePath, { readOnly: true });
+      database = new DatabaseSync(toSqlitePath(databaseFile.sourcePath), { readOnly: true });
       const sourceBefore = await readSourceFileVersions(files);
       if (!sourceBefore[databaseFile.relativePath]) {
         await waitForSqliteRetry(attempt, signal);
         continue;
       }
       await mkdir(path.dirname(temporary), { recursive: true });
-      await backupSqlite(database, temporary);
+      await backupSqlite(database, toSqlitePath(temporary));
       database.close();
       database = undefined;
       const metadata = await stat(temporary);
@@ -741,7 +742,7 @@ async function captureSqliteDatabase(
       }
       let backupDatabase: DatabaseSync | undefined;
       try {
-        backupDatabase = new DatabaseSync(temporary, { readOnly: true });
+        backupDatabase = new DatabaseSync(toSqlitePath(temporary), { readOnly: true });
         if (!sqliteIntegrityOk(backupDatabase)) {
           await waitForSqliteRetry(attempt, signal);
           continue;

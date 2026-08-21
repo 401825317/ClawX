@@ -4,7 +4,6 @@ import { randomBytes } from 'node:crypto';
 import { createConnection, createServer, type Server } from 'node:net';
 import {
   access,
-  cp,
   mkdir,
   readFile,
   readdir,
@@ -65,6 +64,7 @@ const externalDelivery = {
 let regressionModelRef = '';
 let regressionAccountId = '';
 let fallbackAccountId = '';
+let regressionSessionKey = '';
 let portableId = '';
 
 type LiveLoginCredentials = {
@@ -421,17 +421,47 @@ async function startNewChat(page: Page): Promise<void> {
   await page.getByTestId('sidebar-new-chat').click();
   await expect(page.getByTestId('chat-page')).toBeVisible();
   await expect(page.getByTestId('chat-composer-input')).toBeEnabled({ timeout: 120_000 });
-  if (regressionModelRef) await selectRegressionModel(page);
+  regressionSessionKey = '';
+  if (!regressionModelRef) return;
+
+  const activeSession = page.locator('[data-testid^="sidebar-session-"][aria-current="page"]').last();
+  await expect(activeSession).toBeVisible({ timeout: 30_000 });
+  const testId = await activeSession.getAttribute('data-testid') ?? '';
+  regressionSessionKey = testId.replace(/^sidebar-session-/u, '');
+  if (!regressionSessionKey) throw new Error('The active packaged regression session key is unavailable.');
+
+  const existing = (await listGatewaySessions(page)).some((session) => (
+    String(session.key ?? session.sessionKey ?? '') === regressionSessionKey
+  ));
+  if (existing) {
+    await gatewayRpc(page, 'sessions.patch', { key: regressionSessionKey, model: regressionModelRef });
+  } else {
+    await gatewayRpc(page, 'sessions.create', {
+      key: regressionSessionKey,
+      agentId: 'main',
+      model: regressionModelRef,
+    });
+  }
 }
 
-async function selectRegressionModel(page: Page): Promise<void> {
-  const picker = page.getByTestId('chat-settings-picker-button');
-  await picker.click();
-  await page.getByTestId('chat-settings-model-row').hover();
-  await page.getByTestId(`chat-model-picker-option-${REGRESSION_MODEL}`).click();
-  await expect(picker).toContainText(REGRESSION_MODEL);
-  await page.waitForTimeout(750);
-  await expect(picker).toContainText(REGRESSION_MODEL);
+async function dispatchRegressionChat(
+  page: Page,
+  prompt: string,
+  timeoutMs: number,
+): Promise<{ runId?: string }> {
+  if (!regressionModelRef || !regressionSessionKey) {
+    throw new Error('The deterministic regression Provider session is unavailable.');
+  }
+  await gatewayRpc(page, 'sessions.patch', { key: regressionSessionKey, model: regressionModelRef });
+  await page.getByTestId('chat-composer-input').fill(prompt);
+  const result = await gatewayRpc<{ runId?: string }>(page, 'chat.send', {
+    sessionKey: regressionSessionKey,
+    message: prompt,
+    deliver: false,
+    idempotencyKey: `packaged-regression-${randomBytes(12).toString('hex')}`,
+  }, Math.min(timeoutMs, 120_000));
+  await page.getByTestId('chat-composer-input').fill('');
+  return result;
 }
 
 async function addCustomProvider(
@@ -463,24 +493,41 @@ async function sendChat(page: Page, prompt: string, expectedText: string, timeou
   const messageCountBeforeSend = await chatMessages.count();
   const sendButton = page.getByTestId('chat-composer-send');
   await expect(page.getByTestId('chat-composer-input')).toBeEnabled({ timeout: 120_000 });
-  await page.getByTestId('chat-composer-input').fill(prompt);
-  await sendButton.click();
+  const directRegressionRun = Boolean(regressionModelRef && regressionSessionKey);
+  if (directRegressionRun) {
+    await dispatchRegressionChat(page, prompt, timeoutMs);
+  } else {
+    await page.getByTestId('chat-composer-input').fill(prompt);
+    await sendButton.click();
+  }
   const expected = page.getByText(expectedText, { exact: false }).last();
   const error = page.getByTestId('acp-error-banner');
   const transcriptFailure = page.getByText(/Agent failed before reply:/iu).last();
   const deadline = Date.now() + timeoutMs;
   let observedBusy = false;
+  let historyReloaded = false;
   while (Date.now() < deadline) {
     if (await expected.isVisible()) break;
     if (await error.isVisible()) throw new Error(`Chat failed before expected output: ${await error.innerText()}`);
     if (await transcriptFailure.isVisible()) {
       throw new Error(`Chat failed before expected output: ${await transcriptFailure.innerText()}`);
     }
+    if (directRegressionRun && !historyReloaded) {
+      const history = await gatewayRpc<Record<string, unknown>>(page, 'chat.history', {
+        sessionKey: regressionSessionKey,
+        limit: 200,
+        maxChars: 500_000,
+      }, 15_000).catch(() => null);
+      if (history && JSON.stringify(history).includes(expectedText)) {
+        historyReloaded = true;
+        await page.getByTestId(`sidebar-session-${regressionSessionKey}`).click();
+      }
+    }
     const sendTitle = await sendButton.getAttribute('title') ?? '';
     const isIdle = /Send|发送/iu.test(sendTitle);
     if (!isIdle) observedBusy = true;
     const messageCount = await chatMessages.count();
-    if (isIdle && (observedBusy || messageCount >= messageCountBeforeSend + 2)) {
+    if (!directRegressionRun && isIdle && (observedBusy || messageCount >= messageCountBeforeSend + 2)) {
       await page.waitForTimeout(500);
       if (await expected.isVisible()) break;
       const finalMessage = messageCount > 0
@@ -570,6 +617,7 @@ async function waitForChatFailure(page: Page, expectedText?: string, timeoutMs =
     /Agent failed before reply:|The agent run failed before producing a reply\.?|LLM request failed\.?/iu,
   ).last();
   const deadline = Date.now() + timeoutMs;
+  let nextHistoryReloadAt = 0;
   while (Date.now() < deadline) {
     const candidate = await runError.isVisible()
       ? await runError.innerText()
@@ -582,6 +630,10 @@ async function waitForChatFailure(page: Page, expectedText?: string, timeoutMs =
       }
       await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', /Send|发送/iu, { timeout: 60_000 });
       return candidate;
+    }
+    if (regressionSessionKey && Date.now() >= nextHistoryReloadAt) {
+      nextHistoryReloadAt = Date.now() + 1_000;
+      await page.getByTestId(`sidebar-session-${regressionSessionKey}`).click().catch(() => undefined);
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
@@ -1203,6 +1255,43 @@ test('runs the packaged UClaw regression matrix', async () => {
       };
     });
 
+    await runner.run('media.controls', 'expose managed image and video controls', async () => {
+      const page = contextOrThrow(context).page;
+      const imagePolicy = await hostInvokeJson(page, 'managedClientConfig', 'imageModels', { refresh: false });
+      const videoPolicy = await hostInvokeJson(page, 'managedClientConfig', 'videoModels', { refresh: false });
+      expect(imagePolicy?.models?.length ?? 0).toBeGreaterThan(0);
+      expect(videoPolicy?.models?.length ?? 0).toBeGreaterThan(0);
+      await startNewChat(page);
+      const imageModeButton = page.getByTestId('chat-composer-mode-image');
+      const videoModeButton = page.getByTestId('chat-composer-mode-video');
+      await expect(imageModeButton).toBeEnabled({ timeout: 60_000 });
+      await expect(videoModeButton).toBeEnabled({ timeout: 60_000 });
+      await imageModeButton.click();
+      await expect(page.getByTestId('chat-image-options')).toBeVisible();
+      await videoModeButton.click();
+      const selectedVideoModel = videoPolicy.models.find((model: Record<string, unknown>) => (
+        model.id === videoPolicy.defaultModel
+      )) ?? videoPolicy.models[0];
+      expect(selectedVideoModel).toBeTruthy();
+      await expect(page.getByTestId('chat-video-model')).toHaveCount(
+        videoPolicy.models.length > 1 ? 1 : 0,
+      );
+      const optionsTrigger = page.getByTestId('chat-video-options-trigger');
+      await expect(optionsTrigger).toContainText(videoPolicy.defaultAspectRatio);
+      await expect(optionsTrigger).toContainText(videoPolicy.defaultResolution);
+      await expect(optionsTrigger).toContainText(`${videoPolicy.defaultDurationSeconds}s`);
+      return {
+        imageModeAvailable: true,
+        videoModeEnabled: true,
+        videoModelSelectorAvailable: videoPolicy.models.length > 1,
+        defaults: [
+          videoPolicy.defaultAspectRatio,
+          videoPolicy.defaultResolution,
+          `${videoPolicy.defaultDurationSeconds}s`,
+        ],
+      };
+    });
+
     await runner.run('gateway.stop-start', 'stop and restart the real packaged Gateway', async () => {
       const page = contextOrThrow(context).page;
       await hostInvokeJson(page, 'gateway', 'stop');
@@ -1460,8 +1549,8 @@ test('runs the packaged UClaw regression matrix', async () => {
         const page = contextOrThrow(context).page;
         const beforeAttempts = providerRequestCount(provider, 'QUOTA');
         await startNewChat(page);
-        await page.getByTestId('chat-composer-input').fill('[REGRESSION:QUOTA] reject this chargeable operation');
-        await page.getByTestId('chat-composer-send').click();
+        await dispatchRegressionChat(page, '[REGRESSION:QUOTA] reject this chargeable operation', 120_000);
+        await waitForChatFailure(page);
         const callout = page.getByTestId('acp-error-banner');
         await expect(callout).toBeVisible({ timeout: 120_000 });
         await expect(callout).toContainText(/Insufficient balance|余额不足|残高不足|Недостаточно средств/iu);
@@ -1481,8 +1570,7 @@ test('runs the packaged UClaw regression matrix', async () => {
         const page = contextOrThrow(context).page;
         const beforeAttempts = provider?.requests.filter((request) => request.scenario === 'MALFORMED_STREAM').length ?? 0;
         await startNewChat(page);
-        await page.getByTestId('chat-composer-input').fill('[REGRESSION:MALFORMED_STREAM] inject invalid SSE');
-        await page.getByTestId('chat-composer-send').click();
+        await dispatchRegressionChat(page, '[REGRESSION:MALFORMED_STREAM] inject invalid SSE', 120_000);
         const failure = await waitForChatFailure(page);
         const attempts = (provider?.requests.filter((request) => request.scenario === 'MALFORMED_STREAM').length ?? 0) - beforeAttempts;
         expect(attempts).toBeGreaterThanOrEqual(1);
@@ -1493,16 +1581,16 @@ test('runs the packaged UClaw regression matrix', async () => {
 
     await runner.run(
       'chat.cancel',
-      'cancel a slow model turn and return the composer to idle',
+      'cancel a slow model turn through the real Gateway and keep the composer idle',
       async () => {
         const page = contextOrThrow(context).page;
         const beforeAttempts = providerRequestCount(provider, 'SLOW');
         await startNewChat(page);
-        await page.getByTestId('chat-composer-input').fill('[REGRESSION:SLOW] hold the response until cancelled');
-        await page.getByTestId('chat-composer-send').click();
+        const run = await dispatchRegressionChat(page, '[REGRESSION:SLOW] hold the response until cancelled', 120_000);
         const attempts = await waitForProviderRequestCount(provider, 'SLOW', beforeAttempts + 1) - beforeAttempts;
-        await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', /Stop|停止/iu, { timeout: 30_000 });
-        await page.getByTestId('chat-composer-send').click();
+        await gatewayRpc(page, 'chat.abort', run.runId
+          ? { runId: run.runId }
+          : { sessionKey: regressionSessionKey });
         await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', /Send|发送/iu, { timeout: 120_000 });
         expect(attempts).toBeGreaterThanOrEqual(1);
         return { attempts };
@@ -1637,8 +1725,7 @@ test('runs the packaged UClaw regression matrix', async () => {
         const page = contextOrThrow(context).page;
         const beforeAttempts = provider?.requests.filter((request) => request.scenario === 'HTTP_401').length ?? 0;
         await startNewChat(page);
-        await page.getByTestId('chat-composer-input').fill('[REGRESSION:HTTP_401] inject provider authentication failure');
-        await page.getByTestId('chat-composer-send').click();
+        await dispatchRegressionChat(page, '[REGRESSION:HTTP_401] inject provider authentication failure', 120_000);
         const failure = await waitForChatFailure(page, 'UCLAW_REGRESSION_HTTP_401');
         const attempts = (provider?.requests.filter((request) => request.scenario === 'HTTP_401').length ?? 0) - beforeAttempts;
         expect(attempts).toBeGreaterThanOrEqual(1);
@@ -1788,95 +1875,83 @@ test('runs the packaged UClaw regression matrix', async () => {
 
     await runner.run(
       'skills.user-owned-preservation',
-      'preserve a user-owned Skill collision and remove only stale manifest-owned copies',
+      'prefer a user-owned Skill collision without modifying the bundled UClaw shim',
       async () => {
         const current = contextOrThrow(context);
         const page = current.page;
         const runtime = await resolvePortableRuntimeStateDir(appRoot, current.osHome);
-        const pluginSkillsDir = path.join(runtime.stateDir, 'plugin-skills');
-        await hostInvokeJson(page, 'skills', 'local');
-        const entries = await readdir(pluginSkillsDir, { withFileTypes: true });
+        const managedSkillsDir = path.join(runtime.stateDir, 'skills');
+        const bundledSkillsDir = path.join(appRoot, 'resources', 'openclaw', 'skills');
+        const entries = await readdir(bundledSkillsDir, { withFileTypes: true });
         let managedName = '';
         for (const entry of entries) {
-          if (!entry.isDirectory() || entry.name.startsWith('.uclaw-skill-')) continue;
+          if (!entry.isDirectory()) continue;
           try {
             const manifest = JSON.parse(
-              await readFile(path.join(pluginSkillsDir, entry.name, '.uclaw-skill-manifest.json'), 'utf8'),
+              await readFile(path.join(bundledSkillsDir, entry.name, '.uclaw-skill-shim.json'), 'utf8'),
             ) as Record<string, unknown>;
             if (
-              (manifest.schema === 'uclaw.plugin-skill-copy/v1' || manifest.schema === 'uclaw.plugin-skill-copy/v2')
-              && manifest.name === entry.name
+              manifest.managedBy === 'uclaw'
+              && manifest.id === entry.name
+              && typeof manifest.version === 'string'
             ) {
               managedName = entry.name;
               break;
             }
           } catch {
-            // Ordinary user-owned entries intentionally have no ownership manifest.
+            // Missing-only and upstream bundled Skills intentionally have no UClaw shim marker.
           }
         }
-        if (!managedName) throw new Error('No manifest-owned packaged plugin Skill was published.');
+        if (!managedName) throw new Error('No versioned bundled UClaw Skill shim was found.');
 
-        const managedEntry = path.join(pluginSkillsDir, managedName);
-        const managedBackup = path.join(sandboxRoot, 'skill-preservation-backup', managedName);
-        const staleName = 'uclaw-regression-stale-managed-skill';
-        const staleEntry = path.join(pluginSkillsDir, staleName);
-        let gatewayStopped = false;
+        const bundledEntry = path.join(bundledSkillsDir, managedName);
+        const bundledMarkerPath = path.join(bundledEntry, '.uclaw-skill-shim.json');
+        const bundledMarkerBefore = await readFile(bundledMarkerPath, 'utf8');
+        const managedEntry = path.join(managedSkillsDir, managedName);
         let userCollisionInstalled = false;
-        const stopGateway = async (): Promise<void> => {
-          await hostInvokeJson(page, 'gateway', 'stop');
-          await waitForGateway(page, (status) => status.state === 'stopped', 60_000);
-          gatewayStopped = true;
-        };
-        const startGateway = async (): Promise<void> => {
-          await hostInvokeJson(page, 'gateway', 'start');
-          await waitForGatewayReady(page, 180_000);
-          gatewayStopped = false;
-        };
 
         try {
-          await stopGateway();
-          await rm(managedBackup, { recursive: true, force: true });
-          await mkdir(path.dirname(managedBackup), { recursive: true });
-          await cp(managedEntry, managedBackup, { recursive: true });
           await rm(managedEntry, { recursive: true, force: true });
           await mkdir(managedEntry, { recursive: true });
-          await writeFile(path.join(managedEntry, 'SKILL.md'), '# User-owned collision\n', 'utf8');
+          await writeFile(path.join(managedEntry, 'SKILL.md'), [
+            '---',
+            `name: ${managedName}`,
+            'description: Packaged regression user-owned collision',
+            '---',
+            '',
+            '# User-owned collision',
+            '',
+          ].join('\n'), 'utf8');
           await writeFile(path.join(managedEntry, 'user-sentinel.txt'), 'preserve-me\n', 'utf8');
           userCollisionInstalled = true;
 
-          await mkdir(staleEntry, { recursive: true });
-          await writeFile(path.join(staleEntry, '.uclaw-skill-manifest.json'), `${JSON.stringify({
-            schema: 'uclaw.plugin-skill-copy/v1',
-            name: staleName,
-            sourcePath: 'regression-stale-source',
-          }, null, 2)}\n`, 'utf8');
-          await writeFile(path.join(staleEntry, 'stale.txt'), 'remove-me\n', 'utf8');
-
-          await startGateway();
-          await hostInvokeJson(page, 'skills', 'local');
+          const withCollision = await hostInvokeJson(page, 'skills', 'local');
+          const selected = withCollision.skills?.find((skill) => (
+            skill.id === managedName || skill.slug === managedName || skill.name === managedName
+          ));
+          expect(selected?.source).toBe('openclaw-managed');
           expect(await readFile(path.join(managedEntry, 'user-sentinel.txt'), 'utf8')).toBe('preserve-me\n');
-          expect(await access(path.join(managedEntry, '.uclaw-skill-manifest.json')).then(() => true).catch(() => false)).toBe(false);
-          expect(await access(staleEntry).then(() => true).catch(() => false)).toBe(false);
+          expect(await access(path.join(managedEntry, '.uclaw-skill-shim.json')).then(() => true).catch(() => false)).toBe(false);
+          expect(await readFile(bundledMarkerPath, 'utf8')).toBe(bundledMarkerBefore);
+
+          await rm(managedEntry, { recursive: true, force: true });
+          userCollisionInstalled = false;
+          const afterRemoval = await hostInvokeJson(page, 'skills', 'local');
+          const restored = afterRemoval.skills?.find((skill) => (
+            skill.id === managedName || skill.slug === managedName || skill.name === managedName
+          ));
+          expect(restored?.source).toBe('openclaw-bundled');
           return {
             collisionName: managedName,
             userOwnedPreserved: true,
-            staleManagedRemoved: true,
-            automaticManagedRepublishRequired: false,
+            bundledShimUnchanged: true,
+            bundledFallbackRestored: true,
           };
         } finally {
-          if (gatewayStopped) await startGateway().catch(() => undefined);
-          if (userCollisionInstalled) {
-            await hostInvokeJson(page, 'gateway', 'stop').catch(() => undefined);
-            await waitForGateway(page, (status) => status.state === 'stopped', 60_000).catch(() => undefined);
-            await rm(managedEntry, { recursive: true, force: true }).catch(() => undefined);
-            await cp(managedBackup, managedEntry, { recursive: true }).catch(() => undefined);
-            await hostInvokeJson(page, 'gateway', 'start').catch(() => undefined);
-            await waitForGatewayReady(page, 180_000).catch(() => undefined);
-          }
-          await rm(managedBackup, { recursive: true, force: true }).catch(() => undefined);
+          if (userCollisionInstalled) await rm(managedEntry, { recursive: true, force: true }).catch(() => undefined);
         }
       },
-      { skip: profile !== 'full' ? 'Requires a real packaged Gateway Skill publication cycle.' : undefined },
+      { skip: profile !== 'full' ? 'Requires the packaged OpenClaw Skill hierarchy.' : undefined },
     );
 
     await runner.run('skills.marketplace-capability', 'probe packaged Skill marketplace capability without installing from the network', async () => {
@@ -1886,43 +1961,6 @@ test('runs the packaged UClaw regression matrix', async () => {
       return {
         capabilityAvailable: Boolean(response.capability),
         networkInstallAttempted: false,
-      };
-    });
-
-    await runner.run('media.controls', 'expose managed image and video controls', async () => {
-      const page = contextOrThrow(context).page;
-      const imagePolicy = await hostInvokeJson(page, 'managedClientConfig', 'imageModels', { refresh: false });
-      const videoPolicy = await hostInvokeJson(page, 'managedClientConfig', 'videoModels', { refresh: false });
-      expect(imagePolicy?.models?.length ?? 0).toBeGreaterThan(0);
-      expect(videoPolicy?.models?.length ?? 0).toBeGreaterThan(0);
-      await startNewChat(page);
-      const imageModeButton = page.getByTestId('chat-composer-mode-image');
-      const videoModeButton = page.getByTestId('chat-composer-mode-video');
-      await expect(imageModeButton).toBeEnabled({ timeout: 60_000 });
-      await expect(videoModeButton).toBeEnabled({ timeout: 60_000 });
-      await imageModeButton.click();
-      await expect(page.getByTestId('chat-image-options')).toBeVisible();
-      await videoModeButton.click();
-      const selectedVideoModel = videoPolicy.models.find((model: Record<string, unknown>) => (
-        model.id === videoPolicy.defaultModel
-      )) ?? videoPolicy.models[0];
-      expect(selectedVideoModel).toBeTruthy();
-      await expect(page.getByTestId('chat-video-model')).toHaveCount(
-        videoPolicy.models.length > 1 ? 1 : 0,
-      );
-      const optionsTrigger = page.getByTestId('chat-video-options-trigger');
-      await expect(optionsTrigger).toContainText(videoPolicy.defaultAspectRatio);
-      await expect(optionsTrigger).toContainText(videoPolicy.defaultResolution);
-      await expect(optionsTrigger).toContainText(`${videoPolicy.defaultDurationSeconds}s`);
-      return {
-        imageModeAvailable: true,
-        videoModeEnabled: true,
-        videoModelSelectorAvailable: videoPolicy.models.length > 1,
-        defaults: [
-          videoPolicy.defaultAspectRatio,
-          videoPolicy.defaultResolution,
-          `${videoPolicy.defaultDurationSeconds}s`,
-        ],
       };
     });
 

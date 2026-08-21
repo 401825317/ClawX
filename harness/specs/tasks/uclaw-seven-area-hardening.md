@@ -25,6 +25,9 @@ touchedAreas:
   - electron/services/**
   - electron/utils/logger.ts
   - electron/utils/telemetry.ts
+  - electron/utils/sqlite-path.ts
+  - electron/utils/openclaw-auth-sqlite.ts
+  - electron/utils/portable-runtime-snapshot-v2.ts
   - electron/utils/channel-config.ts
   - electron/utils/agent-profile.ts
   - resources/openclaw-plugins/uclaw-artifact-orchestrator/**
@@ -47,6 +50,8 @@ touchedAreas:
   - shared/i18n/locales/**
   - tests/unit/**
   - tests/e2e/**
+  - tests/packaged-e2e/portable-regression.spec.ts
+  - PACKAGED_REGRESSION.md
   - README.md
   - README.zh-CN.md
   - README.ja-JP.md
@@ -58,6 +63,7 @@ expectedUserBehavior:
   - Explicit remember-forever wording stores a global or per-Agent long-term rule, projects it into an owned AGENTS.md block without touching user content, and offers undo plus Settings CRUD.
   - Ecommerce main-image requests use a versioned built-in skill that preserves product structure, packaging, logos, and text while model, quality, and dimensions remain server managed.
   - A disconnected stdout sink cannot crash UClaw, repeat fatal handling, or stop the Gateway more than once; file logs keep working with bounded rotation.
+  - Portable state restored under a Windows path longer than 260 characters remains readable and writable by both UClaw and the bundled OpenClaw Gateway.
   - The existing telemetry preference controls PostHog, Sentry, Crashpad upload, and tracing together, with secrets, prompts, file contents, and private path prefixes removed before upload.
   - Managed backend requests include build diagnostics only for the exact configured UClaw origin, and remote configuration can independently stop or gradually enable every new capability.
 requiredProfiles:
@@ -96,6 +102,7 @@ acceptance:
   - Long-term rules use an atomic local store and an independently owned AGENTS.md block with global and per-Agent scopes, versioning, timestamps, startup repair, and bounded undo.
   - Ecommerce main-image classification and the versioned skill are covered without hard-coded model, quality, or size policy in the client.
   - Console EPIPE permanently opens only that sink's circuit breaker, bounded file logs continue, fatal handling is single-entry, emergency logging bypasses Logger, and Gateway cleanup is idempotent.
+  - Every UClaw-owned SQLite open and backup plus Gateway-owned node:sqlite access uses Windows extended paths for absolute disk locations while preserving memory databases, SQLite URIs, relative paths, and non-Windows behavior.
   - Sentry has no replay, honors remote sampling and kill switches, applies a per-install hourly error cap, and scrubs authentication data, prompt content, file content, and private path prefixes.
   - Client config exposes independent observability, artifacts, and ecommerceMainImage sections; invalid values fall back to safe disabled defaults.
   - Exact-origin managed requests carry version, commit, build ID, platform, architecture, channel, runtime mode, and request ID, while all other destinations receive none of those headers.

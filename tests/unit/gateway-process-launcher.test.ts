@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { EventEmitter } from 'node:events';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import vm from 'node:vm';
 import { utilityProcess } from 'electron';
 import { describe, expect, it, vi } from 'vitest';
@@ -92,6 +92,47 @@ function createGatewayFetchContext(fetch: ReturnType<typeof vi.fn>) {
 }
 
 describe('Gateway process wrapper', () => {
+  it('normalizes SQLite paths before bundled OpenClaw loads', async () => {
+    const { buildGatewayFetchPreloadSource } = await import('@electron/gateway/process-launcher');
+    class MockDatabaseSync {
+      constructor(public readonly location: unknown) {}
+    }
+    const backup = vi.fn((_database: unknown, destination: unknown) => destination);
+    const sqlite = { DatabaseSync: MockDatabaseSync, backup };
+    const syncBuiltinESMExports = vi.fn();
+    const context = {
+      fetch: vi.fn(),
+      URL,
+      process: { platform: 'win32', execPath: 'C:\\UClaw\\UClaw.exe', env: {} },
+      require: (id: string) => {
+        if (id === 'node:sqlite') return sqlite;
+        if (id === 'node:path') return { win32 };
+        if (id === 'node:module') return { syncBuiltinESMExports };
+        if (id === 'node:child_process') return {
+          spawn: vi.fn(), exec: vi.fn(), execFile: vi.fn(), fork: vi.fn(),
+          spawnSync: vi.fn(), execSync: vi.fn(), execFileSync: vi.fn(),
+        };
+        throw new Error(`Unexpected require: ${id}`);
+      },
+    };
+
+    vm.runInNewContext(buildGatewayFetchPreloadSource(), context);
+
+    expect(new sqlite.DatabaseSync('C:\\portable\\state\\openclaw.sqlite').location)
+      .toBe('\\\\?\\C:\\portable\\state\\openclaw.sqlite');
+    expect(new sqlite.DatabaseSync('\\\\server\\share\\openclaw.sqlite').location)
+      .toBe('\\\\?\\UNC\\server\\share\\openclaw.sqlite');
+    expect(new sqlite.DatabaseSync(':memory:').location).toBe(':memory:');
+    expect(new sqlite.DatabaseSync('relative.sqlite').location).toBe('relative.sqlite');
+    await sqlite.backup({}, 'C:\\portable\\snapshot\\openclaw.sqlite');
+    expect(backup).toHaveBeenCalledWith({}, '\\\\?\\C:\\portable\\snapshot\\openclaw.sqlite');
+    expect(syncBuiltinESMExports).toHaveBeenCalled();
+
+    const patchedConstructor = sqlite.DatabaseSync;
+    vm.runInNewContext(buildGatewayFetchPreloadSource(), context);
+    expect(sqlite.DatabaseSync).toBe(patchedConstructor);
+  });
+
   it('writes an opaque ownership record after spawn and clears only that record on exit', async () => {
     const { launchGatewayProcess } = await import('@electron/gateway/process-launcher');
     const child = new EventEmitter() as EventEmitter & {

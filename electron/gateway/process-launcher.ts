@@ -24,6 +24,52 @@ export const OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS =
 
 const GATEWAY_STDERR_DRAIN_TIMEOUT_MS = 100;
 
+const GATEWAY_SQLITE_PATH_PATCH_SOURCE = `
+(function () {
+  if (process.platform !== 'win32') return;
+  try {
+    var sqlite = require('node:sqlite');
+    if (sqlite.__clawxWindowsLongPathPatched) return;
+    var path = require('node:path');
+
+    function toSqlitePath(value) {
+      if (typeof value !== 'string') return value;
+      if (value === ':memory:' || value.slice(0, 5).toLowerCase() === 'file:') return value;
+      if (!path.win32.isAbsolute(value)) return value;
+      return path.win32.toNamespacedPath(value);
+    }
+
+    var OriginalDatabaseSync = sqlite.DatabaseSync;
+    if (typeof OriginalDatabaseSync === 'function') {
+      sqlite.DatabaseSync = new Proxy(OriginalDatabaseSync, {
+        construct: function (target, args, newTarget) {
+          var normalizedArgs = Array.prototype.slice.call(args);
+          if (normalizedArgs.length > 0) normalizedArgs[0] = toSqlitePath(normalizedArgs[0]);
+          return Reflect.construct(target, normalizedArgs, newTarget);
+        },
+      });
+    }
+
+    var originalBackup = sqlite.backup;
+    if (typeof originalBackup === 'function') {
+      sqlite.backup = function () {
+        var args = Array.prototype.slice.call(arguments);
+        if (args.length > 1) args[1] = toSqlitePath(args[1]);
+        return originalBackup.apply(this, args);
+      };
+    }
+
+    Object.defineProperty(sqlite, '__clawxWindowsLongPathPatched', { value: true });
+    var moduleApi = require('node:module');
+    if (typeof moduleApi.syncBuiltinESMExports === 'function') {
+      moduleApi.syncBuiltinESMExports();
+    }
+  } catch (e) {
+    // Older development Node versions may not expose node:sqlite.
+  }
+})();
+`;
+
 const GATEWAY_CHILD_PROCESS_PATCH_SOURCE = `
 (function () {
   function valueReferencesElectronExecPath(value, execPath) {
@@ -263,6 +309,7 @@ const GATEWAY_FETCH_PATCH_SOURCE = `
 `;
 
 const GATEWAY_FETCH_PRELOAD_SOURCE = `'use strict';
+${GATEWAY_SQLITE_PATH_PATCH_SOURCE}
 ${GATEWAY_FETCH_PATCH_SOURCE}
 ${GATEWAY_CHILD_PROCESS_PATCH_SOURCE}
 `;
@@ -274,6 +321,7 @@ export function buildGatewayFetchPreloadSource(): string {
 /** Build the packaged-safe wrapper that patches fetch and child processes before OpenClaw loads. */
 export function buildGatewayEntryWrapperSource(): string {
   return `'use strict';
+${GATEWAY_SQLITE_PATH_PATCH_SOURCE}
 ${GATEWAY_FETCH_PATCH_SOURCE}
 ${GATEWAY_CHILD_PROCESS_PATCH_SOURCE}
 (async function () {

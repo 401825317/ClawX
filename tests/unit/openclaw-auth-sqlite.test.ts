@@ -93,6 +93,31 @@ describe('openclaw-auth-sqlite', () => {
     });
   });
 
+  it.runIf(process.platform === 'win32')('reads and writes agent auth beyond MAX_PATH', async () => {
+    const {
+      getAuthProfilesSqlitePath,
+      readAuthProfilesFromSqlite,
+      writeAuthProfilesToSqlite,
+    } = await import('@electron/utils/openclaw-auth-sqlite');
+    let agentId = 'long-path-agent';
+    while (getAuthProfilesSqlitePath(agentId).length <= 280) {
+      agentId += '-segment';
+    }
+    expect(agentId.length).toBeLessThan(240);
+
+    writeAuthProfilesToSqlite({
+      version: 1,
+      profiles: {
+        'openai:default': { type: 'api_key', provider: 'openai', key: 'long-path-key' },
+      },
+    }, agentId);
+
+    expect(readAuthProfilesFromSqlite(agentId)?.profiles['openai:default']).toMatchObject({
+      provider: 'openai',
+      key: 'long-path-key',
+    });
+  });
+
   it('enforces private modes on an existing agent directory and credential database', async () => {
     if (process.platform === 'win32') return;
     const agentDir = join(testHome, '.openclaw', 'agents', 'main', 'agent');

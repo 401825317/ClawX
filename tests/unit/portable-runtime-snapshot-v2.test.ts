@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { toSqlitePath } from '@electron/utils/sqlite-path';
 
 const unstableFiles = vi.hoisted(() => new Set<string>());
 const durableSyncCount = vi.hoisted(() => ({ value: 0 }));
@@ -443,6 +444,52 @@ describe('portable runtime snapshot v2 sync', () => {
     try {
       const row = restored.prepare('SELECT COUNT(*) AS count FROM messages').get() as { count: number };
       expect(row.count).toBe(2);
+    } finally {
+      restored.close();
+    }
+  });
+
+  it.runIf(process.platform === 'win32')('captures and restores writable SQLite state beyond MAX_PATH', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'uclaw-portable-long-path-'));
+    tempDirs.push(root);
+    let stateDir = join(root, 'state');
+    let snapshotDir = join(root, 'snapshots');
+    const relativeDatabasePath = join('agents', 'main', 'agent', 'openclaw-agent.sqlite');
+    while (join(stateDir, relativeDatabasePath).length <= 280) {
+      stateDir = join(stateDir, 'portable-runtime-segment');
+      snapshotDir = join(snapshotDir, 'portable-snapshot-segment');
+    }
+    const layout: PortableSnapshotV2Layout = {
+      stateDir,
+      snapshotDir,
+      portableId: 'long-path-portable',
+    };
+    await mkdir(join(stateDir, 'agents', 'main', 'agent'), { recursive: true });
+    await mkdir(snapshotDir, { recursive: true });
+    const databasePath = join(stateDir, relativeDatabasePath);
+    const database = new DatabaseSync(toSqlitePath(databasePath));
+    try {
+      database.exec(`
+        PRAGMA journal_mode = WAL;
+        CREATE TABLE probe (value TEXT NOT NULL);
+        INSERT INTO probe VALUES ('before-snapshot');
+      `);
+      await syncPortableRuntimeSnapshotV2(layout, 'long-path-snapshot');
+    } finally {
+      database.close();
+    }
+
+    await rm(stateDir, { recursive: true, force: true });
+    expect(restorePortableRuntimeSnapshotV2Sync(layout, stateDir)).toBe(true);
+
+    const restored = new DatabaseSync(toSqlitePath(databasePath));
+    try {
+      restored.exec("INSERT INTO probe VALUES ('after-restore');");
+      expect(restored.prepare('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' });
+      expect(restored.prepare('SELECT value FROM probe ORDER BY rowid').all()).toEqual([
+        { value: 'before-snapshot' },
+        { value: 'after-restore' },
+      ]);
     } finally {
       restored.close();
     }
