@@ -37,7 +37,10 @@ async function launchPreparedBrowser(
   page: Page;
   policy: WebBrowserPolicyInstrumentation;
 }> {
-  const app = await launchElectronApp({ skipSetup: true, additionalArgs });
+  const app = await launchElectronApp({
+    skipSetup: true,
+    additionalArgs: [...fixture.electronArgs, ...additionalArgs],
+  });
   await prepareWebBrowserApp(app, fixture.workspaceDir);
   const policy = await installWebBrowserPolicyInstrumentation(app);
   const page = await getStableWindow(app);

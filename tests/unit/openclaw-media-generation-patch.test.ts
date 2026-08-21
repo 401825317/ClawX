@@ -1,13 +1,15 @@
 // @vitest-environment node
 
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { pathToFileURL } from 'node:url';
+import { afterEach, describe, expect, it } from 'vitest';
 
 const repoRoot = process.cwd();
 const patchModulePath = resolve(repoRoot, 'scripts/openclaw-media-generation-patch.mjs');
+const tempRoots = new Set<string>();
 const upstreamDetachPolicy = [
   'function shouldDetachMediaGenerationTask(sessionKey) {',
   '\tconst normalizedSessionKey = sessionKey?.trim();',
@@ -15,11 +17,30 @@ const upstreamDetachPolicy = [
   '}',
 ].join('\n');
 
+async function createTempRoot(prefix: string): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), prefix));
+  tempRoots.add(root);
+  return root;
+}
+
+async function importPatchModule(): Promise<typeof import('../../scripts/openclaw-media-generation-patch.mjs')> {
+  const root = await createTempRoot('uclaw-media-patch-module-');
+  const modulePath = join(root, 'openclaw-media-generation-patch.mjs');
+  const source = (await readFile(patchModulePath, 'utf8')).replace(/^#![^\r\n]*(?:\r?\n|$)/, '');
+  await writeFile(modulePath, source, 'utf8');
+  return await import(`${pathToFileURL(modulePath).href}?test=${Date.now()}-${Math.random()}`);
+}
+
+afterEach(async () => {
+  await Promise.all([...tempRoots].map(root => rm(root, { recursive: true, force: true })));
+  tempRoots.clear();
+});
+
 describe('OpenClaw media generation runtime patch', () => {
   it('keeps UClaw image and video generation attached to the active turn', async () => {
     expect(existsSync(patchModulePath)).toBe(true);
 
-    const { rewriteMediaGenerationDetachPolicy } = await import(patchModulePath);
+    const { rewriteMediaGenerationDetachPolicy } = await importPatchModule();
     const source = `before\n${upstreamDetachPolicy}\nafter`;
     const rewritten = rewriteMediaGenerationDetachPolicy(source);
 
@@ -36,8 +57,8 @@ describe('OpenClaw media generation runtime patch', () => {
   it('patches the copied runtime and rejects an unsupported OpenClaw layout', async () => {
     expect(existsSync(patchModulePath)).toBe(true);
 
-    const { patchOpenClawMediaGenerationRuntime } = await import(patchModulePath);
-    const root = await mkdtemp(join(tmpdir(), 'uclaw-media-runtime-'));
+    const { patchOpenClawMediaGenerationRuntime } = await importPatchModule();
+    const root = await createTempRoot('uclaw-media-runtime-');
     const dist = join(root, 'dist');
     await mkdir(dist, { recursive: true });
     const target = join(dist, 'openclaw-tools-test.js');

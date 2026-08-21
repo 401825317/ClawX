@@ -13,10 +13,13 @@ import {
 } from './fixtures/web-browser';
 
 async function launchPreparedBrowser(
-  launchElectronApp: (options?: { skipSetup?: boolean }) => Promise<ElectronApplication>,
+  launchElectronApp: (options?: {
+    skipSetup?: boolean;
+    additionalArgs?: string[];
+  }) => Promise<ElectronApplication>,
   fixture: LocalWebBrowserFixture,
 ): Promise<{ app: ElectronApplication; page: Page }> {
-  const app = await launchElectronApp({ skipSetup: true });
+  const app = await launchElectronApp({ skipSetup: true, additionalArgs: fixture.electronArgs });
   await prepareWebBrowserApp(app, fixture.workspaceDir);
   const page = await getStableWindow(app);
   try {
@@ -299,7 +302,7 @@ test.describe('embedded web browser navigation', () => {
     }
   });
 
-  test('uses the exact UA and safely handles paths, file URLs, and external opening', async ({
+  test('uses the exact UA, denies private and file targets, and accepts a tokenized preview', async ({
     launchElectronApp,
     webBrowserFixture,
   }) => {
@@ -321,11 +324,24 @@ test.describe('embedded web browser navigation', () => {
       expect(webBrowserFixture.lastRequest('/ua')?.headers['user-agent']).toBe(WEB_BROWSER_USER_AGENT);
 
       await navigateFromAddress(page, webBrowserFixture.fileUrl);
-      await expectGuestAt(app, { guestId, url: webBrowserFixture.fileUrl, title: 'Local File Fixture' });
+      await expectMainSnapshotToRemain(app, { guestId, url: webBrowserFixture.urls.ua });
+      await navigateFromAddress(page, webBrowserFixture.urls.privateNetwork);
+      await expectMainSnapshotToRemain(app, { guestId, url: webBrowserFixture.urls.ua });
+      expect(webBrowserFixture.requestCount('/start')).toBe(0);
+
+      expect(webBrowserFixture.urls.workspacePreview).toMatch(
+        /^http:\/\/127\.0\.0\.1:\d+\/[A-Za-z0-9_-]{43}\/index\.html$/u,
+      );
+      await navigateFromAddress(page, webBrowserFixture.urls.workspacePreview);
+      await expectGuestAt(app, {
+        guestId,
+        url: webBrowserFixture.urls.workspacePreview,
+        title: 'Local File Fixture',
+      });
       await page.getByTestId('web-browser-more').click();
       await page.getByTestId('web-browser-open-external').click();
       await expect.poll(() => getWebBrowserShellCalls(app)).toEqual({
-        openExternal: [webBrowserFixture.fileUrl],
+        openExternal: [webBrowserFixture.urls.workspacePreview],
         openPath: [],
       });
 
@@ -334,7 +350,7 @@ test.describe('embedded web browser navigation', () => {
       await page.getByTestId('web-browser-more').click();
       await page.getByTestId('web-browser-open-external').click();
       await expect.poll(() => getWebBrowserShellCalls(app)).toEqual({
-        openExternal: [webBrowserFixture.fileUrl, webBrowserFixture.urls.start],
+        openExternal: [webBrowserFixture.urls.workspacePreview, webBrowserFixture.urls.start],
         openPath: [],
       });
       await expect(getWebBrowserMainSnapshot(app)).resolves.toMatchObject({

@@ -17,6 +17,7 @@ import { ensureClawXContext } from '../utils/openclaw-workspace';
 import { generateAgentProfileViaGateway } from './agent-profile-generation-service';
 import { isRecord } from './payload-utils';
 import { syncAgentModelOverrideToRuntime, syncAllProviderAuthToRuntime } from './providers/provider-runtime-sync';
+import { longTermRuleService } from './long-term-rule-service';
 
 type AgentsApiContext = {
   gatewayManager: GatewayManager;
@@ -104,12 +105,23 @@ export function createAgentsApi(ctx: AgentsApiContext): CompleteHostServiceRegis
       void ensureClawXContext({ waitForAllConfiguredWorkspaces: true }).catch((err) => {
         console.warn('[agents] Failed to ensure ClawX context after agent creation:', err);
       });
+      const createdAgent = snapshot.agents.find((agent) => agent.id === snapshot.createdAgentId);
+      if (createdAgent) {
+        await longTermRuleService.repair({
+          agentId: createdAgent.id,
+          workspaceRoot: createdAgent.workspace,
+        });
+      }
       return { success: true, ...snapshot };
     },
     update: async (payload) => {
       const agentId = requireString(payload, 'id');
       const name = requireString(payload, 'name');
       const snapshot = await updateAgentName(agentId, name);
+      const updatedAgent = snapshot.agents.find((agent) => agent.id === agentId);
+      if (updatedAgent) {
+        await longTermRuleService.repair({ agentId, workspaceRoot: updatedAgent.workspace });
+      }
       scheduleGatewayReload(ctx, 'update-agent');
       return { success: true, ...snapshot };
     },
@@ -142,6 +154,7 @@ export function createAgentsApi(ctx: AgentsApiContext): CompleteHostServiceRegis
       await removeAgentWorkspaceDirectory(removedEntry).catch((err) => {
         console.warn('[agents] Failed to remove workspace after agent deletion:', err);
       });
+      await longTermRuleService.unregisterAgent(agentId);
       return { success: true, ...snapshot };
     },
     assignChannel: async (payload) => {

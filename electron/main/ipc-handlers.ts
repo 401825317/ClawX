@@ -7,8 +7,8 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, extname, basename, resolve, sep, relative } from 'node:path';
 import { syncMacTrafficLightPosition } from './traffic-light-layout';
-import { GatewayManager } from '../gateway/manager';
-import { ClawHubService } from '../gateway/clawhub';
+import type { GatewayManager } from '../gateway/manager';
+import type { ClawHubService } from '../gateway/clawhub';
 import {
   type ProviderConfig,
 } from '../utils/secure-storage';
@@ -84,6 +84,8 @@ import {
 import { withProviderMutationLock } from '../services/providers/provider-mutation-lock';
 import { createManagedAuthApi } from '../services/managed-auth-api';
 import { createManagedClientConfigApi } from '../services/managed-client-config-api';
+import { createArtifactTasksApi } from '../services/artifact-tasks-api';
+import { createLongTermRulesApi } from '../services/long-term-rules-api';
 import { createBillingApi } from '../services/billing-api';
 import { createSupportApi } from '../services/support-api';
 import { createSessionsApi } from '../services/sessions-api';
@@ -246,6 +248,8 @@ function registerTypedHostHandlers(
     providers: createProvidersApi({ gatewayManager, mainWindow }),
     managedAuth: createManagedAuthApi({ gatewayManager }),
     managedClientConfig: createManagedClientConfigApi(),
+    artifactTasks: createArtifactTasksApi(),
+    longTermRules: createLongTermRulesApi(),
     billing: createBillingApi({ gatewayManager }),
     support: createSupportApi(),
     files: createFilesApi({

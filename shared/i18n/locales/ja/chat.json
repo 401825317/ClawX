@@ -358,6 +358,9 @@
         },
         "imageMode": "画像モード",
         "imageModeActive": "画像モードを有効にしました",
+        "imagePresetLabel": "画像プリセット",
+        "imagePresetStandard": "標準画像",
+        "ecommerceMainImage": "EC商品メイン画像",
         "videoMode": "動画モード",
         "videoReferenceImageLimit": "動画生成で指定できる参照画像は1枚です",
         "videoAspectRatioLabel": "動画のアスペクト比",
@@ -388,6 +391,7 @@
         "thinking": "考え中…",
         "gatewayConnected": "接続済み",
         "gatewayStarting": "起動中",
+        "gatewayRetrying": "接続を再試行中（{{attempt}}/{{maxAttempts}}）",
         "gatewayStatus": "ゲートウェイ {{state}} | ポート: {{port}} | PID: {{pid}}",
         "retryFailedAttachments": "失敗した添付を再試行",
         "workspacePrefix": "{{workspace}}",
@@ -400,6 +404,14 @@
         "folderAttachment": "フォルダ",
         "skillPreviewTooltip": "SKILL.md をプレビュー",
         "skillPreviewNotFound": "この Skill が見つかりません。Skill ピッカーを開いて一覧を更新してください。"
+    },
+    "longTermRules": {
+        "saved": "{{scope}}の長期ルールとして保存しました",
+        "scopeGlobal": "グローバル",
+        "scopeAgent": "現在のAgent",
+        "undo": "元に戻す",
+        "undone": "長期ルールを元に戻しました",
+        "undoFailed": "この長期ルールを元に戻せませんでした"
     },
     "sessionList": {
         "title": "セッション一覧",

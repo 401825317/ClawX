@@ -1,8 +1,9 @@
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DATASET_DIR = path.join(ROOT, 'scripts/comms/datasets');
 const OUTPUT_DIR = path.join(ROOT, 'artifacts/comms');
 const OUTPUT_FILE = path.join(OUTPUT_DIR, 'current-metrics.json');
@@ -167,8 +168,24 @@ export async function main() {
   console.log(`Wrote comms replay metrics to ${OUTPUT_FILE}`);
 }
 
-const isEntrypoint = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname);
-if (isEntrypoint) {
+export function isEntrypoint(moduleUrl, argvEntry, platform = process.platform) {
+  if (!argvEntry) return false;
+
+  try {
+    const windows = platform === 'win32';
+    const pathApi = windows ? path.win32 : path.posix;
+    const modulePath = pathApi.normalize(fileURLToPath(moduleUrl, { windows }));
+    const entryPath = pathApi.normalize(pathApi.resolve(argvEntry));
+
+    return windows
+      ? modulePath.toLowerCase() === entryPath.toLowerCase()
+      : modulePath === entryPath;
+  } catch {
+    return false;
+  }
+}
+
+if (isEntrypoint(import.meta.url, process.argv[1])) {
   main().catch((error) => {
     console.error('[comms:replay] failed:', error);
     process.exitCode = 1;

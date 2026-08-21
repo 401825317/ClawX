@@ -358,6 +358,9 @@
         },
         "imageMode": "图片模式",
         "imageModeActive": "图片模式已开启",
+        "imagePresetLabel": "图片预设",
+        "imagePresetStandard": "标准图片",
+        "ecommerceMainImage": "电商主图",
         "videoMode": "视频模式",
         "videoReferenceImageLimit": "视频生成一次仅支持一张参考图",
         "videoAspectRatioLabel": "视频比例",
@@ -388,6 +391,7 @@
         "thinking": "思考中…",
         "gatewayConnected": "已连接",
         "gatewayStarting": "启动中",
+        "gatewayRetrying": "正在重试连接（第 {{attempt}}/{{maxAttempts}} 次）",
         "gatewayStatus": "网关{{state}} ｜ 端口：{{port}} ｜ 进程 ID：{{pid}}",
         "retryFailedAttachments": "重试失败的附件",
         "workspacePrefix": "{{workspace}}",
@@ -400,6 +404,14 @@
         "folderAttachment": "文件夹",
         "skillPreviewTooltip": "预览 SKILL.md",
         "skillPreviewNotFound": "找不到该技能。请打开技能列表以刷新。"
+    },
+    "longTermRules": {
+        "saved": "已保存为{{scope}}长期规则",
+        "scopeGlobal": "全局",
+        "scopeAgent": "当前 Agent",
+        "undo": "撤销",
+        "undone": "已撤销长期规则",
+        "undoFailed": "无法撤销这条长期规则"
     },
     "sessionList": {
         "title": "会话列表",

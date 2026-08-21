@@ -121,4 +121,7 @@ export const hostEvents = {
   onOpenClawCliInstalled: (
     handler: HostEventHandler<'app', 'openClawCliInstalled'>,
   ) => onAppEvent('openClawCliInstalled', handler),
+  onPortableRuntimeHealthChanged: (
+    handler: HostEventHandler<'app', 'portableRuntimeHealthChanged'>,
+  ) => onAppEvent('portableRuntimeHealthChanged', handler),
 };

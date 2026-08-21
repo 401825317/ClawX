@@ -4,7 +4,9 @@ import {
   WEB_BROWSER_PARTITION,
   WEB_BROWSER_USER_AGENT,
   canOpenWebBrowserExternally,
+  isAllowedWorkspaceHtmlPreviewNavigation,
   normalizeWebBrowserTopLevelUrl,
+  normalizeWorkspaceHtmlPreviewUrl,
   parseWebBrowserAddress,
   type WebBrowserAddressErrorCode,
 } from '@shared/web-browser';
@@ -84,5 +86,26 @@ describe('web browser URL policy', () => {
     ['data:text/plain,hello', false],
   ])('reports external-open eligibility for %s as %s', (input, expected) => {
     expect(canOpenWebBrowserExternally(input)).toBe(expected);
+  });
+
+  it('recognizes only the strict generated workspace preview URL shape', () => {
+    const token = 'a'.repeat(43);
+    const previewUrl = `http://127.0.0.1:49152/${token}/index.html`;
+
+    expect(normalizeWorkspaceHtmlPreviewUrl(previewUrl)).toBe(previewUrl);
+    for (const rejected of [
+      `http://localhost:49152/${token}/index.html`,
+      `https://127.0.0.1:49152/${token}/index.html`,
+      `http://127.0.0.1:49152/${'a'.repeat(42)}/index.html`,
+      `http://127.0.0.1:49152/${token}/other.html`,
+      `${previewUrl}?next=https://example.com`,
+      `${previewUrl}#fragment`,
+    ]) {
+      expect(normalizeWorkspaceHtmlPreviewUrl(rejected)).toBeNull();
+    }
+
+    expect(isAllowedWorkspaceHtmlPreviewNavigation(previewUrl, `${previewUrl}#section`)).toBe(true);
+    expect(isAllowedWorkspaceHtmlPreviewNavigation(previewUrl, 'https://example.com/')).toBe(false);
+    expect(isAllowedWorkspaceHtmlPreviewNavigation(previewUrl, 'file:///tmp/page.html')).toBe(false);
   });
 });

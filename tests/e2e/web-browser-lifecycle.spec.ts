@@ -27,10 +27,13 @@ interface Rect {
 }
 
 async function launchPreparedBrowser(
-  launchElectronApp: (options?: { skipSetup?: boolean }) => Promise<ElectronApplication>,
+  launchElectronApp: (options?: {
+    skipSetup?: boolean;
+    additionalArgs?: string[];
+  }) => Promise<ElectronApplication>,
   fixture: LocalWebBrowserFixture,
 ): Promise<{ app: ElectronApplication; page: Page }> {
-  const app = await launchElectronApp({ skipSetup: true });
+  const app = await launchElectronApp({ skipSetup: true, additionalArgs: fixture.electronArgs });
   await prepareWebBrowserApp(app, fixture.workspaceDir);
   const page = await getStableWindow(app);
   try {

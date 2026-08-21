@@ -3,6 +3,13 @@ import { logger } from '../utils/logger';
 type HealthResult = { ok: boolean; error?: string };
 type HeartbeatAliveReason = 'pong' | 'message';
 
+export type ReadOnlyProbeResult = {
+  ok: boolean;
+  durationMs: number;
+  error?: unknown;
+  stale?: boolean;
+};
+
 type PingOptions = {
   sendPing: () => void;
   onHeartbeatTimeout: (context: { consecutiveMisses: number; timeoutMs: number }) => void;
@@ -18,6 +25,8 @@ export class GatewayConnectionMonitor {
   private waitingForAlive = false;
   private consecutiveMisses = 0;
   private timeoutTriggered = false;
+  private generation = 0;
+  private readOnlyProbeInFlight: Promise<ReadOnlyProbeResult> | null = null;
 
   startPing(options: PingOptions): void {
     const intervalMs = options.intervalMs ?? 30000;
@@ -73,6 +82,40 @@ export class GatewayConnectionMonitor {
     return this.consecutiveMisses;
   }
 
+  /** Runs a one-shot probe with no configuration or mutation capability. */
+  runReadOnlyProbe(probe: () => Promise<void>): Promise<ReadOnlyProbeResult> {
+    if (this.readOnlyProbeInFlight) return this.readOnlyProbeInFlight;
+
+    const generation = this.generation;
+    const startedAt = Date.now();
+    let resolveCurrent!: (result: ReadOnlyProbeResult) => void;
+    const current = new Promise<ReadOnlyProbeResult>((resolve) => {
+      resolveCurrent = resolve;
+    });
+    this.readOnlyProbeInFlight = current;
+    void (async (): Promise<void> => {
+      let result: ReadOnlyProbeResult;
+      try {
+        await probe();
+        if (generation !== this.generation) {
+          result = { ok: false, stale: true, durationMs: Date.now() - startedAt };
+        } else {
+          result = { ok: true, durationMs: Date.now() - startedAt };
+        }
+      } catch (error) {
+        if (generation !== this.generation) {
+          result = { ok: false, stale: true, durationMs: Date.now() - startedAt };
+        } else {
+          result = { ok: false, durationMs: Date.now() - startedAt, error };
+        }
+      } finally {
+        if (this.readOnlyProbeInFlight === current) this.readOnlyProbeInFlight = null;
+        resolveCurrent(result!);
+      }
+    })();
+    return current;
+  }
+
   startHealthCheck(options: {
     shouldCheck: () => boolean;
     checkHealth: () => Promise<HealthResult>;
@@ -83,6 +126,7 @@ export class GatewayConnectionMonitor {
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
     }
+    const generation = ++this.generation;
 
     this.healthCheckInterval = setInterval(async () => {
       if (!options.shouldCheck()) {
@@ -91,12 +135,14 @@ export class GatewayConnectionMonitor {
 
       try {
         const health = await options.checkHealth();
+        if (generation !== this.generation) return;
         if (!health.ok) {
           const errorMessage = health.error ?? 'Health check failed';
           logger.warn(`Gateway health check failed: ${errorMessage}`);
           options.onUnhealthy(errorMessage);
         }
       } catch (error) {
+        if (generation !== this.generation) return;
         logger.error('Gateway health check error:', error);
         options.onError(error);
       }
@@ -104,6 +150,8 @@ export class GatewayConnectionMonitor {
   }
 
   clear(): void {
+    this.generation += 1;
+    this.readOnlyProbeInFlight = null;
     if (this.pingInterval) {
       clearInterval(this.pingInterval);
       this.pingInterval = null;

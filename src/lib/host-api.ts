@@ -61,7 +61,9 @@ import type {
   ManagedAuthVerifyPayload,
 } from '@shared/managed-auth';
 import type {
+  ManagedClientImageModelRequest,
   ManagedClientTextModelRequest,
+  ManagedClientRuntimeConfigRequest,
   ManagedClientVideoModelRequest,
 } from '@shared/managed-client-config';
 import type {
@@ -70,6 +72,19 @@ import type {
   BillingOrderStatusPayload,
 } from '@shared/billing';
 import type { SupportContactConfig } from '@shared/support';
+import type {
+  ArtifactTaskPreparePayload,
+  ArtifactWebpageValidationPayload,
+} from '@shared/artifact-tasks';
+import type {
+  LongTermRuleCapturePayload,
+  LongTermRuleContext,
+  LongTermRuleCreatePayload,
+  LongTermRuleDeletePayload,
+  LongTermRuleListPayload,
+  LongTermRuleUndoPayload,
+  LongTermRuleUpdatePayload,
+} from '@shared/long-term-rules';
 import type { AgentProfileGenerationInput } from '@shared/types/agent';
 import { invokeHost } from './host-api-client';
 
@@ -133,6 +148,7 @@ export type { SupportContact, SupportContactConfig } from '@shared/support';
 export const hostApi = {
   app: {
     quit: () => invokeHost('app', 'quit'),
+    portableRuntimeHealth: () => invokeHost('app', 'portableRuntimeHealth'),
     openClawDoctor: async (mode: OpenClawDoctorMode): Promise<OpenClawDoctorResult> => ({
       ...(await invokeHost('app', 'openClawDoctor', { mode })),
       mode,
@@ -342,9 +358,30 @@ export const hostApi = {
     textModels: (input?: ManagedClientTextModelRequest) => (
       invokeHost('managedClientConfig', 'textModels', input)
     ),
+    imageModels: (input?: ManagedClientImageModelRequest) => (
+      invokeHost('managedClientConfig', 'imageModels', input)
+    ),
     videoModels: (input?: ManagedClientVideoModelRequest) => (
       invokeHost('managedClientConfig', 'videoModels', input)
     ),
+    runtimeConfig: (input?: ManagedClientRuntimeConfigRequest) => (
+      invokeHost('managedClientConfig', 'runtimeConfig', input)
+    ),
+  },
+  artifactTasks: {
+    prepare: (input: ArtifactTaskPreparePayload) => invokeHost('artifactTasks', 'prepare', input),
+    validateWebpage: (input: ArtifactWebpageValidationPayload) => (
+      invokeHost('artifactTasks', 'validateWebpage', input)
+    ),
+  },
+  longTermRules: {
+    list: (input: LongTermRuleListPayload) => invokeHost('longTermRules', 'list', input),
+    create: (input: LongTermRuleCreatePayload) => invokeHost('longTermRules', 'create', input),
+    update: (input: LongTermRuleUpdatePayload) => invokeHost('longTermRules', 'update', input),
+    delete: (input: LongTermRuleDeletePayload) => invokeHost('longTermRules', 'delete', input),
+    undo: (input: LongTermRuleUndoPayload) => invokeHost('longTermRules', 'undo', input),
+    capture: (input: LongTermRuleCapturePayload) => invokeHost('longTermRules', 'capture', input),
+    repair: (input: LongTermRuleContext) => invokeHost('longTermRules', 'repair', input),
   },
   billing: {
     overview: () => invokeHost('billing', 'overview'),

@@ -1,14 +1,28 @@
 import { app, utilityProcess } from 'electron';
 import { existsSync, writeFileSync } from 'fs';
+import { StringDecoder } from 'node:string_decoder';
 import path from 'path';
 import type { GatewayLaunchContext } from './config-sync';
 import { stripEnvironmentKeys } from './config-sync-env';
 import type { GatewayLifecycleState } from './process-policy';
 import { logger } from '../utils/logger';
+import { captureGatewayProcessException, captureHandledException } from '../utils/telemetry';
 import { appendNodeRequireToNodeOptions } from '../utils/paths';
+import {
+  clearGatewayOwnershipRecordIfMatches,
+  createGatewayOwnershipRecord,
+  inspectWindowsGatewayProcess,
+  markOwnedGatewayChildExited,
+  registerOwnedGatewayChildMetadata,
+  trackOwnedGatewayChild,
+  writeGatewayOwnershipRecord,
+  type GatewayOwnershipRecord,
+} from './gateway-ownership';
 
 export const OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS =
   'OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS';
+
+const GATEWAY_STDERR_DRAIN_TIMEOUT_MS = 100;
 
 const GATEWAY_CHILD_PROCESS_PATCH_SOURCE = `
 (function () {
@@ -113,12 +127,58 @@ const GATEWAY_CHILD_PROCESS_PATCH_SOURCE = `
 })();
 `;
 
-const GATEWAY_FETCH_PRELOAD_SOURCE = `'use strict';
+const GATEWAY_FETCH_PATCH_SOURCE = `
 (function () {
   var _f = globalThis.fetch;
   if (typeof _f !== 'function') return;
   if (globalThis.__clawxFetchPatched) return;
   globalThis.__clawxFetchPatched = true;
+
+  function assignHeaders(target, source) {
+    if (!source) return;
+    if (typeof source.forEach === 'function') {
+      source.forEach(function (value, key) { target[key] = value; });
+    } else if (Array.isArray(source)) {
+      source.forEach(function (entry) {
+        if (Array.isArray(entry) && entry.length >= 2) target[String(entry[0])] = String(entry[1]);
+      });
+    } else if (typeof source === 'object') {
+      Object.assign(target, source);
+    }
+  }
+
+  function findHeaderKey(headers, name) {
+    var expected = String(name).toLowerCase();
+    return Object.keys(headers).find(function (key) { return key.toLowerCase() === expected; });
+  }
+
+  function setDefaultHeader(headers, name, value) {
+    if (!findHeaderKey(headers, name) && typeof value === 'string' && value) {
+      headers[name] = value;
+    }
+  }
+
+  function removeHeader(headers, name) {
+    var key = findHeaderKey(headers, name);
+    if (key) delete headers[key];
+  }
+
+  var diagnosticHeaders = {};
+  try {
+    var parsedDiagnostics = JSON.parse(process.env.CLAWX_UCLAW_DIAGNOSTIC_HEADERS || '{}');
+    if (parsedDiagnostics && typeof parsedDiagnostics === 'object' && !Array.isArray(parsedDiagnostics)) {
+      diagnosticHeaders = parsedDiagnostics;
+    }
+  } catch (e) {
+    diagnosticHeaders = {};
+  }
+
+  var uclawOrigin = '';
+  try {
+    uclawOrigin = new URL(process.env.CLAWX_UCLAW_ORIGIN || '').origin;
+  } catch (e) {
+    uclawOrigin = '';
+  }
 
   globalThis.fetch = function clawxFetch(input, init) {
     var url =
@@ -126,28 +186,84 @@ const GATEWAY_FETCH_PRELOAD_SOURCE = `'use strict';
         : input && typeof input === 'object' && typeof input.url === 'string'
           ? input.url : '';
 
-    if (url.indexOf('openrouter.ai') !== -1) {
+    var isUclawRequest = false;
+    try {
+      isUclawRequest = Boolean(uclawOrigin) && new URL(url).origin === uclawOrigin;
+    } catch (e) {
+      isUclawRequest = false;
+    }
+
+    if (url.indexOf('openrouter.ai') !== -1 || isUclawRequest) {
       init = init ? Object.assign({}, init) : {};
-      var prev = init.headers;
       var flat = {};
-      if (prev && typeof prev.forEach === 'function') {
-        prev.forEach(function (v, k) { flat[k] = v; });
-      } else if (prev && typeof prev === 'object') {
-        Object.assign(flat, prev);
+      if (input && typeof input === 'object') assignHeaders(flat, input.headers);
+      assignHeaders(flat, init.headers);
+      if (url.indexOf('openrouter.ai') !== -1) {
+        removeHeader(flat, 'http-referer');
+        removeHeader(flat, 'x-title');
+        removeHeader(flat, 'x-openrouter-title');
+        flat['HTTP-Referer'] = 'https://claw-x.com';
+        flat['X-OpenRouter-Title'] = 'ClawX';
       }
-      delete flat['http-referer'];
-      delete flat['HTTP-Referer'];
-      delete flat['x-title'];
-      delete flat['X-Title'];
-      delete flat['x-openrouter-title'];
-      delete flat['X-OpenRouter-Title'];
-      flat['HTTP-Referer'] = 'https://claw-x.com';
-      flat['X-OpenRouter-Title'] = 'ClawX';
+      if (isUclawRequest) {
+        Object.keys(diagnosticHeaders).forEach(function (key) {
+          removeHeader(flat, key);
+          flat[key] = diagnosticHeaders[key];
+        });
+        try {
+          removeHeader(flat, 'X-Request-Id');
+          flat['X-Request-Id'] = require('node:crypto').randomUUID();
+        } catch (e) {
+          // The server still supplies its own request id if crypto is unavailable.
+        }
+      }
       init.headers = flat;
     }
-    return _f.call(globalThis, input, init);
+    if (!isUclawRequest) return _f.call(globalThis, input, init);
+
+    init.redirect = 'manual';
+    return (async function () {
+      var currentInput = input;
+      var currentUrl = url;
+      var currentInit = init;
+      for (var redirects = 0; ; redirects += 1) {
+        var response = await _f.call(globalThis, currentInput, currentInit);
+        if (!response || response.status < 300 || response.status >= 400 || redirects >= 5) {
+          return response;
+        }
+        var location = response.headers && typeof response.headers.get === 'function'
+          ? response.headers.get('location') : '';
+        if (!location) return response;
+        var nextUrl;
+        try {
+          nextUrl = new URL(location, currentUrl);
+        } catch (e) {
+          return response;
+        }
+        if (nextUrl.origin !== uclawOrigin) return response;
+
+        var method = String(currentInit.method || (currentInput && currentInput.method) || 'GET').toUpperCase();
+        if (response.status === 303 || ((response.status === 301 || response.status === 302) && method === 'POST')) {
+          currentInit = Object.assign({}, currentInit, { method: 'GET', body: undefined });
+          var redirectedHeaders = {};
+          assignHeaders(redirectedHeaders, currentInit.headers);
+          removeHeader(redirectedHeaders, 'content-length');
+          removeHeader(redirectedHeaders, 'content-type');
+          currentInit.headers = redirectedHeaders;
+        } else if (method !== 'GET' && method !== 'HEAD' && !Object.prototype.hasOwnProperty.call(currentInit, 'body')) {
+          // A Request object's consumed body cannot be replayed safely.
+          return response;
+        }
+        currentInput = nextUrl.toString();
+        currentUrl = nextUrl.toString();
+      }
+    })();
   };
 })();
+`;
+
+const GATEWAY_FETCH_PRELOAD_SOURCE = `'use strict';
+${GATEWAY_FETCH_PATCH_SOURCE}
 ${GATEWAY_CHILD_PROCESS_PATCH_SOURCE}
 `;
 
@@ -155,9 +271,10 @@ export function buildGatewayFetchPreloadSource(): string {
   return GATEWAY_FETCH_PRELOAD_SOURCE;
 }
 
-/** Build the packaged-safe wrapper that patches child processes before OpenClaw loads. */
+/** Build the packaged-safe wrapper that patches fetch and child processes before OpenClaw loads. */
 export function buildGatewayEntryWrapperSource(): string {
   return `'use strict';
+${GATEWAY_FETCH_PATCH_SOURCE}
 ${GATEWAY_CHILD_PROCESS_PATCH_SOURCE}
 (async function () {
   var entry = process.env.CLAWX_OPENCLAW_ENTRY;
@@ -228,7 +345,7 @@ export async function launchGatewayProcess(options: {
   onStderrLine: (line: string) => void;
   onSpawn: (pid: number | undefined) => void;
   onExit: (child: Electron.UtilityProcess, code: number | null) => void;
-  onError: (error: Error) => void;
+  onError: (child: Electron.UtilityProcess, error: Error) => void;
   allowOlderBinaryDestructiveActions?: boolean;
 }): Promise<{ child: Electron.UtilityProcess; lastSpawnSummary: string }> {
   const {
@@ -299,8 +416,19 @@ export async function launchGatewayProcess(options: {
       env: runtimeEnv as NodeJS.ProcessEnv,
       serviceName: 'OpenClaw Gateway',
     });
+    trackOwnedGatewayChild(child);
 
     let settled = false;
+    let childExited = false;
+    let errorHandled = false;
+    let exitEventHandled = false;
+    let exitCallbackCalled = false;
+    let stderrFinalized = !child.stderr;
+    let stderrLineBuffer = '';
+    const stderrDecoder = new StringDecoder('utf8');
+    let pendingExit: { code: number | null } | null = null;
+    let exitDrainTimer: ReturnType<typeof setTimeout> | null = null;
+    let ownershipRecord: GatewayOwnershipRecord | null = null;
     const resolveOnce = () => {
       if (settled) return;
       settled = true;
@@ -312,14 +440,133 @@ export async function launchGatewayProcess(options: {
       reject(error);
     };
 
+    const clearOwnershipRecord = async (): Promise<void> => {
+      if (!ownershipRecord) return;
+      const record = ownershipRecord;
+      ownershipRecord = null;
+      try {
+        await clearGatewayOwnershipRecordIfMatches(record);
+      } catch {
+        // A stale record only reduces crash-recovery convenience. It must never
+        // affect the process lifecycle or be deleted without an exact match.
+      }
+    };
+
+    const persistOwnershipRecord = async (): Promise<void> => {
+      const pid = child.pid;
+      if (!pid || process.platform !== 'win32' || childExited) return;
+      const identity = await inspectWindowsGatewayProcess(pid);
+      if (childExited) return;
+      if (!identity) {
+        logger.warn(`Gateway process started without a verifiable creation identity (pid=${pid}); orphan takeover disabled`);
+        return;
+      }
+      if (!identity.commandIdentityHash) {
+        logger.warn(`Gateway process started without a canonical command identity hash (pid=${pid}); orphan takeover disabled`);
+        return;
+      }
+      const token = runtimeEnv.OPENCLAW_GATEWAY_TOKEN;
+      if (!token) {
+        logger.warn(`Gateway process started without an ownership token hash (pid=${pid}); orphan takeover disabled`);
+        return;
+      }
+      try {
+        const record = await createGatewayOwnershipRecord({
+          pid,
+          processCreationIdentity: identity.creationIdentity,
+          runtimeRoot: openclawDir,
+          token,
+        });
+        if (childExited) return;
+        await writeGatewayOwnershipRecord(record);
+        ownershipRecord = record;
+        if (childExited) {
+          await clearOwnershipRecord();
+          return;
+        }
+        registerOwnedGatewayChildMetadata(child, {
+          record,
+          processIdentity: identity,
+          port: options.port,
+        });
+      } catch {
+        logger.warn(`Failed to persist Gateway ownership record (pid=${pid}); orphan takeover disabled`);
+      }
+    };
+
+    const clearExitDrainTimer = (): void => {
+      if (!exitDrainTimer) return;
+      clearTimeout(exitDrainTimer);
+      exitDrainTimer = null;
+    };
+
+    const notifyExitOnce = (): void => {
+      if (!stderrFinalized || !pendingExit || exitCallbackCalled) return;
+      const { code } = pendingExit;
+      pendingExit = null;
+      exitCallbackCalled = true;
+      clearExitDrainTimer();
+      options.onExit(child, code);
+    };
+
+    const emitBufferedStderrLines = (): void => {
+      let newlineIndex = stderrLineBuffer.indexOf('\n');
+      while (newlineIndex >= 0) {
+        let line = stderrLineBuffer.slice(0, newlineIndex);
+        if (line.endsWith('\r')) line = line.slice(0, -1);
+        stderrLineBuffer = stderrLineBuffer.slice(newlineIndex + 1);
+        options.onStderrLine(line);
+        newlineIndex = stderrLineBuffer.indexOf('\n');
+      }
+    };
+
+    const finalizeStderr = (): void => {
+      if (stderrFinalized) return;
+      stderrFinalized = true;
+      clearExitDrainTimer();
+
+      try {
+        stderrLineBuffer += stderrDecoder.end();
+        emitBufferedStderrLines();
+        if (stderrLineBuffer.length > 0) {
+          const line = stderrLineBuffer.endsWith('\r')
+            ? stderrLineBuffer.slice(0, -1)
+            : stderrLineBuffer;
+          stderrLineBuffer = '';
+          options.onStderrLine(line);
+        }
+      } finally {
+        // The process exit callback must observe every line that arrived
+        // before the stream closed, even if a consumer callback throws.
+        notifyExitOnce();
+      }
+    };
+
     child.on('error', (error: unknown) => {
+      if (errorHandled) return;
+      errorHandled = true;
+      childExited = true;
+      markOwnedGatewayChildExited(child);
       const normalizedError = error instanceof Error ? error : new Error(String(error));
       logger.error('Gateway process spawn error:', error);
-      options.onError(normalizedError);
+      captureHandledException(normalizedError, { subsystem: 'gateway', phase: 'spawn' });
+      void clearOwnershipRecord();
       rejectOnce(normalizedError);
+      try {
+        options.onError(child, normalizedError);
+      } catch (callbackError) {
+        // Preserve the original spawn error if a caller's error callback
+        // fails while the launch promise is still being settled.
+        logger.error('Gateway process error callback failed:', callbackError);
+      }
     });
 
     child.on('exit', (code: number) => {
+      if (exitEventHandled) return;
+      exitEventHandled = true;
+      childExited = true;
+      markOwnedGatewayChildExited(child);
+      void clearOwnershipRecord();
       // Only check shouldReconnect — not current state.  On Windows the WS
       // close handler fires before the process exit handler and sets state to
       // 'stopped', which would make an unexpected crash look like a planned
@@ -328,20 +575,44 @@ export async function launchGatewayProcess(options: {
       const expectedExit = !options.getShouldReconnect();
       const level = expectedExit ? logger.info : logger.warn;
       level(`Gateway process exited (code=${code}, expected=${expectedExit ? 'yes' : 'no'})`);
-      options.onExit(child, code);
+      if (!expectedExit) {
+        captureGatewayProcessException(
+          new Error(`Gateway process exited unexpectedly with code ${code}`),
+          { phase: 'exit', exitCode: code },
+        );
+      }
+      pendingExit = { code };
+      if (stderrFinalized) {
+        notifyExitOnce();
+      } else {
+        exitDrainTimer = setTimeout(finalizeStderr, GATEWAY_STDERR_DRAIN_TIMEOUT_MS);
+        exitDrainTimer.unref?.();
+      }
     });
 
     child.stderr?.on('data', (data) => {
-      const raw = data.toString();
-      for (const line of raw.split(/\r?\n/)) {
-        options.onStderrLine(line);
-      }
+      if (stderrFinalized) return;
+      const chunk = typeof data === 'string'
+        ? Buffer.from(data)
+        : Buffer.isBuffer(data) || data instanceof Uint8Array
+          ? data
+          : Buffer.from(String(data));
+      stderrLineBuffer += stderrDecoder.write(chunk);
+      emitBufferedStderrLines();
     });
+    child.stderr?.once('end', finalizeStderr);
+    child.stderr?.once('close', finalizeStderr);
+    child.stderr?.once('error', finalizeStderr);
 
     child.on('spawn', () => {
       logger.info(`Gateway process started (pid=${child.pid})`);
       options.onSpawn(child.pid);
       resolveOnce();
+      // Ownership metadata improves crash recovery but is not a launch gate.
+      // WMI can be slower than a child that fails during ESM initialization;
+      // resolving first lets the manager retain the child and report its real
+      // exit code/stderr instead of an ownership initialization wrapper error.
+      void persistOwnershipRecord();
     });
   });
 }

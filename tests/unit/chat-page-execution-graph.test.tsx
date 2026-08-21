@@ -55,6 +55,19 @@ const resolveWorkspaceContext = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/host-api', () => ({
   hostApi: {
     files: { resolveWorkspaceContext },
+    artifactTasks: {
+      prepare: vi.fn(async ({ sessionKey }) => ({
+        artifactTask: false,
+        effectiveSessionKey: sessionKey,
+        createSession: false,
+      })),
+      validateWebpage: vi.fn(async () => ({ ok: false })),
+    },
+    longTermRules: {
+      capture: vi.fn(async () => ({ captured: false })),
+      repair: vi.fn(async () => ({ repaired: false })),
+      undo: vi.fn(async () => ({ restored: false })),
+    },
   },
 }));
 

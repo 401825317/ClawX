@@ -35,6 +35,7 @@ import type { MessageSegmentItem, RenderPart } from '@/lib/acp/timeline-types';
 import { projectOpenClawFileActivities, type AcpFileActivityProjection } from '@/lib/acp/openclaw-file-activities';
 import { hostApi } from '@/lib/host-api';
 import { getAgentAvatar } from '@/lib/agent-avatars';
+import { collectHtmlAutoOpen, isTokenizedLoopbackPreviewUrl } from '@/lib/acp/html-auto-open';
 import { ChatInput, type ChatWorkspaceOption, type FileAttachment } from './ChatInput';
 import { ChatToolbar } from './ChatToolbar';
 import { AcpTimeline } from './AcpTimeline';
@@ -222,6 +223,8 @@ export function Chat() {
     executionCwd: string;
   } | null>(null);
   const [workspaceContextCheck, setWorkspaceContextCheck] = useState<WorkspaceContextCheck | null>(null);
+  const autoOpenedHtmlToolCallsRef = useRef(new Set<string>());
+  const autoOpenHtmlRequestSeqRef = useRef(0);
   const currentSession = useMemo(
     () => sessions.find((session) => session.key === currentSessionKey) ?? null,
     [currentSessionKey, sessions],
@@ -284,7 +287,10 @@ export function Chat() {
   const respondAcpPermission = useAcpChatSessionStore((s) => s.respondPermission);
   const clearAcpError = useAcpChatSessionStore((s) => s.clearError);
   const gatewayStatus = useGatewayStore((s) => s.status);
-  const gatewayReady = gatewayStatus.state === 'running' && gatewayStatus.gatewayReady === true;
+  // `gatewayReady` was added after the original running-state contract. Keep
+  // older/compatible status payloads usable; only an explicit false means the
+  // Gateway is still transitioning.
+  const gatewayReady = gatewayStatus.state === 'running' && gatewayStatus.gatewayReady !== false;
   const gatewayRuntimeIdentity = gatewayReady
     ? `${gatewayStatus.pid ?? 'none'}:${gatewayStatus.connectedAt ?? 'none'}:${gatewayStatus.port}`
     : null;
@@ -324,6 +330,8 @@ export function Chat() {
 
   useEffect(() => {
     closeArtifactPanel();
+    autoOpenedHtmlToolCallsRef.current.clear();
+    autoOpenHtmlRequestSeqRef.current += 1;
   }, [currentSessionKey, closeArtifactPanel]);
 
   const projectionExecutionCwd = acpActiveSessionKey === currentSessionKey && acpCwd ? acpCwd : cwd;
@@ -332,9 +340,40 @@ export function Chat() {
     : null;
 
   useEffect(() => {
+    if (
+      !resolvedWorkspaceContext
+      || resolvedWorkspaceContext.key !== workspaceContextKey
+      || resolvedWorkspaceContext.sessionKey !== currentSessionKey
+      || acpTimeline.sessionId !== currentSessionKey
+    ) return;
+    const result = collectHtmlAutoOpen(
+      acpTimeline,
+      resolvedWorkspaceContext.workspaceRoot,
+      autoOpenedHtmlToolCallsRef.current,
+    );
+    for (const toolCallId of result.observedToolCallIds) {
+      autoOpenedHtmlToolCallsRef.current.add(toolCallId);
+    }
+    if (!result.filePath) return;
+    const requestSeq = ++autoOpenHtmlRequestSeqRef.current;
+    void hostApi.artifactTasks.validateWebpage({
+      workspaceRoot: resolvedWorkspaceContext.workspaceRoot,
+      filePath: result.filePath,
+    }).then((validation) => {
+      if (
+        requestSeq === autoOpenHtmlRequestSeqRef.current
+        && validation.ok
+        && typeof validation.browserUrl === 'string'
+        && isTokenizedLoopbackPreviewUrl(validation.browserUrl)
+      ) {
+        useArtifactPanel.getState().openWebBrowser(validation.browserUrl);
+      }
+    }).catch(() => undefined);
+  }, [acpTimeline, currentSessionKey, resolvedWorkspaceContext, workspaceContextKey]);
+
+  useEffect(() => {
     if (!workspaceContextKey || !currentSessionKey || !cwd || !projectionExecutionCwd) return;
     let stale = false;
-    setWorkspaceContextCheck(null);
     void hostApi.files.resolveWorkspaceContext({
       workspaceRoot: cwd,
       executionCwd: projectionExecutionCwd,
@@ -361,6 +400,18 @@ export function Chat() {
       stale = true;
     };
   }, [currentSessionKey, cwd, projectionExecutionCwd, workspaceContextKey]);
+
+  useEffect(() => {
+    if (
+      !resolvedWorkspaceContext
+      || resolvedWorkspaceContext.key !== workspaceContextKey
+      || resolvedWorkspaceContext.sessionKey !== currentSessionKey
+    ) return;
+    void hostApi.longTermRules.repair({
+      agentId: currentAgentId || 'main',
+      workspaceRoot: resolvedWorkspaceContext.workspaceRoot,
+    }).catch(() => undefined);
+  }, [currentAgentId, currentSessionKey, resolvedWorkspaceContext, workspaceContextKey]);
 
   const workspaceContextAvailable = !!workspaceContextKey
     && workspaceContextCheck?.key === workspaceContextKey
@@ -573,10 +624,9 @@ export function Chat() {
             const targetAgent = targetAgentId
               ? agents.find((agent) => agent.id === targetAgentId) ?? null
               : null;
-            const sessionKey = targetAgent
+            const baseSessionKey = targetAgent
               ? targetAgent.mainSessionKey || `agent:${targetAgent.id}:main`
               : currentSessionKey;
-            setLastPromptAttemptSessionKey(sessionKey);
             const promptCwd = targetAgent?.workspace || cwd;
             const media = attachments
               ?.filter((file) => file.status === 'ready')
@@ -586,9 +636,6 @@ export function Chat() {
                 fileName: file.fileName,
                 mimeType: file.mimeType,
               }));
-            if (targetAgent) {
-              selectAcpSession(sessionKey, promptCwd);
-            }
             void (async () => {
               if (!gatewayReady) return;
               if (promptCwd !== cwd) {
@@ -598,9 +645,70 @@ export function Chat() {
                 }).catch(() => ({ ok: false }));
                 if (!promptWorkspace.ok) return;
               }
+              const baseSession = sessions.find((session) => session.key === baseSessionKey);
+              const hasHistory = baseSessionKey === currentSessionKey
+                ? acpTimeline.itemOrder.length > 0
+                : Boolean(
+                    baseSession
+                    && !baseSession.createdLocally
+                    && (baseSession.lastMessagePreview || baseSession.updatedAt),
+                  );
+              const ruleContext = {
+                agentId: targetAgent?.id || currentAgentId || 'main',
+                workspaceRoot: promptCwd,
+              };
+              const [capture, artifactPreparation] = await Promise.all([
+                hostApi.longTermRules.capture({
+                  ...ruleContext,
+                  message: text,
+                }).catch(() => null),
+                hostApi.artifactTasks.prepare({
+                  sessionKey: baseSessionKey,
+                  agentId: ruleContext.agentId,
+                  workspaceRoot: promptCwd,
+                  message: text,
+                  hasHistory,
+                  ...(imageOptions?.preset === 'ecommerce-main-image'
+                    ? { kindHint: 'ecommerce-main-image' as const }
+                    : {}),
+                }).catch(() => ({
+                  artifactTask: false as const,
+                  effectiveSessionKey: baseSessionKey,
+                  createSession: false,
+                })),
+              ]);
+              if (capture?.captured && capture.rule) {
+                const scope = capture.rule.scope === 'global'
+                  ? t('longTermRules.scopeGlobal')
+                  : t('longTermRules.scopeAgent');
+                toast.success(t('longTermRules.saved', { scope }), capture.undoToken ? {
+                  action: {
+                    label: t('longTermRules.undo'),
+                    onClick: () => {
+                      void hostApi.longTermRules.undo({
+                        ...ruleContext,
+                        undoToken: capture.undoToken!,
+                      }).then((result) => {
+                        if (result.disabled === true) {
+                          toast.error(t('longTermRules.undoFailed'));
+                          return;
+                        }
+                        toast.success(t('longTermRules.undone'));
+                      })
+                        .catch(() => toast.error(t('longTermRules.undoFailed')));
+                    },
+                  },
+                } : undefined);
+              }
+              const sessionKey = artifactPreparation.effectiveSessionKey;
+              setLastPromptAttemptSessionKey(sessionKey);
+              if (targetAgent || sessionKey !== currentSessionKey) {
+                selectAcpSession(sessionKey, promptCwd);
+              }
               const existingSession = sessions.find((session) => session.key === sessionKey);
               const pendingAcpConfirmation = !existingSession || existingSession.createdLocally === true;
-              const createIfMissing = !existingSession
+              const createIfMissing = artifactPreparation.createSession
+                || !existingSession
                 || (existingSession.createdLocally === true && existingSession.createdOnGateway !== true);
               if (
                 pendingAcpConfirmation

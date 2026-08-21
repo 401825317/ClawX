@@ -1,10 +1,13 @@
 {
   "id": "uclaw-local-artifacts",
   "name": "UClaw Local Artifacts",
-  "description": "Creates reliable local PPTX, DOCX, XLSX, text, and runnable HTML artifacts without desktop automation.",
-  "version": "0.1.5",
+  "description": "Creates and verifies local PPTX, DOCX, XLSX, DXF, text, and safely previewable HTML artifacts.",
+  "version": "0.2.0",
   "entry": "index.mjs",
   "enabledByDefault": false,
+  "skills": [
+    "skills"
+  ],
   "activation": {
     "onStartup": true
   },
@@ -15,8 +18,10 @@
       "create_pptx_file",
       "create_docx_file",
       "create_xlsx_file",
+      "create_dxf_file",
       "create_text_file",
-      "create_html_app_file"
+      "create_html_app_file",
+      "prepare_workspace_html_preview"
     ]
   },
   "configSchema": {

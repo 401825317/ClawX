@@ -2,7 +2,7 @@
 
 import JSZip from 'jszip';
 import * as fsp from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -92,7 +92,7 @@ describe('SkillHub marketplace archive installation', () => {
     __setSkillHubFsForTests({
       ...fsp,
       rename: async (from, to) => {
-        if (String(from).includes('/.demo-skill-skillhub-') && to === target) {
+        if (basename(String(from)).startsWith('.demo-skill-skillhub-') && to === target) {
           throw Object.assign(new Error('commit failed'), { code: 'EIO' });
         }
         await fsp.rename(from, to);

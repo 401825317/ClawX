@@ -2,7 +2,7 @@
 
 import { chmod, mkdir, readFile, rm, stat, writeFile } from 'fs/promises';
 import { join } from 'path';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { UCLAW_MANAGED_PROVIDER_BASE_URL } from '@shared/junfeiai-endpoints';
 import { createManagedRuntimeProviderEntry } from '@electron/services/providers/managed-runtime-config';
 
@@ -49,6 +49,40 @@ vi.mock('@electron/utils/paths', async () => {
   };
 });
 
+type ProcessExitListener = (code: number) => void;
+
+let processExitListenerBaseline: readonly ProcessExitListener[] | undefined;
+
+function removeProcessExitListenersAddedSince(
+  baseline: readonly ProcessExitListener[],
+): void {
+  const remainingBaselineListeners = new Map<ProcessExitListener, number>();
+  for (const listener of baseline) {
+    remainingBaselineListeners.set(listener, (remainingBaselineListeners.get(listener) ?? 0) + 1);
+  }
+
+  const currentListeners = process.rawListeners('exit') as ProcessExitListener[];
+  for (const listener of currentListeners) {
+    const remainingCount = remainingBaselineListeners.get(listener) ?? 0;
+    if (remainingCount > 0) {
+      remainingBaselineListeners.set(listener, remainingCount - 1);
+      continue;
+    }
+
+    process.removeListener('exit', listener);
+  }
+}
+
+beforeEach(() => {
+  processExitListenerBaseline = [...process.rawListeners('exit')] as ProcessExitListener[];
+});
+
+afterEach(() => {
+  if (!processExitListenerBaseline) return;
+  removeProcessExitListenersAddedSince(processExitListenerBaseline);
+  processExitListenerBaseline = undefined;
+});
+
 const CLAWX_DESKTOP_TOOL_DENY = [
   'sessions_spawn',
   'sessions_yield',
@@ -65,6 +99,20 @@ async function writeOpenClawJson(config: unknown): Promise<void> {
 async function readOpenClawJson(): Promise<Record<string, unknown>> {
   const content = await readFile(join(testHome, '.openclaw', 'openclaw.json'), 'utf8');
   return JSON.parse(content) as Record<string, unknown>;
+}
+
+async function writeManagedPluginMarker(pluginPath: string, pluginId: string): Promise<void> {
+  await writeFile(
+    join(pluginPath, '.uclaw-managed-plugin.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      managedBy: 'uclaw',
+      pluginId,
+      contentFingerprint: '0'.repeat(64),
+      installedAt: '2026-08-19T00:00:00.000Z',
+    }),
+    'utf8',
+  );
 }
 
 async function readAuthProfiles(agentId: string): Promise<Record<string, unknown>> {
@@ -301,7 +349,9 @@ describe('managed auth profiles transaction', () => {
     await restoreManagedAgentAuthProfiles(snapshot);
 
     expect(await readFile(jsonPath, 'utf8')).toBe(originalJson);
-    expect(await fileMode(jsonPath)).toBe(0o640);
+    if (process.platform !== 'win32') {
+      expect(await fileMode(jsonPath)).toBe(0o640);
+    }
     expect(snapshotAuthProfilesSqlitePrimaryRows('main')).toEqual(originalSqliteRows);
     expect(readAuthProfilesFromSqlite('main')?.profiles['openai:default']).toEqual(
       originalStore.profiles['openai:default'],
@@ -1022,6 +1072,7 @@ describe('sanitizeOpenClawConfig', () => {
     const retiredPluginPath = join(testHome, '.openclaw', 'extensions', 'uclaw-artifact-guard');
     await mkdir(retiredPluginPath, { recursive: true });
     await writeFile(join(retiredPluginPath, 'openclaw.plugin.json'), '{"id":"uclaw-artifact-guard"}', 'utf8');
+    await writeManagedPluginMarker(retiredPluginPath, 'uclaw-artifact-guard');
     const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
@@ -1507,11 +1558,13 @@ describe('sanitizeOpenClawConfig', () => {
       'extensions',
       'acpx',
     );
+    const customPluginPath = join(testHome, 'custom-plugins', 'kept');
     await mkdir(staleAcpxPath, { recursive: true });
+    await mkdir(customPluginPath, { recursive: true });
     await writeOpenClawJson({
       plugins: {
         load: {
-          paths: [staleAcpxPath],
+          paths: [staleAcpxPath, customPluginPath],
         },
         entries: {
           acpx: {
@@ -1526,7 +1579,7 @@ describe('sanitizeOpenClawConfig', () => {
 
     const result = await readOpenClawJson();
     const plugins = result.plugins as Record<string, unknown>;
-    expect(plugins.load).toBeUndefined();
+    expect(plugins.load).toEqual({ paths: [customPluginPath] });
     expect((plugins.entries as Record<string, unknown>).acpx).toEqual({ enabled: true });
   });
 
@@ -1581,6 +1634,9 @@ describe('sanitizeOpenClawConfig', () => {
         JSON.stringify({ id: pluginId }, null, 2),
         'utf8',
       );
+      if (retiredPluginIds.includes(pluginId)) {
+        await writeManagedPluginMarker(pluginPath, pluginId);
+      }
     }
     await mkdir(customPluginPath, { recursive: true });
     await writeFile(
@@ -1642,6 +1698,39 @@ describe('sanitizeOpenClawConfig', () => {
     expect((result.tools as Record<string, unknown>).web).toEqual({
       search: { provider: 'parallel-free' },
     });
+  });
+
+  it('preserves an unmarked user plugin that reuses a retired UClaw id', async () => {
+    const pluginId = 'uclaw-task-bridge';
+    const pluginPath = join(testHome, '.openclaw', 'extensions', pluginId);
+    await mkdir(pluginPath, { recursive: true });
+    await writeFile(
+      join(pluginPath, 'openclaw.plugin.json'),
+      JSON.stringify({ id: pluginId, entry: 'index.mjs' }),
+      'utf8',
+    );
+    await writeFile(
+      join(pluginPath, 'package.json'),
+      JSON.stringify({ name: 'user-task-bridge', version: '9.0.0', main: 'index.mjs' }),
+      'utf8',
+    );
+    await writeFile(join(pluginPath, 'index.mjs'), 'export default { owner: "user" };\n', 'utf8');
+    await writeOpenClawJson({
+      plugins: {
+        allow: [pluginId],
+        entries: { [pluginId]: { enabled: true } },
+        load: { paths: [pluginPath] },
+      },
+    });
+
+    const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
+    await expect(sanitizeOpenClawConfig()).resolves.toBeUndefined();
+
+    await expect(stat(pluginPath)).resolves.toBeDefined();
+    const config = await readOpenClawJson();
+    const plugins = config.plugins as Record<string, unknown>;
+    expect(plugins.allow).toContain(pluginId);
+    expect((plugins.entries as Record<string, unknown>)[pluginId]).toEqual({ enabled: true });
   });
 
   it('preserves allowlisted plugins loaded from local plugin paths', async () => {
@@ -2757,6 +2846,81 @@ describe('managed agent models transaction', () => {
     await rm(testUserData, { recursive: true, force: true });
   });
 
+  it('serializes concurrent managed replacements and rejects the stale generation', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    const original = '{"providers":{"deepseek":{"api":"openai-completions"}}}\n';
+    await writeAgentModelsJson('main', original);
+
+    let releaseFirstLock!: () => void;
+    let signalBothRequested!: () => void;
+    const releaseFirst = new Promise<void>((resolve) => { releaseFirstLock = resolve; });
+    const bothRequested = new Promise<void>((resolve) => { signalBothRequested = resolve; });
+    let queue = Promise.resolve();
+    const lockRequests: string[] = [];
+
+    vi.doMock('@electron/utils/model-catalog-store', async () => {
+      const actual = await vi.importActual<typeof import('@electron/utils/model-catalog-store')>(
+        '@electron/utils/model-catalog-store',
+      );
+      return {
+        ...actual,
+        withModelCatalogWriteLock: async <T>(filePath: string, operation: () => Promise<T>): Promise<T> => {
+          const requestIndex = lockRequests.push(filePath);
+          if (requestIndex === 2) signalBothRequested();
+          const previous = queue;
+          let releaseCurrent!: () => void;
+          const current = new Promise<void>((resolve) => { releaseCurrent = resolve; });
+          queue = previous.then(() => current);
+          await previous;
+          try {
+            if (requestIndex === 1) await releaseFirst;
+            return await operation();
+          } finally {
+            releaseCurrent();
+          }
+        },
+      };
+    });
+
+    try {
+      const {
+        snapshotManagedAgentModelsFiles,
+        updateManagedAgentModelProviderStrict,
+      } = await import('@electron/utils/openclaw-auth');
+      const firstSnapshot = await snapshotManagedAgentModelsFiles();
+      const secondSnapshot = await snapshotManagedAgentModelsFiles();
+      const firstUpdate = updateManagedAgentModelProviderStrict(firstSnapshot, {
+        baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
+        api: 'openai-responses',
+        models: [{ id: 'first', name: 'first' }],
+      });
+      const secondUpdate = updateManagedAgentModelProviderStrict(secondSnapshot, {
+        baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
+        api: 'openai-responses',
+        models: [{ id: 'second', name: 'second' }],
+      });
+
+      await bothRequested;
+      releaseFirstLock();
+      const [firstResult, secondResult] = await Promise.allSettled([firstUpdate, secondUpdate]);
+
+      expect(firstResult.status).toBe('fulfilled');
+      expect(secondResult.status).toBe('rejected');
+      expect(lockRequests).toHaveLength(2);
+      expect(lockRequests[0]).toBe(lockRequests[1]);
+      expect(lockRequests[0]?.replace(/\\/g, '/')).toMatch(/\/agents\/main\/agent\/models\.json$/u);
+      const result = JSON.parse(await readFile(getAgentModelsPath('main'), 'utf8')) as {
+        providers: Record<string, { models: Array<{ id: string }> }>;
+      };
+      expect(result.providers.openai.models[0]?.id).toBe('first');
+      expect(result.providers.lingzhiwuxian.models[0]?.id).toBe('first');
+    } finally {
+      releaseFirstLock();
+      vi.doUnmock('@electron/utils/model-catalog-store');
+      vi.resetModules();
+    }
+  });
+
   it('falls back to main when model target discovery is empty', async () => {
     await mkdir(join(testHome, '.openclaw', 'agents'), { recursive: true });
     const agentConfig = await import('@electron/utils/agent-config');
@@ -2885,6 +3049,56 @@ describe('managed agent models transaction', () => {
       api: 'openai-completions',
       models: [{ id: 'gpt-image-2', name: 'Image' }],
     });
+  });
+
+  it('treats final chmod failure as committed-but-metadata-warning without rolling back', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    await writeAgentModelsJson('main', '{"providers":{}}\n');
+    const modelsPath = getAgentModelsPath('main');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    vi.doMock('fs/promises', async () => {
+      const actual = await vi.importActual<typeof import('fs/promises')>('fs/promises');
+      return {
+        ...actual,
+        chmod: vi.fn(async () => {
+          const error = new Error(`sensitive-key at ${modelsPath}`) as NodeJS.ErrnoException;
+          error.code = 'EPERM';
+          throw error;
+        }),
+      };
+    });
+
+    try {
+      const {
+        restoreManagedAgentModelsFiles,
+        snapshotManagedAgentModelsFiles,
+        updateManagedAgentModelProviderStrict,
+      } = await import('@electron/utils/openclaw-auth');
+      const snapshot = await snapshotManagedAgentModelsFiles();
+
+      await expect(updateManagedAgentModelProviderStrict(snapshot, {
+        baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
+        api: 'openai-responses',
+        models: [{ id: 'smart-latest', name: 'smart-latest' }],
+      })).resolves.toBeUndefined();
+
+      const result = JSON.parse(await readFile(modelsPath, 'utf8')) as {
+        providers: Record<string, unknown>;
+      };
+      expect(result.providers.openai).toBeDefined();
+      expect(result.providers.lingzhiwuxian).toBeDefined();
+      await expect(restoreManagedAgentModelsFiles(snapshot)).resolves.toBeUndefined();
+      expect(await readFile(modelsPath, 'utf8')).toBe('{"providers":{}}\n');
+      const warningOutput = JSON.stringify(warn.mock.calls);
+      expect(warningOutput).toContain('committed-but-metadata-warning');
+      expect(warningOutput).toContain('fs_eperm');
+      expect(warningOutput).not.toContain(modelsPath);
+      expect(warningOutput).not.toContain('sensitive-key');
+    } finally {
+      vi.doUnmock('fs/promises');
+      vi.resetModules();
+    }
   });
 
   it('discovers managed relay ids from every frozen models.json without matching unrelated custom providers', async () => {
@@ -3108,6 +3322,70 @@ describe('managed agent models transaction', () => {
     await expect(readFile(getAgentModelsPath('worker'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('holds the directory lock across restore read, generation check, and unlink', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    let releaseRestoreLock!: () => void;
+    let signalRestoreLockRequested!: () => void;
+    const releaseRestore = new Promise<void>((resolve) => { releaseRestoreLock = resolve; });
+    const restoreLockRequested = new Promise<void>((resolve) => {
+      signalRestoreLockRequested = resolve;
+    });
+    let lockRequestCount = 0;
+
+    vi.doMock('@electron/utils/model-catalog-store', async () => {
+      const actual = await vi.importActual<typeof import('@electron/utils/model-catalog-store')>(
+        '@electron/utils/model-catalog-store',
+      );
+      return {
+        ...actual,
+        withModelCatalogWriteLock: async <T>(_filePath: string, operation: () => Promise<T>): Promise<T> => {
+          lockRequestCount += 1;
+          if (lockRequestCount === 2) {
+            signalRestoreLockRequested();
+            await releaseRestore;
+          }
+          return operation();
+        },
+      };
+    });
+
+    try {
+      const {
+        restoreManagedAgentModelsFiles,
+        snapshotManagedAgentModelsFiles,
+        updateManagedAgentModelProviderStrict,
+      } = await import('@electron/utils/openclaw-auth');
+      const snapshot = await snapshotManagedAgentModelsFiles();
+      await updateManagedAgentModelProviderStrict(snapshot, {
+        baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
+        api: 'openai-responses',
+        models: [{ id: 'smart-latest', name: 'smart-latest' }],
+      });
+
+      const restoreResult = restoreManagedAgentModelsFiles(snapshot).then(
+        () => ({ error: null as unknown }),
+        (error: unknown) => ({ error }),
+      );
+      await Promise.race([
+        restoreLockRequested,
+        restoreResult.then(() => Promise.reject(new Error('restore bypassed the directory lock'))),
+      ]);
+
+      const concurrentModels = '{"providers":{"deepseek":{"api":"openai-completions"}}}\n';
+      await writeFile(getAgentModelsPath('main'), concurrentModels, 'utf8');
+      releaseRestoreLock();
+      const { error } = await restoreResult;
+
+      expect(error).toBeInstanceOf(AggregateError);
+      expect(lockRequestCount).toBe(2);
+      expect(await readFile(getAgentModelsPath('main'), 'utf8')).toBe(concurrentModels);
+    } finally {
+      releaseRestoreLock();
+      vi.doUnmock('@electron/utils/model-catalog-store');
+      vi.resetModules();
+    }
+  });
+
   it('refuses to overwrite a concurrent models.json change during rollback', async () => {
     await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
     await writeAgentModelsJson('main', '{"providers":{"deepseek":{"api":"openai-completions"}}}\n');
@@ -3193,26 +3471,48 @@ describe('managed agent models transaction', () => {
     expect(await readFile(getAgentModelsPath('worker'), 'utf8')).toBe(workerOriginal);
   });
 
-  it('keeps the generic updater best-effort when one agent write fails', async () => {
+  it('attempts every generic Provider target and aggregates partial failures', async () => {
     await writeOpenClawJson({
-      agents: { list: [{ id: 'main', name: 'Main' }, { id: 'worker', name: 'Worker' }] },
+      agents: {
+        list: [
+          { id: 'main', name: 'Main' },
+          { id: 'worker', name: 'Worker' },
+          { id: 'later', name: 'Later' },
+        ],
+      },
     });
     await writeAgentModelsJson('main', '{"providers":{}}');
     await writeAgentModelsJson('worker', '{"providers":{}}');
+    await writeAgentModelsJson('later', '{"providers":{}}');
     const workerPath = getAgentModelsPath('worker');
     await rm(workerPath);
     await mkdir(workerPath);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
     const { updateAgentModelProvider } = await import('@electron/utils/openclaw-auth');
 
-    await expect(updateAgentModelProvider('openai', {
+    const error = await updateAgentModelProvider('openai', {
       baseUrl: 'https://example.com/v1',
       api: 'openai-completions',
       models: [{ id: 'example', name: 'example' }],
-    })).resolves.toBeUndefined();
+      apiKey: 'synthetic-secret',
+    }).catch((cause: unknown) => cause);
 
     const main = JSON.parse(await readFile(getAgentModelsPath('main'), 'utf8')) as Record<string, unknown>;
+    const later = JSON.parse(await readFile(getAgentModelsPath('later'), 'utf8')) as Record<string, unknown>;
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).errors).toHaveLength(1);
+    expect((error as AggregateError).errors[0]?.message).toContain('worker');
     expect((main.providers as Record<string, unknown>).openai).toBeDefined();
+    expect((later.providers as Record<string, unknown>).openai).toBeDefined();
+    const diagnosticOutput = JSON.stringify([
+      String(error),
+      ...(error as AggregateError).errors.map((failure) => String(failure)),
+      ...warn.mock.calls,
+    ]);
+    expect(diagnosticOutput).not.toContain(testHome);
+    expect(diagnosticOutput).not.toContain(testHome.split('/').at(-1));
+    expect(diagnosticOutput).not.toContain('synthetic-secret');
   });
 });
 
@@ -3714,6 +4014,29 @@ describe('batchSyncConfigFields', () => {
     await rm(testUserData, { recursive: true, force: true });
   });
 
+  it('defaults browser private-network access to verified UClaw hosts only', async () => {
+    await writeOpenClawJson({
+      browser: {
+        ssrfPolicy: {
+          dangerouslyAllowPrivateNetwork: true,
+          allowedHostnames: ['192.168.1.10'],
+          hostnameAllowlist: ['*.internal.example'],
+        },
+      },
+    });
+
+    const { batchSyncConfigFields } = await import('@electron/utils/openclaw-auth');
+    await batchSyncConfigFields('new-token');
+
+    const config = await readOpenClawJson();
+    const browser = config.browser as Record<string, unknown>;
+    const policy = browser.ssrfPolicy as Record<string, unknown>;
+    expect(policy.dangerouslyAllowPrivateNetwork).toBe(false);
+    expect(policy.allowedHostnames).toEqual(expect.arrayContaining(['localhost', '127.0.0.1', '[::1]']));
+    expect(policy.allowedHostnames).not.toContain('192.168.1.10');
+    expect(policy.hostnameAllowlist).toBeUndefined();
+  });
+
   it('enables Parallel Search and the restored document and Blender runtime plugins', async () => {
     await writeOpenClawJson({
       plugins: {
@@ -3730,12 +4053,17 @@ describe('batchSyncConfigFields', () => {
     expect(plugins.allow).toEqual([
       'custom-installed',
       'parallel',
+      'uclaw-artifact-orchestrator',
       'uclaw-local-artifacts',
       'uclaw-blender',
     ]);
     expect(plugins.entries).toEqual({
       'custom-installed': { enabled: true },
       parallel: { enabled: true },
+      'uclaw-artifact-orchestrator': {
+        enabled: true,
+        hooks: { allowPromptInjection: true },
+      },
       'uclaw-local-artifacts': { enabled: true },
       'uclaw-blender': { enabled: true },
     });
@@ -3767,8 +4095,33 @@ describe('batchSyncConfigFields', () => {
     expect((plugins.entries as Record<string, unknown>).duckduckgo).toBeUndefined();
   });
 
-  it('seeds web_fetch SSRF policy for fake-IP proxy environments', async () => {
+  it('denies RFC2544 and IPv6 ULA web_fetch targets by default', async () => {
     await writeOpenClawJson({ gateway: { auth: { mode: 'token', token: 'old' } } });
+
+    const { batchSyncConfigFields } = await import('@electron/utils/openclaw-auth');
+    await batchSyncConfigFields('new-token');
+
+    const config = await readOpenClawJson();
+    const fetch = (config.tools as Record<string, unknown>).web as Record<string, unknown>;
+    const ssrfPolicy = (fetch.fetch as Record<string, unknown>).ssrfPolicy as Record<string, unknown>;
+    expect(ssrfPolicy.allowRfc2544BenchmarkRange).toBe(false);
+    expect(ssrfPolicy.allowIpv6UniqueLocalRange).toBe(false);
+  });
+
+  it('preserves an explicit web_fetch SSRF compatibility opt-in', async () => {
+    await writeOpenClawJson({
+      gateway: { auth: { mode: 'token', token: 'old' } },
+      tools: {
+        web: {
+          fetch: {
+            ssrfPolicy: {
+              allowRfc2544BenchmarkRange: true,
+              allowIpv6UniqueLocalRange: true,
+            },
+          },
+        },
+      },
+    });
 
     const { batchSyncConfigFields } = await import('@electron/utils/openclaw-auth');
     await batchSyncConfigFields('new-token');

@@ -1,5 +1,6 @@
 import type { ElectronApplication } from '@playwright/test';
 import { closeElectronApp, expect, getStableWindow, installIpcMocks, test } from './fixtures/electron';
+import type { ManagedClientImageModelPolicy } from '@shared/managed-client-config';
 
 const MAIN_SESSION_KEY = 'agent:main:main';
 const MAIN_WORKSPACE = '/workspace';
@@ -13,6 +14,19 @@ const GENERATED_GATEWAY_IMAGE_URL = '/api/chat/media/outgoing/agent%3Amain%3Amai
 const GENERATED_IMAGE_PREVIEW = 'data:image/png;base64,iVBORw0KGgo=';
 const GENERATED_IMAGE_IDENTITY = 'e2e-transcript-generated-image';
 const DEFAULT_WORKSPACE_SEGMENT = '~%2F.openclaw%2Fworkspace';
+const IMAGE_MODEL_POLICY: ManagedClientImageModelPolicy = {
+  defaultModel: 'gpt-image-2',
+  defaultSize: '1024x1024',
+  defaultQuality: 'medium',
+  models: [{
+    id: 'gpt-image-2',
+    sizes: ['1024x1536', '1536x1024', '1024x1024', '2160x3840', '3840x2160'],
+    qualities: ['low', 'medium', 'high'],
+    defaultSize: '1024x1024',
+    defaultQuality: 'medium',
+    supportsEditing: true,
+  }],
+};
 
 type AcpSessionUpdate = Record<string, unknown> & { sessionUpdate: string };
 
@@ -62,9 +76,17 @@ async function installAcpChatMocks(
   gatewaySessions: Array<Record<string, unknown>> = [
     { key: MAIN_SESSION_KEY, displayName: 'main', workspacePath: MAIN_WORKSPACE },
   ],
+  options: {
+    imageModels?: ManagedClientImageModelPolicy | null;
+  } = {},
 ) {
   await installIpcMocks(app, {
-    gatewayStatus: { state: 'running', gatewayReady: true, port: 18789, pid: 12345 },
+    gatewayStatus: {
+      state: 'running',
+      gatewayReady: true,
+      port: 18789,
+      pid: 12345,
+    },
     gatewayRpc: {
       [stableStringify(['sessions.list', {}])]: {
         success: true,
@@ -74,6 +96,9 @@ async function installAcpChatMocks(
       },
     },
     hostApi: baseHostApiMocks(loadResult),
+    ...(options.imageModels !== undefined
+      ? { managedClientConfig: { imageModels: options.imageModels } }
+      : {}),
   });
 }
 
@@ -384,12 +409,28 @@ async function installAcpPromptDeferredMock(app: ElectronApplication) {
     type IpcInvokeHandler = (event: unknown, request: { id?: string; module?: string; action?: string }) => Promise<unknown>;
     const handlers = (ipcMain as unknown as { _invokeHandlers?: Map<string, IpcInvokeHandler> })._invokeHandlers;
     const originalHostInvoke = handlers?.get('host:invoke');
+    const globals = globalThis as unknown as {
+      __acpPromptActive?: boolean;
+      __resolveAcpPrompt?: () => void;
+    };
+    globals.__acpPromptActive = false;
     ipcMain.removeHandler('host:invoke');
     ipcMain.handle('host:invoke', async (event: unknown, request: { id?: string; module?: string; action?: string }) => {
       if (request?.module === 'chat' && request.action === 'sendAcpPrompt') {
+        globals.__acpPromptActive = true;
         return await new Promise((resolve) => {
-          (globalThis as unknown as { __resolveAcpPrompt?: () => void }).__resolveAcpPrompt = () => resolve({ id: request.id, ok: true, data: { success: true, generation: 1 } });
+          globals.__resolveAcpPrompt = () => {
+            globals.__acpPromptActive = false;
+            resolve({ id: request.id, ok: true, data: { success: true, generation: 1 } });
+          };
         });
+      }
+      if (request?.module === 'chat' && request.action === 'loadAcpSession' && globals.__acpPromptActive) {
+        return {
+          id: request.id,
+          ok: true,
+          data: { success: true, generation: 1, resumedActivePrompt: true },
+        };
       }
       return originalHostInvoke?.(event, request) ?? { id: request?.id, ok: true, data: {} };
     });
@@ -1077,7 +1118,9 @@ test.describe('ClawX ACP inline timeline', () => {
     const app = await launchElectronApp({ skipSetup: true });
 
     try {
-      await installAcpChatMocks(app);
+      await installAcpChatMocks(app, undefined, undefined, {
+        imageModels: IMAGE_MODEL_POLICY,
+      });
       await installImageOptionPromptRecorder(app);
       const page = await openChat(app);
       await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible({ timeout: 30_000 });
@@ -1085,7 +1128,9 @@ test.describe('ClawX ACP inline timeline', () => {
 
       const sendButton = page.getByTestId('chat-composer-send');
       const sendBoxBeforeImageMode = await sendButton.boundingBox();
-      await page.getByTestId('chat-composer-mode-image').click();
+      const imageModeButton = page.getByTestId('chat-composer-mode-image');
+      await expect(imageModeButton).toBeEnabled();
+      await imageModeButton.click();
       const imageOptionsTrigger = page.getByTestId('chat-image-options-trigger');
       await expect(imageOptionsTrigger).toContainText('1:1');
       await expect(imageOptionsTrigger).toContainText('Medium');
@@ -1124,10 +1169,10 @@ test.describe('ClawX ACP inline timeline', () => {
       expect(aspectMenuBox).not.toBeNull();
       expect(aspectMenuBox!.width).toBeGreaterThanOrEqual(124);
       expect(aspectMenuBox!.width).toBeLessThanOrEqual(176);
-      const squareDescription = page.getByTestId('chat-image-aspect-1-1-description');
+      const squareDescription = page.getByTestId('chat-image-size-1024x1024-description');
       await expect(squareDescription).toHaveText('Square');
       expect(await squareDescription.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-      const widescreenAspectOption = page.getByTestId('chat-image-aspect-16-9');
+      const widescreenAspectOption = page.getByTestId('chat-image-size-3840x2160');
       const widescreenAspectHitTest = await widescreenAspectOption.evaluate((element) => {
         const rect = element.getBoundingClientRect();
         const hitTarget = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
@@ -1954,8 +1999,10 @@ test.describe('ClawX ACP inline timeline', () => {
       await page.getByTestId('chat-composer-input').fill('Trigger target send failure');
       await page.getByTestId('chat-composer-send').click();
 
-      await expect(page.getByTestId('acp-error-banner')).toBeVisible({ timeout: 30_000 });
-      await expect(page.getByTestId('acp-error-banner')).toContainText(error);
+      const failure = page.getByTestId('acp-turn-failure');
+      await expect(failure).toBeVisible({ timeout: 30_000 });
+      await expect(failure).toHaveAttribute('data-error-code', 'UNKNOWN');
+      await expect(failure).toContainText('Model call failed');
     } finally {
       await closeElectronApp(app);
     }

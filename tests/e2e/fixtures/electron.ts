@@ -7,6 +7,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { RawMessage } from '../../../shared/chat/types';
+import type {
+  ManagedClientImageModelPolicy,
+  ManagedClientRuntimeConfig,
+} from '../../../shared/managed-client-config';
 
 export type LaunchElectronOptions = {
   skipSetup?: boolean;
@@ -14,11 +18,22 @@ export type LaunchElectronOptions = {
   additionalArgs?: string[];
 };
 
+export type ManagedClientConfigFixtureOptions = {
+  imageModels?: ManagedClientImageModelPolicy | null;
+  features?: {
+    artifacts?: { enabled: boolean };
+    ecommerceMainImage?: { enabled: boolean };
+    htmlPreview?: { enabled: boolean };
+    longTermRules?: { enabled: boolean };
+  };
+};
+
 type IpcMockConfig = {
   gatewayStatus?: Record<string, unknown>;
   gatewayRpc?: Record<string, unknown>;
   hostApi?: Record<string, unknown>;
   hostApiErrors?: Record<string, string>;
+  managedClientConfig?: ManagedClientConfigFixtureOptions;
   recordHostInvocations?: boolean;
   recordLegacyIpcInvocations?: boolean;
 };
@@ -81,6 +96,7 @@ export type AttachmentHostFixture = {
   setTranscriptResponses: (
     sessionKey: string,
     responses: AttachmentFixtureTranscriptResponse[],
+    options?: { resetHistoryRequestTimes?: boolean },
   ) => Promise<void>;
   releaseTranscriptResponse: (deferId: string) => Promise<void>;
   waitForDeferredTranscriptReady: (deferId: string, timeoutMs?: number) => Promise<void>;
@@ -347,7 +363,8 @@ export async function installIpcMocks(
 ): Promise<void> {
   await app.evaluate(
     async ({ app: _app }, mockConfig) => {
-      const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
+      const { BrowserWindow, ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
+      const gatewayStatus = mockConfig.gatewayStatus;
       const stableStringify = (value: unknown): string => {
         if (value == null || typeof value !== 'object') return JSON.stringify(value);
         if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`;
@@ -405,6 +422,53 @@ export async function installIpcMocks(
           }
         }
         return respond(id, response);
+      };
+      const managedFeatureEnabled = (
+        feature: 'artifacts' | 'ecommerceMainImage' | 'htmlPreview' | 'longTermRules',
+      ): boolean => mockConfig.managedClientConfig?.features?.[feature]?.enabled === true;
+      const managedRuntimeConfig = (): ManagedClientRuntimeConfig => {
+        const artifactsEnabled = managedFeatureEnabled('artifacts');
+        const ecommerceMainImageEnabled = artifactsEnabled
+          && managedFeatureEnabled('ecommerceMainImage');
+        const htmlPreviewEnabled = managedFeatureEnabled('htmlPreview');
+        const longTermRulesEnabled = managedFeatureEnabled('longTermRules');
+        return {
+          observability: {
+            enabled: false,
+            rolloutPercentage: 0,
+            tunnelPath: '/api/clawx/observability/envelope',
+            crashSampleRate: 1,
+            handledErrorSampleRate: 0.2,
+            tracesSampleRate: 0.05,
+            artifactSampleRate: 0.2,
+            maxEventsPerHour: 30,
+          },
+          features: {
+            artifacts: {
+              enabled: artifactsEnabled,
+              rolloutPercentage: artifactsEnabled ? 100 : 0,
+              eligible: artifactsEnabled,
+              modelAlias: 'uclaw-artifact-v1',
+              policyVersion: 'v1',
+            },
+            ecommerceMainImage: {
+              enabled: ecommerceMainImageEnabled,
+              rolloutPercentage: ecommerceMainImageEnabled ? 100 : 0,
+              eligible: ecommerceMainImageEnabled,
+              skillVersion: 'v1',
+            },
+            htmlPreview: {
+              enabled: htmlPreviewEnabled,
+              rolloutPercentage: htmlPreviewEnabled ? 100 : 0,
+              eligible: htmlPreviewEnabled,
+            },
+            longTermRules: {
+              enabled: longTermRulesEnabled,
+              rolloutPercentage: longTermRulesEnabled ? 100 : 0,
+              eligible: longTermRulesEnabled,
+            },
+          },
+        };
       };
       const originalLegacyGatewayRpc = getInvokeHandler('gateway:rpc');
       const originalLegacyFileStat = getInvokeHandler('file:stat');
@@ -490,7 +554,13 @@ export async function installIpcMocks(
         return null;
       };
 
-      if (mockConfig.gatewayRpc || mockConfig.hostApi || mockConfig.hostApiErrors || mockConfig.gatewayStatus) {
+      if (
+        mockConfig.gatewayRpc
+        || mockConfig.hostApi
+        || mockConfig.hostApiErrors
+        || mockConfig.gatewayStatus
+        || mockConfig.managedClientConfig
+      ) {
         ipcMain.removeHandler('host:invoke');
         ipcMain.handle('host:invoke', async (event: unknown, request: {
           id?: string;
@@ -515,8 +585,8 @@ export async function installIpcMocks(
             return fail(request.id, mockConfig.hostApiErrors[typedKey]);
           }
 
-          if (mockConfig.gatewayStatus && request?.module === 'gateway' && request.action === 'status') {
-            return respond(request.id, mockConfig.gatewayStatus);
+          if (gatewayStatus && request?.module === 'gateway' && request.action === 'status') {
+            return respond(request.id, gatewayStatus);
           }
 
           if (mockConfig.gatewayRpc && request?.module === 'gateway' && request.action === 'rpc') {
@@ -554,6 +624,62 @@ export async function installIpcMocks(
               if (key in mockConfig.hostApi) {
                 return respond(request.id, unwrapLegacyResponse(mockConfig.hostApi[key]));
               }
+            }
+          }
+
+          if (request?.module === 'managedClientConfig') {
+            if (request.action === 'textModels') {
+              return respond(request.id, {
+                defaultModel: 'smart-latest',
+                defaultThinkingLevel: 'minimal',
+                models: [{ id: 'smart-latest', label: 'Smart' }],
+              });
+            }
+            if (request.action === 'imageModels') {
+              return respond(request.id, mockConfig.managedClientConfig?.imageModels ?? null);
+            }
+            if (request.action === 'videoModels') {
+              return respond(request.id, null);
+            }
+            if (request.action === 'runtimeConfig') {
+              const runtimeConfig = managedRuntimeConfig();
+              if (request.payload?.refresh === true && originalHostInvoke) {
+                const { net } = process.mainModule!.require('electron') as typeof import('electron');
+                const network = net as unknown as {
+                  fetch: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+                };
+                const originalFetch = network.fetch;
+                network.fetch = async (input, init) => {
+                  const url = typeof input === 'string'
+                    ? input
+                    : input instanceof URL
+                      ? input.toString()
+                      : input.url;
+                  if (url.includes('/api/clawx/client-config') || url.includes('/api/clawx/bootstrap')) {
+                    return new Response(JSON.stringify({ data: runtimeConfig }), {
+                      status: 200,
+                      headers: { 'content-type': 'application/json' },
+                    });
+                  }
+                  return originalFetch.call(network, input, init);
+                };
+                try {
+                  const seeded = await originalHostInvoke(event, {
+                    ...request,
+                    payload: { ...(request.payload ?? {}), refresh: true },
+                  });
+                  if (
+                    !seeded
+                    || typeof seeded !== 'object'
+                    || (seeded as { ok?: unknown }).ok !== true
+                  ) {
+                    throw new Error('Electron E2E could not seed the managed runtime Gate snapshot');
+                  }
+                } finally {
+                  network.fetch = originalFetch;
+                }
+              }
+              return respond(request.id, runtimeConfig);
             }
           }
 
@@ -600,9 +726,14 @@ export async function installIpcMocks(
         });
       }
 
-      if (mockConfig.gatewayStatus) {
+      if (gatewayStatus) {
         ipcMain.removeHandler('gateway:status');
-        ipcMain.handle('gateway:status', async () => mockConfig.gatewayStatus);
+        ipcMain.handle('gateway:status', async () => gatewayStatus);
+        for (const window of BrowserWindow.getAllWindows()) {
+          if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+            window.webContents.send('gateway:status-changed', gatewayStatus);
+          }
+        }
       }
     },
     config,
@@ -620,7 +751,12 @@ function stableStringify(value: unknown): string {
 
 export async function installAttachmentHostFixture(
   app: ElectronApplication,
-  options: { sessions: AttachmentFixtureSession[]; replayInLoadResult?: boolean },
+  options: {
+    sessions: AttachmentFixtureSession[];
+    replayInLoadResult?: boolean;
+    managedClientConfig?: ManagedClientConfigFixtureOptions;
+    useProductionHtmlPreview?: boolean;
+  },
 ): Promise<AttachmentHostFixture> {
   if (options.sessions.length === 0) throw new Error('Attachment fixture requires at least one session');
   const homeDir = await app.evaluate(async () => process.env.HOME || process.env.USERPROFILE || '');
@@ -685,8 +821,25 @@ export async function installAttachmentHostFixture(
         })),
       },
     },
+    managedClientConfig: options.managedClientConfig,
     recordLegacyIpcInvocations: true,
   });
+
+  if (options.managedClientConfig) {
+    await app.evaluate(async () => {
+      const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
+      const handler = (ipcMain as unknown as {
+        _invokeHandlers?: Map<string, (event: unknown, request: unknown) => Promise<unknown>>;
+      })._invokeHandlers?.get('host:invoke');
+      if (!handler) throw new Error('Electron E2E managed runtime fixture could not find host:invoke');
+      await handler({}, {
+        id: 'e2e-managed-runtime-seed',
+        module: 'managedClientConfig',
+        action: 'runtimeConfig',
+        payload: { refresh: true },
+      });
+    });
+  }
 
   await app.evaluate(async ({ app: _app }, payload) => {
     const { BrowserWindow, ipcMain, shell } = process.mainModule!.require('electron') as typeof import('electron');
@@ -918,6 +1071,35 @@ export async function installAttachmentHostFixture(
           executionCwd,
         });
       }
+      if (request.module === 'artifactTasks' && request.action === 'validateWebpage') {
+        if (payload.useProductionHtmlPreview) {
+          return originalHostInvoke?.(event, request) ?? respond(request.id, { ok: false });
+        }
+        const { access } = process.mainModule!.require('node:fs/promises') as typeof import('node:fs/promises');
+        const { isAbsolute, relative, resolve } = process.mainModule!.require('node:path') as typeof import('node:path');
+        const { randomBytes } = process.mainModule!.require('node:crypto') as typeof import('node:crypto');
+        const filePath = typeof request.payload?.filePath === 'string'
+          ? resolve(request.payload.filePath)
+          : '';
+        const fromWorkspace = filePath ? relative(payload.workspaceDir, filePath) : '..';
+        const insideWorkspace = fromWorkspace !== ''
+          && fromWorkspace !== '..'
+          && !fromWorkspace.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`)
+          && !isAbsolute(fromWorkspace)
+          && /\.html?$/iu.test(filePath);
+        if (
+          payload.managedClientConfig?.features?.htmlPreview?.enabled !== true
+          || !insideWorkspace
+          || await access(filePath).then(() => false, () => true)
+        ) {
+          return respond(request.id, { ok: false });
+        }
+        const token = randomBytes(32).toString('base64url');
+        return respond(request.id, {
+          ok: true,
+          browserUrl: `http://127.0.0.1:49152/${token}/index.html`,
+        });
+      }
       if (request.module === 'files' && request.action === 'resolveAttachment') {
         return respond(request.id, await productionAttachmentAccess.resolveAttachment(request.payload));
       }
@@ -956,7 +1138,13 @@ export async function installAttachmentHostFixture(
 
       return originalHostInvoke?.(event, request) ?? respond(request.id, {});
     });
-  }, { workspaceDir, productionAttachmentBundlePath, replayInLoadResult: options.replayInLoadResult === true });
+  }, {
+    workspaceDir,
+    productionAttachmentBundlePath,
+    replayInLoadResult: options.replayInLoadResult === true,
+    managedClientConfig: options.managedClientConfig,
+    useProductionHtmlPreview: options.useProductionHtmlPreview === true,
+  });
 
   const writeFixtureFile = async (root: string, relativePath: string, data: string | Uint8Array) => {
     const filePath = resolve(root, relativePath);
@@ -1044,7 +1232,7 @@ export async function installAttachmentHostFixture(
         state.replays[input.sessionKey] = input.updates;
       }, { sessionKey, updates });
     },
-    setTranscriptResponses: async (sessionKey, responses) => {
+    setTranscriptResponses: async (sessionKey, responses, options) => {
       const normalized = responses.map((response) => Array.isArray(response)
         ? { messages: response }
         : response);
@@ -1053,12 +1241,18 @@ export async function installAttachmentHostFixture(
           __e2eAttachmentFixture?: {
             transcriptResponses: Record<string, unknown[]>;
             transcriptIndexes: Record<string, number>;
+            historyRequestTimes: Record<string, number[]>;
           };
         }).__e2eAttachmentFixture;
         if (!state) throw new Error('Attachment fixture is not installed');
         state.transcriptResponses[input.sessionKey] = input.responses;
         state.transcriptIndexes[input.sessionKey] = 0;
-      }, { sessionKey, responses: normalized });
+        if (input.resetHistoryRequestTimes) state.historyRequestTimes[input.sessionKey] = [];
+      }, {
+        sessionKey,
+        responses: normalized,
+        resetHistoryRequestTimes: options?.resetHistoryRequestTimes === true,
+      });
     },
     releaseTranscriptResponse: async (deferId) => {
       await app.evaluate(async ({ app: _app }, id) => {

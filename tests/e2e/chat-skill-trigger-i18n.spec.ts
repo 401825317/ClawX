@@ -1,6 +1,7 @@
 import { closeElectronApp, expect, getStableWindow, installIpcMocks, test } from './fixtures/electron';
 
 const SESSION_KEY = 'agent:main:main';
+const DEFAULT_WORKSPACE = '~/.openclaw/workspace';
 
 function stableStringify(value: unknown): string {
   if (value == null || typeof value !== 'object') return JSON.stringify(value);
@@ -17,7 +18,7 @@ test.describe('ClawX chat skill trigger', () => {
 
     try {
       await installIpcMocks(app, {
-        gatewayStatus: { state: 'running', port: 18789, pid: 12345 },
+        gatewayStatus: { state: 'running', gatewayReady: true, port: 18789, pid: 12345 },
         gatewayRpc: {
           [stableStringify(['sessions.list', {}])]: {
             success: true,
@@ -35,12 +36,17 @@ test.describe('ClawX chat skill trigger', () => {
           },
         },
         hostApi: {
+          [stableStringify(['chat', 'loadAcpSession', {
+            sessionKey: SESSION_KEY,
+            workspaceRoot: DEFAULT_WORKSPACE,
+            cwd: DEFAULT_WORKSPACE,
+          }])]: { success: true, generation: 1 },
           [stableStringify(['/api/gateway/status', 'GET'])]: {
             ok: true,
             data: {
               status: 200,
               ok: true,
-              json: { state: 'running', port: 18789, pid: 12345 },
+              json: { state: 'running', gatewayReady: true, port: 18789, pid: 12345 },
             },
           },
           [stableStringify(['/api/settings', 'GET'])]: {
@@ -130,7 +136,7 @@ test.describe('ClawX chat skill trigger', () => {
 
     try {
       await installIpcMocks(app, {
-        gatewayStatus: { state: 'running', port: 18789, pid: 12345 },
+        gatewayStatus: { state: 'running', gatewayReady: true, port: 18789, pid: 12345 },
         gatewayRpc: {
           [stableStringify(['sessions.list', {}])]: {
             success: true,
@@ -148,12 +154,17 @@ test.describe('ClawX chat skill trigger', () => {
           },
         },
         hostApi: {
+          [stableStringify(['chat', 'loadAcpSession', {
+            sessionKey: SESSION_KEY,
+            workspaceRoot: DEFAULT_WORKSPACE,
+            cwd: DEFAULT_WORKSPACE,
+          }])]: { success: true, generation: 1 },
           [stableStringify(['/api/gateway/status', 'GET'])]: {
             ok: true,
             data: {
               status: 200,
               ok: true,
-              json: { state: 'running', port: 18789, pid: 12345 },
+              json: { state: 'running', gatewayReady: true, port: 18789, pid: 12345 },
             },
           },
           [stableStringify(['/api/settings', 'GET'])]: {

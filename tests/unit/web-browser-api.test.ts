@@ -3,6 +3,7 @@ import type { Session, WebContents } from 'electron';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebBrowserGuestRegistry } from '@electron/main/web-browser-policy';
 import { createWebBrowserApi } from '@electron/services/web-browser-api';
+import { registerWorkspaceHtmlPreviewCapability } from '@electron/services/workspace-html-preview';
 
 const { shellOpenExternalMock, shellOpenPathMock } = vi.hoisted(() => ({
   shellOpenExternalMock: vi.fn<(url: string) => Promise<void>>().mockResolvedValue(undefined),
@@ -20,6 +21,7 @@ class MockGuest extends EventEmitter {
   destroyed = false;
   url = 'https://current.example/path';
   readonly loadURL = vi.fn<(url: string) => Promise<void>>().mockResolvedValue(undefined);
+  readonly stop = vi.fn();
 
   getURL(): string {
     return this.url;
@@ -60,7 +62,56 @@ describe('web browser host service', () => {
     expect(guest.loadURL).toHaveBeenCalledWith('https://example.com/path%20with%20space');
   });
 
-  it('treats Electron ERR_ABORTED as a normal navigation cancellation', async () => {
+  it('enters strict preview mode only for generated loopback URLs and exits on explicit normal navigation', async () => {
+    const guest = registerGuest(registry);
+    const api = createWebBrowserApi({ browserSession, registry });
+    const previewUrl = `http://127.0.0.1:49152/${'a'.repeat(43)}/index.html`;
+    const revoke = registerWorkspaceHtmlPreviewCapability(previewUrl, Date.now() + 60_000);
+
+    try {
+      await api.navigate({ url: previewUrl });
+      expect(registry.isPreviewGuest(guest as unknown as WebContents)).toBe(true);
+      expect(registry.allowsTopLevelNavigation(
+        guest as unknown as WebContents,
+        'https://example.com/',
+      )).toBe(false);
+
+      await api.navigate({ url: 'https://example.com/' });
+      expect(registry.isPreviewGuest(guest as unknown as WebContents)).toBe(false);
+      expect(registry.allowsTopLevelNavigation(
+        guest as unknown as WebContents,
+        'https://other.example/',
+      )).toBe(true);
+    } finally {
+      revoke();
+    }
+  });
+
+  it('keeps the preview lock when an explicit normal navigation is aborted', async () => {
+    const guest = registerGuest(registry);
+    const api = createWebBrowserApi({ browserSession, registry });
+    const previewUrl = `http://127.0.0.1:49152/${'a'.repeat(43)}/index.html`;
+    const revoke = registerWorkspaceHtmlPreviewCapability(previewUrl, Date.now() + 60_000);
+    await api.navigate({ url: previewUrl });
+    guest.loadURL.mockRejectedValueOnce(Object.assign(new Error('aborted'), {
+      code: 'ERR_ABORTED',
+      errno: -3,
+    }));
+
+    await expect(api.navigate({ url: 'https://example.com/' })).rejects.toMatchObject({
+      code: 'web_browser_navigation_aborted',
+      recoverable: true,
+      restartGateway: false,
+    });
+    expect(registry.isPreviewGuest(guest as unknown as WebContents)).toBe(true);
+    expect(registry.allowsTopLevelNavigation(
+      guest as unknown as WebContents,
+      'https://other.example/',
+    )).toBe(false);
+    revoke();
+  });
+
+  it('reports Electron ERR_ABORTED as a recoverable navigation cancellation', async () => {
     const guest = registerGuest(registry);
     const aborted = Object.assign(new Error("ERR_ABORTED (-3) loading 'https://example.com/'"), {
       code: 'ERR_ABORTED',
@@ -70,7 +121,61 @@ describe('web browser host service', () => {
     guest.loadURL.mockRejectedValueOnce(aborted);
     const api = createWebBrowserApi({ browserSession, registry });
 
-    await expect(api.navigate({ url: 'https://example.com/' })).resolves.toBeUndefined();
+    await expect(api.navigate({ url: 'https://example.com/' })).rejects.toMatchObject({
+      code: 'web_browser_navigation_aborted',
+      recoverable: true,
+      restartGateway: false,
+    });
+  });
+
+  it('stops an application-timed-out load and ignores its late completion', async () => {
+    vi.useFakeTimers();
+    try {
+      const guest = registerGuest(registry);
+      let resolveLoad!: () => void;
+      guest.loadURL.mockReturnValueOnce(new Promise<void>((resolve) => {
+        resolveLoad = resolve;
+      }));
+      const api = createWebBrowserApi({
+        browserSession,
+        registry,
+        navigationTimeoutMs: 50,
+        resolveNavigation: async url => ({ ok: true, url, kind: 'public' }),
+      });
+      const navigation = api.navigate({ url: 'https://example.com/' });
+      const observed = navigation.catch(error => error as unknown);
+      await Promise.resolve();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(50);
+
+      await expect(observed).resolves.toMatchObject({
+        code: 'web_browser_navigation_timeout',
+        recoverable: true,
+        restartGateway: false,
+      });
+      expect(guest.stop).toHaveBeenCalledOnce();
+      resolveLoad();
+      await Promise.resolve();
+      expect(registry.isPreviewGuest(guest as unknown as WebContents)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects lookalike and revoked preview URLs before loading them', async () => {
+    const guest = registerGuest(registry);
+    const api = createWebBrowserApi({ browserSession, registry });
+    const previewUrl = `http://127.0.0.1:49152/${'c'.repeat(43)}/index.html`;
+
+    await expect(api.navigate({ url: previewUrl })).rejects.toMatchObject({
+      code: 'web_browser_preview_not_authorized',
+    });
+    const revoke = registerWorkspaceHtmlPreviewCapability(previewUrl, Date.now() + 60_000);
+    revoke();
+    await expect(api.navigate({ url: previewUrl })).rejects.toMatchObject({
+      code: 'web_browser_preview_not_authorized',
+    });
+    expect(guest.loadURL).not.toHaveBeenCalled();
   });
 
   it('preserves non-abort loadURL failures', async () => {
@@ -190,14 +295,18 @@ describe('web browser host service', () => {
     expect(openExternal).toHaveBeenCalledWith('https://example.com/current%20path');
   });
 
-  it('passes standard file URLs to shell.openExternal and never shell.openPath', async () => {
+  it('does not pass local file URLs to the external shell', async () => {
     const guest = registerGuest(registry);
     guest.url = 'file:///tmp/report%20one.html';
     const api = createWebBrowserApi({ browserSession, registry });
 
-    await expect(api.openExternal()).resolves.toBeUndefined();
+    await expect(api.openExternal()).rejects.toMatchObject({
+      code: 'web_browser_file_requires_preview',
+      recoverable: true,
+      restartGateway: false,
+    });
 
-    expect(shellOpenExternalMock).toHaveBeenCalledWith('file:///tmp/report%20one.html');
+    expect(shellOpenExternalMock).not.toHaveBeenCalled();
     expect(shellOpenPathMock).not.toHaveBeenCalled();
   });
 

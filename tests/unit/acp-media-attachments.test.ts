@@ -175,7 +175,7 @@ describe('OpenClaw MEDIA transcript extraction', () => {
     });
   });
 
-  it('does not treat a failed media assistant record as successful final text', () => {
+  it('extracts a failed summary with only a video MEDIA directive without treating it as final text', () => {
     const [turn] = extract(transcript(
       { role: 'user', content: '生成视频' },
       {
@@ -185,7 +185,7 @@ describe('OpenClaw MEDIA transcript extraction', () => {
         model: 'smart-latest',
         stopReason: 'error',
         errorMessage: 'stream_read_error',
-        content: '视频生成失败。\n\nMEDIA:C:\\Users\\Tester\\Videos\\partial.mp4',
+        content: 'MEDIA:C:\\Users\\Tester\\Videos\\partial.mp4',
       },
     ));
 

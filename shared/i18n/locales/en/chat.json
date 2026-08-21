@@ -358,6 +358,9 @@
         },
         "imageMode": "Image mode",
         "imageModeActive": "Image mode enabled",
+        "imagePresetLabel": "Image preset",
+        "imagePresetStandard": "Standard image",
+        "ecommerceMainImage": "Ecommerce main image",
         "videoMode": "Video mode",
         "videoReferenceImageLimit": "Video generation supports one reference image at a time",
         "videoAspectRatioLabel": "Video aspect ratio",
@@ -388,6 +391,7 @@
         "thinking": "Thinking…",
         "gatewayConnected": "connected",
         "gatewayStarting": "starting",
+        "gatewayRetrying": "retrying connection ({{attempt}}/{{maxAttempts}})",
         "gatewayStatus": "gateway {{state}} | port: {{port}} | pid: {{pid}}",
         "retryFailedAttachments": "Retry failed attachments",
         "workspacePrefix": "{{workspace}}",
@@ -400,6 +404,14 @@
         "folderAttachment": "Folder",
         "skillPreviewTooltip": "Preview SKILL.md",
         "skillPreviewNotFound": "Could not find this skill. Open the skill picker to refresh the list."
+    },
+    "longTermRules": {
+        "saved": "Saved as a {{scope}} long-term rule",
+        "scopeGlobal": "global",
+        "scopeAgent": "current Agent",
+        "undo": "Undo",
+        "undone": "Long-term rule undone",
+        "undoFailed": "Could not undo this long-term rule"
     },
     "sessionList": {
         "title": "Sessions",

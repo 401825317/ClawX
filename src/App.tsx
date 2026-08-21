@@ -30,6 +30,7 @@ import { UpdateNotifier } from './components/update/UpdateNotifier';
 import { ManagedAuthGate } from './components/auth/ManagedAuthGate';
 import { useNewChatAction } from './components/layout/use-new-chat-action';
 import { hostEvents } from './lib/host-events';
+import { captureRendererException, syncRendererObservability } from './lib/observability';
 
 
 /**
@@ -50,6 +51,7 @@ class ErrorBoundary extends Component<
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error('React Error Boundary caught error:', error, info);
+    captureRendererException(error, { componentStack: info.componentStack || '' });
   }
 
   render() {
@@ -110,6 +112,7 @@ function App() {
   const initUpdate = useUpdateStore((state) => state.init);
   const initProviders = useProviderStore((state) => state.init);
   const handleNewChat = useNewChatAction();
+  const telemetryEnabled = useSettingsStore((state) => state.telemetryEnabled);
 
   useEffect(() => {
     let cancelled = false;
@@ -124,6 +127,10 @@ function App() {
       cancelled = true;
     };
   }, [initSettings, initUpdate]);
+
+  useEffect(() => {
+    void syncRendererObservability();
+  }, [telemetryEnabled]);
 
   // Sync i18n language with persisted settings on mount
   useEffect(() => {

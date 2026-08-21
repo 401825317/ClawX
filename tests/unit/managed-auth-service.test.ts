@@ -38,6 +38,7 @@ const mocks = vi.hoisted(() => ({
   restoreManagedAgentModelsFiles: vi.fn(),
   snapshotManagedAgentModelsFiles: vi.fn(),
   updateManagedAgentModelProviderStrict: vi.fn(),
+  getVerifiedManagedClientImageModelPolicySnapshot: vi.fn(),
   restoreManagedRuntimeConfig: vi.fn(),
   removeManagedRuntimeOpenAiState: vi.fn(),
   createManagedRuntimeProviderEntry: vi.fn(),
@@ -53,6 +54,7 @@ const mocks = vi.hoisted(() => ({
   storeDelete: vi.fn(),
   ensureProviderStoreMigrated: vi.fn(),
   waitForPortFree: vi.fn(),
+  loggerInfo: vi.fn(),
 }));
 
 vi.mock('@electron/utils/junfeiai-distribution', () => ({
@@ -64,8 +66,10 @@ vi.mock('@electron/utils/junfeiai-distribution', () => ({
   UCLAW_DEFAULT_ACCESS_TOKEN_LIFETIME_SECONDS: 86_400,
   UCLAW_DEFAULT_API_PROTOCOL: 'openai-responses',
   UCLAW_DEFAULT_BASE_URL: 'https://zz-cn.lingzhiwuxian.com/v1',
+  UCLAW_MANAGED_PROVIDER_BASE_URL: 'https://zz-cn.lingzhiwuxian.com/v1',
   UCLAW_DEFAULT_MODEL: 'smart-latest',
   UCLAW_DEFAULT_MODEL_CONTEXT_WINDOW: 258_000,
+  UCLAW_IMAGE_GENERATION_TIMEOUT_MS: 900_000,
   UCLAW_DEFAULT_THINKING_LEVEL: 'medium',
   UCLAW_LEGACY_AUTH_ACCOUNT_IDS: ['lingzhiwuxian-auth'],
   UCLAW_MANAGED_SERVICE_NAME: 'UClaw',
@@ -138,6 +142,7 @@ vi.mock('@electron/services/providers/managed-runtime-config', () => ({
 
 vi.mock('@electron/services/managed-client-config-service', () => ({
   cacheManagedClientModelPoliciesFromPayload: mocks.cacheManagedClientModelPoliciesFromPayload,
+  getVerifiedManagedClientImageModelPolicySnapshot: mocks.getVerifiedManagedClientImageModelPolicySnapshot,
 }));
 
 vi.mock('@electron/utils/openclaw-auth', () => ({
@@ -172,7 +177,7 @@ vi.mock('@electron/services/providers/store-instance', () => ({
 vi.mock('@electron/utils/logger', () => ({
   logger: {
     debug: vi.fn(),
-    info: vi.fn(),
+    info: mocks.loggerInfo,
     warn: vi.fn(),
     error: vi.fn(),
   },
@@ -253,9 +258,11 @@ const PROVIDER_SECRET_SLOTS_SNAPSHOT = {};
 const RUNTIME_MUTATION_LEASE = {};
 const MANAGED_MODEL_POLICY = {
   defaultModel: 'smart-latest',
+  fallbackModels: ['gpt-5.4', 'reasoning-pro'],
   models: [
     { id: 'smart-latest', label: 'Smart Latest' },
     { id: 'gpt-5.4', label: 'GPT-5.4' },
+    { id: 'reasoning-pro', label: 'Reasoning Pro' },
   ],
 };
 const MANAGED_VIDEO_MODEL_POLICY = {
@@ -264,6 +271,20 @@ const MANAGED_VIDEO_MODEL_POLICY = {
   defaultResolution: '480P',
   defaultDurationSeconds: 6,
   models: [],
+};
+const MANAGED_IMAGE_MODEL_POLICY = {
+  defaultModel: 'gpt-image-2',
+  defaultSize: '1536x1024',
+  defaultQuality: 'high',
+  models: [{
+    id: 'gpt-image-2',
+    label: 'GPT Image 2',
+    sizes: ['1024x1024', '1536x1024'],
+    qualities: ['medium', 'high'],
+    defaultSize: '1536x1024',
+    defaultQuality: 'high',
+    supportsEditing: true,
+  }],
 };
 
 function activationFilesSnapshot(state: ActivationState = activationState) {
@@ -328,7 +349,12 @@ function installSuccessBackend() {
           refreshToken: 'refresh-secret',
           expiresIn: 3_600,
           user: { id: 'user-1', username: 'tester', email: 'test@example.com' },
-          client: { modelOptions: { text: MANAGED_MODEL_POLICY } },
+          client: {
+            modelOptions: {
+              text: MANAGED_MODEL_POLICY,
+              image: MANAGED_IMAGE_MODEL_POLICY,
+            },
+          },
         });
       case '/api/clawx/relay-token':
         return jsonResponse(200, { token: 'relay-secret', expiresIn: 3_600 });
@@ -433,7 +459,7 @@ beforeEach(() => {
       baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
       apiProtocol: 'openai-responses',
       model: policy.defaultModel,
-      fallbackModels: [],
+      fallbackModels: [...policy.fallbackModels],
       fallbackAccountIds: [],
       enabled: true,
       isDefault,
@@ -489,8 +515,10 @@ beforeEach(() => {
   mocks.updateManagedAgentModelProviderStrict.mockResolvedValue(undefined);
   mocks.cacheManagedClientModelPoliciesFromPayload.mockResolvedValue({
     text: MANAGED_MODEL_POLICY,
+    image: MANAGED_IMAGE_MODEL_POLICY,
     video: MANAGED_VIDEO_MODEL_POLICY,
   });
+  mocks.getVerifiedManagedClientImageModelPolicySnapshot.mockReturnValue(MANAGED_IMAGE_MODEL_POLICY);
   mocks.createManagedRuntimeProviderEntry.mockImplementation((policy) => ({
     baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
     api: 'openai-responses',
@@ -517,7 +545,7 @@ beforeEach(() => {
   }));
   mocks.updateManagedRuntimeConfig.mockImplementation(async (snapshotValue, mutate) => {
     const config = structuredClone(openClawConfig);
-    mutate(config);
+    if (mutate(config) === false) return;
     const commands = typeof config.commands === 'object' && config.commands && !Array.isArray(config.commands)
       ? { ...config.commands as Record<string, unknown> }
       : {};
@@ -545,10 +573,37 @@ beforeEach(() => {
       const defaults = typeof agents.defaults === 'object' && agents.defaults && !Array.isArray(agents.defaults)
         ? { ...agents.defaults as Record<string, unknown> }
         : {};
-      defaults.model = { primary: `openai/${policy.defaultModel}`, fallbacks: [] };
+      const fallbackRefs = policy.fallbackModels.map((modelId: string) => `openai/${modelId}`);
+      defaults.model = { primary: `openai/${policy.defaultModel}`, fallbacks: fallbackRefs };
       defaults.thinkingDefault = 'medium';
       defaults.reasoningDefault = 'on';
       agents.defaults = defaults;
+      if (Array.isArray(agents.list)) {
+        agents.list = agents.list.map((rawEntry) => {
+          if (typeof rawEntry !== 'object' || rawEntry === null || Array.isArray(rawEntry)) {
+            return rawEntry;
+          }
+          const entry = { ...rawEntry as Record<string, unknown> };
+          if (entry.model === undefined) return entry;
+          const model = typeof entry.model === 'string'
+            ? { primary: entry.model.trim() }
+            : typeof entry.model === 'object' && entry.model !== null && !Array.isArray(entry.model)
+              ? { ...entry.model as Record<string, unknown> }
+              : null;
+          if (!model) return entry;
+          const primary = typeof model.primary === 'string' ? model.primary.trim() : '';
+          const separator = primary.indexOf('/');
+          const primaryProvider = separator > 0 ? primary.slice(0, separator) : '';
+          const primaryModel = managedProviderIds.has(primaryProvider)
+            ? primary.slice(separator + 1)
+            : null;
+          model.fallbacks = fallbackRefs.filter((fallbackRef: string) => (
+            fallbackRef.slice(fallbackRef.indexOf('/') + 1) !== primaryModel
+          ));
+          entry.model = model;
+          return entry;
+        });
+      }
       config.agents = agents;
 
       if (typeof config.auth === 'object' && config.auth && !Array.isArray(config.auth)) {
@@ -673,7 +728,7 @@ describe('managed auth service transaction and compatibility behavior', () => {
     expect(mocks.installManagedAgentOpenAiApiKey).toHaveBeenCalledWith(
       AGENT_AUTH_PROFILES_SNAPSHOT,
       'valid-compatibility-relay',
-      new Set(['openai', 'lingzhiwuxian']),
+      new Set(['openai', 'lingzhiwuxian', 'clawx-openai-image']),
     );
   });
 
@@ -724,7 +779,7 @@ describe('managed auth service transaction and compatibility behavior', () => {
 
     expect(mocks.removeManagedAgentOpenAiCredentialsFromSnapshot).toHaveBeenCalledWith(
       AGENT_AUTH_PROFILES_SNAPSHOT,
-      new Set(['openai', 'lingzhiwuxian']),
+      new Set(['openai', 'lingzhiwuxian', 'clawx-openai-image']),
     );
     expect(mocks.removeManagedAgentOpenAiProviders).toHaveBeenCalledOnce();
     expect(mocks.removeManagedRuntimeOpenAiState).toHaveBeenCalledOnce();
@@ -852,6 +907,34 @@ describe('managed auth service transaction and compatibility behavior', () => {
   });
 
   it('commits a successful login to both managed Provider accounts', async () => {
+    openClawConfig = {
+      agents: {
+        defaults: {
+          model: {
+            primary: 'personal/old-primary',
+            fallbacks: ['personal/stale-default'],
+          },
+        },
+        list: [
+          {
+            id: 'managed-agent',
+            model: {
+              primary: 'openai/gpt-5.4',
+              fallbacks: ['personal/stale-agent'],
+            },
+          },
+          {
+            id: 'personal-agent',
+            model: {
+              primary: 'personal/custom-model',
+              fallbacks: ['personal/stale-agent'],
+            },
+          },
+          { id: 'string-agent', model: 'lingzhiwuxian/reasoning-pro' },
+          { id: 'inherits-defaults' },
+        ],
+      },
+    };
     const result = await loginManagedAuth({
       account: 'test@example.com',
       password: 'password',
@@ -867,11 +950,12 @@ describe('managed auth service transaction and compatibility behavior', () => {
         baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
         apiProtocol: 'openai-responses',
         model: 'smart-latest',
+        fallbackModels: ['gpt-5.4', 'reasoning-pro'],
         isDefault: true,
         metadata: expect.objectContaining({
           managedBy: 'uclaw',
-          customModels: ['smart-latest', 'gpt-5.4'],
-          managedAllowedModels: ['smart-latest', 'gpt-5.4'],
+          customModels: ['smart-latest', 'gpt-5.4', 'reasoning-pro'],
+          managedAllowedModels: ['smart-latest', 'gpt-5.4', 'reasoning-pro'],
         }),
       }),
       expect.objectContaining({
@@ -881,11 +965,12 @@ describe('managed auth service transaction and compatibility behavior', () => {
         baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
         apiProtocol: 'openai-responses',
         model: 'smart-latest',
+        fallbackModels: ['gpt-5.4', 'reasoning-pro'],
         isDefault: false,
         metadata: expect.objectContaining({
           managedBy: 'uclaw',
-          customModels: ['smart-latest', 'gpt-5.4'],
-          managedAllowedModels: ['smart-latest', 'gpt-5.4'],
+          customModels: ['smart-latest', 'gpt-5.4', 'reasoning-pro'],
+          managedAllowedModels: ['smart-latest', 'gpt-5.4', 'reasoning-pro'],
         }),
       }),
     );
@@ -934,16 +1019,43 @@ describe('managed auth service transaction and compatibility behavior', () => {
     expect(mocks.installManagedAgentOpenAiApiKey).toHaveBeenCalledWith(
       AGENT_AUTH_PROFILES_SNAPSHOT,
       'relay-secret',
-      new Set(['openai', 'lingzhiwuxian']),
+      new Set(['openai', 'lingzhiwuxian', 'clawx-openai-image']),
     );
     expect(mocks.removeManagedAgentOpenAiCredentialsFromSnapshot).not.toHaveBeenCalled();
     expect(openClawConfig).toMatchObject({
       agents: {
         defaults: {
-          model: { primary: 'openai/smart-latest', fallbacks: [] },
+          model: {
+            primary: 'openai/smart-latest',
+            fallbacks: ['openai/gpt-5.4', 'openai/reasoning-pro'],
+          },
           thinkingDefault: 'medium',
           reasoningDefault: 'on',
         },
+        list: [
+          {
+            id: 'managed-agent',
+            model: {
+              primary: 'openai/gpt-5.4',
+              fallbacks: ['openai/reasoning-pro'],
+            },
+          },
+          {
+            id: 'personal-agent',
+            model: {
+              primary: 'personal/custom-model',
+              fallbacks: ['openai/gpt-5.4', 'openai/reasoning-pro'],
+            },
+          },
+          {
+            id: 'string-agent',
+            model: {
+              primary: 'lingzhiwuxian/reasoning-pro',
+              fallbacks: ['openai/gpt-5.4'],
+            },
+          },
+          { id: 'inherits-defaults' },
+        ],
       },
       models: {
         providers: {
@@ -957,12 +1069,14 @@ describe('managed auth service transaction and compatibility behavior', () => {
                 compat: expect.objectContaining({ supportsReasoningEffort: true }),
               }),
               expect.objectContaining({ id: 'gpt-5.4', name: 'GPT-5.4' }),
+              expect.objectContaining({ id: 'reasoning-pro', name: 'Reasoning Pro' }),
             ],
           },
           lingzhiwuxian: {
             models: [
               expect.objectContaining({ id: 'smart-latest', name: 'Smart Latest' }),
               expect.objectContaining({ id: 'gpt-5.4', name: 'GPT-5.4' }),
+              expect.objectContaining({ id: 'reasoning-pro', name: 'Reasoning Pro' }),
             ],
           },
         },
@@ -974,6 +1088,7 @@ describe('managed auth service transaction and compatibility behavior', () => {
         models: [
           expect.objectContaining({ id: 'smart-latest', contextWindow: 258_000 }),
           expect.objectContaining({ id: 'gpt-5.4', contextWindow: 258_000 }),
+          expect.objectContaining({ id: 'reasoning-pro', contextWindow: 258_000 }),
         ],
       }),
       new Set(['openai', 'lingzhiwuxian']),
@@ -981,8 +1096,64 @@ describe('managed auth service transaction and compatibility behavior', () => {
     expect(mocks.cacheManagedClientModelPoliciesFromPayload).toHaveBeenCalledWith(
       expect.objectContaining({
         accessToken: 'access-secret',
-        client: { modelOptions: { text: MANAGED_MODEL_POLICY } },
+        client: {
+          modelOptions: {
+            text: MANAGED_MODEL_POLICY,
+            image: MANAGED_IMAGE_MODEL_POLICY,
+          },
+        },
       }),
+    );
+    expect(openClawConfig.agents).toMatchObject({
+      defaults: {
+        imageGenerationModel: {
+          primary: 'clawx-openai-image/gpt-image-2',
+          fallbacks: [],
+          timeoutMs: 900_000,
+        },
+      },
+    });
+    const imageProvider = (openClawConfig.models as Record<string, unknown>)
+      .providers as Record<string, unknown>;
+    expect(imageProvider['clawx-openai-image']).toEqual({
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      api: 'openai-completions',
+      request: { allowPrivateNetwork: true },
+      models: [{ id: 'gpt-image-2', name: 'GPT Image 2' }],
+    });
+    expect(openClawConfig.plugins).toEqual({
+      allow: ['clawx-openai-image'],
+      entries: {
+        'clawx-openai-image': {
+          enabled: true,
+          config: {
+            defaultModel: 'gpt-image-2',
+            defaultSize: '1536x1024',
+            defaultQuality: 'high',
+            models: [{
+              id: 'gpt-image-2',
+              enabled: true,
+              label: 'GPT Image 2',
+              sizes: ['1024x1024', '1536x1024'],
+              qualities: ['medium', 'high'],
+              defaultSize: '1536x1024',
+              defaultQuality: 'high',
+              supportsEditing: true,
+            }],
+          },
+        },
+      },
+    });
+    expect(mocks.loggerInfo).toHaveBeenCalledWith(
+      '[uclaw-auth] Managed text fallback contract synchronized',
+      {
+        event: 'managed_text_fallback_sync',
+        result: 'synchronized',
+        defaultModel: 'smart-latest',
+        fallbackModels: ['gpt-5.4', 'reasoning-pro'],
+        fallbackCount: 2,
+        targets: ['agents.defaults', 'agents.list', 'agent-model-catalogs'],
+      },
     );
   });
 
@@ -1548,7 +1719,7 @@ describe('managed auth service transaction and compatibility behavior', () => {
         baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
         apiProtocol: 'openai-responses',
         model: 'smart-latest',
-        fallbackModels: [],
+        fallbackModels: ['gpt-5.4', 'reasoning-pro'],
         metadata: expect.objectContaining({ managedBy: 'uclaw' }),
       }),
       expect.objectContaining({
@@ -1560,13 +1731,13 @@ describe('managed auth service transaction and compatibility behavior', () => {
       }),
     );
     expect(accountState?.headers).toBeUndefined();
-    expect(accountState?.fallbackModels).toEqual([]);
+    expect(accountState?.fallbackModels).toEqual(['gpt-5.4', 'reasoning-pro']);
     expect(accountState?.fallbackAccountIds).toEqual([]);
     expect(accountState?.metadata).toEqual({
       managedBy: 'uclaw',
-      customModels: ['smart-latest', 'gpt-5.4'],
+      customModels: ['smart-latest', 'gpt-5.4', 'reasoning-pro'],
       managedDefaultModel: 'smart-latest',
-      managedAllowedModels: ['smart-latest', 'gpt-5.4'],
+      managedAllowedModels: ['smart-latest', 'gpt-5.4', 'reasoning-pro'],
       managedRuntimeContractVersion: 4,
       email: 'test@example.com',
     });
@@ -1589,10 +1760,18 @@ describe('managed auth service transaction and compatibility behavior', () => {
           name: 'GPT-5.4',
           contextWindow: 258_000,
         }),
+        expect.objectContaining({
+          id: 'reasoning-pro',
+          name: 'Reasoning Pro',
+          contextWindow: 258_000,
+        }),
       ],
     });
     expect((openClawConfig.agents as Record<string, unknown>).defaults).toEqual(expect.objectContaining({
-      model: { primary: 'openai/smart-latest', fallbacks: [] },
+      model: {
+        primary: 'openai/smart-latest',
+        fallbacks: ['openai/gpt-5.4', 'openai/reasoning-pro'],
+      },
     }));
     const runtimeProviders = (openClawConfig.models as Record<string, unknown>).providers as Record<string, unknown>;
     expect(runtimeProviders.lingzhiwuxian).toEqual(runtimeProviders.openai);
@@ -1733,7 +1912,7 @@ describe('managed auth service transaction and compatibility behavior', () => {
     expect(mocks.installManagedAgentOpenAiApiKey).toHaveBeenCalledWith(
       AGENT_AUTH_PROFILES_SNAPSHOT,
       'relay-secret',
-      new Set(['openai', 'lingzhiwuxian']),
+      new Set(['openai', 'lingzhiwuxian', 'clawx-openai-image']),
     );
   });
 

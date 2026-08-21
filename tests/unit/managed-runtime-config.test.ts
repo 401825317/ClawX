@@ -15,7 +15,10 @@ import {
   UCLAW_VIDEO_GENERATION_TIMEOUT_MS,
   UCLAW_VIDEO_PROVIDER_ID,
 } from '@shared/junfeiai-endpoints';
-import { createDefaultManagedClientVideoModelPolicy } from '@shared/managed-client-config';
+import {
+  createDefaultManagedClientRuntimeConfig,
+} from '@shared/managed-client-config';
+import type { ManagedClientVideoModelPolicy } from '@shared/managed-client-config';
 
 const { root, configPath } = vi.hoisted(() => {
   const root = `/tmp/uclaw-managed-runtime-${Math.random().toString(36).slice(2)}`;
@@ -43,7 +46,52 @@ import {
 } from '@electron/services/providers/managed-runtime-config';
 
 describe('managed runtime config transaction', () => {
-  const videoPolicy = createDefaultManagedClientVideoModelPolicy();
+  const videoPolicy = {
+    defaultModel: 'grok-image-video',
+    defaultSize: '854x480',
+    defaultAspectRatio: '16:9',
+    defaultResolution: '480P',
+    defaultDurationSeconds: 6,
+    models: [
+      {
+        id: 'grok-image-video',
+        label: 'Grok Video',
+        modes: ['text-to-video', 'image-to-video'],
+        sizes: ['854x480'],
+        aspectRatios: ['16:9'],
+        resolutions: ['480P'],
+        durations: [6],
+        defaultSize: '854x480',
+        defaultAspectRatio: '16:9',
+        defaultResolution: '480P',
+        defaultDurationSeconds: 6,
+        requiresImage: false,
+      },
+      {
+        id: 'grok-video-1.5',
+        label: 'Grok Video 1.5',
+        modes: ['image-to-video'],
+        sizes: ['854x480'],
+        aspectRatios: ['16:9'],
+        resolutions: ['480P'],
+        durations: [6],
+        defaultSize: '854x480',
+        defaultAspectRatio: '16:9',
+        defaultResolution: '480P',
+        defaultDurationSeconds: 6,
+        requiresImage: true,
+      },
+    ],
+  } satisfies ManagedClientVideoModelPolicy;
+
+  it('fails closed for every remotely managed runtime capability by default', () => {
+    const runtime = createDefaultManagedClientRuntimeConfig();
+    expect(runtime.observability).toMatchObject({ enabled: false, rolloutPercentage: 0 });
+    expect(runtime.features.artifacts).toMatchObject({ enabled: false, rolloutPercentage: 0 });
+    expect(runtime.features.ecommerceMainImage).toMatchObject({ enabled: false, rolloutPercentage: 0 });
+    expect(runtime.features.htmlPreview).toEqual({ enabled: false, rolloutPercentage: 0, eligible: false });
+    expect(runtime.features.longTermRules).toEqual({ enabled: false, rolloutPercentage: 0, eligible: false });
+  });
 
   it('uses a fifteen-minute timeout for image and video generation', () => {
     expect(UCLAW_IMAGE_GENERATION_TIMEOUT_MS).toBe(900_000);
@@ -105,7 +153,9 @@ describe('managed runtime config transaction', () => {
     await restoreManagedRuntimeConfig(snapshot);
 
     expect(await readFile(configPath)).toEqual(original);
-    expect((await stat(configPath)).mode & 0o777).toBe(0o640);
+    if (process.platform !== 'win32') {
+      expect((await stat(configPath)).mode & 0o777).toBe(0o640);
+    }
   });
 
   it('refuses to roll back over a newer external config generation', async () => {
@@ -123,26 +173,34 @@ describe('managed runtime config transaction', () => {
   });
 
   it('installs the same server-owned model catalog for both managed Providers', async () => {
+    const diagnosticHeaders = {
+      'X-UClaw-Version': '2.0.3',
+      'X-UClaw-Build-Id': 'build-test',
+    };
     const policy = {
       defaultModel: 'smart-latest',
+      fallbackModels: ['standard-chat', 'reasoning-pro'],
       defaultThinkingLevel: 'high' as const,
       models: [
         { id: 'smart-latest', label: 'Smart' },
         { id: 'standard-chat', label: 'Standard Chat' },
+        { id: 'reasoning-pro', label: 'Reasoning Pro' },
       ],
     };
-    const providerEntry = createManagedRuntimeProviderEntry(policy);
-    const videoProviderEntry = createManagedRuntimeVideoProviderEntry(videoPolicy);
+    const providerEntry = createManagedRuntimeProviderEntry(policy, diagnosticHeaders);
+    const videoProviderEntry = createManagedRuntimeVideoProviderEntry(videoPolicy, diagnosticHeaders);
     expect(providerEntry).toEqual(expect.objectContaining({
       baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
       api: 'openai-responses',
       timeoutSeconds: UCLAW_PROVIDER_REQUEST_TIMEOUT_SECONDS,
       request: { allowPrivateNetwork: true },
       agentRuntime: { id: 'pi' },
+      headers: diagnosticHeaders,
     }));
     expect(providerEntry.models.map((model) => model.id)).toEqual([
       'smart-latest',
       'standard-chat',
+      'reasoning-pro',
     ]);
     expect(providerEntry.models[0]).toEqual(expect.objectContaining({
       reasoning: true,
@@ -159,6 +217,7 @@ describe('managed runtime config transaction', () => {
       baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
       api: 'openai-completions',
       request: { allowPrivateNetwork: true },
+      headers: diagnosticHeaders,
       models: [
         { id: 'grok-image-video', name: 'Grok Video' },
         { id: 'grok-video-1.5', name: 'Grok Video 1.5' },
@@ -170,7 +229,27 @@ describe('managed runtime config transaction', () => {
     })).toBe(false);
 
     await writeFile(configPath, JSON.stringify({
-      agents: { defaults: { workspace: '/tmp/keep' } },
+      agents: {
+        defaults: { workspace: '/tmp/keep' },
+        list: [
+          {
+            id: 'managed-override',
+            model: {
+              primary: 'lingzhiwuxian/standard-chat',
+              fallbacks: ['personal/stale-fallback'],
+            },
+          },
+          {
+            id: 'personal-override',
+            model: {
+              primary: 'personal/custom-model',
+              fallbacks: ['personal/stale-fallback'],
+            },
+          },
+          { id: 'string-override', model: 'openai/standard-chat' },
+          { id: 'inherits-defaults' },
+        ],
+      },
       plugins: {
         allow: ['keep-plugin'],
         entries: { 'keep-plugin': { enabled: true } },
@@ -192,16 +271,19 @@ describe('managed runtime config transaction', () => {
       },
     }));
     const snapshot = await snapshotManagedRuntimeConfig();
-    await installManagedRuntimeProviderState(snapshot, policy, videoPolicy);
+    await installManagedRuntimeProviderState(snapshot, policy, videoPolicy, [], diagnosticHeaders);
 
     const installed = JSON.parse(await readFile(configPath, 'utf8')) as {
-      agents: { defaults: Record<string, unknown> };
+      agents: { defaults: Record<string, unknown>; list: Array<Record<string, unknown>> };
       models: { mode: string; providers: Record<string, unknown> };
       plugins: { allow: string[]; entries: Record<string, unknown> };
     };
     expect(installed.agents.defaults).toEqual(expect.objectContaining({
       workspace: '/tmp/keep',
-      model: { primary: 'openai/smart-latest', fallbacks: [] },
+      model: {
+        primary: 'openai/smart-latest',
+        fallbacks: ['openai/standard-chat', 'openai/reasoning-pro'],
+      },
       thinkingDefault: 'high',
       reasoningDefault: 'on',
       videoGenerationModel: {
@@ -211,6 +293,30 @@ describe('managed runtime config transaction', () => {
       },
       mediaMaxMb: 128,
     }));
+    expect(installed.agents.list).toEqual([
+      {
+        id: 'managed-override',
+        model: {
+          primary: 'lingzhiwuxian/standard-chat',
+          fallbacks: ['openai/reasoning-pro'],
+        },
+      },
+      {
+        id: 'personal-override',
+        model: {
+          primary: 'personal/custom-model',
+          fallbacks: ['openai/standard-chat', 'openai/reasoning-pro'],
+        },
+      },
+      {
+        id: 'string-override',
+        model: {
+          primary: 'openai/standard-chat',
+          fallbacks: ['openai/reasoning-pro'],
+        },
+      },
+      { id: 'inherits-defaults' },
+    ]);
     expect(installed.models.mode).toBe('merge');
     expect(installed.models.providers.openai).toEqual(providerEntry);
     expect(installed.models.providers[UCLAW_COMPATIBILITY_PROVIDER_ID]).toEqual(providerEntry);
@@ -242,7 +348,7 @@ describe('managed runtime config transaction', () => {
     });
 
     const noOpSnapshot = await snapshotManagedRuntimeConfig();
-    await installManagedRuntimeProviderState(noOpSnapshot, policy, videoPolicy);
+    await installManagedRuntimeProviderState(noOpSnapshot, policy, videoPolicy, [], diagnosticHeaders);
     expect(noOpSnapshot.applied).toBeUndefined();
   });
 
@@ -295,6 +401,15 @@ describe('managed runtime config transaction', () => {
           },
           workspace: '/tmp/keep',
         },
+        list: [
+          {
+            id: 'personal-agent',
+            model: {
+              primary: 'personal/custom-model',
+              fallbacks: ['openai/standard-chat', 'personal/keep'],
+            },
+          },
+        ],
       },
       models: {
         mode: 'merge',
@@ -369,6 +484,15 @@ describe('managed runtime config transaction', () => {
         videoGenerationModel: { primary: 'runway/gen4.5' },
         workspace: '/tmp/keep',
       },
+      list: [
+        {
+          id: 'personal-agent',
+          model: {
+            primary: 'personal/custom-model',
+            fallbacks: ['personal/keep'],
+          },
+        },
+      ],
     });
     expect(models.mode).toBe('merge');
     expect(Object.keys(providers).sort()).toEqual([

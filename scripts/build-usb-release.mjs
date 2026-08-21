@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import JSZip from 'jszip';
 import { buildWindowsSelfCheck } from './build-windows-self-check.mjs';
@@ -21,6 +23,10 @@ const METADATA_PATH = path.join(RELEASE_DIR, FILE_NAME.replace(/\.zip$/i, '.json
 const PACKAGED_IDENTITY_FILE = 'resources/uclaw-build.json';
 const USB_IDENTITY_FILE = 'uclaw-usb-build.json';
 const SELF_CHECK_FILE = 'UClaw-SelfCheck.cmd';
+const BOOTSTRAP_GATE_TIMEOUT_MS = 30_000;
+const BOOTSTRAP_GATE_STABILITY_MS = 2_000;
+const BOOTSTRAP_GATE_POLL_MS = 100;
+const BOOTSTRAP_GATE_OUTPUT_LIMIT = 24_000;
 const WINDOWS_PE_FILES = [
   'UClaw.exe',
   'resources/bin/node.exe',
@@ -74,6 +80,429 @@ function readArg(name) {
   if (match) return match.slice(prefix.length);
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : '';
+}
+
+function isDirectInvocation() {
+  if (!process.argv[1]) return false;
+  const invokedPath = path.resolve(process.argv[1]);
+  const modulePath = fileURLToPath(import.meta.url);
+  return process.platform === 'win32'
+    ? invokedPath.toLowerCase() === modulePath.toLowerCase()
+    : invokedPath === modulePath;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function allocateLoopbackPort() {
+  return await new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        server.close(() => reject(new Error('Failed to allocate an ephemeral loopback port.')));
+        return;
+      }
+      server.close((error) => error ? reject(error) : resolve(address.port));
+    });
+  });
+}
+
+async function allocateBootstrapPorts(allocatePort) {
+  const ports = [];
+  for (let attempt = 0; ports.length < 3 && attempt < 12; attempt += 1) {
+    const port = await allocatePort();
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+      throw new Error('Bootstrap gate received an invalid loopback port.');
+    }
+    if (!ports.includes(port)) ports.push(port);
+  }
+  if (ports.length !== 3) throw new Error('Bootstrap gate could not allocate three distinct loopback ports.');
+  return {
+    cdpPort: ports[0],
+    hostApiPort: ports[1],
+    gatewayPort: ports[2],
+  };
+}
+
+function isolatedChildEnvironment(baseEnvironment) {
+  const environment = { ...baseEnvironment };
+  for (const key of Object.keys(environment)) {
+    if (/^(?:CLAWX|OPENCLAW|UCLAW|SENTRY|POSTHOG)_/iu.test(key)
+      || /^(?:PW_|PLAYWRIGHT_)/iu.test(key)
+      || /^(?:HTTP|HTTPS|ALL|NO)_PROXY$/iu.test(key)
+      || key === 'ELECTRON_RUN_AS_NODE'
+      || key === 'NODE_OPTIONS'
+      || /(?:^|_)(?:API_?KEY|ACCESS_?KEY|TOKEN|PASSWORD|PASSWD|SECRET|CREDENTIALS?)(?:$|_)/iu.test(key)) {
+      delete environment[key];
+    }
+  }
+  return environment;
+}
+
+export function createBootstrapEnvironment({
+  baseEnvironment,
+  sandboxRoot,
+  cdpPort,
+  hostApiPort,
+  gatewayPort,
+}) {
+  const homeDir = path.join(sandboxRoot, 'home');
+  const appDataDir = path.join(homeDir, 'AppData', 'Roaming');
+  const localAppDataDir = path.join(homeDir, 'AppData', 'Local');
+  const tempDir = path.join(sandboxRoot, 'temp');
+  const portableRoot = path.join(sandboxRoot, 'portable');
+  const runtimeRoot = path.join(sandboxRoot, 'runtime');
+  const openClawHome = path.join(sandboxRoot, 'openclaw-home');
+  const openClawState = path.join(sandboxRoot, 'openclaw-state');
+  const userDataDir = path.join(portableRoot, 'UClawData', 'clawx');
+  const driveRoot = path.parse(homeDir).root.replace(/[\\/]$/u, '');
+  const homePath = driveRoot && homeDir.toLowerCase().startsWith(driveRoot.toLowerCase())
+    ? homeDir.slice(driveRoot.length)
+    : homeDir;
+
+  return {
+    ...isolatedChildEnvironment(baseEnvironment),
+    HOME: homeDir,
+    USERPROFILE: homeDir,
+    HOMEDRIVE: driveRoot,
+    HOMEPATH: homePath,
+    APPDATA: appDataDir,
+    LOCALAPPDATA: localAppDataDir,
+    TEMP: tempDir,
+    TMP: tempDir,
+    TMPDIR: tempDir,
+    XDG_CONFIG_HOME: path.join(homeDir, '.config'),
+    XDG_DATA_HOME: path.join(homeDir, '.local', 'share'),
+    XDG_CACHE_HOME: path.join(runtimeRoot, 'xdg-cache'),
+    CLAWX_E2E: '1',
+    CLAWX_E2E_SKIP_SETUP: '1',
+    CLAWX_MANAGED_PROVIDER: '0',
+    CLAWX_PORTABLE: '1',
+    CLAWX_PORTABLE_ROOT: portableRoot,
+    CLAWX_PORTABLE_RUNTIME_ROOT: runtimeRoot,
+    CLAWX_RUNTIME_CACHE_ROOT: runtimeRoot,
+    CLAWX_USER_DATA_DIR: userDataDir,
+    CLAWX_REMOTE_DEBUGGING_PORT: String(cdpPort),
+    CLAWX_PORT_CLAWX_HOST_API: String(hostApiPort),
+    CLAWX_PORT_OPENCLAW_GATEWAY: String(gatewayPort),
+    OPENCLAW_HOME: openClawHome,
+    OPENCLAW_STATE_DIR: openClawState,
+    OPENCLAW_CONFIG_PATH: path.join(openClawState, 'openclaw.json'),
+    OPENCLAW_CONFIG: path.join(openClawState, 'openclaw.json'),
+    OPENCLAW_DISABLE_UPDATE_CHECK: '1',
+    OPENCLAW_DISABLE_BONJOUR: '1',
+    OPENCLAW_NO_RESPAWN: '1',
+    VITE_DEV_SERVER_URL: '',
+    NO_PROXY: '127.0.0.1,localhost',
+    no_proxy: '127.0.0.1,localhost',
+    ELECTRON_ENABLE_LOGGING: '1',
+  };
+}
+
+function replaceKnownPath(text, value, replacement) {
+  if (!value) return text;
+  const variants = new Set([
+    String(value),
+    String(value).replaceAll('\\', '/'),
+    String(value).replaceAll('/', '\\'),
+  ]);
+  let result = text;
+  for (const variant of variants) {
+    if (!variant) continue;
+    const escaped = variant.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    result = result.replace(new RegExp(escaped, 'giu'), replacement);
+  }
+  return result;
+}
+
+export function redactBootstrapOutput(value, { sensitivePaths = [] } = {}) {
+  let text = String(value ?? '').replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '');
+  for (const { value: sensitivePath, replacement } of sensitivePaths) {
+    text = replaceKnownPath(text, sensitivePath, replacement);
+  }
+  text = text
+    .replace(/(\b(?:https?|wss?):\/\/)[^/@\s]+@/giu, '$1[credentials-redacted]@')
+    .replace(/(\bBearer\s+)[A-Za-z0-9._~+/=-]+/giu, '$1[secret-redacted]')
+    .replace(
+      /((?:"|')?(?:api[_-]?key|access[_-]?key|[a-z0-9_-]*token|password|passwd|secret|authorization|cookie|credential|private[_-]?key|client[_-]?secret|signature)(?:"|')?\s*(?::|=|\s)\s*)(?:"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|[^\s,;}\]]+)/giu,
+      '$1[secret-redacted]',
+    )
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/gu, '[secret-redacted]')
+    .replace(/\b[A-Za-z]:[\\/]Users[\\/][^\\/\s"'`]+(?:[\\/][^\r\n"'`<>|]*)?/giu, '[UserPath]');
+  return text.length > BOOTSTRAP_GATE_OUTPUT_LIMIT
+    ? `[output truncated]\n${text.slice(-BOOTSTRAP_GATE_OUTPUT_LIMIT)}`
+    : text;
+}
+
+function createOutputCollector() {
+  let output = '';
+  return {
+    append(chunk) {
+      output += String(chunk);
+      if (output.length > BOOTSTRAP_GATE_OUTPUT_LIMIT * 2) {
+        output = output.slice(-BOOTSTRAP_GATE_OUTPUT_LIMIT);
+      }
+    },
+    read() {
+      return output;
+    },
+  };
+}
+
+function childHasExited(child) {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function describeChildExit(child) {
+  return `exit=${child.exitCode ?? 'none'}, signal=${child.signalCode ?? 'none'}`;
+}
+
+async function probeCdpPage(cdpPort, fetchImpl, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetchImpl(`http://127.0.0.1:${cdpPort}/json/list`, {
+      signal: controller.signal,
+    });
+    if (!response.ok) return { ready: false, detail: `HTTP ${response.status}` };
+    const targets = await response.json();
+    const ready = Array.isArray(targets) && targets.some((target) => (
+      target && typeof target === 'object' && target.type === 'page'
+    ));
+    return {
+      ready,
+      detail: ready ? '' : `CDP exposed ${Array.isArray(targets) ? targets.length : 0} targets without a page`,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function waitForBootstrapReady({
+  child,
+  cdpPort,
+  fetchImpl,
+  timeoutMs,
+  stabilityMs,
+  pollIntervalMs,
+  sleep,
+  getSpawnError,
+}) {
+  const deadline = Date.now() + timeoutMs;
+  let lastProbe = 'CDP has not responded';
+  while (Date.now() < deadline) {
+    const spawnError = getSpawnError();
+    if (spawnError) throw new Error(`UClaw.exe could not start: ${spawnError.message}`);
+    if (childHasExited(child)) {
+      throw new Error(`UClaw.exe exited before Bootstrap completed (${describeChildExit(child)}).`);
+    }
+
+    let probe;
+    try {
+      const remaining = Math.max(50, deadline - Date.now());
+      probe = await probeCdpPage(cdpPort, fetchImpl, Math.min(1_000, remaining));
+    } catch (error) {
+      if (childHasExited(child)) {
+        throw new Error(`UClaw.exe exited before Bootstrap completed (${describeChildExit(child)}).`);
+      }
+      lastProbe = error instanceof Error ? error.message : String(error);
+      await sleep(pollIntervalMs);
+      continue;
+    }
+    if (probe.ready) {
+      const stableUntil = Date.now() + stabilityMs;
+      while (Date.now() < stableUntil) {
+        if (childHasExited(child)) {
+          throw new Error(`UClaw.exe exited during Bootstrap stability check (${describeChildExit(child)}).`);
+        }
+        await sleep(Math.min(pollIntervalMs, Math.max(1, stableUntil - Date.now())));
+      }
+      if (childHasExited(child)) {
+        throw new Error(`UClaw.exe exited during Bootstrap stability check (${describeChildExit(child)}).`);
+      }
+      return;
+    }
+    lastProbe = probe.detail;
+    await sleep(pollIntervalMs);
+  }
+  throw new Error(`UClaw.exe did not expose a page over CDP within ${timeoutMs}ms (${lastProbe}).`);
+}
+
+function waitForProcessExit(child, timeoutMs) {
+  if (childHasExited(child)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const onExit = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    const timer = setTimeout(() => {
+      child.removeListener('exit', onExit);
+      resolve(false);
+    }, timeoutMs);
+    child.once('exit', onExit);
+  });
+}
+
+async function waitForChildOutput(child, timeoutMs = 250) {
+  if (!child || typeof child.once !== 'function') return;
+  await new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener?.('close', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    child.once('close', finish);
+    if (child.stdout?.readableEnded && child.stderr?.readableEnded) finish();
+  });
+}
+
+async function terminateBootstrapProcessTree(child) {
+  if (!child || childHasExited(child) || !child.pid) return;
+  if (process.platform === 'win32') {
+    spawnSync('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+  } else {
+    child.kill('SIGKILL');
+  }
+  if (!(await waitForProcessExit(child, 5_000))) {
+    throw new Error('Bootstrap probe process tree did not stop within 5000ms.');
+  }
+}
+
+export async function runPackagedBootstrapGate({
+  portableRoot,
+  platform = process.platform,
+  baseEnvironment = process.env,
+  timeoutMs = BOOTSTRAP_GATE_TIMEOUT_MS,
+  stabilityMs = BOOTSTRAP_GATE_STABILITY_MS,
+  pollIntervalMs = BOOTSTRAP_GATE_POLL_MS,
+  allocatePort = allocateLoopbackPort,
+  spawnProcess = spawn,
+  fetchImpl = globalThis.fetch,
+  sleep = delay,
+  terminateProcess = terminateBootstrapProcessTree,
+  tempParent = os.tmpdir(),
+  removeDirectory = (directory) => fs.promises.rm(directory, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 100,
+  }),
+} = {}) {
+  if (platform !== 'win32') throw new Error('Packaged Bootstrap integrity gate requires Windows.');
+  if (!portableRoot) throw new Error('Packaged Bootstrap integrity gate requires a portable root.');
+  const executablePath = path.join(portableRoot, 'UClaw.exe');
+  if (!fs.existsSync(executablePath)) throw new Error('Packaged Bootstrap integrity gate cannot find UClaw.exe.');
+
+  const startedAt = Date.now();
+  const output = createOutputCollector();
+  let sandboxRoot = '';
+  let child = null;
+  let spawnError = null;
+  let ports = null;
+  let failure = null;
+  try {
+    sandboxRoot = await fs.promises.mkdtemp(path.join(tempParent, 'uclaw-bootstrap-gate-'));
+    ports = await allocateBootstrapPorts(allocatePort);
+    const environment = createBootstrapEnvironment({
+      baseEnvironment,
+      sandboxRoot,
+      ...ports,
+    });
+    await Promise.all([
+      environment.USERPROFILE,
+      environment.APPDATA,
+      environment.LOCALAPPDATA,
+      environment.TEMP,
+      environment.CLAWX_PORTABLE_ROOT,
+      environment.CLAWX_RUNTIME_CACHE_ROOT,
+      environment.OPENCLAW_HOME,
+      environment.OPENCLAW_STATE_DIR,
+      environment.XDG_CONFIG_HOME,
+      environment.XDG_DATA_HOME,
+      environment.XDG_CACHE_HOME,
+    ].map((directory) => fs.promises.mkdir(directory, { recursive: true })));
+
+    child = spawnProcess(executablePath, [
+      `--remote-debugging-port=${ports.cdpPort}`,
+      `--user-data-dir=${environment.CLAWX_USER_DATA_DIR}`,
+      '--no-first-run',
+    ], {
+      cwd: portableRoot,
+      env: environment,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.once('error', (error) => {
+      spawnError = error instanceof Error ? error : new Error(String(error));
+    });
+    child.stdout?.on('data', (chunk) => output.append(chunk));
+    child.stderr?.on('data', (chunk) => output.append(chunk));
+    await waitForBootstrapReady({
+      child,
+      cdpPort: ports.cdpPort,
+      fetchImpl,
+      timeoutMs,
+      stabilityMs,
+      pollIntervalMs,
+      sleep,
+      getSpawnError: () => spawnError,
+    });
+  } catch (error) {
+    failure = error instanceof Error ? error : new Error(String(error));
+  }
+
+  try {
+    await terminateProcess(child);
+  } catch (error) {
+    const cleanupError = error instanceof Error ? error : new Error(String(error));
+    failure ??= cleanupError;
+    if (failure !== cleanupError) output.append(`\nCleanup error: ${cleanupError.message}`);
+  }
+  await waitForChildOutput(child);
+  if (sandboxRoot) {
+    try {
+      await removeDirectory(sandboxRoot);
+    } catch (error) {
+      const cleanupError = error instanceof Error ? error : new Error(String(error));
+      failure ??= cleanupError;
+      if (failure !== cleanupError) output.append(`\nSandbox cleanup error: ${cleanupError.message}`);
+    }
+  }
+
+  if (failure) {
+    const sensitivePaths = [
+      { value: sandboxRoot, replacement: '[BootstrapTemp]' },
+      { value: portableRoot, replacement: '[AppRoot]' },
+      { value: baseEnvironment.USERPROFILE, replacement: '[UserPath]' },
+      { value: baseEnvironment.HOME, replacement: '[UserPath]' },
+      { value: baseEnvironment.APPDATA, replacement: '[UserPath]' },
+      { value: baseEnvironment.LOCALAPPDATA, replacement: '[UserPath]' },
+    ];
+    const reason = redactBootstrapOutput(failure.message, { sensitivePaths });
+    const captured = redactBootstrapOutput(output.read(), { sensitivePaths }).trim();
+    const category = /MODULE_NOT_FOUND|Cannot find (?:package|module)/iu.test(`${failure.message}\n${output.read()}`)
+      ? 'MODULE_NOT_FOUND'
+      : 'startup_failure';
+    throw new Error([
+      `Packaged main-process Bootstrap integrity gate failed (${category}): ${reason}`,
+      `Captured startup output:\n${captured || '[no process output]'}`,
+    ].join('\n'));
+  }
+
+  return {
+    durationMs: Date.now() - startedAt,
+    cdpPort: ports.cdpPort,
+  };
 }
 
 function resolveSourceCommit() {
@@ -363,7 +792,9 @@ function writeMetadata(buffer, identity) {
   return metadata;
 }
 
-if (process.argv.includes('--clean-only')) {
+const DIRECT_INVOCATION = isDirectInvocation();
+
+if (DIRECT_INVOCATION && process.argv.includes('--clean-only')) {
   if (process.argv.includes('--require-clean-source') && resolveSourceTreeState() !== 'clean') {
     console.error('[build-usb-release] Windows USB builds require a committed, clean source tree.');
     process.exit(1);
@@ -373,7 +804,7 @@ if (process.argv.includes('--clean-only')) {
   process.exit(0);
 }
 
-try {
+if (DIRECT_INVOCATION) try {
   if (process.platform !== 'win32') {
     throw new Error('Windows USB packages must be built on a Windows host. Use the Package Windows workflow.');
   }
@@ -390,6 +821,9 @@ try {
   buildWindowsSelfCheck(path.join(portableRoot, SELF_CHECK_FILE));
   assertPortableDataClean(portableRoot);
   assertPortableContents(portableRoot);
+  const bootstrapGate = await runPackagedBootstrapGate({ portableRoot });
+  console.log(`[build-usb-release] Main-process Bootstrap integrity gate passed (${bootstrapGate.durationMs}ms).`);
+  assertPortableDataClean(portableRoot);
   const buffer = await writeZip(portableRoot);
   const metadata = writeMetadata(buffer, identity);
   console.log(`[build-usb-release] Created ${path.relative(ROOT, OUTPUT_PATH)} (${metadata.size} bytes).`);

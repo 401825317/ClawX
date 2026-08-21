@@ -12,6 +12,7 @@ import {
 import { cn } from '@/lib/utils';
 import { extnameOf, isHtmlPreviewExt } from '@/lib/generated-files';
 import { useArtifactPanel } from '@/stores/artifact-panel';
+import { normalizeWorkspaceHtmlPreviewUrl } from '@shared/web-browser';
 
 export type AcpFileTarget =
   | { kind: 'attachment'; ref: AttachmentFileRef }
@@ -27,7 +28,7 @@ function validIconDataUrl(value: string | undefined): value is string {
   );
 }
 
-function fileTargetKey(target: AcpFileTarget): string {
+function fileTargetKey(target: AcpFileTarget, attachmentWorkspaceRoot?: string): string {
   if (target.kind === 'workspace') {
     return JSON.stringify([target.kind, target.ref.workspaceRoot, target.ref.relativePath]);
   }
@@ -38,41 +39,50 @@ function fileTargetKey(target: AcpFileTarget): string {
     target.ref.uri,
     target.ref.stagingId,
     target.ref.transcriptMessageId,
+    attachmentWorkspaceRoot,
   ]);
 }
 
-function absolutePathToFileUrl(filePath: string): string {
-  const normalized = filePath.replace(/\\/g, '/');
-  const absolutePath = normalized.startsWith('/') ? normalized : `/${normalized}`;
-  const encodedPath = absolutePath
-    .split('/')
-    .map((segment, index) => {
-      if (index === 0) return '';
-      if (index === 1 && /^[A-Za-z]:$/.test(segment)) return segment;
-      return encodeURIComponent(segment);
-    })
-    .join('/');
-  return `file://${encodedPath}`;
+function localPathFromAttachmentUri(uri: string, platform: NodeJS.Platform): string | null {
+  if (!/^file:/i.test(uri)) {
+    return /^(?:[\\/]|[A-Za-z]:[\\/])/.test(uri) ? uri : null;
+  }
+  try {
+    const url = new URL(uri);
+    if (
+      url.protocol !== 'file:'
+      || url.username
+      || url.password
+      || url.search
+      || url.hash
+      || (url.hostname && url.hostname.toLowerCase() !== 'localhost')
+    ) return null;
+    let filePath = decodeURIComponent(url.pathname);
+    if (platform === 'win32') {
+      if (/^\/[A-Za-z]:\//.test(filePath)) filePath = filePath.slice(1);
+      filePath = filePath.replace(/\//g, '\\');
+    }
+    return filePath;
+  } catch {
+    return null;
+  }
 }
 
-function builtInBrowserUrl(target: AcpFileTarget, name: string): string | null {
+function builtInBrowserRequest(
+  target: AcpFileTarget,
+  name: string,
+  attachmentWorkspaceRoot: string | undefined,
+  platform: NodeJS.Platform,
+): { workspaceRoot: string; filePath: string } | null {
   if (!isHtmlPreviewExt(extnameOf(name))) return null;
   if (target.kind === 'workspace') {
     const root = target.ref.workspaceRoot.replace(/[\\/]+$/, '');
     const relativePath = target.ref.relativePath.replace(/^[\\/]+/, '');
-    return absolutePathToFileUrl(`${root}/${relativePath}`);
+    return { workspaceRoot: target.ref.workspaceRoot, filePath: `${root}/${relativePath}` };
   }
-  try {
-    const url = new URL(target.ref.uri);
-    if (url.protocol !== 'file:') return null;
-    if (!url.hostname) return url.href;
-    if (url.hostname.toLowerCase() !== 'localhost') return null;
-    return absolutePathToFileUrl(decodeURIComponent(url.pathname));
-  } catch {
-    return /^(?:[\\/]|[A-Za-z]:[\\/])/.test(target.ref.uri)
-      ? absolutePathToFileUrl(target.ref.uri)
-      : null;
-  }
+  if (!attachmentWorkspaceRoot) return null;
+  const filePath = localPathFromAttachmentUri(target.ref.uri, platform);
+  return filePath ? { workspaceRoot: attachmentWorkspaceRoot, filePath } : null;
 }
 
 function ApplicationIcon({ iconDataUrl }: { iconDataUrl?: string }) {
@@ -99,19 +109,28 @@ function ApplicationIcon({ iconDataUrl }: { iconDataUrl?: string }) {
   );
 }
 
-export function AcpFileOpenWith({ target, name }: { target: AcpFileTarget; name: string }) {
+export function AcpFileOpenWith({
+  target,
+  name,
+  workspaceRoot: attachmentWorkspaceRoot,
+}: {
+  target: AcpFileTarget;
+  name: string;
+  workspaceRoot?: string;
+}) {
   const { t, i18n } = useTranslation('chat');
   const [open, setOpen] = useState(false);
-  const targetKey = fileTargetKey(target);
+  const targetKey = fileTargetKey(target, attachmentWorkspaceRoot);
   const [discovery, setDiscovery] = useState<{
     targetKey: string;
     loading: boolean;
     handlers: AttachmentOpenHandler[];
   }>(() => ({ targetKey, loading: false, handlers: [] }));
   const requestToken = useRef(0);
+  const browserRequestToken = useRef(0);
   const currentTargetKey = useRef(targetKey);
   const platform = window.electron.platform;
-  const browserUrl = builtInBrowserUrl(target, name);
+  const browserRequest = builtInBrowserRequest(target, name, attachmentWorkspaceRoot, platform);
   const targetKind = target.kind;
   const attachmentSessionKey = target.kind === 'attachment' ? target.ref.sessionKey : undefined;
   const attachmentGeneration = target.kind === 'attachment' ? target.ref.generation : undefined;
@@ -129,6 +148,7 @@ export function AcpFileOpenWith({ target, name }: { target: AcpFileTarget; name:
 
   useLayoutEffect(() => {
     currentTargetKey.current = targetKey;
+    browserRequestToken.current += 1;
   }, [targetKey]);
 
   useEffect(() => {
@@ -197,6 +217,7 @@ export function AcpFileOpenWith({ target, name }: { target: AcpFileTarget; name:
 
   useEffect(() => () => {
     requestToken.current += 1;
+    browserRequestToken.current += 1;
   }, []);
 
   const handleOpenChange = (nextOpen: boolean) => {
@@ -220,6 +241,28 @@ export function AcpFileOpenWith({ target, name }: { target: AcpFileTarget; name:
       if (!result.ok) toast.error(t('fileCard.openWithFailed'));
     } catch {
       toast.error(t('fileCard.openWithFailed'));
+    }
+  };
+
+  const openInBuiltInBrowser = async (
+    request: { workspaceRoot: string; filePath: string },
+    requestTargetKey: string,
+  ) => {
+    if (requestTargetKey !== currentTargetKey.current) return;
+    const token = ++browserRequestToken.current;
+    try {
+      const validation = await hostApi.artifactTasks.validateWebpage(request);
+      const browserUrl = validation.ok && typeof validation.browserUrl === 'string'
+        ? normalizeWorkspaceHtmlPreviewUrl(validation.browserUrl)
+        : null;
+      if (
+        !browserUrl
+        || browserRequestToken.current !== token
+        || currentTargetKey.current !== requestTargetKey
+      ) return;
+      useArtifactPanel.getState().openWebBrowser(browserUrl);
+    } catch {
+      // Main validation owns both the feature gate and workspace authorization.
     }
   };
 
@@ -269,12 +312,12 @@ export function AcpFileOpenWith({ target, name }: { target: AcpFileTarget; name:
           sideOffset={4}
           className="z-50 max-h-72 min-w-48 overflow-y-auto rounded-lg border border-black/10 bg-surface-modal p-1 text-foreground shadow-lg dark:border-white/10"
         >
-          {browserUrl && (
+          {browserRequest && (
             <>
               <DropdownMenu.Item
                 data-testid="acp-file-open-in-built-in-browser"
                 className={itemClassName}
-                onSelect={() => useArtifactPanel.getState().openWebBrowser(browserUrl)}
+                onSelect={() => void openInBuiltInBrowser(browserRequest, targetKey)}
               >
                 <Globe className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
                 <span>{t('fileCard.openInBuiltInBrowser')}</span>
@@ -336,7 +379,7 @@ export function AcpFileCard({
   primaryTestId?: string;
   primaryDisabled?: boolean;
   onPrimary: () => void;
-  openWith?: { target: AcpFileTarget; name: string };
+  openWith?: { target: AcpFileTarget; name: string; workspaceRoot?: string };
   trailing?: ReactNode;
 }) {
   const primary = (
@@ -389,7 +432,13 @@ export function AcpFileCard({
     )}>
       {primary}
       {trailing}
-      {openWith && <AcpFileOpenWith target={openWith.target} name={openWith.name} />}
+      {openWith && (
+        <AcpFileOpenWith
+          target={openWith.target}
+          name={openWith.name}
+          workspaceRoot={openWith.workspaceRoot}
+        />
+      )}
     </div>
   );
 }

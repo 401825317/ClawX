@@ -396,7 +396,7 @@ export async function applyOpenAiImageRelaySettings(params: {
     imageModelIds,
   });
   if (params.enabled) {
-    ensureClawXOpenAiImagePluginInstalled();
+    await ensureClawXOpenAiImagePluginInstalled();
   }
 }
 

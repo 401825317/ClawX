@@ -1,7 +1,18 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import * as ts from 'typescript';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  expressionPath,
+  findAncestor,
+  findCalls,
+  findFunctionBody,
+  findNodes,
+  functionBody,
+  objectProperty,
+  parseTypeScriptSource,
+} from './source-contract';
 
 const {
   applyProxySettingsMock,
@@ -190,6 +201,14 @@ vi.mock('@electron/utils/agent-config', () => ({
 
 vi.mock('@electron/services/agent-profile-generation-service', () => ({
   generateAgentProfileViaGateway: (...args: unknown[]) => generateAgentProfileViaGatewayMock(...args),
+}));
+
+vi.mock('@electron/services/managed-auth-api', () => ({
+  createManagedAuthApi: vi.fn(() => ({})),
+}));
+
+vi.mock('@electron/services/billing-api', () => ({
+  createBillingApi: vi.fn(() => ({})),
 }));
 
 vi.mock('@electron/utils/plugin-install', () => ({
@@ -1976,73 +1995,153 @@ describe('host services', () => {
   });
 
   it('registers exactly one typed web browser service without legacy IPC', () => {
-    const source = readFileSync(join(process.cwd(), 'electron/main/ipc-handlers.ts'), 'utf8');
+    const source = parseTypeScriptSource('electron/main/ipc-handlers.ts');
+    const registrations = findCalls(source, 'hostApiRegistry.registerCoreServices');
+    const services = registrations[0]?.arguments[0];
 
-    expect(source.match(/\bwebBrowser\s*:/g)).toHaveLength(1);
-    expect(source).toContain('webBrowser: createWebBrowserApi({ browserSession, registry })');
-    expect(source).not.toMatch(/['"]webBrowser:/);
+    expect(registrations).toHaveLength(1);
+    expect(services && ts.isObjectLiteralExpression(services)).toBe(true);
+    const webBrowser = services && ts.isObjectLiteralExpression(services)
+      ? objectProperty(services, 'webBrowser')
+      : null;
+    expect(webBrowser && ts.isPropertyAssignment(webBrowser)).toBe(true);
+    expect(
+      webBrowser && ts.isPropertyAssignment(webBrowser) && ts.isCallExpression(webBrowser.initializer)
+        ? expressionPath(webBrowser.initializer.expression)
+        : null,
+    ).toBe('createWebBrowserApi');
+
+    const legacyWebBrowserChannels = findCalls(source, 'ipcMain.handle').filter((call) => {
+      const channel = call.arguments[0];
+      return channel && ts.isStringLiteralLike(channel) && channel.text.startsWith('webBrowser:');
+    });
+    expect(legacyWebBrowserChannels).toHaveLength(0);
   });
 
   it('registers the managed authentication typed service', () => {
-    const source = readFileSync(join(process.cwd(), 'electron/main/ipc-handlers.ts'), 'utf8');
+    const source = parseTypeScriptSource('electron/main/ipc-handlers.ts');
+    const registration = findCalls(source, 'hostApiRegistry.registerCoreServices')[0];
+    const services = registration?.arguments[0];
+    expect(services && ts.isObjectLiteralExpression(services)).toBe(true);
 
-    expect(source).toContain('managedAuth: createManagedAuthApi({ gatewayManager })');
-    expect(source).toContain('managedClientConfig: createManagedClientConfigApi()');
-    expect(source).toContain('billing: createBillingApi({ gatewayManager })');
-    expect(source).toContain('support: createSupportApi()');
+    const expectedFactories = {
+      managedAuth: 'createManagedAuthApi',
+      managedClientConfig: 'createManagedClientConfigApi',
+      billing: 'createBillingApi',
+      support: 'createSupportApi',
+    };
+    for (const [service, factory] of Object.entries(expectedFactories)) {
+      const property = services && ts.isObjectLiteralExpression(services)
+        ? objectProperty(services, service)
+        : null;
+      expect(property && ts.isPropertyAssignment(property)).toBe(true);
+      expect(
+        property && ts.isPropertyAssignment(property) && ts.isCallExpression(property.initializer)
+          ? expressionPath(property.initializer.expression)
+          : null,
+      ).toBe(factory);
+    }
   });
 
   it('checks managed recovery quarantine before startup Provider sync', () => {
-    const source = readFileSync(join(process.cwd(), 'electron/main/index.ts'), 'utf8');
-    const markerCheck = source.indexOf('await hasManagedRuntimeMutationMarker()');
-    const providerSync = source.indexOf('await syncAllProviderAuthToRuntime({', markerCheck);
-    const gatewayStart = source.indexOf('await gatewayManager.start()', providerSync);
+    const source = parseTypeScriptSource('electron/main/app-runtime.ts');
+    const initialize = findFunctionBody(source, 'initialize');
+    const markerCheck = findCalls(initialize, 'hasManagedRuntimeMutationMarker')[0];
+    const quarantine = markerCheck
+      ? findAncestor(markerCheck, ts.isIfStatement)
+      : null;
 
-    expect(markerCheck).toBeGreaterThan(-1);
-    expect(providerSync).toBeGreaterThan(markerCheck);
-    expect(gatewayStart).toBeGreaterThan(providerSync);
-    expect(source.slice(providerSync, gatewayStart)).toContain('refreshManagedPolicy: true');
-    expect(source.slice(providerSync, gatewayStart)).toContain('reconcileManagedRuntime: true');
+    expect(markerCheck).toBeDefined();
+    expect(quarantine).not.toBeNull();
+    expect(quarantine?.elseStatement).toBeDefined();
+    expect(findCalls(quarantine!.thenStatement, 'gatewayManager.start')).toHaveLength(0);
+
+    const providerSync = findCalls(quarantine!.elseStatement!, 'syncAllProviderAuthToRuntime')[0];
+    const gatewayStart = findCalls(quarantine!.elseStatement!, 'gatewayManager.start')[0];
+    expect(providerSync).toBeDefined();
+    expect(gatewayStart).toBeDefined();
+    expect(providerSync.pos).toBeLessThan(gatewayStart.pos);
+
+    const options = providerSync.arguments[0];
+    expect(options && ts.isObjectLiteralExpression(options)).toBe(true);
+    for (const option of ['refreshManagedPolicy', 'reconcileManagedRuntime']) {
+      const property = options && ts.isObjectLiteralExpression(options)
+        ? objectProperty(options, option)
+        : null;
+      expect(property && ts.isPropertyAssignment(property)).toBe(true);
+      expect(
+        property && ts.isPropertyAssignment(property)
+          ? property.initializer.kind
+          : null,
+      ).toBe(ts.SyntaxKind.TrueKeyword);
+    }
   });
 
   it('configures browser policy and typed handlers before the initial renderer load', () => {
-    const source = readFileSync(join(process.cwd(), 'electron/main/index.ts'), 'utf8');
-    const createWindowSource = source.slice(
-      source.indexOf('function createWindow('),
-      source.indexOf('function loadMainWindow('),
+    const source = parseTypeScriptSource('electron/main/app-runtime.ts');
+    const initialize = findFunctionBody(source, 'initialize');
+    const createWindow = findFunctionBody(source, 'createWindow');
+    const browserRegistries = findNodes(
+      source,
+      (node): node is ts.NewExpression => (
+        ts.isNewExpression(node) && expressionPath(node.expression) === 'WebBrowserGuestRegistry'
+      ),
     );
-    const configureIndex = source.indexOf('configureWebBrowserSession({');
-    const firstInitializationAwaitIndex = source.indexOf(
-      'await initTelemetry();',
-      source.indexOf('async function initialize()'),
-    );
-    const createMainWindowIndex = source.indexOf('const window = createMainWindow();');
-    const registerHandlersIndex = source.indexOf('registerIpcHandlers(');
-    const retiredSkillsCleanupIndex = source.indexOf('await removeRetiredPreinstalledSkills()');
-    const loadRendererIndex = source.indexOf('loadMainWindow(window);');
-    const appReadySource = source.slice(
-      source.indexOf('app.whenReady().then('),
-      source.indexOf("app.on('window-all-closed'"),
-    );
-    const initializeCompleteIndex = appReadySource.indexOf('await initialize();');
-    const activateHandlerIndex = appReadySource.indexOf("app.on('activate'");
+    expect(browserRegistries).toHaveLength(1);
 
-    expect(source.match(/new WebBrowserGuestRegistry\(\)/g)).toHaveLength(1);
-    expect(configureIndex).toBeGreaterThan(-1);
-    expect(configureIndex).toBeLessThan(firstInitializationAwaitIndex);
-    expect(createMainWindowIndex).toBeGreaterThan(configureIndex);
-    expect(registerHandlersIndex).toBeGreaterThan(createMainWindowIndex);
-    expect(retiredSkillsCleanupIndex).toBeGreaterThan(registerHandlersIndex);
-    expect(loadRendererIndex).toBeGreaterThan(retiredSkillsCleanupIndex);
-    expect(loadRendererIndex).toBeGreaterThan(registerHandlersIndex);
-    expect(initializeCompleteIndex).toBeGreaterThan(-1);
-    expect(activateHandlerIndex).toBeGreaterThan(initializeCompleteIndex);
-    expect(appReadySource).not.toContain('void initialize()');
-    expect(createWindowSource.indexOf('new BrowserWindow(')).toBeLessThan(
-      createWindowSource.indexOf('installWebBrowserGuestPolicy('),
-    );
-    expect(createWindowSource).not.toContain('.loadURL(');
-    expect(createWindowSource).not.toContain('.loadFile(');
-    expect(source).toContain('getMainWindow: () => mainWindow');
+    const configure = findCalls(initialize, 'configureWebBrowserSession')[0];
+    const createMainWindow = findCalls(initialize, 'createMainWindow')[0];
+    const registerHandlers = findCalls(initialize, 'registerIpcHandlers')[0];
+    const loadRenderer = findCalls(initialize, 'loadMainWindow')[0];
+    expect(configure).toBeDefined();
+    expect(createMainWindow).toBeDefined();
+    expect(registerHandlers).toBeDefined();
+    expect(loadRenderer).toBeDefined();
+    expect(configure.pos).toBeLessThan(createMainWindow.pos);
+    expect(createMainWindow.pos).toBeLessThan(registerHandlers.pos);
+    expect(registerHandlers.pos).toBeLessThan(loadRenderer.pos);
+
+    const configureOptions = configure.arguments[0];
+    const getMainWindow = configureOptions && ts.isObjectLiteralExpression(configureOptions)
+      ? objectProperty(configureOptions, 'getMainWindow')
+      : null;
+    expect(getMainWindow && ts.isPropertyAssignment(getMainWindow)).toBe(true);
+    const getMainWindowInitializer = getMainWindow && ts.isPropertyAssignment(getMainWindow)
+      ? getMainWindow.initializer
+      : null;
+    expect(getMainWindowInitializer && ts.isArrowFunction(getMainWindowInitializer)).toBe(true);
+    expect(
+      getMainWindowInitializer
+      && ts.isArrowFunction(getMainWindowInitializer)
+      && ts.isIdentifier(getMainWindowInitializer.body)
+        ? getMainWindowInitializer.body.text
+        : null,
+    ).toBe('mainWindow');
+
+    const readyRegistration = findCalls(source, 'app.whenReady().then')[0];
+    const readyBody = functionBody(readyRegistration?.arguments[0]);
+    expect(readyBody).not.toBeNull();
+    const initializeCall = findCalls(readyBody!, 'initialize')[0];
+    const activateRegistration = findCalls(readyBody!, 'app.on').find((call) => {
+      const event = call.arguments[0];
+      return event && ts.isStringLiteralLike(event) && event.text === 'activate';
+    });
+    expect(initializeCall).toBeDefined();
+    expect(findAncestor(initializeCall, ts.isAwaitExpression)).not.toBeNull();
+    expect(activateRegistration).toBeDefined();
+    expect(initializeCall.pos).toBeLessThan(activateRegistration!.pos);
+
+    const browserWindow = findNodes(
+      createWindow,
+      (node): node is ts.NewExpression => (
+        ts.isNewExpression(node) && expressionPath(node.expression) === 'BrowserWindow'
+      ),
+    )[0];
+    const installGuestPolicy = findCalls(createWindow, 'installWebBrowserGuestPolicy')[0];
+    expect(browserWindow).toBeDefined();
+    expect(installGuestPolicy).toBeDefined();
+    expect(browserWindow.pos).toBeLessThan(installGuestPolicy.pos);
+    expect(findCalls(createWindow, 'win.loadURL')).toHaveLength(0);
+    expect(findCalls(createWindow, 'win.loadFile')).toHaveLength(0);
   });
 });

@@ -1,7 +1,8 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import sharp from 'sharp';
@@ -269,7 +270,7 @@ describe('AcpChatService', () => {
     pendingLoad.resolve({});
 
     await expect(load).resolves.toMatchObject({
-      success: false, errorCode: 'SERVICE_UNAVAILABLE', retryable: true,
+      success: false, errorCode: 'GATEWAY_UNAVAILABLE', retryable: true,
     });
   });
 
@@ -293,7 +294,7 @@ describe('AcpChatService', () => {
     pendingPrompt.resolve({});
 
     await expect(prompt).resolves.toMatchObject({
-      success: false, errorCode: 'SERVICE_UNAVAILABLE', retryable: true,
+      success: false, errorCode: 'GATEWAY_UNAVAILABLE', retryable: true,
     });
     expect(connection.prompt).toHaveBeenCalledTimes(1);
   });
@@ -466,6 +467,295 @@ describe('AcpChatService', () => {
       httpStatus: 403,
       upstreamCode: 'insufficient_user_quota',
     });
+  });
+
+  it('retries a pre-tool upstream 503 with bounded exponential backoff', async () => {
+    const connection = createConnection();
+    connection.prompt
+      .mockRejectedValueOnce({ status: 503, type: 'service_unavailable_error', message: 'Our servers are currently overloaded.' })
+      .mockRejectedValueOnce({ status: 503, type: 'upstream_error', message: 'Upstream service temporarily unavailable.' })
+      .mockResolvedValueOnce({ stopReason: 'end_turn' });
+    const { service } = await createService(connection);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    vi.useFakeTimers();
+
+    try {
+      const result = service.sendPrompt({
+        sessionKey: 'agent:pi:s1',
+        cwd: '/repo',
+        message: 'create the report',
+        messageId: 'msg-overload',
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      await expect(result).resolves.toEqual({ success: true, generation: 1 });
+      expect(connection.prompt).toHaveBeenCalledTimes(3);
+      expect(connection.prompt.mock.calls[0]?.[0]).toMatchObject({
+        prompt: [{ type: 'text', text: 'create the report' }],
+        messageId: 'msg-overload',
+      });
+      expect(connection.prompt.mock.calls[1]?.[0]).toMatchObject({
+        messageId: 'msg-overload:upstream-retry:2',
+        prompt: [{ type: 'text', text: expect.stringContaining('latest unresolved user request already recorded') }],
+      });
+      expect(connection.prompt.mock.calls[2]?.[0]).toMatchObject({
+        messageId: 'msg-overload:upstream-retry:3',
+      });
+      expect(loggerMock.warn).toHaveBeenCalledWith(expect.stringContaining('after 500ms'));
+      expect(loggerMock.warn).toHaveBeenCalledWith(expect.stringContaining('after 1000ms'));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    [{ status: 429, type: 'rate_limit_error', message: 'Too many requests.' }, 'RATE_LIMIT'],
+    [{ type: 'service_unavailable', message: 'The provider is unavailable.' }, 'SERVICE_UNAVAILABLE'],
+    [{ type: 'upstream_error', message: 'The upstream failed.' }, 'SERVICE_UNAVAILABLE'],
+  ] as const)('retries Responses upstream failure shape %j', async (upstreamError, expectedCode) => {
+    const connection = createConnection();
+    connection.prompt
+      .mockRejectedValueOnce(upstreamError)
+      .mockRejectedValueOnce(upstreamError)
+      .mockRejectedValueOnce(upstreamError);
+    const { service } = await createService(connection);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    vi.useFakeTimers();
+
+    try {
+      const result = service.sendPrompt({
+        sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'continue', messageId: 'msg-responses-shape',
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(result).resolves.toMatchObject({
+        success: false,
+        errorCode: expectedCode,
+        retryable: true,
+      });
+      expect(connection.prompt).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('emits one terminal failure reply when bounded upstream retries are exhausted', async () => {
+    const connection = createConnection();
+    connection.prompt.mockRejectedValue({ type: 'upstream_error', message: 'Upstream service failed.' });
+    const { service, send } = await createService(connection);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    vi.useFakeTimers();
+
+    try {
+      const result = service.sendPrompt({
+        sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'continue', messageId: 'msg-final-failure',
+      });
+      await vi.advanceTimersByTimeAsync(500 + 1_000);
+      await expect(result).resolves.toMatchObject({
+        success: false,
+        errorCode: 'SERVICE_UNAVAILABLE',
+        retryable: true,
+      });
+      expect(connection.prompt).toHaveBeenCalledTimes(3);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send).toHaveBeenCalledWith(HOST_EVENT_CHANNELS.chat.acpSessionUpdate, expect.objectContaining({
+        notification: expect.objectContaining({
+          sessionId: 'agent:pi:s1',
+          update: expect.objectContaining({
+            sessionUpdate: 'uclaw_turn_failure',
+            userMessageId: 'msg-final-failure',
+            errorCode: 'SERVICE_UNAVAILABLE',
+            retryable: true,
+          }),
+        }),
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not replay an upstream 503 after a tool call has started', async () => {
+    const connection = createConnection();
+    const pendingPrompt = createDeferred<unknown>();
+    connection.prompt.mockReturnValueOnce(pendingPrompt.promise);
+    const { service } = await createService(connection);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+
+    const result = service.sendPrompt({
+      sessionKey: 'agent:pi:s1',
+      cwd: '/repo',
+      message: 'edit the workbook',
+      messageId: 'msg-post-tool',
+    });
+    await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(1));
+    await service.client.sessionUpdate({
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-side-effect',
+        title: 'Write workbook',
+        status: 'in_progress',
+      },
+    } as never);
+    pendingPrompt.reject({ status: 503, type: 'upstream_error', message: 'Upstream service temporarily unavailable.' });
+
+    await expect(result).resolves.toMatchObject({
+      success: false,
+      error: expect.stringContaining('did not replay the turn'),
+      errorCode: 'SERVICE_UNAVAILABLE',
+      retryable: true,
+      httpStatus: 503,
+    });
+    expect(connection.prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('settles a hung prompt from its terminal event and completes a replay-safe retry', async () => {
+    const connection = createConnection();
+    const firstPrompt = createDeferred<unknown>();
+    connection.prompt
+      .mockReturnValueOnce(firstPrompt.promise)
+      .mockResolvedValueOnce({ stopReason: 'end_turn' });
+    const { service, send } = await createService(connection);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    vi.useFakeTimers();
+
+    try {
+      const result = service.sendPrompt({
+        sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'continue', messageId: 'msg-terminal-retry',
+      });
+      await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(1));
+      await service.client.sessionUpdate({
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'uclaw_turn_failure',
+          userMessageId: 'msg-terminal-retry',
+          errorMessage: 'Upstream service temporarily unavailable.',
+        },
+      } as never);
+
+      await vi.advanceTimersByTimeAsync(500);
+      await expect(result).resolves.toEqual({ success: true, generation: 1 });
+      expect(send).not.toHaveBeenCalledWith(HOST_EVENT_CHANNELS.chat.acpSessionUpdate, expect.objectContaining({
+        notification: expect.objectContaining({
+          update: expect.objectContaining({ sessionUpdate: 'uclaw_turn_failure' }),
+        }),
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('uses a structured OpenClaw fallback summary for one context recovery attempt', async () => {
+    const structuredSummary = [
+      '## Decisions', 'Keep the accepted dress dimensions.',
+      '## Open TODOs', 'Generate the DXF.',
+      '## Constraints/Rules', 'Do not repeat completed tools.',
+      '## Pending user asks', 'Finish the CAD pattern.',
+      '## Exact identifiers', 'DXF-2026-08-19.',
+    ].join('\n');
+    const connection = createConnection();
+    connection.prompt
+      .mockRejectedValueOnce({
+        message: 'Context is too large and auto-compaction could not recover this turn.',
+        data: { recoverySummary: structuredSummary },
+      })
+      .mockResolvedValueOnce({ stopReason: 'end_turn' });
+    const { service } = await createService(connection);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    vi.useFakeTimers();
+
+    try {
+      const result = service.sendPrompt({
+        sessionKey: 'agent:pi:s1',
+        cwd: '/repo',
+        message: 'finish the CAD pattern',
+        messageId: 'msg-context',
+      });
+      await vi.advanceTimersByTimeAsync(500);
+
+      await expect(result).resolves.toEqual({ success: true, generation: 1 });
+      expect(connection.prompt).toHaveBeenCalledTimes(2);
+      expect(connection.prompt.mock.calls[1]?.[0]).toMatchObject({
+        messageId: 'msg-context:context-recovery:2',
+        prompt: [{ type: 'text', text: expect.stringContaining(structuredSummary) }],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('builds a minimal recovery summary when compaction returns no summary', async () => {
+    const connection = createConnection();
+    connection.prompt
+      .mockRejectedValueOnce({ message: 'Context limit exceeded; compaction failed.' })
+      .mockResolvedValueOnce({ stopReason: 'end_turn' });
+    const { service } = await createService(connection);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    vi.useFakeTimers();
+
+    try {
+      const result = service.sendPrompt({
+        sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'continue', messageId: 'msg-minimal-recovery',
+      });
+      await vi.advanceTimersByTimeAsync(500);
+
+      await expect(result).resolves.toEqual({ success: true, generation: 1 });
+      expect(connection.prompt).toHaveBeenCalledTimes(2);
+      const recoveryText = connection.prompt.mock.calls[1]?.[0].prompt[0];
+      expect(recoveryText).toMatchObject({ type: 'text' });
+      expect((recoveryText as { text: string }).text).toEqual(expect.stringContaining('## Exact identifiers'));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('returns an explicit context error when the single recovery attempt fails', async () => {
+    const connection = createConnection();
+    connection.prompt.mockRejectedValue({
+      message: 'Preflight compaction required but failed: summarizer unavailable',
+    });
+    const { service } = await createService(connection);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    vi.useFakeTimers();
+
+    try {
+      const result = service.sendPrompt({
+        sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'continue', messageId: 'msg-context-failed',
+      });
+      await vi.advanceTimersByTimeAsync(500);
+
+      await expect(result).resolves.toMatchObject({
+        success: false,
+        error: expect.stringContaining('Automatic context recovery failed after one replay-safe attempt'),
+        errorCode: 'CONTEXT_OVERFLOW',
+        retryable: true,
+      });
+      expect(connection.prompt).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not retry a non-retryable provider request error', async () => {
+    const connection = createConnection();
+    connection.prompt.mockRejectedValueOnce({
+      status: 400,
+      code: 'invalid_request',
+      message: 'Unsupported parameter: max_output_tokens',
+    });
+    const { service } = await createService(connection);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+
+    await expect(service.sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'hello', messageId: 'msg-invalid',
+    })).resolves.toMatchObject({
+      success: false,
+      errorCode: 'INVALID_REQUEST',
+      retryable: false,
+      httpStatus: 400,
+    });
+    expect(connection.prompt).toHaveBeenCalledTimes(1);
   });
 
   it('queues video composer options without changing the ACP prompt text', async () => {
@@ -1348,8 +1638,8 @@ describe('AcpChatService', () => {
       expect(accessRegistry.get('agent:pi:grant', 1)).toEqual({
         sessionKey: 'agent:pi:grant',
         generation: 1,
-        workspaceRoot: realpathSync(workspaceRoot),
-        executionCwd: realpathSync(executionCwd),
+        workspaceRoot: await realpath(workspaceRoot),
+        executionCwd: await realpath(executionCwd),
       });
     } finally {
       rmSync(parent, { recursive: true, force: true });
@@ -1380,7 +1670,7 @@ describe('AcpChatService', () => {
 
       expect(connection.loadSession).toHaveBeenCalledWith({
         sessionId: 'agent:pi:portable',
-        cwd: realpathSync(workspaceRoot),
+        cwd: await realpath(workspaceRoot),
         mcpServers: [],
       });
       expect(connection.prompt).toHaveBeenCalledTimes(1);
@@ -1411,8 +1701,8 @@ describe('AcpChatService', () => {
       expect(accessRegistry.get('agent:pi:first', 1)).toEqual({
         sessionKey: 'agent:pi:first',
         generation: 1,
-        workspaceRoot: realpathSync(firstRoot),
-        executionCwd: realpathSync(firstRoot),
+        workspaceRoot: await realpath(firstRoot),
+        executionCwd: await realpath(firstRoot),
       });
       expect(accessRegistry.get('agent:pi:second', 2)).toBeNull();
     } finally {

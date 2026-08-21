@@ -1,4 +1,5 @@
 import type { ElectronApplication } from '@playwright/test';
+import { randomBytes } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import { basename, join } from 'node:path';
@@ -16,6 +17,7 @@ export interface LocalWebBrowserFixture {
   filePath: string;
   fileUrl: string;
   downloadFilename: string;
+  electronArgs: string[];
   urls: {
     start: string;
     second: string;
@@ -25,6 +27,7 @@ export interface LocalWebBrowserFixture {
     allowedRedirect: string;
     crossOriginRedirect: string;
     disallowedRedirect: string;
+    privateNetwork: string;
     storage: string;
     storagePolicy: string;
     storageAlternate: string;
@@ -32,6 +35,7 @@ export interface LocalWebBrowserFixture {
     download: string;
     cache: string;
     serviceWorker: string;
+    workspacePreview: string;
   };
   advanceStorageVersion: () => number;
   requestCount: (path: string) => number;
@@ -126,15 +130,21 @@ async function createLocalWebBrowserFixture(homeDir: string): Promise<{
 }> {
   const fixtureDir = join(homeDir, 'web-browser-e2e');
   const workspaceDir = join(fixtureDir, 'workspace');
-  const filePath = join(fixtureDir, 'local file fixture.html');
+  const filePath = join(workspaceDir, 'local file fixture.html');
   const downloadFilename = `clawx-e2e-${basename(homeDir)}.txt`;
+  const primaryHost = 'clawx-browser-fixture.test';
+  const alternateHost = 'clawx-browser-fixture-alt.test';
+  const previewToken = randomBytes(32).toString('base64url');
+  const previewPath = `/${previewToken}/index.html`;
   await mkdir(workspaceDir, { recursive: true });
-  await writeFile(filePath, html('Local File Fixture', '<main id="local-file">local file</main>'), 'utf8');
+  const workspaceHtml = html('Local File Fixture', '<main id="local-file">local file</main>');
+  await writeFile(filePath, workspaceHtml, 'utf8');
 
   const requests: LocalWebBrowserRequest[] = [];
   let cacheVersion = 0;
   let storageVersion = 1;
   let origin = '';
+  let alternateOrigin = '';
   const server = createServer((request, response) => {
     const requestUrl = new URL(request.url ?? '/', origin || 'http://127.0.0.1');
     requests.push({
@@ -144,6 +154,10 @@ async function createLocalWebBrowserFixture(homeDir: string): Promise<{
     });
 
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
+    if (requestUrl.pathname === previewPath) {
+      response.end(workspaceHtml);
+      return;
+    }
     switch (requestUrl.pathname) {
       case '/start':
         response.end(html('Fixture Start', [
@@ -178,7 +192,7 @@ async function createLocalWebBrowserFixture(homeDir: string): Promise<{
         return;
       case '/redirect-cross-origin':
         response.statusCode = 302;
-        response.setHeader('Location', `${origin.replace('127.0.0.1', 'localhost')}/storage-policy`);
+        response.setHeader('Location', `${alternateOrigin}/storage-policy`);
         response.end();
         return;
       case '/redirect-disallowed':
@@ -272,7 +286,9 @@ async function createLocalWebBrowserFixture(homeDir: string): Promise<{
     }
   });
   const port = await listen(server);
-  origin = `http://127.0.0.1:${port}`;
+  origin = `http://${primaryHost}:${port}`;
+  alternateOrigin = `http://${alternateHost}:${port}`;
+  const loopbackOrigin = `http://127.0.0.1:${port}`;
   const url = (path: string) => `${origin}${path}`;
 
   return {
@@ -282,6 +298,13 @@ async function createLocalWebBrowserFixture(homeDir: string): Promise<{
       filePath,
       fileUrl: pathToFileURL(filePath).href,
       downloadFilename,
+      // This maps only deterministic E2E hostnames to the loopback fixture.
+      // Production still sees and rejects actual localhost/private-network URLs.
+      electronArgs: [
+        `--host-resolver-rules=MAP ${primaryHost} 127.0.0.1,MAP ${alternateHost} 127.0.0.1`,
+        '--no-proxy-server',
+        `--unsafely-treat-insecure-origin-as-secure=${origin},${alternateOrigin}`,
+      ],
       urls: {
         start: url('/start'),
         second: url('/second'),
@@ -291,13 +314,15 @@ async function createLocalWebBrowserFixture(homeDir: string): Promise<{
         allowedRedirect: url('/redirect-allowed'),
         crossOriginRedirect: url('/redirect-cross-origin'),
         disallowedRedirect: url('/redirect-disallowed'),
+        privateNetwork: `http://localhost:${port}/start`,
         storage: url('/storage'),
         storagePolicy: url('/storage-policy'),
-        storageAlternate: `http://localhost:${port}/storage-policy`,
+        storageAlternate: `${alternateOrigin}/storage-policy`,
         permissions: url('/permissions'),
         download: url('/download'),
         cache: url('/cache'),
         serviceWorker: url('/service-worker'),
+        workspacePreview: `${loopbackOrigin}${previewPath}`,
       },
       advanceStorageVersion: () => {
         storageVersion += 1;

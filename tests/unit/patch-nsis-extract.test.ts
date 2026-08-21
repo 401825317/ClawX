@@ -1,16 +1,19 @@
 // @vitest-environment node
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { basename, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import {
-  patchNsisExtractTemplate,
-  restoreExtractAppPackageTemplate,
-} from '../../scripts/patch-nsis-extract.mjs';
-import { patchNsisUninstallTemplate } from '../../scripts/patch-nsis-uninstall.mjs';
-
 const FIXTURES = join(fileURLToPath(new URL('.', import.meta.url)), '../fixtures');
+const patchExtractModulePath = resolve(process.cwd(), 'scripts/patch-nsis-extract.mjs');
+const patchUninstallModulePath = resolve(process.cwd(), 'scripts/patch-nsis-uninstall.mjs');
+
+async function importCliModule<T>(sourcePath: string, directory: string): Promise<T> {
+  const modulePath = join(directory, basename(sourcePath));
+  const source = readFileSync(sourcePath, 'utf8').replace(/^#![^\r\n]*(?:\r?\n|$)/, '');
+  writeFileSync(modulePath, source, 'utf8');
+  return await import(`${pathToFileURL(modulePath).href}?test=${Date.now()}-${Math.random()}`) as T;
+}
 
 const SAMPLE_EXTRACT_MACRO = `!macro extractUsing7za FILE
   Push $OUTDIR
@@ -47,8 +50,12 @@ describe('patch-nsis-extract', () => {
     }
   });
 
-  it('replaces CopyFiles-based extractUsing7za with direct 7z extraction', () => {
+  it('replaces CopyFiles-based extractUsing7za with direct 7z extraction', async () => {
     tempDir = mkdtempSync(join(tmpdir(), 'clawx-patch-nsis-'));
+    const { patchNsisExtractTemplate } = await importCliModule<typeof import('../../scripts/patch-nsis-extract.mjs')>(
+      patchExtractModulePath,
+      tempDir,
+    );
     const target = join(tempDir, 'extractAppPackage.nsh');
     writeFileSync(target, SAMPLE_FILE, 'utf8');
 
@@ -66,8 +73,12 @@ describe('patch-nsis-extract', () => {
     expect(patchNsisExtractTemplate(target)).toBe(true);
   });
 
-  it('upgrades stale ClawX extract patches that used to continue after extract failure', () => {
+  it('upgrades stale ClawX extract patches that used to continue after extract failure', async () => {
     tempDir = mkdtempSync(join(tmpdir(), 'clawx-patch-nsis-'));
+    const { patchNsisExtractTemplate } = await importCliModule<typeof import('../../scripts/patch-nsis-extract.mjs')>(
+      patchExtractModulePath,
+      tempDir,
+    );
     const target = join(tempDir, 'extractAppPackage.nsh');
     writeFileSync(
       target,
@@ -95,8 +106,15 @@ describe('patch-nsis-extract', () => {
     expect(result).not.toContain('continuing overwrite install anyway');
   });
 
-  it('restores and re-patches a corrupted template', () => {
+  it('restores and re-patches a corrupted template', async () => {
     tempDir = mkdtempSync(join(tmpdir(), 'clawx-patch-nsis-'));
+    const {
+      patchNsisExtractTemplate,
+      restoreExtractAppPackageTemplate,
+    } = await importCliModule<typeof import('../../scripts/patch-nsis-extract.mjs')>(
+      patchExtractModulePath,
+      tempDir,
+    );
     const target = join(tempDir, 'extractAppPackage.nsh');
     writeFileSync(
       target,
@@ -124,8 +142,12 @@ describe('patch-nsis-uninstall', () => {
     }
   });
 
-  it('skips the legacy uninstaller retry loop on upgrades', () => {
+  it('skips the legacy uninstaller retry loop on upgrades', async () => {
     tempDir = mkdtempSync(join(tmpdir(), 'clawx-patch-nsis-'));
+    const { patchNsisUninstallTemplate } = await importCliModule<typeof import('../../scripts/patch-nsis-uninstall.mjs')>(
+      patchUninstallModulePath,
+      tempDir,
+    );
     const target = join(tempDir, 'installUtil.nsh');
     writeFileSync(target, `before\n${SAMPLE_UNINSTALL_FUNCTION}\nafter`, 'utf8');
 

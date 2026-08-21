@@ -4,6 +4,7 @@ import type {
 } from '../acp-chat/types';
 import type { UpdateStatusSnapshot } from '../host-api/contract';
 import type { ChatRuntimeEvent } from '../chat-runtime-events';
+import type { PortableRuntimeHealthSnapshot } from '../portable-runtime-health';
 import type {
   GatewayNotification,
   GatewayRuntimePayload,
@@ -100,6 +101,7 @@ export type HostEventContract = {
     navigate: (path: string) => void;
     newChat: () => void;
     openClawCliInstalled: (installedPath: string) => void;
+    portableRuntimeHealthChanged: (snapshot: PortableRuntimeHealthSnapshot) => void;
   };
 };
 
@@ -144,6 +146,7 @@ export const HOST_EVENT_CHANNELS = {
     navigate: 'navigate',
     newChat: 'new-chat',
     openClawCliInstalled: 'openclaw:cli-installed',
+    portableRuntimeHealthChanged: 'portable-runtime:health-changed',
   },
 } as const satisfies {
   [M in Exclude<HostEventModule, 'channel'>]: {

@@ -32,6 +32,16 @@ vi.mock('electron', () => ({
   },
 }));
 
+vi.mock('@electron/utils/logger', () => {
+  const logger = {
+    debug: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+  };
+  return { ...logger, logger };
+});
+
 async function writeOpenClawJson(config: unknown): Promise<void> {
   const openclawDir = join(testHome, '.openclaw');
   await mkdir(openclawDir, { recursive: true });

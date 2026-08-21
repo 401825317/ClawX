@@ -2,12 +2,22 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   existsSync,
   readFileSync,
+  statSync,
 } from 'node:fs';
 import { cp, mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 const CACHE_SCHEMA = 'uclaw.portable-openclaw-runtime/v1';
 const CACHE_MARKER_FILE = '.uclaw-openclaw-runtime.json';
+const CHALK_PACKAGE_DIR = join('node_modules', 'chalk');
+const CHALK_SOURCE_FILE = join(CHALK_PACKAGE_DIR, 'source', 'index.js');
+const CHALK_ANSI_STYLES_FILE = join(
+  CHALK_PACKAGE_DIR,
+  'source',
+  'vendor',
+  'ansi-styles',
+  'index.js',
+);
 
 type PortableOpenClawRuntimeMarker = {
   schema: typeof CACHE_SCHEMA;
@@ -21,6 +31,7 @@ export type PreparePortableOpenClawRuntimeInput = {
   sourceDir: string;
   profileDir: string;
   resourcesDir: string;
+  cacheRootDir?: string;
 };
 
 export type PortableOpenClawRuntimeResult = {
@@ -78,8 +89,79 @@ function resolveRuntimeIdentity(input: PreparePortableOpenClawRuntimeInput): {
   };
 }
 
+export function resolvePortableOpenClawCacheRoot(
+  runtimeRootDir: string,
+  portableId: string,
+): string {
+  const portableScope = createHash('sha256')
+    .update(portableId, 'utf8')
+    .digest('hex')
+    .slice(0, 16);
+  return join(runtimeRootDir, 'oc', portableScope);
+}
+
+function resolveRuntimeCacheRoot(input: PreparePortableOpenClawRuntimeInput): string {
+  return input.cacheRootDir?.trim() || join(input.profileDir, 'openclaw-runtime');
+}
+
+function resolveRuntimeDir(input: PreparePortableOpenClawRuntimeInput, cacheKey: string): string {
+  return join(resolveRuntimeCacheRoot(input), cacheKey);
+}
+
+function isFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function resolvePackageImportTarget(packageDir: string, target: unknown): string | null {
+  if (typeof target !== 'string' || !target.startsWith('./')) {
+    return null;
+  }
+  const targetPath = resolve(packageDir, target);
+  const relativeTarget = relative(packageDir, targetPath);
+  if (
+    !relativeTarget
+    || relativeTarget === '..'
+    || relativeTarget.startsWith(`..${sep}`)
+    || isAbsolute(relativeTarget)
+  ) {
+    return null;
+  }
+  return targetPath;
+}
+
+function hasCompleteRuntimePayload(runtimeDir: string): boolean {
+  const chalkPackageDir = join(runtimeDir, CHALK_PACKAGE_DIR);
+  const chalkPackagePath = join(chalkPackageDir, 'package.json');
+  const chalkSourcePath = join(runtimeDir, CHALK_SOURCE_FILE);
+  const ansiStylesPath = join(runtimeDir, CHALK_ANSI_STYLES_FILE);
+  if (
+    !isFile(join(runtimeDir, 'openclaw.mjs'))
+    || !isFile(join(runtimeDir, 'package.json'))
+    || !isFile(chalkPackagePath)
+    || !isFile(chalkSourcePath)
+    || !isFile(ansiStylesPath)
+  ) {
+    return false;
+  }
+
+  const chalkPackage = readJson(chalkPackagePath);
+  const imports = chalkPackage?.imports;
+  if (!imports || typeof imports !== 'object' || Array.isArray(imports)) {
+    return false;
+  }
+  const importTarget = resolvePackageImportTarget(
+    chalkPackageDir,
+    (imports as Record<string, unknown>)['#ansi-styles'],
+  );
+  return importTarget === resolve(ansiStylesPath) && isFile(importTarget);
+}
+
 function isCompleteRuntime(runtimeDir: string, cacheKey: string): boolean {
-  if (!existsSync(join(runtimeDir, 'openclaw.mjs')) || !existsSync(join(runtimeDir, 'package.json'))) {
+  if (!hasCompleteRuntimePayload(runtimeDir)) {
     return false;
   }
   const marker = readJson(join(runtimeDir, CACHE_MARKER_FILE));
@@ -96,7 +178,7 @@ export function findPreparedPortableOpenClawRuntime(
 ): PortableOpenClawRuntimeResult | null {
   try {
     const identity = resolveRuntimeIdentity(input);
-    const runtimeDir = join(input.profileDir, 'openclaw-runtime', identity.cacheKey);
+    const runtimeDir = resolveRuntimeDir(input, identity.cacheKey);
     return isCompleteRuntime(runtimeDir, identity.cacheKey)
       ? { runtimeDir, cacheKey: identity.cacheKey, cacheHit: true }
       : null;
@@ -114,7 +196,7 @@ export function configurePortableOpenClawRuntime(
   input: PreparePortableOpenClawRuntimeInput,
 ): PortableOpenClawRuntimeResult {
   const identity = resolveRuntimeIdentity(input);
-  const runtimeDir = join(input.profileDir, 'openclaw-runtime', identity.cacheKey);
+  const runtimeDir = resolveRuntimeDir(input, identity.cacheKey);
   const prepared = isCompleteRuntime(runtimeDir, identity.cacheKey);
   const result = { runtimeDir, cacheKey: identity.cacheKey, cacheHit: prepared };
   configuredRuntime = { input, result, prepared };
@@ -146,12 +228,12 @@ export function isConfiguredPortableOpenClawRuntimePrepared(): boolean {
 export async function preparePortableOpenClawRuntime(
   input: PreparePortableOpenClawRuntimeInput,
 ): Promise<PortableOpenClawRuntimeResult> {
-  if (!existsSync(join(input.sourceDir, 'openclaw.mjs')) || !existsSync(join(input.sourceDir, 'package.json'))) {
+  if (!hasCompleteRuntimePayload(input.sourceDir)) {
     throw new Error(`Packaged OpenClaw runtime is incomplete: ${input.sourceDir}`);
   }
 
   const identity = resolveRuntimeIdentity(input);
-  const cacheRoot = join(input.profileDir, 'openclaw-runtime');
+  const cacheRoot = resolveRuntimeCacheRoot(input);
   const runtimeDir = join(cacheRoot, identity.cacheKey);
   await mkdir(cacheRoot, { recursive: true });
 
@@ -159,18 +241,20 @@ export async function preparePortableOpenClawRuntime(
     return { runtimeDir, cacheKey: identity.cacheKey, cacheHit: true };
   }
 
-  await rm(runtimeDir, { recursive: true, force: true });
   const staleEntries = await readdir(cacheRoot, { withFileTypes: true }).catch(() => []);
   await Promise.all(staleEntries
     .filter((entry) => entry.isDirectory() && entry.name.startsWith('.staging-'))
     .map((entry) => rm(join(cacheRoot, entry.name), { recursive: true, force: true })));
-  const stagingDir = join(cacheRoot, `.staging-${process.pid}-${randomUUID().slice(0, 8)}`);
+  const operationId = `${process.pid}-${randomUUID().slice(0, 8)}`;
+  const stagingDir = join(cacheRoot, `.staging-${operationId}`);
+  const previousDir = join(cacheRoot, `.previous-${operationId}`);
   await rm(stagingDir, { recursive: true, force: true });
+  await rm(previousDir, { recursive: true, force: true });
 
   try {
     await cp(input.sourceDir, stagingDir, { recursive: true, dereference: true, force: true });
-    if (!existsSync(join(stagingDir, 'openclaw.mjs')) || !existsSync(join(stagingDir, 'package.json'))) {
-      throw new Error('Copied OpenClaw runtime failed entrypoint validation');
+    if (!hasCompleteRuntimePayload(stagingDir)) {
+      throw new Error('Copied OpenClaw runtime failed payload validation');
     }
     const marker: PortableOpenClawRuntimeMarker = {
       schema: CACHE_SCHEMA,
@@ -180,13 +264,38 @@ export async function preparePortableOpenClawRuntime(
       preparedAt: new Date().toISOString(),
     };
     await writeFile(join(stagingDir, CACHE_MARKER_FILE), `${JSON.stringify(marker, null, 2)}\n`, 'utf8');
-    await rename(stagingDir, runtimeDir);
+    if (!isCompleteRuntime(stagingDir, identity.cacheKey)) {
+      throw new Error('Copied OpenClaw runtime failed completion validation');
+    }
+
+    const hadPreviousRuntime = existsSync(runtimeDir);
+    if (hadPreviousRuntime) {
+      await rename(runtimeDir, previousDir);
+    }
+    try {
+      await rename(stagingDir, runtimeDir);
+    } catch (error) {
+      if (hadPreviousRuntime && !existsSync(runtimeDir) && existsSync(previousDir)) {
+        await rename(previousDir, runtimeDir);
+      }
+      throw error;
+    }
+    await rm(previousDir, { recursive: true, force: true });
+
     const oldEntries = await readdir(cacheRoot, { withFileTypes: true }).catch(() => []);
     await Promise.all(oldEntries
-      .filter((entry) => entry.isDirectory() && entry.name !== identity.cacheKey && !entry.name.startsWith('.staging-'))
+      .filter((entry) => (
+        entry.isDirectory()
+        && entry.name !== identity.cacheKey
+        && !entry.name.startsWith('.staging-')
+        && !entry.name.startsWith('.previous-')
+      ))
       .map((entry) => rm(join(cacheRoot, entry.name), { recursive: true, force: true })));
   } catch (error) {
     await rm(stagingDir, { recursive: true, force: true });
+    if (!existsSync(runtimeDir) && existsSync(previousDir)) {
+      await rename(previousDir, runtimeDir);
+    }
     throw error;
   }
 

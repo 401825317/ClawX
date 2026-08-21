@@ -6,9 +6,10 @@ export type UclawExecSecurity = 'deny' | 'allowlist' | 'full';
 export type UclawExecAsk = 'off' | 'on-miss' | 'always';
 export type UclawCompactionMode = 'default' | 'safeguard';
 export type UclawMarketplaceProvider = 'skillhub' | 'clawhub';
-export type UclawVideoMode = 'text-to-video' | 'image-to-video';
-export type UclawVideoAspectRatio = '2:3' | '3:2' | '1:1' | '9:16' | '16:9';
-export type UclawVideoResolution = '480P' | '720P';
+/** Server-owned media capability tokens. Do not narrow these to a client allowlist. */
+export type UclawVideoMode = string;
+export type UclawVideoAspectRatio = string;
+export type UclawVideoResolution = string;
 
 export type UclawVideoModelConfig = {
   id: string;
@@ -123,7 +124,7 @@ export type UclawEndpointsConfig = {
       defaultAspectRatio: UclawVideoAspectRatio;
       defaultResolution: UclawVideoResolution;
       defaultDurationSeconds: number;
-      resolutionSizes: Record<UclawVideoResolution, string>;
+      resolutionSizes: Record<string, string>;
       models: UclawVideoModelConfig[];
     };
     testTimeoutMs: number;
@@ -248,12 +249,24 @@ function readPixelSize(value: unknown, key: string): string {
   return normalized;
 }
 
+function readPixelSizeMap(value: unknown, key: string): Record<string, string> {
+  const record = readRecord(value, key);
+  const entries = Object.entries(record);
+  if (entries.length === 0) {
+    throw new Error(`${key} in shared/junfeiai-endpoints.json must not be empty`);
+  }
+  return Object.fromEntries(entries.map(([resolution, size]) => {
+    const normalizedResolution = readNonEmptyString(resolution, `${key} key`);
+    return [normalizedResolution, readPixelSize(size, `${key}.${normalizedResolution}`)];
+  }));
+}
+
 function readVideoResolution(value: unknown, key: string): UclawVideoResolution {
-  return readEnum(value, key, ['480P', '720P']);
+  return readNonEmptyString(value, key);
 }
 
 function readVideoAspectRatio(value: unknown, key: string): UclawVideoAspectRatio {
-  return readEnum(value, key, ['2:3', '3:2', '1:1', '9:16', '16:9']);
+  return readNonEmptyString(value, key);
 }
 
 function readVideoModeArray(value: unknown, key: string): UclawVideoMode[] {
@@ -261,7 +274,7 @@ function readVideoModeArray(value: unknown, key: string): UclawVideoMode[] {
     throw new Error(`${key} in shared/junfeiai-endpoints.json must be a non-empty array`);
   }
   return [...new Set(value.map((entry, index) => (
-    readEnum(entry, `${key}[${index}]`, ['text-to-video', 'image-to-video'] as const)
+    readNonEmptyString(entry, `${key}[${index}]`)
   )))];
 }
 
@@ -362,7 +375,7 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
   const media = readRecord(root.media, 'media');
   const image = readRecord(media.image, 'media.image');
   const video = readRecord(media.video, 'media.video');
-  const videoResolutionSizes = readRecord(video.resolutionSizes, 'media.video.resolutionSizes');
+  const videoResolutionSizes = readPixelSizeMap(video.resolutionSizes, 'media.video.resolutionSizes');
   const videoModels = readVideoModels(video.models, 'media.video.models');
   const videoDefaultModel = readNonEmptyString(video.defaultModel, 'media.video.defaultModel');
   const videoDefaultAspectRatio = readVideoAspectRatio(
@@ -383,6 +396,7 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
     || !defaultVideoModel.aspectRatios.includes(videoDefaultAspectRatio)
     || !defaultVideoModel.resolutions.includes(videoDefaultResolution)
     || !defaultVideoModel.durations.includes(videoDefaultDurationSeconds)
+    || videoModels.some((model) => model.resolutions.some((resolution) => !videoResolutionSizes[resolution]))
   ) {
     throw new Error('media.video in shared/junfeiai-endpoints.json has unsupported defaults');
   }
@@ -587,10 +601,7 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
         defaultAspectRatio: videoDefaultAspectRatio,
         defaultResolution: videoDefaultResolution,
         defaultDurationSeconds: videoDefaultDurationSeconds,
-        resolutionSizes: {
-          '480P': readPixelSize(videoResolutionSizes['480P'], 'media.video.resolutionSizes.480P'),
-          '720P': readPixelSize(videoResolutionSizes['720P'], 'media.video.resolutionSizes.720P'),
-        },
+        resolutionSizes: videoResolutionSizes,
         models: videoModels,
       },
       testTimeoutMs: readPositiveInteger(media.testTimeoutMs, 'media.testTimeoutMs'),

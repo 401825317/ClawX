@@ -55,15 +55,15 @@ const managedAccount = {
   baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
   apiProtocol: UCLAW_DEFAULT_API_PROTOCOL,
   model: 'smart-latest',
-  fallbackModels: [],
+  fallbackModels: ['reasoning-pro', 'standard-chat'],
   fallbackAccountIds: [],
   enabled: true,
   isDefault: true,
   metadata: {
     managedBy: 'uclaw',
-    customModels: ['smart-latest'],
+    customModels: ['smart-latest', 'reasoning-pro', 'standard-chat'],
     managedDefaultModel: 'smart-latest',
-    managedAllowedModels: ['smart-latest'],
+    managedAllowedModels: ['smart-latest', 'reasoning-pro', 'standard-chat'],
     managedRuntimeContractVersion: UCLAW_RUNTIME_CONTRACT_VERSION,
   },
   createdAt: '2026-07-24T00:00:00.000Z',
@@ -168,7 +168,10 @@ describe('loadManagedOpenAiProviderEnv', () => {
     ['Relay base URL', { ...managedCompatibilityAccount, baseUrl: 'https://wrong.example.test/v1' }],
     ['API protocol', { ...managedCompatibilityAccount, apiProtocol: 'openai-completions' }],
     ['default role', { ...managedCompatibilityAccount, isDefault: true }],
-    ['fallback models', { ...managedCompatibilityAccount, fallbackModels: ['other-model'] }],
+    ['fallback model order', {
+      ...managedCompatibilityAccount,
+      fallbackModels: ['standard-chat', 'reasoning-pro'],
+    }],
     ['runtime contract version', {
       ...managedCompatibilityAccount,
       metadata: {
@@ -179,6 +182,22 @@ describe('loadManagedOpenAiProviderEnv', () => {
   ])('fails closed when the compatibility account has an invalid %s contract', async (_field, account) => {
     providerMocks.getProviderAccount.mockImplementation(async (accountId: string) => (
       accountId === 'lingzhiwuxian' ? account : managedAccount
+    ));
+
+    const result = await loadManagedOpenAiProviderEnv();
+
+    expect(result.providerEnv.OPENAI_API_KEY).toBe(UCLAW_LOGIN_REQUIRED_PROVIDER_KEY);
+    expect(result.loadedProviderKeyCount).toBe(0);
+  });
+
+  it.each([
+    ['primary model', ['smart-latest']],
+    ['unknown model', ['reasoning-pro', 'missing-model']],
+  ])('fails closed when both managed accounts use an invalid %s as fallback', async (_case, fallbackModels) => {
+    const primary = { ...managedAccount, fallbackModels };
+    const compatibility = { ...managedCompatibilityAccount, fallbackModels };
+    providerMocks.getProviderAccount.mockImplementation(async (accountId: string) => (
+      accountId === 'lingzhiwuxian' ? compatibility : primary
     ));
 
     const result = await loadManagedOpenAiProviderEnv();

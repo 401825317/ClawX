@@ -89,7 +89,7 @@ test.describe('ClawX chat table header styling', () => {
 
     try {
       await installIpcMocks(app, {
-        gatewayStatus: { state: 'running', port: 18789, pid: 12345 },
+        gatewayStatus: { state: 'running', gatewayReady: true, port: 18789, pid: 12345 },
         gatewayRpc: {
           [stableStringify(['sessions.list', {}])]: {
             success: true,
@@ -120,7 +120,7 @@ test.describe('ClawX chat table header styling', () => {
             data: {
               status: 200,
               ok: true,
-              json: { state: 'running', port: 18789, pid: 12345 },
+              json: { state: 'running', gatewayReady: true, port: 18789, pid: 12345 },
             },
           },
           [stableStringify(['/api/agents', 'GET'])]: {

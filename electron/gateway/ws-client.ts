@@ -15,6 +15,29 @@ import {
 
 export const GATEWAY_CHALLENGE_TIMEOUT_MS = 10_000;
 export const GATEWAY_CONNECT_HANDSHAKE_TIMEOUT_MS = 20_000;
+export const GATEWAY_READY_TIMEOUT_MS = 120_000;
+const GATEWAY_READY_PROBE_TIMEOUT_MS = 1_500;
+
+export type GatewayReadyFailureCode = 'retry_limit_exhausted' | 'ready_deadline_exceeded';
+
+export class GatewayReadyError extends Error {
+  readonly code: GatewayReadyFailureCode;
+
+  constructor(options: {
+    code: GatewayReadyFailureCode;
+    port: number;
+    attempts: number;
+    timeoutMs: number;
+  }) {
+    super(
+      options.code === 'retry_limit_exhausted'
+        ? `Gateway failed to become ready: retry_limit_exhausted after ${options.attempts} attempt(s) (port ${options.port})`
+        : `Gateway failed to become ready: ready_deadline_exceeded after ${options.timeoutMs}ms (port ${options.port})`,
+    );
+    this.name = 'GatewayReadyError';
+    this.code = options.code;
+  }
+}
 
 export async function probeGatewayReady(
   port: number,
@@ -75,36 +98,73 @@ export async function waitForGatewayReady(options: {
   getProcessExitCode: () => number | null;
   retries?: number;
   intervalMs?: number;
+  timeoutMs?: number;
+  generation?: number;
+  beforeProbe?: () => void;
 }): Promise<void> {
-  const retries = options.retries ?? 2400;
+  const retries = options.retries ?? Number.POSITIVE_INFINITY;
   const intervalMs = options.intervalMs ?? 200;
+  const timeoutMs = options.timeoutMs ?? GATEWAY_READY_TIMEOUT_MS;
+  const startedAt = Date.now();
+  const deadlineAt = startedAt + timeoutMs;
+  let attempts = 0;
 
-  for (let i = 0; i < retries; i++) {
+  while (attempts < retries) {
+    const remainingBeforeProbeMs = deadlineAt - Date.now();
+    if (remainingBeforeProbeMs <= 0) {
+      break;
+    }
+
+    // This is intentionally the only lifecycle/cancellation check in an
+    // iteration. A superseded lifecycle throws here before touching the socket.
+    options.beforeProbe?.();
     const exitCode = options.getProcessExitCode();
     if (exitCode !== null) {
       logger.error(`Gateway process exited before ready (code=${exitCode})`);
       throw new Error(`Gateway process exited before becoming ready (code=${exitCode})`);
     }
 
+    attempts += 1;
     try {
-      const ready = await probeGatewayReady(options.port, 1500);
-      if (ready) {
-        logger.debug(`Gateway ready after ${i + 1} attempt(s)`);
+      const ready = await probeGatewayReady(
+        options.port,
+        Math.min(GATEWAY_READY_PROBE_TIMEOUT_MS, remainingBeforeProbeMs),
+      );
+      if (ready && Date.now() <= deadlineAt) {
+        logger.debug(`Gateway ready after ${attempts} attempt(s)`);
         return;
       }
     } catch {
       // Gateway not ready yet.
     }
 
-    if (i > 0 && i % 10 === 0) {
-      logger.debug(`Still waiting for Gateway... (attempt ${i + 1}/${retries})`);
+    if (attempts > 1 && attempts % 10 === 0) {
+      logger.debug(`Still waiting for Gateway... (attempt ${attempts}/${retries})`);
     }
 
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    const remainingBeforeSleepMs = deadlineAt - Date.now();
+    if (remainingBeforeSleepMs <= 0) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, remainingBeforeSleepMs)));
   }
 
-  logger.error(`Gateway failed to become ready after ${retries} attempts on port ${options.port}`);
-  throw new Error(`Gateway failed to start after ${retries} retries (port ${options.port})`);
+  const elapsedMs = Date.now() - startedAt;
+  const code: GatewayReadyFailureCode = attempts >= retries
+    ? 'retry_limit_exhausted'
+    : 'ready_deadline_exceeded';
+  const generation = Number.isSafeInteger(options.generation) && (options.generation ?? 0) >= 0
+    ? options.generation ?? 0
+    : 0;
+  logger.error('Gateway readiness failed', {
+    event: 'gateway_ready_failed',
+    code,
+    attempts,
+    elapsedMs,
+    deadlineMs: timeoutMs,
+    generation,
+  });
+  throw new GatewayReadyError({ code, port: options.port, attempts, timeoutMs });
 }
 
 const GATEWAY_PROTOCOL_VERSION = 4;
@@ -184,20 +244,32 @@ export async function connectGatewaySocket(options: {
   onCloseAfterHandshake: (code: number) => void;
   challengeTimeoutMs?: number;
   connectTimeoutMs?: number;
+  /** Total deadline from WebSocket creation through connect RPC completion. */
+  handshakeTimeoutMs?: number;
+  /** Cancels an in-flight startup handshake when its lifecycle is superseded. */
+  signal?: AbortSignal;
 }): Promise<WebSocket> {
+  if (options.signal?.aborted) {
+    throw options.signal.reason ?? new Error('Gateway WebSocket connection aborted');
+  }
   logger.debug(`Connecting Gateway WebSocket (ws://localhost:${options.port}/ws)`);
   const challengeTimeoutMs = options.challengeTimeoutMs ?? GATEWAY_CHALLENGE_TIMEOUT_MS;
   const connectTimeoutMs = options.connectTimeoutMs ?? GATEWAY_CONNECT_HANDSHAKE_TIMEOUT_MS;
+  const handshakeTimeoutMs = options.handshakeTimeoutMs ?? challengeTimeoutMs + connectTimeoutMs;
 
   return await new Promise<WebSocket>((resolve, reject) => {
     const wsUrl = `ws://localhost:${options.port}/ws`;
+    const handshakeStartedAt = Date.now();
     const ws = new WebSocket(wsUrl);
+    const handshakeDeadlineAt = handshakeStartedAt + handshakeTimeoutMs;
     let handshakeComplete = false;
     let connectId: string | null = null;
     let handshakeTimeout: NodeJS.Timeout | null = null;
     let challengeTimer: NodeJS.Timeout | null = null;
+    let overallHandshakeTimer: NodeJS.Timeout | null = null;
     let challengeReceived = false;
     let settled = false;
+    let abortHandler: (() => void) | null = null;
 
     const cleanupHandshakeRequest = () => {
       if (challengeTimer) {
@@ -207,6 +279,14 @@ export async function connectGatewaySocket(options: {
       if (handshakeTimeout) {
         clearTimeout(handshakeTimeout);
         handshakeTimeout = null;
+      }
+      if (overallHandshakeTimer) {
+        clearTimeout(overallHandshakeTimer);
+        overallHandshakeTimer = null;
+      }
+      if (abortHandler && options.signal) {
+        options.signal.removeEventListener('abort', abortHandler);
+        abortHandler = null;
       }
       if (connectId && options.pendingRequests.has(connectId)) {
         const request = options.pendingRequests.get(connectId);
@@ -242,6 +322,14 @@ export async function connectGatewaySocket(options: {
       logger.debug('Sending connect handshake with challenge nonce');
 
       const currentToken = await options.getToken();
+      if (settled) return;
+      if (ws.readyState !== WebSocket.OPEN) {
+        throw new Error('Gateway WebSocket closed while loading handshake credentials');
+      }
+      const remainingHandshakeMs = handshakeDeadlineAt - Date.now();
+      if (remainingHandshakeMs <= 0) {
+        throw new Error('Gateway handshake deadline exceeded');
+      }
       const connectPayload = buildGatewayConnectFrame({
         challengeNonce,
         token: currentToken,
@@ -257,6 +345,7 @@ export async function connectGatewaySocket(options: {
         });
       }
       ws.send(JSON.stringify(connectPayload.frame));
+      if (settled) return;
 
       const requestTimeout = setTimeout(() => {
         if (!handshakeComplete) {
@@ -264,7 +353,7 @@ export async function connectGatewaySocket(options: {
           ws.close();
           rejectOnce(new Error('Connect handshake timeout'));
         }
-      }, connectTimeoutMs);
+      }, Math.min(connectTimeoutMs, remainingHandshakeMs));
       handshakeTimeout = requestTimeout;
 
       options.pendingRequests.set(connectId, {
@@ -281,6 +370,13 @@ export async function connectGatewaySocket(options: {
         timeout: requestTimeout,
       });
     };
+
+    overallHandshakeTimer = setTimeout(() => {
+      if (!settled) {
+        logger.error('Gateway handshake deadline exceeded');
+        rejectOnce(new Error('Gateway handshake deadline exceeded'));
+      }
+    }, Math.max(0, handshakeDeadlineAt - Date.now()));
 
     challengeTimer = setTimeout(() => {
       if (!challengeReceived && !settled) {
@@ -319,7 +415,10 @@ export async function connectGatewaySocket(options: {
             return;
           }
           logger.debug('Received connect.challenge, sending handshake');
-          void sendConnectHandshake(nonce);
+          void sendConnectHandshake(nonce).catch((error) => {
+            logger.error('Gateway connect handshake preparation failed:', error);
+            rejectOnce(error);
+          });
           return;
         }
 
@@ -333,7 +432,7 @@ export async function connectGatewaySocket(options: {
       const reasonStr = reason?.toString() || 'unknown';
       logger.warn(`Gateway WebSocket closed (code=${code}, reason=${reasonStr}, handshake=${handshakeComplete ? 'ok' : 'pending'})`);
       if (!handshakeComplete) {
-        rejectOnce(new Error(`WebSocket closed before handshake: ${reasonStr}`));
+        rejectOnce(new Error(`WebSocket closed before handshake (code=${code}, reason=${reasonStr})`));
         return;
       }
       cleanupHandshakeRequest();
@@ -350,5 +449,15 @@ export async function connectGatewaySocket(options: {
         rejectOnce(error);
       }
     });
+
+    if (options.signal) {
+      abortHandler = () => {
+        rejectOnce(options.signal?.reason ?? new Error('Gateway WebSocket connection aborted'));
+      };
+      options.signal.addEventListener('abort', abortHandler, { once: true });
+      if (options.signal.aborted) {
+        abortHandler();
+      }
+    }
   });
 }

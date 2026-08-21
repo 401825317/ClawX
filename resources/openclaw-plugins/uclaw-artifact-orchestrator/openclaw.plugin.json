@@ -1,0 +1,32 @@
+{
+  "id": "uclaw-artifact-orchestrator",
+  "name": "UClaw Artifact Orchestrator",
+  "description": "Applies versioned model, prompt, tool, and repair policies to classified artifact sessions.",
+  "version": "0.1.0",
+  "entry": "index.mjs",
+  "enabledByDefault": false,
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "artifactsEnabled": {
+        "type": "boolean"
+      },
+      "features": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "artifacts": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

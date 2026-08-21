@@ -5,7 +5,9 @@ export type AcpChatErrorCode =
   | 'PERMISSION_DENIED'
   | 'TIMEOUT'
   | 'NETWORK'
+  | 'GATEWAY_UNAVAILABLE'
   | 'SERVICE_UNAVAILABLE'
+  | 'CONTEXT_OVERFLOW'
   | 'SESSION_LOCKED'
   | 'MODEL_UNAVAILABLE'
   | 'CONTENT_POLICY'
@@ -136,6 +138,15 @@ export function normalizeAcpChatError(error: unknown, fallback = 'ACP prompt fai
   ])) return result('CONVERSATION_INVALID', false);
 
   if (includesAny(searchable, [
+    /preflight compaction required but failed/u,
+    /context is too large and auto-compaction could not recover/u,
+    /auto-compaction could not recover/u,
+    /context limit exceeded/u,
+    /context recovery failed/u,
+    /上下文.{0,12}(?:过大|超限).{0,20}(?:压缩|恢复).{0,12}(?:失败|无法)/u,
+  ])) return result('CONTEXT_OVERFLOW', true);
+
+  if (includesAny(searchable, [
     /cancelled by (?:the )?user/u,
     /user cancelled/u,
     /用户(?:主动)?取消/u,
@@ -192,6 +203,14 @@ export function normalizeAcpChatError(error: unknown, fallback = 'ACP prompt fai
   ])) return result('TIMEOUT', true);
 
   if (includesAny(searchable, [
+    /gateway is starting or reconnecting/u,
+    /gateway is restarting/u,
+    /gateway disconnected/u,
+    /gateway runtime.{0,20}(?:changed|replaced)/u,
+    /网关.{0,12}(?:启动中|重连中|重启中|已断开|发生切换)/u,
+  ])) return result('GATEWAY_UNAVAILABLE', true);
+
+  if (includesAny(searchable, [
     /econn(?:reset|refused|aborted)/u,
     /enotfound/u,
     /network error/u,
@@ -206,14 +225,15 @@ export function normalizeAcpChatError(error: unknown, fallback = 'ACP prompt fai
   ])) return result('NETWORK', true);
 
   if ((httpStatus != null && httpStatus >= 500) || includesAny(searchable, [
-    /gateway is starting or reconnecting/u,
     /bad gateway/u,
     /service unavailable/u,
+    /\bservice[_ -]?unavailable\b/u,
     /service[_ -]?unavailable[_ -]?error/u,
     /server[_ -]?is[_ -]?overloaded/u,
     /servers? (?:are|is).{0,20}overloaded/u,
     /temporarily overloaded/u,
-    /upstream.{0,12}(?:error|unavailable)/u,
+    /\bupstream[_ -]?error\b/u,
+    /upstream.{0,40}(?:error|unavailable)/u,
     /服务.{0,8}(?:异常|不可用)/u,
     /responses stream error/u,
   ])) return result('SERVICE_UNAVAILABLE', true);

@@ -76,7 +76,7 @@ test.describe('ClawX chat code block wrapping', () => {
 
     try {
       await installIpcMocks(app, {
-        gatewayStatus: { state: 'running', port: 18789, pid: 12345 },
+        gatewayStatus: { state: 'running', gatewayReady: true, port: 18789, pid: 12345 },
         gatewayRpc: {
           [stableStringify(['sessions.list', {}])]: {
             success: true,
@@ -102,7 +102,7 @@ test.describe('ClawX chat code block wrapping', () => {
           },
           [stableStringify(['/api/gateway/status', 'GET'])]: {
             ok: true,
-            data: { status: 200, ok: true, json: { state: 'running', port: 18789, pid: 12345 } },
+            data: { status: 200, ok: true, json: { state: 'running', gatewayReady: true, port: 18789, pid: 12345 } },
           },
           [stableStringify(['/api/agents', 'GET'])]: {
             ok: true,

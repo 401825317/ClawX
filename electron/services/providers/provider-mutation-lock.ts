@@ -25,6 +25,7 @@ type ProviderAccountReader = {
 
 type ManagedProviderModelContract = {
   defaultModel: string;
+  fallbackModels: string[];
   models: string[];
 };
 
@@ -87,8 +88,6 @@ function resolveManagedProviderModelContract(
     || account.apiProtocol !== UCLAW_DEFAULT_API_PROTOCOL
     || account.enabled !== true
     || account.isDefault !== expectedIsDefault
-    || !Array.isArray(account.fallbackModels)
-    || account.fallbackModels.length !== 0
     || !Array.isArray(account.fallbackAccountIds)
     || account.fallbackAccountIds.length !== 0
     || !isUclawManagedAccount(account)
@@ -104,6 +103,7 @@ function resolveManagedProviderModelContract(
     : '';
   const allowedModels = exactStringArray(account.metadata.managedAllowedModels);
   const customModels = exactStringArray(account.metadata.customModels);
+  const fallbackModels = exactStringArray(account.fallbackModels);
   if (
     !defaultModel
     || account.model !== defaultModel
@@ -111,12 +111,15 @@ function resolveManagedProviderModelContract(
     || !allowedModels
     || allowedModels.length === 0
     || !customModels
+    || !fallbackModels
     || !allowedModels.includes(defaultModel)
     || !sameStringArray(allowedModels, customModels)
+    || fallbackModels.includes(defaultModel)
+    || fallbackModels.some((fallbackModel) => !allowedModels.includes(fallbackModel))
   ) {
     return null;
   }
-  return { defaultModel, models: allowedModels };
+  return { defaultModel, fallbackModels, models: allowedModels };
 }
 
 function isManagedOpenAiModel(value: unknown): boolean {
@@ -316,6 +319,7 @@ export function resolveValidUclawManagedRelayPairToken(
     !compatibility
     || compatibility.token !== primary.token
     || compatibility.modelContract.defaultModel !== primary.modelContract.defaultModel
+    || !sameStringArray(compatibility.modelContract.fallbackModels, primary.modelContract.fallbackModels)
     || !sameStringArray(compatibility.modelContract.models, primary.modelContract.models)
   ) {
     return null;

@@ -103,6 +103,57 @@ describe('host invoke dispatcher', () => {
     });
   });
 
+  it('passes only the allowlisted recoverable contract and strips unsafe fields', async () => {
+    const error = Object.assign(new Error('Browser navigation timed out at https://secret.example/token=abc'), {
+      code: 'web_browser_navigation_timeout',
+      recoverable: true,
+      restartGateway: false,
+      recovery: 'Retry https://secret.example/token=abc without restarting Gateway.',
+      stack: 'private stack',
+      secret: 'abc',
+    });
+    const dispatch = createHostInvokeDispatcher({
+      settings: { getAll: vi.fn(() => { throw error; }) },
+    });
+
+    const response = await dispatch({ id: 'req-recoverable', module: 'settings', action: 'getAll' });
+    expect(response).toEqual({
+      id: 'req-recoverable',
+      ok: false,
+      error: {
+        code: 'INTERNAL',
+        message: 'Browser navigation timed out at [redacted-url]',
+        details: {
+          contract: 'recoverable-v1',
+          code: 'web_browser_navigation_timeout',
+          recoverable: true,
+          restartGateway: false,
+          recovery: 'Retry [redacted-url] without restarting Gateway.',
+        },
+      },
+    });
+    expect(JSON.stringify(response)).not.toContain('private stack');
+    expect(JSON.stringify(response)).not.toContain('secret');
+  });
+
+  it('does not pass unknown recoverable error fields', async () => {
+    const error = Object.assign(new Error('Unknown failure'), {
+      code: 'arbitrary_error',
+      recoverable: true,
+      restartGateway: false,
+      recovery: 'Run a secret command',
+    });
+    const dispatch = createHostInvokeDispatcher({
+      settings: { getAll: vi.fn(() => { throw error; }) },
+    });
+
+    await expect(dispatch({ id: 'req-unknown', module: 'settings', action: 'getAll' })).resolves.toEqual({
+      id: 'req-unknown',
+      ok: false,
+      error: { code: 'INTERNAL', message: 'Unknown failure' },
+    });
+  });
+
   it('dispatches extension-contributed actions registered after dispatcher creation', async () => {
     const registry = new HostApiRegistry();
     const dispatch = createHostInvokeDispatcher(registry);

@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   connectGatewayWithStartupRetry,
+  GatewayRuntimePackageResolutionError,
+  GATEWAY_CONNECT_STARTUP_MAX_ATTEMPTS,
   getGatewayStartupRecoveryAction,
+  hasDeterministicGatewayRuntimeFailureSignal,
   hasInvalidConfigFailureSignal,
   hasOpenClawFutureConfigGuardSignal,
   isGatewayStillStartingError,
@@ -66,6 +69,18 @@ describe('gateway startup recovery heuristics', () => {
     expect(hasOpenClawFutureConfigGuardSignal(new Error('process exited'), lines)).toBe(true);
     expect(isOpenClawFutureConfigGuardSignal('Config invalid')).toBe(false);
   });
+
+  it('detects deterministic Node package import failures without exposing paths', () => {
+    const stderr = [
+      '[openclaw] Reason: Package import specifier "#ansi-styles" is not defined imported from [UserPath]',
+    ];
+
+    expect(hasDeterministicGatewayRuntimeFailureSignal(undefined, stderr)).toBe(true);
+    const error = new GatewayRuntimePackageResolutionError(new Error('raw-path-is-kept-in-cause-only'));
+    expect(error.code).toBe('gateway_runtime_package_resolution_failed');
+    expect(error.message).toBe('Gateway runtime package imports could not be resolved');
+    expect(error.message).not.toContain('raw-path');
+  });
 });
 
 describe('getGatewayStartupRecoveryAction', () => {
@@ -88,6 +103,20 @@ describe('getGatewayStartupRecoveryAction', () => {
       startupError: transientError,
       startupStderrLines: [
         'Refusing to run automatic gateway startup migrations because this OpenClaw binary (2026.6.10) is older than the config last written by OpenClaw 2026.6.11.',
+      ],
+      configRepairAttempted: false,
+      attempt: 1,
+      maxAttempts: 3,
+    });
+
+    expect(action).toBe('fail');
+  });
+
+  it('fails fast instead of restarting a deterministic package import error', () => {
+    const action = getGatewayStartupRecoveryAction({
+      startupError: transientError,
+      startupStderrLines: [
+        'TypeError [ERR_PACKAGE_IMPORT_NOT_DEFINED]: Package import specifier "#ansi-styles" is not defined',
       ],
       configRepairAttempted: false,
       attempt: 1,
@@ -156,6 +185,25 @@ describe('getGatewayStartupRecoveryAction', () => {
 });
 
 describe('connectGatewayWithStartupRetry', () => {
+  it('uses one bounded five-attempt connection budget by default', async () => {
+    const connect = vi.fn().mockRejectedValue(new Error('ECONNREFUSED 127.0.0.1:18789'));
+    const delay = vi.fn().mockResolvedValue(undefined);
+    const onAttempt = vi.fn();
+
+    await expect(connectGatewayWithStartupRetry({
+      connect,
+      port: 18789,
+      delay,
+      onAttempt,
+    })).rejects.toMatchObject({ code: 'gateway_connect_retry_limit_exhausted' });
+
+    expect(GATEWAY_CONNECT_STARTUP_MAX_ATTEMPTS).toBe(5);
+    expect(connect).toHaveBeenCalledTimes(5);
+    expect(delay).toHaveBeenCalledTimes(4);
+    expect(onAttempt).toHaveBeenNthCalledWith(1, 1, 5);
+    expect(onAttempt).toHaveBeenNthCalledWith(5, 5, 5);
+  });
+
   it('retries connect when gateway is still starting', async () => {
     const connect = vi.fn()
       .mockRejectedValueOnce(new Error('gateway starting; retry shortly'))
@@ -177,7 +225,7 @@ describe('connectGatewayWithStartupRetry', () => {
   });
 
   it('throws immediately for non-starting errors', async () => {
-    const connect = vi.fn().mockRejectedValue(new Error('token mismatch'));
+    const connect = vi.fn().mockRejectedValue(new Error('authentication failed: token mismatch'));
     const delay = vi.fn().mockResolvedValue(undefined);
 
     await expect(connectGatewayWithStartupRetry({

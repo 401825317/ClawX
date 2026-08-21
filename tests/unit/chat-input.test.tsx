@@ -33,6 +33,30 @@ const { agentsState, chatState, gatewayState, providersState, managedClientConfi
     refreshProviderSnapshot: vi.fn(),
   },
   managedClientConfigState: {
+    runtimeConfig: {
+      observability: {
+        enabled: false,
+        tunnelPath: '/api/clawx/observability/envelope',
+        crashSampleRate: 1,
+        handledErrorSampleRate: 0.2,
+        tracesSampleRate: 0.05,
+        artifactSampleRate: 0.2,
+        maxEventsPerHour: 30,
+      },
+      features: {
+        artifacts: {
+          enabled: false,
+          rolloutPercentage: 0,
+          modelAlias: 'uclaw-artifact-v1',
+          policyVersion: 'v1',
+        },
+        ecommerceMainImage: {
+          enabled: false,
+          rolloutPercentage: 0,
+          skillVersion: 'v1',
+        },
+      },
+    },
     textModelPolicy: {
       defaultModel: 'smart-latest',
       defaultThinkingLevel: 'medium',
@@ -41,34 +65,57 @@ const { agentsState, chatState, gatewayState, providersState, managedClientConfi
         { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
       ],
     },
+    imageModelPolicy: {
+      defaultModel: 'gpt-image-2',
+      defaultSize: '1024x1024',
+      defaultQuality: 'medium',
+      models: [{
+        id: 'gpt-image-2',
+        sizes: ['1024x1536', '1536x1024', '1024x1024', '2160x3840', '3840x2160'],
+        qualities: ['low', 'medium', 'high'],
+        defaultSize: '1024x1024',
+        defaultQuality: 'medium',
+      }],
+    },
     videoModelPolicy: {
       defaultModel: 'grok-image-video',
+      defaultSize: '1280x720',
       defaultAspectRatio: '16:9',
-      defaultResolution: '480P',
-      defaultDurationSeconds: 6,
+      defaultResolution: '720P',
+      defaultDurationSeconds: 10,
       models: [
         {
           id: 'grok-image-video',
           label: 'Grok Video',
           modes: ['text-to-video'],
+          sizes: [
+            '480x720', '720x480', '480x480', '480x854', '854x480',
+            '720x1080', '1080x720', '720x720', '720x1280', '1280x720',
+          ],
           aspectRatios: ['2:3', '3:2', '1:1', '9:16', '16:9'],
           resolutions: ['480P', '720P'],
           durations: [6, 10, 15],
+          defaultSize: '1280x720',
           defaultAspectRatio: '16:9',
-          defaultResolution: '480P',
-          defaultDurationSeconds: 6,
+          defaultResolution: '720P',
+          defaultDurationSeconds: 10,
           requiresImage: false,
         },
         {
           id: 'grok-video-1.5',
           label: 'Grok Video 1.5',
           modes: ['image-to-video'],
+          sizes: [
+            '480x720', '720x480', '480x480', '480x854', '854x480',
+            '720x1080', '1080x720', '720x720', '720x1280', '1280x720',
+          ],
           aspectRatios: ['2:3', '3:2', '1:1', '9:16', '16:9'],
           resolutions: ['480P', '720P'],
           durations: [6, 10, 15],
+          defaultSize: '1280x720',
           defaultAspectRatio: '16:9',
-          defaultResolution: '480P',
-          defaultDurationSeconds: 6,
+          defaultResolution: '720P',
+          defaultDurationSeconds: 10,
           requiresImage: true,
         },
       ],
@@ -76,7 +123,9 @@ const { agentsState, chatState, gatewayState, providersState, managedClientConfi
     initialized: true,
     loading: false,
     loadTextModels: vi.fn(),
+    loadImageModels: vi.fn(),
     loadVideoModels: vi.fn(),
+    loadRuntimeConfig: vi.fn().mockResolvedValue(undefined),
   },
   artifactPanelMocks: {
     openPreview: vi.fn(),
@@ -232,6 +281,8 @@ function translate(key: string, vars?: Record<string, unknown>): string {
       return 'connected';
     case 'composer.gatewayStarting':
       return 'starting';
+    case 'composer.gatewayRetrying':
+      return `retrying connection (${String(vars?.attempt ?? '')}/${String(vars?.maxAttempts ?? '')})`;
     case 'composer.gatewayStatus':
       return `gateway ${String(vars?.state ?? '')} | port: ${String(vars?.port ?? '')} ${String(vars?.pid ?? '')}`.trim();
     case 'composer.retryFailedAttachments':
@@ -389,7 +440,7 @@ describe('ChatInput agent targeting', () => {
     chatState.updateSessionThinking.mockResolvedValue(undefined);
     chatState.waitForSessionThinkingUpdate.mockReset();
     chatState.waitForSessionThinkingUpdate.mockResolvedValue(undefined);
-    gatewayState.status = { state: 'running', port: 18789 };
+    gatewayState.status = { state: 'running', port: 18789, gatewayReady: true };
     providersState.accounts = [];
     providersState.statuses = [];
     providersState.defaultAccountId = null;
@@ -517,7 +568,7 @@ describe('ChatInput agent targeting', () => {
     expect(screen.getByTestId('chat-image-options-trigger')).toHaveTextContent('Medium');
 
     openComposerOptionsSubmenu('chat-image-options-trigger', 'chat-image-aspect-row');
-    fireEvent.click(screen.getByTestId('chat-image-aspect-16-9'));
+    fireEvent.click(screen.getByTestId('chat-image-size-3840x2160'));
     openComposerOptionsSubmenu('chat-image-options-trigger', 'chat-image-quality-row');
     fireEvent.click(screen.getByTestId('chat-image-quality-option-high'));
     fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Create a product photo.' } });
@@ -575,8 +626,8 @@ describe('ChatInput agent targeting', () => {
     expect(screen.getByTestId('chat-video-options')).toBeInTheDocument();
     expect(screen.queryByTestId('chat-video-model')).not.toBeInTheDocument();
     expect(screen.getByTestId('chat-video-options-trigger')).toHaveTextContent('16:9');
-    expect(screen.getByTestId('chat-video-options-trigger')).toHaveTextContent('480P');
-    expect(screen.getByTestId('chat-video-options-trigger')).toHaveTextContent('6s');
+    expect(screen.getByTestId('chat-video-options-trigger')).toHaveTextContent('720P');
+    expect(screen.getByTestId('chat-video-options-trigger')).toHaveTextContent('10s');
 
     openComposerOptionsSubmenu('chat-video-options-trigger', 'chat-video-resolution-row');
     fireEvent.click(screen.getByTestId('chat-video-resolution-option-720p'));
@@ -598,7 +649,14 @@ describe('ChatInput agent targeting', () => {
         undefined,
         null,
         undefined,
-        { aspectRatio: '9:16', resolution: '720P', durationSeconds: 10 },
+        {
+          modelId: 'grok-image-video',
+          size: '720x1280',
+          mode: 'text-to-video',
+          aspectRatio: '9:16',
+          resolution: '720P',
+          durationSeconds: 10,
+        },
       );
     });
   });
@@ -1669,9 +1727,9 @@ describe('ChatInput agent targeting', () => {
     });
   });
 
-  it('keeps the ACP composer enabled while gateway is running but not yet ready', async () => {
+  it('keeps the ACP composer enabled when a running gateway omits the optional readiness flag', async () => {
     const onSend = vi.fn();
-    gatewayState.status = { state: 'running', port: 18789, gatewayReady: false };
+    gatewayState.status = { state: 'running', port: 18789 };
     agentsState.agents = [
       {
         id: 'main',
@@ -1752,7 +1810,22 @@ describe('ChatInput agent targeting', () => {
 
     renderChatInput();
 
+    expect(screen.getByTestId('chat-composer-input')).toBeDisabled();
     expect(screen.getByText(/gateway starting \| port: 18789/i)).toBeInTheDocument();
+  });
+
+  it('shows the bounded connection retry attempt in the composer', () => {
+    gatewayState.status = {
+      state: 'starting',
+      port: 18789,
+      gatewayReady: false,
+      connectionAttempt: 2,
+      connectionMaxAttempts: 5,
+    };
+
+    renderChatInput();
+
+    expect(screen.getByText(/gateway retrying connection \(2\/5\) \| port: 18789/i)).toBeInTheDocument();
   });
 
   it('renders the skill trigger after the @ agent picker', () => {

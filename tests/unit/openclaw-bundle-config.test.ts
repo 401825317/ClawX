@@ -11,6 +11,8 @@ describe('openclaw bundle config', () => {
       EXTRA_BUNDLED_PACKAGES,
       BUNDLED_OPENCLAW_PLUGINS,
       LOCAL_OPENCLAW_PLUGIN_IDS,
+      OPENCLAW_SKILL_SHIM_ALLOWLIST,
+      VERSIONED_OPENCLAW_SKILL_SHIMS,
     } = await import('../../scripts/openclaw-bundle-config.mjs');
 
     expect(ELECTRON_MAIN_RUNTIME_PACKAGES).toEqual([
@@ -36,6 +38,7 @@ describe('openclaw bundle config', () => {
     ]));
     expect(LOCAL_OPENCLAW_PLUGIN_IDS).toEqual([
       'clawx-openai-image',
+      'uclaw-artifact-orchestrator',
       'uclaw-local-artifacts',
       'uclaw-blender',
       'uclaw-video',
@@ -44,6 +47,18 @@ describe('openclaw bundle config', () => {
       npmName: '@openclaw/parallel-plugin',
       pluginId: 'parallel',
       manifestId: 'parallel',
+    });
+    expect(OPENCLAW_SKILL_SHIM_ALLOWLIST).toEqual([
+      'presentation-maker',
+      'spreadsheet-maker',
+      'document-maker',
+      'blender-maker',
+      'cad-editor',
+      'ecommerce-main-image',
+    ]);
+    expect(VERSIONED_OPENCLAW_SKILL_SHIMS).toEqual({
+      'cad-editor': 'v1',
+      'ecommerce-main-image': 'v1',
     });
     const packageJson = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf8')) as {
       dependencies?: Record<string, string>;
@@ -61,6 +76,7 @@ describe('openclaw bundle config', () => {
 
     expect(packageJson.dependencies).toMatchObject({
       jszip: '^3.10.1',
+      ms: '2.1.3',
       pptxgenjs: '4.0.1',
       sharp: '^0.34.5',
       undici: '8.1.0',
@@ -96,6 +112,27 @@ describe('openclaw bundle config', () => {
     expect(JSON.stringify(packageJson.scripts)).not.toContain('preinstalled-skills');
     expect(bundleSource).not.toContain('trimBundledOpenClawSkills');
     expect(bundleSource).toContain('verifyOpenClawSkillsPreserved');
+  });
+
+  it('keeps the offline skill manifest aligned with the bundle allowlist', async () => {
+    const { OPENCLAW_SKILL_SHIM_ALLOWLIST, VERSIONED_OPENCLAW_SKILL_SHIMS } = await import(
+      '../../scripts/openclaw-bundle-config.mjs'
+    );
+    const manifest = JSON.parse(readFileSync(
+      resolve(process.cwd(), 'resources/skills/preinstalled-manifest.json'),
+      'utf8',
+    )) as {
+      schemaVersion: number;
+      skills: Array<{ id: string; version?: string; installMode: string }>;
+    };
+
+    expect(manifest.schemaVersion).toBe(1);
+    expect(manifest.skills.map((skill) => skill.id)).toEqual(OPENCLAW_SKILL_SHIM_ALLOWLIST);
+    expect(Object.fromEntries(
+      manifest.skills
+        .filter((skill) => skill.installMode === 'managed-sync')
+        .map((skill) => [skill.id, skill.version]),
+    )).toEqual(VERSIONED_OPENCLAW_SKILL_SHIMS);
   });
 
   it('declares every managed video request timeout in the plugin config schema', () => {

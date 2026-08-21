@@ -4,9 +4,10 @@
  *
  * All file I/O uses async fs/promises to avoid blocking the main thread.
  */
-import { access, mkdir, readFile, writeFile, readdir, stat, rm } from 'fs/promises';
+import { access, mkdir, readFile, writeFile, readdir, stat, rm, rename, unlink } from 'fs/promises';
 import { constants } from 'fs';
 import { join } from 'path';
+import { randomUUID } from 'crypto';
 import { getOpenClawConfigDir, getOpenClawResolvedDir } from './paths';
 import * as logger from './logger';
 import { proxyAwareFetch } from './proxy-fetch';
@@ -460,21 +461,52 @@ async function ensureConfigDir(): Promise<void> {
     }
 }
 
-export async function readOpenClawConfig(): Promise<OpenClawConfig> {
+export async function readOpenClawConfig(
+    options: { requireExisting?: boolean } = {},
+): Promise<OpenClawConfig> {
     await ensureConfigDir();
-
-    if (!(await fileExists(CONFIG_FILE))) {
-        return {};
-    }
 
     try {
         const content = await readFile(CONFIG_FILE, 'utf-8');
-        return JSON.parse(content) as OpenClawConfig;
+        const parsed: unknown = JSON.parse(content);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new Error('OpenClaw config root must be a JSON object');
+        }
+        return parsed as OpenClawConfig;
     } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code === 'ENOENT' && !options.requireExisting) {
+            return {};
+        }
         logger.error('Failed to read OpenClaw config', error);
         console.error('Failed to read OpenClaw config:', error);
-        return {};
+        throw error;
     }
+}
+
+export interface ChannelStartupSnapshot {
+    config: OpenClawConfig;
+    configuredChannels: string[];
+    cleanedDanglingWeChatState: boolean;
+}
+
+// A launch can briefly observe an empty, but syntactically valid, config while
+// OpenClaw is restarting. Keep only a snapshot that was later connected; a
+// merely prepared launch must not make a future empty read look configured.
+let pendingChannelStartupSnapshot: ChannelStartupSnapshot | undefined;
+let connectedChannelStartupSnapshot: ChannelStartupSnapshot | undefined;
+
+function clearConnectedChannelStartupSnapshot(): void {
+    pendingChannelStartupSnapshot = undefined;
+    connectedChannelStartupSnapshot = undefined;
+}
+
+export function markChannelStartupSnapshotConnected(): void {
+    if (!pendingChannelStartupSnapshot) return;
+    connectedChannelStartupSnapshot = {
+        ...pendingChannelStartupSnapshot,
+        configuredChannels: [...pendingChannelStartupSnapshot.configuredChannels],
+    };
+    pendingChannelStartupSnapshot = undefined;
 }
 
 export async function writeOpenClawConfig(config: OpenClawConfig): Promise<void> {
@@ -489,7 +521,19 @@ export async function writeOpenClawConfig(config: OpenClawConfig): Promise<void>
         commands.restart = true;
         config.commands = commands;
 
-        await writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
+        const temporaryPath = join(
+            OPENCLAW_DIR,
+            `.openclaw.json.${process.pid}.${randomUUID()}.tmp`,
+        );
+        try {
+            await writeFile(temporaryPath, JSON.stringify(config, null, 2), {
+                encoding: 'utf-8',
+                mode: 0o600,
+            });
+            await rename(temporaryPath, CONFIG_FILE);
+        } finally {
+            await unlink(temporaryPath).catch(() => undefined);
+        }
     } catch (error) {
         logger.error('Failed to write OpenClaw config', error);
         console.error('Failed to write OpenClaw config:', error);
@@ -1008,6 +1052,7 @@ export async function deleteChannelAccountConfig(channelType: string, accountId:
         const channelSection = currentConfig.channels?.[resolvedChannelType];
         if (!channelSection) {
             if (isWechatChannelType(resolvedChannelType)) {
+                clearConnectedChannelStartupSnapshot();
                 removePluginRegistration(currentConfig, WECHAT_PLUGIN_ID);
                 await writeOpenClawConfig(currentConfig);
                 await deleteWeChatAccountState(accountId);
@@ -1034,6 +1079,7 @@ export async function deleteChannelAccountConfig(channelType: string, accountId:
 
         if (Object.keys(accounts).length === 0) {
             delete currentConfig.channels![resolvedChannelType];
+            clearConnectedChannelStartupSnapshot();
             if (isWechatChannelType(resolvedChannelType)) {
                 removePluginRegistration(currentConfig, WECHAT_PLUGIN_ID);
             }
@@ -1082,6 +1128,7 @@ export async function deleteChannelConfig(channelType: string): Promise<void> {
 
         if (currentConfig.channels?.[resolvedChannelType]) {
             delete currentConfig.channels[resolvedChannelType];
+            clearConnectedChannelStartupSnapshot();
             if (isWechatChannelType(resolvedChannelType)) {
                 removePluginRegistration(currentConfig, WECHAT_PLUGIN_ID);
             }
@@ -1109,12 +1156,14 @@ export async function deleteChannelConfig(channelType: string): Promise<void> {
             console.log(`Deleted channel config for ${resolvedChannelType}`);
         } else if (PLUGIN_CHANNELS.includes(resolvedChannelType)) {
             if (currentConfig.plugins?.entries?.[resolvedChannelType] || currentConfig.plugins?.allow?.includes(resolvedChannelType)) {
+                clearConnectedChannelStartupSnapshot();
                 removePluginRegistration(currentConfig, resolvedChannelType);
                 syncBuiltinChannelsWithPluginAllowlist(currentConfig);
                 await writeOpenClawConfig(currentConfig);
                 console.log(`Deleted plugin channel config for ${resolvedChannelType}`);
             }
         } else if (isWechatChannelType(resolvedChannelType)) {
+            clearConnectedChannelStartupSnapshot();
             removePluginRegistration(currentConfig, WECHAT_PLUGIN_ID);
             syncBuiltinChannelsWithPluginAllowlist(currentConfig);
             await writeOpenClawConfig(currentConfig);
@@ -1178,7 +1227,9 @@ export async function listConfiguredChannelsFromConfig(config: OpenClawConfig): 
         // Ignore errors checking whatsapp dir
     }
 
-    return channels;
+    // Plugin maintenance and Gateway recovery must receive the same order on
+    // every launch, regardless of how a config writer ordered its keys.
+    return channels.sort();
 }
 
 export async function listConfiguredChannels(): Promise<string[]> {
@@ -1306,6 +1357,7 @@ export async function deleteAgentChannelAccounts(agentId: string, ownedChannelAc
             delete accounts[accountId];
             if (Object.keys(accounts).length === 0) {
                 delete currentConfig.channels[channelType];
+                clearConnectedChannelStartupSnapshot();
             } else {
                 if (section.defaultAccount === accountId) {
                     const nextDefaultAccountId = Object.keys(accounts).sort((a, b) => {
@@ -1345,6 +1397,9 @@ export async function setChannelEnabled(channelType: string, enabled: boolean): 
     return withConfigLock(async () => {
         const resolvedChannelType = resolveStoredChannelType(channelType);
         const currentConfig = await readOpenClawConfig();
+        if (!enabled) {
+            clearConnectedChannelStartupSnapshot();
+        }
         cleanupLegacyBuiltInChannelPluginRegistration(currentConfig, resolvedChannelType);
 
         if (isWechatChannelType(resolvedChannelType)) {
@@ -1382,26 +1437,67 @@ export async function setChannelEnabled(channelType: string, enabled: boolean): 
     });
 }
 
+async function cleanupDanglingWeChatPluginStateFromConfig(
+    currentConfig: OpenClawConfig,
+): Promise<{ cleanedDanglingState: boolean }> {
+    const channelSection = currentConfig.channels?.[WECHAT_PLUGIN_ID];
+    const hasConfiguredWeChatAccounts = channelHasConfiguredAccounts(channelSection);
+    const hadPluginRegistration = Boolean(
+        currentConfig.plugins?.entries?.[WECHAT_PLUGIN_ID]
+        || currentConfig.plugins?.allow?.includes(WECHAT_PLUGIN_ID),
+    );
+
+    if (hasConfiguredWeChatAccounts) {
+        return { cleanedDanglingState: false };
+    }
+
+    const modified = removePluginRegistration(currentConfig, WECHAT_PLUGIN_ID);
+    if (modified) {
+        await writeOpenClawConfig(currentConfig);
+    }
+    await deleteWeChatState();
+    return { cleanedDanglingState: hadPluginRegistration || modified };
+}
+
 export async function cleanupDanglingWeChatPluginState(): Promise<{ cleanedDanglingState: boolean }> {
+    return withConfigLock(async () => (
+        cleanupDanglingWeChatPluginStateFromConfig(await readOpenClawConfig({ requireExisting: true }))
+    ));
+}
+
+/**
+ * Freeze the channel view used by one Gateway launch. Destructive cleanup and
+ * channel enumeration intentionally share one locked, successfully parsed
+ * config object so a transient or malformed read can never become an empty
+ * channel decision.
+ */
+export async function captureChannelStartupSnapshot(): Promise<ChannelStartupSnapshot> {
     return withConfigLock(async () => {
-        const currentConfig = await readOpenClawConfig();
-        const channelSection = currentConfig.channels?.[WECHAT_PLUGIN_ID];
-        const hasConfiguredWeChatAccounts = channelHasConfiguredAccounts(channelSection);
-        const hadPluginRegistration = Boolean(
-            currentConfig.plugins?.entries?.[WECHAT_PLUGIN_ID]
-            || currentConfig.plugins?.allow?.includes(WECHAT_PLUGIN_ID),
-        );
-
-        if (hasConfiguredWeChatAccounts) {
-            return { cleanedDanglingState: false };
+        pendingChannelStartupSnapshot = undefined;
+        const config = await readOpenClawConfig({ requireExisting: true });
+        const configuredChannels = await listConfiguredChannelsFromConfig(config);
+        const connected = connectedChannelStartupSnapshot;
+        if (configuredChannels.length === 0 && connected && connected.configuredChannels.length > 0) {
+            logger.warn('Preserving channels from the last connected Gateway snapshot during an empty config read', {
+                configuredChannels: connected.configuredChannels,
+            });
+            return {
+                config: connected.config,
+                configuredChannels: [...connected.configuredChannels],
+                cleanedDanglingWeChatState: false,
+            };
         }
 
-        const modified = removePluginRegistration(currentConfig, WECHAT_PLUGIN_ID);
-        if (modified) {
-            await writeOpenClawConfig(currentConfig);
+        const cleanup = await cleanupDanglingWeChatPluginStateFromConfig(config);
+        const snapshot = {
+            config,
+            configuredChannels,
+            cleanedDanglingWeChatState: cleanup.cleanedDanglingState,
+        };
+        if (configuredChannels.length > 0) {
+            pendingChannelStartupSnapshot = snapshot;
         }
-        await deleteWeChatState();
-        return { cleanedDanglingState: hadPluginRegistration || modified };
+        return snapshot;
     });
 }
 

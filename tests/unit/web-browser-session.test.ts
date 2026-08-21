@@ -10,6 +10,7 @@ import type {
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebBrowserGuestRegistry } from '@electron/main/web-browser-policy';
 import { configureWebBrowserSession } from '@electron/main/web-browser-session';
+import { registerWorkspaceHtmlPreviewCapability } from '@electron/services/workspace-html-preview';
 import {
   WEB_BROWSER_PARTITION,
   WEB_BROWSER_USER_AGENT,
@@ -40,6 +41,7 @@ vi.mock('../../electron/utils/logger', () => ({
 type PermissionCheckHandler = NonNullable<Parameters<Session['setPermissionCheckHandler']>[0]>;
 type PermissionRequestHandler = NonNullable<Parameters<Session['setPermissionRequestHandler']>[0]>;
 type WillDownloadHandler = Parameters<Session['on']>[1];
+type BeforeRequestHandler = (details: { url: string; webContentsId?: number }, callback: (result: { cancel: boolean }) => void) => void;
 
 interface SessionHarness {
   session: Session;
@@ -49,9 +51,11 @@ interface SessionHarness {
   on: ReturnType<typeof vi.fn>;
   setProxy: ReturnType<typeof vi.fn>;
   closeAllConnections: ReturnType<typeof vi.fn>;
+  onBeforeRequest: ReturnType<typeof vi.fn>;
   listeners: Map<string, (...args: never[]) => void>;
   checkHandler: () => PermissionCheckHandler;
   requestHandler: () => PermissionRequestHandler;
+  beforeRequestHandler: () => BeforeRequestHandler;
 }
 
 class MockGuest extends EventEmitter {
@@ -74,6 +78,7 @@ class MockDownloadItem extends EventEmitter {
 function createSessionHarness(): SessionHarness {
   let checkHandler: PermissionCheckHandler | null = null;
   let requestHandler: PermissionRequestHandler | null = null;
+  let beforeRequestHandler: BeforeRequestHandler | null = null;
   const listeners = new Map<string, (...args: never[]) => void>();
   const setUserAgent = vi.fn();
   const setPermissionCheckHandler = vi.fn((handler: PermissionCheckHandler | null) => {
@@ -84,6 +89,9 @@ function createSessionHarness(): SessionHarness {
   });
   const setProxy = vi.fn();
   const closeAllConnections = vi.fn();
+  const onBeforeRequest = vi.fn((_filter: unknown, handler: BeforeRequestHandler) => {
+    beforeRequestHandler = handler;
+  });
   const on = vi.fn((event: string, listener: (...args: never[]) => void) => {
     listeners.set(event, listener);
   });
@@ -94,6 +102,7 @@ function createSessionHarness(): SessionHarness {
     on,
     setProxy,
     closeAllConnections,
+    webRequest: { onBeforeRequest },
   } as unknown as Session;
 
   return {
@@ -104,6 +113,7 @@ function createSessionHarness(): SessionHarness {
     on,
     setProxy,
     closeAllConnections,
+    onBeforeRequest,
     listeners,
     checkHandler: () => {
       if (!checkHandler) throw new Error('Permission check handler was not installed');
@@ -112,6 +122,10 @@ function createSessionHarness(): SessionHarness {
     requestHandler: () => {
       if (!requestHandler) throw new Error('Permission request handler was not installed');
       return requestHandler;
+    },
+    beforeRequestHandler: () => {
+      if (!beforeRequestHandler) throw new Error('Network request handler was not installed');
+      return beforeRequestHandler;
     },
   };
 }
@@ -168,7 +182,7 @@ describe('web browser session policy', () => {
     });
   }
 
-  it('configures the exact persistent partition, UA, handlers, and one download listener', () => {
+  it('configures the exact persistent partition, UA, handlers, network filter, and one download listener', () => {
     expect(configure()).toBe(harness.session);
 
     expect(mocks.fromPartition).toHaveBeenCalledOnce();
@@ -179,21 +193,25 @@ describe('web browser session policy', () => {
     expect(harness.setPermissionRequestHandler).toHaveBeenCalledOnce();
     expect(harness.listeners.size).toBe(1);
     expect(harness.listeners.has('will-download')).toBe(true);
+    expect(harness.onBeforeRequest).toHaveBeenCalledOnce();
+    expect(harness.onBeforeRequest).toHaveBeenCalledWith({ urls: ['<all_urls>'] }, expect.any(Function));
     expect(harness.setProxy).not.toHaveBeenCalled();
     expect(harness.closeAllConnections).not.toHaveBeenCalled();
   });
 
-  it('does not duplicate the download observer when the persistent Session is configured again', () => {
+  it('does not duplicate the download observer or network filter when the persistent Session is configured again', () => {
     configure();
     configure();
 
     expect(harness.on).toHaveBeenCalledOnce();
     expect(harness.on).toHaveBeenCalledWith('will-download', expect.any(Function));
+    expect(harness.onBeforeRequest).toHaveBeenCalledOnce();
   });
 
-  it('allows only clipboard variants during synchronous permission checks', () => {
+  it('allows clipboard variants only for a registered non-preview guest during synchronous permission checks', () => {
     configure();
     const check = harness.checkHandler();
+    const guest = registerGuest(registry);
     const allowed = [
       'clipboard-read',
       'clipboard-sanitized-write',
@@ -201,28 +219,103 @@ describe('web browser session policy', () => {
     ] as const;
 
     for (const permission of allowed) {
-      expect(check(null, permission, 'https://example.com', {} as never)).toBe(true);
+      expect(check(guest as unknown as WebContents, permission, 'https://example.com', {} as never)).toBe(true);
+      expect(check(null, permission, 'https://example.com', {} as never)).toBe(false);
     }
     for (const permission of ['media', 'geolocation', 'notifications', 'fileSystem'] as const) {
       expect(check(null, permission, 'https://example.com', {} as never)).toBe(false);
     }
   });
 
-  it('grants clipboard requests immediately without opening a dialog', () => {
+  it('grants clipboard requests only to a registered non-preview guest without opening a dialog', () => {
     configure();
     const request = harness.requestHandler();
+    const guest = registerGuest(registry);
 
     for (const permission of [
       'clipboard-read',
       'clipboard-sanitized-write',
       'deprecated-sync-clipboard-read',
     ]) {
-      const callback = vi.fn();
-      request({} as WebContents, permission as never, callback, requestDetails());
-      expect(callback).toHaveBeenCalledOnce();
-      expect(callback).toHaveBeenCalledWith(true);
+      const registeredCallback = vi.fn();
+      request(guest as unknown as WebContents, permission as never, registeredCallback, requestDetails());
+      expect(registeredCallback).toHaveBeenCalledOnce();
+      expect(registeredCallback).toHaveBeenCalledWith(true);
+
+      const unregisteredCallback = vi.fn();
+      request({} as WebContents, permission as never, unregisteredCallback, requestDetails());
+      expect(unregisteredCallback).toHaveBeenCalledOnce();
+      expect(unregisteredCallback).toHaveBeenCalledWith(false);
     }
     expect(mocks.showMessageBox).not.toHaveBeenCalled();
+  });
+
+  it('denies every permission and download while the guest is showing a generated preview', () => {
+    configure();
+    const guest = registerGuest(registry);
+    const previewUrl = `http://127.0.0.1:49152/${'a'.repeat(43)}/index.html`;
+    const revoke = registerWorkspaceHtmlPreviewCapability(previewUrl, Date.now() + 60_000);
+    registry.beginExplicitNavigation(
+      guest as unknown as WebContents,
+      previewUrl,
+    ).commit();
+
+    const check = harness.checkHandler();
+    expect(check(
+      guest as unknown as WebContents,
+      'clipboard-read',
+      'http://127.0.0.1:49152',
+      {} as never,
+    )).toBe(false);
+
+    for (const permission of ['clipboard-read', 'media', 'notifications']) {
+      const callback = vi.fn();
+      harness.requestHandler()(
+        guest as unknown as WebContents,
+        permission as never,
+        callback,
+        requestDetails({ mediaTypes: ['video'] }),
+      );
+      expect(callback).toHaveBeenCalledWith(false);
+    }
+    expect(mocks.showMessageBox).not.toHaveBeenCalled();
+
+    const downloadEvent = { preventDefault: vi.fn() };
+    const item = new MockDownloadItem();
+    const listener = harness.listeners.get('will-download') as WillDownloadHandler;
+    listener(downloadEvent as never, item as unknown as DownloadItem, guest as unknown as WebContents);
+    expect(downloadEvent.preventDefault).toHaveBeenCalledOnce();
+    expect(item.listenerCount('done')).toBe(0);
+    revoke();
+  });
+
+  it('blocks local files and private-network requests while allowing public requests and the active preview route', async () => {
+    configure({
+      resolveNavigation: async url => ({ ok: true, url, kind: 'public' }),
+    });
+    const beforeRequest = harness.beforeRequestHandler();
+    const request = (url: string, webContentsId?: number) => {
+      const callback = vi.fn();
+      beforeRequest({ url, ...(webContentsId === undefined ? {} : { webContentsId }) }, callback);
+      return callback;
+    };
+
+    const publicRequest = request('https://example.com/');
+    await vi.waitFor(() => expect(publicRequest).toHaveBeenCalledWith({ cancel: false }));
+    expect(request('file:///tmp/page.html')).toHaveBeenCalledWith({ cancel: true });
+    expect(request('http://localhost:3000/')).toHaveBeenCalledWith({ cancel: true });
+    expect(request('http://127.0.0.1:3000/')).toHaveBeenCalledWith({ cancel: true });
+
+    const guest = registerGuest(registry) as MockGuest & { id?: number };
+    guest.id = 7;
+    const previewUrl = `http://127.0.0.1:49152/${'a'.repeat(43)}/index.html`;
+    const revoke = registerWorkspaceHtmlPreviewCapability(previewUrl, Date.now() + 60_000);
+    registry.beginExplicitNavigation(guest as unknown as WebContents, previewUrl).commit();
+    expect(request(previewUrl, 7)).toHaveBeenCalledWith({ cancel: false });
+    expect(request(`${previewUrl}#section`, 7)).toHaveBeenCalledWith({ cancel: false });
+    expect(request(previewUrl, 8)).toHaveBeenCalledWith({ cancel: true });
+    expect(request(`${previewUrl}#section`, 8)).toHaveBeenCalledWith({ cancel: true });
+    revoke();
   });
 
   it('prompts once for combined camera and microphone with current locale and origin', async () => {

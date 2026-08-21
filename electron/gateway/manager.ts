@@ -69,7 +69,11 @@ import {
   rollbackOpenClawDowngrade,
   type OpenClawDowngradeTransaction,
 } from './openclaw-downgrade';
-import { hasOpenClawFutureConfigGuardSignal } from './startup-recovery';
+import {
+  GatewayRuntimePackageResolutionError,
+  hasDeterministicGatewayRuntimeFailureSignal,
+  hasOpenClawFutureConfigGuardSignal,
+} from './startup-recovery';
 import {
   acquireManagedRuntimeMutationLease as acquireRuntimeMutationLease,
   assertManagedRuntimeLaunchAllowed,
@@ -105,6 +109,9 @@ export interface GatewayStatus {
   connectedAt?: number;
   version?: string;
   reconnectAttempts?: number;
+  reconnectMaxAttempts?: number;
+  connectionAttempt?: number;
+  connectionMaxAttempts?: number;
   /** True once the gateway's internal subsystems (skills, plugins) are ready for RPC calls. */
   gatewayReady?: boolean;
 }
@@ -142,6 +149,50 @@ export interface GatewayDiagnosticsSnapshot {
   lastSocketCloseCode?: number;
   consecutiveRpcFailures: number;
 }
+
+type GatewayRestartDrainState = 'waiting' | 'drained' | 'forced' | 'executing' | 'terminal';
+type GatewayRestartDrainResult =
+  | 'pending'
+  | 'joined'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+  | 'deferred'
+  | 'suppressed';
+type GatewayRestartDrainForcedReason =
+  | 'none'
+  | 'active_runs_deadline'
+  | 'runtime_unavailable';
+
+interface GatewayRestartDrainLogContext {
+  forcedReason: GatewayRestartDrainForcedReason;
+  terminalEmitted: boolean;
+}
+
+interface GatewayRestartDrainOperation extends GatewayRestartDrainLogContext {
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  lease?: ManagedRuntimeMutationLease;
+  forcedCancellation?: Promise<void>;
+}
+
+class GatewayNonRetryableAuthenticationError extends Error {
+  readonly code = 'gateway_authentication_failed';
+  readonly retryable = false;
+
+  constructor() {
+    super('Gateway authentication was rejected; automatic recovery is disabled for this launch');
+    this.name = 'GatewayNonRetryableAuthenticationError';
+  }
+}
+
+function isDeterministicGatewayAuthenticationError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return /(?:token[_ ]mismatch|unauthorized|authentication failed|auth failed|invalid (?:api )?token|token expired|forbidden|\b401\b|\b403\b)/iu.test(message);
+}
+
+export const __test = { isDeterministicGatewayAuthenticationError };
 
 function isCoreRpcMethod(method: string): boolean {
   return method === 'system-presence';
@@ -213,6 +264,8 @@ export class GatewayManager extends EventEmitter {
   private process: Electron.UtilityProcess | null = null;
   private processExitCode: number | null = null; // set by exit event, replaces exitCode/signalCode
   private ownsProcess = false;
+  private connectedGatewayOwned = false;
+  private connectedGatewayProvenance: 'managed-process' | 'verified-orphan' | 'unknown-external' = 'unknown-external';
   private ws: WebSocket | null = null;
   private status: GatewayStatus = { state: 'stopped', port: getPort('OPENCLAW_GATEWAY') };
   private readonly stateController: GatewayStateController;
@@ -224,6 +277,7 @@ export class GatewayManager extends EventEmitter {
   private startInFlight: Promise<void> | null = null;
   private lastSpawnSummary: string | null = null;
   private recentStartupStderrLines: string[] = [];
+  private startupStderrCollectionActive = false;
   private openClawDowngradeTransaction: OpenClawDowngradeTransaction | null = null;
   private processIsolationError: GatewayProcessIsolationError | null = null;
   private automaticRecoveryDisabledForLaunch = false;
@@ -231,6 +285,7 @@ export class GatewayManager extends EventEmitter {
   private pendingRequests: Map<string, PendingGatewayRequest> = new Map();
   private deviceIdentity: DeviceIdentity | null = null;
   private restartInFlight: Promise<void> | null = null;
+  private restartInFlightDrainContext: GatewayRestartDrainLogContext | null = null;
   private readonly connectionMonitor = new GatewayConnectionMonitor();
   private readonly lifecycleController = new GatewayLifecycleController();
   private readonly restartController = new GatewayRestartController();
@@ -256,6 +311,19 @@ export class GatewayManager extends EventEmitter {
   private gatewayReadyFallbackTimer: NodeJS.Timeout | null = null;
   private gatewayReadyFallbackAttempt = 0;
   private readonly capabilityMonitor = new GatewayCapabilityMonitor();
+  private startupAbortController: AbortController | null = null;
+  private processGeneration = 0;
+  private socketGeneration = 0;
+  private activeRunIds = new Set<string>();
+  private activeRuns = new Map<string, string | undefined>();
+  private runAdmissionClosed = false;
+  private runAdmissionGeneration = 0;
+  private processTerminationInFlight: { child: Electron.UtilityProcess; promise: Promise<void> } | null = null;
+  private stopInFlight: Promise<void> | null = null;
+  private restartAfterDrainTimer: NodeJS.Timeout | null = null;
+  private restartAfterDrainOperation: GatewayRestartDrainOperation | null = null;
+  private static readonly RESTART_DRAIN_TIMEOUT_MS = 90_000;
+  private static readonly TERMINATION_STABILITY_WINDOW_MS = 250;
   private diagnostics: GatewayDiagnosticsSnapshot = {
     consecutiveHeartbeatMisses: 0,
     consecutiveRpcFailures: 0,
@@ -296,18 +364,31 @@ export class GatewayManager extends EventEmitter {
     // so that async file I/O and key generation don't block module loading.
 
     this.on('gateway:ready', () => {
-      this.resetGatewayReadyFallback();
-      this.clearInitialReadyHeartbeatRecoveryTimer();
-      if (this.status.state === 'running' && !this.status.gatewayReady) {
-        logger.info('Gateway subsystems ready (event received)');
-        this.setStatus({ gatewayReady: true });
-      }
+      this.markGatewayRuntimeReady('event');
     });
     this.on('gateway:health', (payload) => {
       this.capabilityMonitor.recordOpenClawHealth(payload);
     });
     this.on('gateway:presence', (payload) => {
       this.capabilityMonitor.recordPresence(payload);
+    });
+    this.on('chat:runtime-event', (event: ChatRuntimeEvent) => {
+      if (event.type === 'run.started') {
+        this.activeRunIds.add(event.runId);
+        this.activeRuns.set(event.runId, event.sessionKey);
+        return;
+      }
+      if (event.type === 'run.ended') {
+        this.activeRunIds.delete(event.runId);
+        this.activeRuns.delete(event.runId);
+        // Forced cancellation emits a synthetic run.ended event after it has
+        // already removed the run from the local set. Suppress the normal
+        // drain callback here; the cancellation owner resumes the restart
+        // exactly once after all abort attempts settle.
+        if (!this.restartAfterDrainOperation?.forcedCancellation) {
+          this.flushRestartAfterDrain();
+        }
+      }
     });
   }
 
@@ -442,7 +523,14 @@ export class GatewayManager extends EventEmitter {
       this.reconnectAttempts = 0;
     }
     this.isAutoReconnectStart = false; // consume the flag
-    this.setStatus({ state: 'starting', reconnectAttempts: this.reconnectAttempts, gatewayReady: false });
+    this.setStatus({
+      state: 'starting',
+      reconnectAttempts: this.reconnectAttempts,
+      reconnectMaxAttempts: this.reconnectConfig.maxAttempts,
+      connectionAttempt: undefined,
+      connectionMaxAttempts: undefined,
+      gatewayReady: false,
+    });
     this.resetGatewayReadyFallback();
 
     // Check if Python environment is ready (self-healing) asynchronously.
@@ -453,6 +541,8 @@ export class GatewayManager extends EventEmitter {
     let tSpawned = 0;
     let tReady = 0;
     let downgradeMutationStarted = false;
+    const startupAbortController = new AbortController();
+    this.startupAbortController = startupAbortController;
 
     try {
       // This must run before prepareGatewayLaunchContext performs any config synchronization.
@@ -469,6 +559,7 @@ export class GatewayManager extends EventEmitter {
         shouldWaitForPortFree: process.platform === 'win32',
         hasOwnedProcess: () => this.process?.pid != null && this.ownsProcess,
         resetStartupStderrLines: () => {
+          this.startupStderrCollectionActive = false;
           this.recentStartupStderrLines = [];
         },
         getStartupStderrLines: () => this.recentStartupStderrLines,
@@ -482,23 +573,40 @@ export class GatewayManager extends EventEmitter {
           // snapshot captured at start() entry is stale after startProcess()
           // replaces this.process — leading to the just-started pid being
           // immediately killed as a false orphan on the next retry iteration.
-          const existing = await findExistingGatewayProcess({ port, ownedPid: this.process?.pid });
+          const existing = await findExistingGatewayProcess({
+            port,
+            ownedPid: this.process?.pid,
+            assertCanContinue: () => {
+              this.lifecycleController.assert(startEpoch, 'start/find-existing-identity');
+              assertManagedRuntimeLaunchAllowed(lease);
+            },
+          });
           if (existing && this.openClawDowngradeTransaction) {
             throw new Error('Cannot hand off OpenClaw config while another Gateway is running');
           }
           return existing;
         },
         connect: async (port, externalToken) => {
-          await this.connect(port, externalToken);
+          await this.connect(port, externalToken, startupAbortController.signal);
         },
-        onConnectedToExistingGateway: () => {
+        onConnectAttempt: (attemptNo, maxAttempts) => {
+          this.setStatus({
+            connectionAttempt: attemptNo,
+            connectionMaxAttempts: maxAttempts,
+          });
+        },
+        onConnectedToExistingGateway: ({ gateway, source }) => {
           // If the existing gateway is actually our own spawned UtilityProcess
           // (e.g. after a self-restart code=1012), keep ownership so that
           // stop() can still terminate the process during a restart() cycle.
-          const isOwnProcess = this.process?.pid != null && this.ownsProcess;
+          const isOwnProcess = this.process?.pid != null && this.ownsProcess && (
+            source === 'owned-process'
+            || (gateway.pid != null && this.process.pid === gateway.pid)
+          );
+          this.connectedGatewayOwned = isOwnProcess;
+          this.connectedGatewayProvenance = isOwnProcess ? 'managed-process' : gateway.provenance;
           if (!isOwnProcess) {
-            this.ownsProcess = false;
-            this.setStatus({ pid: undefined });
+            this.setStatus({ pid: gateway.pid });
           }
 
           // Treat a successful reconnect to the owned process as a restart
@@ -510,6 +618,8 @@ export class GatewayManager extends EventEmitter {
             this.restartController.recordRestartCompleted();
           }
 
+          this.finishGatewayStartupDiagnostics();
+          this.openRunAdmission();
           this.startHealthCheck();
         },
         waitForPortFree: async (port) => {
@@ -525,10 +635,21 @@ export class GatewayManager extends EventEmitter {
           tSpawned = Date.now();
         },
         waitForReady: async (port) => {
-          await waitForGatewayReady({
-            port,
-            getProcessExitCode: () => this.processExitCode,
-          });
+          try {
+            await waitForGatewayReady({
+              port,
+              getProcessExitCode: () => this.processExitCode,
+              beforeProbe: () => {
+                this.lifecycleController.assert(startEpoch, 'start/wait-ready-probe');
+                assertManagedRuntimeLaunchAllowed(lease);
+              },
+            });
+          } catch (error) {
+            if (hasDeterministicGatewayRuntimeFailureSignal(error, this.recentStartupStderrLines)) {
+              throw new GatewayRuntimePackageResolutionError(error);
+            }
+            throw error;
+          }
           tReady = Date.now();
         },
         afterManagedGatewayReady: async () => {
@@ -545,6 +666,12 @@ export class GatewayManager extends EventEmitter {
           );
         },
         onConnectedToManagedGateway: () => {
+          this.connectedGatewayOwned = this.process?.pid != null && this.ownsProcess;
+          this.connectedGatewayProvenance = this.connectedGatewayOwned
+            ? 'managed-process'
+            : 'unknown-external';
+          this.finishGatewayStartupDiagnostics();
+          this.openRunAdmission();
           this.startHealthCheck();
           const tConnected = Date.now();
           const spawnToReadyMs = tReady && tSpawned ? tReady - tSpawned : undefined;
@@ -633,6 +760,15 @@ export class GatewayManager extends EventEmitter {
         logger.debug(startupError.message);
         throw startupError;
       }
+      if (
+        startupError instanceof GatewayRuntimePackageResolutionError
+        || hasDeterministicGatewayRuntimeFailureSignal(startupError, this.recentStartupStderrLines)
+      ) {
+        this.disableAutomaticRecovery('OpenClaw runtime package resolution failed');
+      }
+      if (startupError instanceof GatewayNonRetryableAuthenticationError) {
+        this.disableAutomaticRecovery(startupError.message);
+      }
       logger.error(
         `Gateway start failed (port=${this.status.port}, reconnectAttempts=${this.reconnectAttempts}, spawn=${this.lastSpawnSummary ?? 'n/a'})`,
         startupError
@@ -644,6 +780,10 @@ export class GatewayManager extends EventEmitter {
       }
       throw startupError;
     } finally {
+      this.startupStderrCollectionActive = false;
+      if (this.startupAbortController === startupAbortController) {
+        this.startupAbortController = null;
+      }
       this.startLock = false;
       if (isManagedRuntimeMutationActive()) {
         this.restartController.resetDeferredRestart();
@@ -671,7 +811,8 @@ export class GatewayManager extends EventEmitter {
     if (!child || !this.ownsProcess) return;
     const childPid = child.pid;
 
-    await terminateOwnedGatewayProcess(child);
+    await this.confirmTerminationTarget(child, this.processGeneration, childPid);
+    await this.terminateOwnedProcessAndWaitForPort(child);
     if (this.process === child) {
       this.process = null;
       this.ownsProcess = false;
@@ -698,7 +839,8 @@ export class GatewayManager extends EventEmitter {
   ): Promise<void> {
     const child = this.process;
     if (child && this.ownsProcess) {
-      await terminateOwnedGatewayProcess(child);
+      await this.confirmTerminationTarget(child, this.processGeneration, child.pid);
+      await this.terminateOwnedProcessAndWaitForPort(child);
       if (this.process === child) {
         this.process = null;
         this.ownsProcess = false;
@@ -717,9 +859,36 @@ export class GatewayManager extends EventEmitter {
    * Stop Gateway process
    */
   async stop(): Promise<void> {
+    if (this.stopInFlight) return this.stopInFlight;
+    const stopPromise = this.stopInternal();
+    this.stopInFlight = stopPromise;
+    try {
+      await stopPromise;
+    } finally {
+      if (this.stopInFlight === stopPromise) this.stopInFlight = null;
+    }
+  }
+
+  private async stopInternal(): Promise<void> {
     logger.info('Gateway stop requested');
+    const gatewayPortAtStop = this.status.port;
+    // Capture the owned child before the shutdown RPC. The child exit handler
+    // can clear `this.process` while the RPC is in flight; the stop operation
+    // still has to wait for that child's listener to release the port.
+    let ownedChildAtStop = this.process && this.ownsProcess
+      ? {
+        child: this.process,
+        processGeneration: this.processGeneration,
+        pid: this.process.pid,
+      }
+      : null;
+    if (!this.runAdmissionClosed) this.closeRunAdmission();
     cancelLocalDeviceAutoApproval();
     this.lifecycleController.bump('stop');
+    const startupAbortController = this.startupAbortController;
+    if (startupAbortController && !startupAbortController.signal.aborted) {
+      startupAbortController.abort(new LifecycleSupersededError('Gateway startup cancelled by stop'));
+    }
     // Disable auto-reconnect
     this.shouldReconnect = false;
 
@@ -733,19 +902,38 @@ export class GatewayManager extends EventEmitter {
       await startToDrain.catch(() => undefined);
     }
 
-    // If this manager is attached to an external gateway process, ask it to shut down
-    // over protocol before closing the socket.
-    if (!this.ownsProcess && this.ws?.readyState === WebSocket.OPEN && this.externalShutdownSupported !== false) {
+    // A superseded start can fork its child while the stop operation is
+    // draining. Capture that late child after the drain so it cannot escape
+    // the same termination and port-release barrier.
+    if (this.process && this.ownsProcess && ownedChildAtStop?.child !== this.process) {
+      ownedChildAtStop = {
+        child: this.process,
+        processGeneration: this.processGeneration,
+        pid: this.process.pid,
+      };
+    }
+
+    // Ask the connected runtime to shut down gracefully before terminating an
+    // owned process. This gives active channel transports and session writers a
+    // bounded drain window; unknown listeners are never signalled or killed.
+    const connectedGatewayProvenance = this.connectedGatewayProvenance;
+    const canGracefullyShutdown = this.ws?.readyState === WebSocket.OPEN
+      && this.externalShutdownSupported !== false
+      && (this.connectedGatewayOwned || connectedGatewayProvenance === 'verified-orphan');
+    if (canGracefullyShutdown) {
       try {
         await this.rpc('shutdown', undefined, 5000);
         this.externalShutdownSupported = true;
       } catch (error) {
         if (this.isUnsupportedShutdownError(error)) {
           this.externalShutdownSupported = false;
-          logger.info('External Gateway does not support "shutdown"; skipping shutdown RPC for future stops');
+          logger.info('Owned Gateway does not support "shutdown"; skipping shutdown RPC for future stops');
         } else {
-          logger.warn('Failed to request shutdown for externally managed Gateway:', error);
+          logger.warn('Failed to request graceful shutdown for verified Gateway:', error);
         }
+      }
+      if (connectedGatewayProvenance === 'verified-orphan' && this.externalShutdownSupported !== false) {
+        await this.waitForConnectedGatewayPortFree(gatewayPortAtStop);
       }
     }
 
@@ -759,14 +947,23 @@ export class GatewayManager extends EventEmitter {
       try { this.ws.terminate(); } catch { /* ignore */ }
       this.ws = null;
     }
+    this.connectedGatewayOwned = false;
+    this.connectedGatewayProvenance = 'unknown-external';
 
-    // Kill process
-    if (this.process && this.ownsProcess) {
-      const child = this.process;
-      await terminateOwnedGatewayProcess(child);
+    // Kill the child captured before shutdown. If the child exited while the
+    // shutdown RPC was running, its exit handler may have already cleared the
+    // manager references; the port-release wait remains mandatory either way.
+    if (ownedChildAtStop) {
+      const { child, processGeneration, pid } = ownedChildAtStop;
+      if (this.process === child && this.ownsProcess) {
+        await this.confirmTerminationTarget(child, processGeneration, pid);
+        await this.terminateOwnedProcessAndWaitForPort(child, gatewayPortAtStop);
 
-      if (this.process === child) {
-        this.process = null;
+        if (this.process === child) {
+          this.process = null;
+        }
+      } else {
+        await this.waitForConnectedGatewayPortFree(gatewayPortAtStop);
       }
     }
     this.ownsProcess = false;
@@ -776,7 +973,18 @@ export class GatewayManager extends EventEmitter {
     this.restartController.resetDeferredRestart();
     this.isAutoReconnectStart = false;
     this.diagnostics.consecutiveHeartbeatMisses = 0;
-    this.setStatus({ state: 'stopped', error: undefined, pid: undefined, connectedAt: undefined, uptime: undefined, gatewayReady: undefined });
+    this.setStatus({
+      state: 'stopped',
+      error: undefined,
+      pid: undefined,
+      connectedAt: undefined,
+      uptime: undefined,
+      gatewayReady: undefined,
+      reconnectAttempts: undefined,
+      reconnectMaxAttempts: undefined,
+      connectionAttempt: undefined,
+      connectionMaxAttempts: undefined,
+    });
   }
 
   /**
@@ -789,7 +997,8 @@ export class GatewayManager extends EventEmitter {
     }
 
     const child = this.process;
-    await terminateOwnedGatewayProcess(child);
+    await this.confirmTerminationTarget(child, this.processGeneration, child.pid);
+    await this.terminateOwnedProcessAndWaitForPort(child);
     if (this.process === child) {
       this.process = null;
     }
@@ -798,11 +1007,249 @@ export class GatewayManager extends EventEmitter {
     return true;
   }
 
+  private terminateOwnedProcess(child: Electron.UtilityProcess): Promise<void> {
+    if (this.processTerminationInFlight?.child === child) {
+      return this.processTerminationInFlight.promise;
+    }
+    const promise = terminateOwnedGatewayProcess(child).finally(() => {
+      if (this.processTerminationInFlight?.promise === promise) {
+        this.processTerminationInFlight = null;
+      }
+    });
+    this.processTerminationInFlight = { child, promise };
+    return promise;
+  }
+
+  private async terminateOwnedProcessAndWaitForPort(
+    child: Electron.UtilityProcess,
+    port = this.status.port,
+  ): Promise<void> {
+    await this.terminateOwnedProcess(child);
+    await this.waitForConnectedGatewayPortFree(port);
+  }
+
+  private waitForConnectedGatewayPortFree(port = this.status.port): Promise<void> {
+    if (process.platform !== 'win32') return Promise.resolve();
+    return waitForPortFree(port);
+  }
+
+  private async confirmTerminationTarget(
+    child: Electron.UtilityProcess,
+    processGeneration: number,
+    pid: number | undefined,
+  ): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, GatewayManager.TERMINATION_STABILITY_WINDOW_MS));
+    if (
+      this.process !== child
+      || !this.ownsProcess
+      || this.processGeneration !== processGeneration
+      || child.pid !== pid
+    ) {
+      throw new Error('Gateway termination target changed during the stability window');
+    }
+  }
+
   /**
    * Restart Gateway process
    */
+  private shouldDrainBeforeRestart(): boolean {
+    return this.activeRunIds.size > 0
+      && this.status.state === 'running'
+      && this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  private closeRunAdmission(): number {
+    this.runAdmissionClosed = true;
+    this.runAdmissionGeneration = this.nextGeneration(this.runAdmissionGeneration);
+    return this.runAdmissionGeneration;
+  }
+
+  private reopenRunAdmission(generation: number): void {
+    if (generation === this.runAdmissionGeneration) this.runAdmissionClosed = false;
+  }
+
+  private openRunAdmission(): void {
+    this.runAdmissionGeneration = this.nextGeneration(this.runAdmissionGeneration);
+    this.runAdmissionClosed = false;
+  }
+
+  private nextGeneration(current: number): number {
+    return current >= Number.MAX_SAFE_INTEGER ? 1 : current + 1;
+  }
+
+  private logRestartDrain(
+    state: GatewayRestartDrainState,
+    result: GatewayRestartDrainResult,
+    forcedReason: GatewayRestartDrainForcedReason,
+  ): void {
+    const details = {
+      event: 'gateway_restart_drain',
+      state,
+      result,
+      forcedReason,
+    } as const;
+    if (state === 'forced' || (state === 'terminal' && result !== 'succeeded')) {
+      logger.warn('Gateway restart drain', details);
+      return;
+    }
+    logger.info('Gateway restart drain', details);
+  }
+
+  private logRestartDrainTerminal(
+    context: GatewayRestartDrainLogContext,
+    result: Extract<GatewayRestartDrainResult, 'succeeded' | 'failed' | 'cancelled' | 'deferred' | 'suppressed'>,
+  ): void {
+    if (context.terminalEmitted) return;
+    context.terminalEmitted = true;
+    this.logRestartDrain('terminal', result, context.forcedReason);
+  }
+
+  private deferRestartUntilRunsDrain(lease?: ManagedRuntimeMutationLease): Promise<void> {
+    if (this.restartAfterDrainOperation) {
+      this.logRestartDrain(
+        'waiting',
+        'joined',
+        this.restartAfterDrainOperation.forcedReason,
+      );
+      return this.restartAfterDrainOperation.promise;
+    }
+
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    const operation: GatewayRestartDrainOperation = {
+      promise,
+      resolve,
+      reject,
+      lease,
+      forcedReason: 'none',
+      terminalEmitted: false,
+    };
+    this.restartAfterDrainOperation = operation;
+    this.logRestartDrain('waiting', 'pending', operation.forcedReason);
+
+    this.restartAfterDrainTimer = setTimeout(() => {
+      this.restartAfterDrainTimer = null;
+      if (this.restartAfterDrainOperation !== operation) return;
+
+      operation.forcedReason = 'active_runs_deadline';
+      this.logRestartDrain('forced', 'pending', operation.forcedReason);
+      void this.cancelActiveRunsForForcedRestart(operation).then(() => this.executeDeferredRestart(operation));
+    }, GatewayManager.RESTART_DRAIN_TIMEOUT_MS);
+    return operation.promise;
+  }
+
+  private flushRestartAfterDrain(): void {
+    const operation = this.restartAfterDrainOperation;
+    if (!operation || this.activeRunIds.size > 0) return;
+    this.logRestartDrain('drained', 'pending', operation.forcedReason);
+    void this.executeDeferredRestart(operation);
+  }
+
+  private async cancelActiveRunsForForcedRestart(operation: GatewayRestartDrainOperation): Promise<void> {
+    if (operation.forcedCancellation) return operation.forcedCancellation;
+    const activeRuns = [...this.activeRuns.entries()];
+    if (activeRuns.length === 0) return;
+
+    operation.forcedCancellation = Promise.allSettled(activeRuns.map(async ([runId, sessionKey]) => {
+      try {
+        await this.rpc(
+          'chat.abort',
+          sessionKey ? { sessionKey } : { runId },
+          15_000,
+        );
+      } catch {
+        // A dead or already-disconnected Gateway cannot acknowledge abort.
+        // The local run still needs an explicit terminal state so restart
+        // does not wait forever or replay the request after recovery.
+      } finally {
+        if (this.activeRuns.has(runId)) {
+          this.activeRuns.delete(runId);
+          this.activeRunIds.delete(runId);
+          this.emit('chat:runtime-event', {
+            type: 'run.ended',
+            runId,
+            sessionKey,
+            status: 'aborted',
+            error: 'Gateway restart forced cancellation',
+            stopReason: 'forced_restart',
+          });
+        }
+      }
+    })).then(() => undefined);
+    await operation.forcedCancellation;
+  }
+
+  private async executeDeferredRestart(operation: GatewayRestartDrainOperation): Promise<void> {
+    if (this.restartAfterDrainOperation !== operation) return;
+    this.detachDeferredRestartDrain(operation);
+    try {
+      await assertManagedRuntimeStartAllowed(operation.lease);
+      await this.executeRestart(operation.lease, operation);
+      operation.resolve();
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      this.logRestartDrainTerminal(operation, 'failed');
+      operation.reject(normalized);
+    }
+  }
+
+  private detachDeferredRestartDrain(operation: GatewayRestartDrainOperation): void {
+    if (this.restartAfterDrainOperation !== operation) return;
+    if (this.restartAfterDrainTimer) {
+      clearTimeout(this.restartAfterDrainTimer);
+      this.restartAfterDrainTimer = null;
+    }
+    this.restartAfterDrainOperation = null;
+  }
+
+  private clearDeferredRestartDrain(error?: Error): void {
+    const operation = this.restartAfterDrainOperation;
+    if (this.restartAfterDrainTimer) {
+      clearTimeout(this.restartAfterDrainTimer);
+      this.restartAfterDrainTimer = null;
+    }
+    this.restartAfterDrainOperation = null;
+    if (error && operation) {
+      this.logRestartDrainTerminal(operation, 'cancelled');
+      operation.reject(error);
+    }
+  }
+
   async restart(lease?: ManagedRuntimeMutationLease): Promise<void> {
-    await assertManagedRuntimeStartAllowed(lease);
+    const admissionGeneration = this.closeRunAdmission();
+    try {
+      await assertManagedRuntimeStartAllowed(lease);
+      if (this.shouldDrainBeforeRestart()) {
+        await this.deferRestartUntilRunsDrain(lease);
+        return;
+      }
+      await this.executeRestart(lease, {
+        forcedReason: 'none',
+        terminalEmitted: false,
+      });
+    } finally {
+      this.reopenRunAdmission(admissionGeneration);
+    }
+  }
+
+  private async executeRestart(
+    lease: ManagedRuntimeMutationLease | undefined,
+    drainContext: GatewayRestartDrainLogContext,
+  ): Promise<void> {
+    if (this.activeRunIds.size > 0) {
+      drainContext.forcedReason = 'runtime_unavailable';
+      this.logRestartDrain('forced', 'pending', drainContext.forcedReason);
+      await this.cancelActiveRunsForForcedRestart({
+        ...drainContext,
+        promise: Promise.resolve(),
+        resolve: () => undefined,
+        reject: () => undefined,
+      });
+    }
     if (this.restartController.isRestartDeferred({
       state: this.status.state,
       startLock: this.startLock,
@@ -811,11 +1258,16 @@ export class GatewayManager extends EventEmitter {
         state: this.status.state,
         startLock: this.startLock,
       });
+      this.logRestartDrainTerminal(drainContext, 'deferred');
       return;
     }
 
     if (this.restartInFlight) {
-      logger.debug('Gateway restart already in progress, joining existing request');
+      this.logRestartDrain(
+        'waiting',
+        'joined',
+        this.restartInFlightDrainContext?.forcedReason ?? drainContext.forcedReason,
+      );
       await this.restartInFlight;
       return;
     }
@@ -836,12 +1288,15 @@ export class GatewayManager extends EventEmitter {
       };
       trackMetric('gateway.restart.suppressed', props);
       captureTelemetryEvent('gateway_restart_suppressed', props);
+      this.logRestartDrainTerminal(drainContext, 'suppressed');
       return;
     }
 
     const pidBefore = this.status.pid;
     let managedRuntimeBlocked = false;
     logger.info(`[gateway-refresh] mode=restart requested pidBefore=${pidBefore ?? 'n/a'}`);
+    this.logRestartDrain('executing', 'pending', drainContext.forcedReason);
+    this.restartInFlightDrainContext = drainContext;
     this.restartInFlight = (async () => {
       await this.stop();
       try {
@@ -862,7 +1317,11 @@ export class GatewayManager extends EventEmitter {
         }
         // stop() set shouldReconnect=false. Restore it so the gateway
         // can self-heal via scheduleReconnect() instead of dying permanently.
-        logger.warn('Gateway restart: start() failed after stop(), enabling auto-reconnect recovery', err);
+        logger.warn('Gateway restart recovery', {
+          event: 'gateway_restart_recovery',
+          result: 'start_failed',
+          action: 'schedule_reconnect',
+        });
         this.shouldReconnect = true;
         this.scheduleReconnect();
         throw err;
@@ -885,8 +1344,13 @@ export class GatewayManager extends EventEmitter {
         `[gateway-refresh] mode=restart result=applied pidBefore=${pidBefore ?? 'n/a'} pidAfter=${this.status.pid ?? 'n/a'} ` +
         `suppressed=${observability.suppressed_total} executed=${observability.executed_total} circuitOpenUntil=${observability.circuit_open_until}`,
       );
+      this.logRestartDrainTerminal(drainContext, 'succeeded');
+    } catch (error) {
+      this.logRestartDrainTerminal(drainContext, 'failed');
+      throw error;
     } finally {
       this.restartInFlight = null;
+      this.restartInFlightDrainContext = null;
       if (managedRuntimeBlocked || isManagedRuntimeMutationActive()) {
         this.restartController.resetDeferredRestart();
       } else {
@@ -1088,6 +1552,7 @@ export class GatewayManager extends EventEmitter {
     }
     this.resetGatewayReadyFallback();
     this.clearInitialReadyHeartbeatRecoveryTimer();
+    this.clearDeferredRestartDrain(new Error('Gateway stop cancelled a pending graceful restart'));
   }
 
   private clearGatewayReadyFallbackTimer(): void {
@@ -1111,7 +1576,7 @@ export class GatewayManager extends EventEmitter {
   }
 
   private scheduleGatewayReadyFallback(delayMs?: number): void {
-    if (this.status.state !== 'running' || this.status.gatewayReady) {
+    if ((this.status.state !== 'starting' && this.status.state !== 'running') || this.status.gatewayReady) {
       return;
     }
     this.clearGatewayReadyFallbackTimer();
@@ -1123,7 +1588,7 @@ export class GatewayManager extends EventEmitter {
   }
 
   private async probeGatewayReadyFallback(): Promise<void> {
-    if (this.status.state !== 'running' || this.status.gatewayReady) {
+    if ((this.status.state !== 'starting' && this.status.state !== 'running') || this.status.gatewayReady) {
       return;
     }
 
@@ -1136,11 +1601,7 @@ export class GatewayManager extends EventEmitter {
         checkedAt: Date.now(),
         durationMs: Date.now() - startedAt,
       });
-      if (this.status.state === 'running' && !this.status.gatewayReady) {
-        logger.info('Gateway ready fallback RPC router probe succeeded');
-        this.resetGatewayReadyFallback();
-        this.setStatus({ gatewayReady: true });
-      }
+      this.markGatewayRuntimeReady('rpc-fallback');
     } catch (error) {
       this.capabilityMonitor.recordCoreProbe({
         ok: false,
@@ -1149,7 +1610,7 @@ export class GatewayManager extends EventEmitter {
         error: error instanceof Error ? error.message : String(error),
       });
       logger.warn('Gateway ready fallback RPC router probe failed; waiting for gateway.ready event or heartbeat recovery:', error);
-      if (this.status.state === 'running' && !this.status.gatewayReady) {
+      if ((this.status.state === 'starting' || this.status.state === 'running') && !this.status.gatewayReady) {
         this.scheduleGatewayReadyFallback();
       }
     }
@@ -1164,6 +1625,10 @@ export class GatewayManager extends EventEmitter {
     return await new Promise<T>((resolve, reject) => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         reject(new Error('Gateway not connected'));
+        return;
+      }
+      if (this.runAdmissionClosed && method === 'chat.send') {
+        reject(new Error('Gateway restart drain is closing run admission'));
         return;
       }
 
@@ -1252,6 +1717,45 @@ export class GatewayManager extends EventEmitter {
     });
   }
 
+  private markGatewayRuntimeReady(source: 'event' | 'rpc-fallback'): void {
+    if ((this.status.state !== 'starting' && this.status.state !== 'running') || this.status.gatewayReady) return;
+    this.resetGatewayReadyFallback();
+    this.clearInitialReadyHeartbeatRecoveryTimer();
+    logger.info(`[gateway-ready] source=${source}; Gateway subsystems ready`);
+    this.setStatus({
+      state: 'running',
+      gatewayReady: true,
+      reconnectAttempts: 0,
+      reconnectMaxAttempts: undefined,
+      connectionAttempt: undefined,
+      connectionMaxAttempts: undefined,
+    });
+    this.scheduleReadOnlyChannelRecoveryProbe();
+  }
+
+  private finishGatewayStartupDiagnostics(): void {
+    this.startupStderrCollectionActive = false;
+    this.recentStartupStderrLines = [];
+  }
+
+  private scheduleReadOnlyChannelRecoveryProbe(): void {
+    const epoch = this.lifecycleController.getCurrentEpoch();
+    const socketGeneration = this.socketGeneration;
+    void this.connectionMonitor.runReadOnlyProbe(async () => {
+      await this.rpc('channels.status', { probe: false }, 5_000);
+    }).then((result) => {
+      if (result.stale || !this.lifecycleController.isCurrent(epoch) || socketGeneration !== this.socketGeneration) return;
+      if (result.ok) {
+        logger.info(`[gateway-channel-recovery] result=ok mode=readonly elapsedMs=${result.durationMs}`);
+        return;
+      }
+      logger.warn(
+        `[gateway-channel-recovery] result=failed mode=readonly elapsedMs=${result.durationMs}; preserving existing runtime and configuration`,
+        result.error,
+      );
+    });
+  }
+
   /**
    * Check Gateway health via WebSocket ping
    * OpenClaw Gateway doesn't have an HTTP /health endpoint
@@ -1334,9 +1838,20 @@ export class GatewayManager extends EventEmitter {
     const stderrDedup = new Map<string, number>();
     this.startupTraceCollector.reset();
 
-    // This is the final asynchronous boundary before utilityProcess.fork().
     // A managed transaction that superseded startup must win before the child exists.
     assertCanLaunch('start/process-before-fork');
+    if (process.platform === 'win32') {
+      // Config preparation and service cleanup happen after the orchestrator's
+      // first port probe. Recheck at the final launch boundary so a listener
+      // that appears in that gap cannot be mistaken for this managed child.
+      await waitForPortFree(this.status.port);
+      assertCanLaunch('start/process-after-port-check');
+    }
+    this.externalShutdownSupported = null;
+    const processGeneration = ++this.processGeneration;
+    const startupStderrLines: string[] = [];
+    this.recentStartupStderrLines = startupStderrLines;
+    this.startupStderrCollectionActive = true;
     const { child, lastSpawnSummary } = await launchGatewayProcess({
       port: this.status.port,
       launchContext,
@@ -1344,8 +1859,12 @@ export class GatewayManager extends EventEmitter {
       getCurrentState: () => this.status.state,
       getShouldReconnect: () => this.shouldReconnect,
       onStderrLine: (line) => {
-        recordGatewayStartupStderrLine(this.recentStartupStderrLines, line);
-        const traceStage = this.startupTraceCollector.record(line);
+        const isCurrentStartup = processGeneration === this.processGeneration
+          && this.startupStderrCollectionActive;
+        if (isCurrentStartup) {
+          recordGatewayStartupStderrLine(startupStderrLines, line);
+        }
+        const traceStage = isCurrentStartup ? this.startupTraceCollector.record(line) : null;
         const classified = classifyGatewayStderrMessage(line);
         if (classified.level === 'drop') return;
 
@@ -1384,8 +1903,16 @@ export class GatewayManager extends EventEmitter {
         this.setStatus({ pid });
       },
       onExit: (exitedChild, code) => {
+        if (processGeneration !== this.processGeneration || this.process !== exitedChild) {
+          logger.debug(
+            `Ignoring stale Gateway process exit (generation=${processGeneration}, current=${this.processGeneration}, pid=${exitedChild.pid ?? 'unknown'})`,
+          );
+          return;
+        }
         this.processExitCode = code;
         this.ownsProcess = false;
+        this.connectedGatewayOwned = false;
+        this.connectedGatewayProvenance = 'unknown-external';
         this.connectionMonitor.clear();
         if (this.process === exitedChild) {
           this.process = null;
@@ -1398,9 +1925,20 @@ export class GatewayManager extends EventEmitter {
 
         if (
           this.openClawDowngradeTransaction
-          || hasOpenClawFutureConfigGuardSignal(undefined, this.recentStartupStderrLines)
+          || (
+            this.startupStderrCollectionActive
+            && hasOpenClawFutureConfigGuardSignal(undefined, startupStderrLines)
+          )
         ) {
           this.disableAutomaticRecovery('OpenClaw config handoff child exited');
+          return;
+        }
+
+        if (
+          this.startupStderrCollectionActive
+          && hasDeterministicGatewayRuntimeFailureSignal(undefined, startupStderrLines)
+        ) {
+          this.disableAutomaticRecovery('OpenClaw runtime package resolution failed');
           return;
         }
 
@@ -1416,10 +1954,19 @@ export class GatewayManager extends EventEmitter {
         // the gateway permanently dead with no recovery path.
         this.scheduleReconnect();
       },
-      onError: () => {
-        this.ownsProcess = false;
-        if (this.process === child) {
+      onError: (failedChild, spawnError) => {
+        const isCurrentFailedChild = this.processGeneration === processGeneration
+          && (this.process === null || this.process === failedChild);
+        if (isCurrentFailedChild) {
+          this.ownsProcess = false;
+          this.connectedGatewayOwned = false;
+          this.connectedGatewayProvenance = 'unknown-external';
+        }
+        if (this.process === failedChild) {
           this.process = null;
+        }
+        if (hasDeterministicGatewayRuntimeFailureSignal(spawnError, startupStderrLines)) {
+          this.disableAutomaticRecovery('OpenClaw runtime package resolution failed');
         }
       },
       allowOlderBinaryDestructiveActions: this.openClawDowngradeTransaction !== null,
@@ -1436,7 +1983,8 @@ export class GatewayManager extends EventEmitter {
       assertCanLaunch('start/process-after-register');
     } catch (error) {
       try {
-        await terminateOwnedGatewayProcess(child);
+        await this.confirmTerminationTarget(child, processGeneration, child.pid);
+        await this.terminateOwnedProcessAndWaitForPort(child);
       } catch (terminationError) {
         throw new GatewayLateChildTerminationError(error, terminationError, child.pid);
       }
@@ -1454,14 +2002,27 @@ export class GatewayManager extends EventEmitter {
   /**
    * Connect WebSocket to Gateway
    */
-  private async connect(port: number, _externalToken?: string): Promise<void> {
-    this.ws = await connectGatewaySocket({
-      port,
-      deviceIdentity: this.deviceIdentity,
-      platform: process.platform,
-      pendingRequests: this.pendingRequests,
-      getToken: async () => await import('../utils/store').then(({ getSetting }) => getSetting('gatewayToken')),
-      onHandshakeComplete: (ws) => {
+  private async connect(
+    port: number,
+    _externalToken?: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const socketGeneration = ++this.socketGeneration;
+    this.connectedGatewayOwned = false;
+    this.connectedGatewayProvenance = 'unknown-external';
+    let connectedSocket: WebSocket;
+    try {
+      connectedSocket = await connectGatewaySocket({
+        port,
+        deviceIdentity: this.deviceIdentity,
+        platform: process.platform,
+        pendingRequests: this.pendingRequests,
+        getToken: async () => await import('../utils/store').then(({ getSetting }) => getSetting('gatewayToken')),
+        onHandshakeComplete: (ws) => {
+        if (socketGeneration !== this.socketGeneration) {
+          try { ws.terminate(); } catch { /* ignore stale socket cleanup */ }
+          return;
+        }
         this.ws = ws;
         ws.on('pong', () => {
           this.connectionMonitor.markAlive('pong');
@@ -1469,23 +2030,31 @@ export class GatewayManager extends EventEmitter {
         });
         this.recordGatewayAlive();
         this.setStatus({
-          state: 'running',
+          state: 'starting',
           port,
           connectedAt: Date.now(),
+          gatewayReady: false,
         });
         this.startPing();
         this.scheduleGatewayReadyFallback();
         scheduleLocalDeviceAutoApproval(this);
       },
-      onMessage: (message) => {
+        onMessage: (message) => {
+        if (socketGeneration !== this.socketGeneration) return;
         this.handleMessage(message);
       },
-      onCloseAfterHandshake: (closeCode) => {
+        onCloseAfterHandshake: (closeCode) => {
+        if (socketGeneration !== this.socketGeneration) {
+          logger.debug(`Ignoring stale Gateway socket close (generation=${socketGeneration}, current=${this.socketGeneration}, code=${closeCode})`);
+          return;
+        }
         cancelLocalDeviceAutoApproval();
+        this.connectedGatewayOwned = false;
+        this.connectedGatewayProvenance = 'unknown-external';
         this.connectionMonitor.clear();
         this.recordSocketClose(closeCode);
         this.diagnostics.consecutiveHeartbeatMisses = 0;
-        if (this.status.state === 'running') {
+        if (this.status.state === 'running' || this.status.state === 'starting') {
           this.setStatus({ state: 'stopped' });
           // On Windows, skip reconnect from WS close.  The Gateway is a local
           // child process; actual crashes are already caught by the process exit
@@ -1499,9 +2068,21 @@ export class GatewayManager extends EventEmitter {
           if (process.platform !== 'win32' || closeCode === 1012) {
             this.scheduleReconnect();
           }
-        }
-      },
-    });
+          }
+        },
+        signal,
+      });
+    } catch (error) {
+      if (isDeterministicGatewayAuthenticationError(error)) {
+        throw new GatewayNonRetryableAuthenticationError();
+      }
+      throw error;
+    }
+    if (socketGeneration !== this.socketGeneration) {
+      try { connectedSocket.terminate(); } catch { /* ignore stale socket cleanup */ }
+      throw new LifecycleSupersededError('Gateway socket connection superseded by a newer runtime');
+    }
+    this.ws = connectedSocket;
   }
 
   /**
@@ -1673,7 +2254,8 @@ export class GatewayManager extends EventEmitter {
       this.setStatus({
         state: 'error',
         error: 'Failed to reconnect after maximum attempts',
-        reconnectAttempts: this.reconnectAttempts
+        reconnectAttempts: this.reconnectAttempts,
+        reconnectMaxAttempts: decision.maxAttempts,
       });
       return;
     }
@@ -1686,7 +2268,8 @@ export class GatewayManager extends EventEmitter {
 
     this.setStatus({
       state: 'reconnecting',
-      reconnectAttempts: this.reconnectAttempts
+      reconnectAttempts: this.reconnectAttempts,
+      reconnectMaxAttempts: maxAttempts,
     });
     const scheduledEpoch = this.lifecycleController.getCurrentEpoch();
 

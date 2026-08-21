@@ -21,6 +21,7 @@ const releaseAttachmentPlaybackMock = vi.hoisted(() => vi.fn());
 const listWorkspaceOpenHandlersMock = vi.hoisted(() => vi.fn());
 const openWorkspaceWithMock = vi.hoisted(() => vi.fn());
 const revealWorkspaceFileMock = vi.hoisted(() => vi.fn());
+const validateWebpageMock = vi.hoisted(() => vi.fn());
 const thumbnailsMock = vi.hoisted(() => vi.fn());
 const toastErrorMock = vi.hoisted(() => vi.fn());
 const i18nLanguage = vi.hoisted(() => ({ value: 'en' }));
@@ -38,6 +39,9 @@ vi.mock('@/lib/host-api', () => ({
       listWorkspaceOpenHandlers: listWorkspaceOpenHandlersMock,
       openWorkspaceWith: openWorkspaceWithMock,
       revealWorkspaceFile: revealWorkspaceFileMock,
+    },
+    artifactTasks: {
+      validateWebpage: validateWebpageMock,
     },
     media: {
       thumbnails: thumbnailsMock,
@@ -230,6 +234,10 @@ describe('ACP chat timeline components', () => {
     listWorkspaceOpenHandlersMock.mockResolvedValue({ ok: true, platform: 'darwin', handlers: [] });
     openWorkspaceWithMock.mockResolvedValue({ ok: true });
     revealWorkspaceFileMock.mockResolvedValue({ ok: true });
+    validateWebpageMock.mockResolvedValue({
+      ok: true,
+      browserUrl: `http://127.0.0.1:49152/${'A'.repeat(43)}/index.html`,
+    });
     thumbnailsMock.mockResolvedValue({});
     Object.defineProperty(URL, 'createObjectURL', {
       configurable: true,
@@ -639,12 +647,16 @@ describe('ACP chat timeline components', () => {
     expect(items[0]).toHaveTextContent('Open in built-in browser');
     fireEvent.click(items[0]);
 
+    await waitFor(() => expect(validateWebpageMock).toHaveBeenCalledWith({
+      workspaceRoot: '/workspace/demo',
+      filePath: '/workspace/demo/site/report #1.html',
+    }));
     expect(useArtifactPanel.getState()).toMatchObject({
       open: true,
       tab: 'web-browser',
       webBrowserInitialized: true,
       webBrowserNavigation: {
-        url: 'file:///workspace/demo/site/report%20%231.html',
+        url: `http://127.0.0.1:49152/${'A'.repeat(43)}/index.html`,
       },
     });
     expect(listWorkspaceOpenHandlersMock).toHaveBeenCalledWith({
@@ -1419,6 +1431,7 @@ describe('ACP chat timeline components', () => {
   });
 
   it('opens a local HTML attachment in the built-in browser from the first Open with item', async () => {
+    const workspaceRoot = '/workspace';
     render(<AcpAttachmentPart part={availableAttachment({
       name: 'site one.html',
       mimeType: 'text/html',
@@ -1426,21 +1439,38 @@ describe('ACP chat timeline components', () => {
         ...attachmentRef,
         uri: '/workspace/site one.html',
       },
-    })} />);
+    })} workspaceRoot={workspaceRoot} />);
 
     await openAttachmentMenu('site one.html');
     const items = screen.getAllByRole('menuitem');
     expect(items[0]).toHaveTextContent('Open in built-in browser');
     fireEvent.click(items[0]);
 
+    await waitFor(() => expect(validateWebpageMock).toHaveBeenCalledWith({
+      workspaceRoot,
+      filePath: '/workspace/site one.html',
+    }));
     expect(useArtifactPanel.getState()).toMatchObject({
       open: true,
       tab: 'web-browser',
       webBrowserInitialized: true,
       webBrowserNavigation: {
-        url: 'file:///workspace/site%20one.html',
+        url: `http://127.0.0.1:49152/${'A'.repeat(43)}/index.html`,
       },
     });
+  });
+
+  it('does not expose a browser action for an HTML attachment without workspace context', async () => {
+    render(<AcpAttachmentPart part={availableAttachment({
+      name: 'site one.html',
+      mimeType: 'text/html',
+      ref: { ...attachmentRef, uri: '/workspace/site one.html' },
+    })} />);
+
+    await openAttachmentMenu('site one.html');
+
+    expect(screen.queryByTestId('acp-file-open-in-built-in-browser')).not.toBeInTheDocument();
+    expect(validateWebpageMock).not.toHaveBeenCalled();
   });
 
   it.each([

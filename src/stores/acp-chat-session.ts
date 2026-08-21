@@ -7,7 +7,11 @@ import type {
   AcpPermissionRequestEnvelope,
   AcpSessionUpdateEnvelope,
 } from '@shared/acp-chat/types';
-import { normalizeAcpChatError, type AcpChatErrorDetails } from '@shared/acp-chat/errors';
+import {
+  normalizeAcpChatError,
+  type AcpChatErrorCode,
+  type AcpChatErrorDetails,
+} from '@shared/acp-chat/errors';
 import type {
   MediaThumbnailResult,
   ResolveAttachmentPayload,
@@ -106,6 +110,8 @@ type ImageGenerationCompatSession = {
 
 const imageGenerationCompatSessions = new Map<string, ImageGenerationCompatSession>();
 const pendingLoadUpdates = new Map<number, AcpSessionUpdateEnvelope[]>();
+const browserFailureCancelOperationIds = new Set<number>();
+const browserFailureCancelPromises = new Map<string, Promise<boolean>>();
 type LiveSessionSnapshot = {
   sessionKey: string;
   workspaceRoot: string | null;
@@ -177,6 +183,9 @@ type TranscriptSupplementOperation = {
   started: boolean;
   terminal: boolean;
   cancelled: boolean;
+  mediaCandidateSeen: boolean;
+  authorizedMediaDelivered: boolean;
+  browserReleased: boolean;
   inFlight?: Promise<number>;
   liveUserMessageId?: string;
   retryTimer?: ReturnType<typeof setTimeout>;
@@ -773,6 +782,9 @@ function beginTranscriptSupplement(
     started: false,
     terminal: false,
     cancelled: false,
+    mediaCandidateSeen: false,
+    authorizedMediaDelivered: false,
+    browserReleased: false,
     ...(liveUserMessageId ? { liveUserMessageId } : {}),
   };
   const state = useAcpChatSessionStore.getState();
@@ -1518,12 +1530,184 @@ function liveTextChunkBatchKey(event: AcpSessionUpdateEnvelope): string | null {
   return JSON.stringify([event.sessionKey, event.generation, kind, messageId]);
 }
 
+type RecoverableBrowserToolFailure = Pick<AcpChatErrorDetails, 'code' | 'message'> & { retryable: true };
+
+function browserToolFailureStrings(value: unknown, strings: string[], seen: Set<object>, depth = 0): void {
+  if (strings.length >= 16 || depth > 3) return;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed) strings.push(trimmed.slice(0, 1000));
+    return;
+  }
+  if (!value || typeof value !== 'object' || seen.has(value)) return;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const entry of value) browserToolFailureStrings(entry, strings, seen, depth + 1);
+    return;
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of ['error', 'message', 'detail', 'details', 'reason', 'rawOutput', 'output', 'content']) {
+    browserToolFailureStrings(record[key], strings, seen, depth + 1);
+  }
+}
+
+/**
+ * Browser failures are recoverable only when OpenClaw has already marked the
+ * Browser tool terminal. Do not infer failures from browser-looking output.
+ */
+function recoverableBrowserToolFailure(event: AcpSessionUpdateEnvelope): RecoverableBrowserToolFailure | null {
+  if (event.historical) return null;
+  const update = event.notification.update as unknown as Record<string, unknown>;
+  if (update.sessionUpdate !== 'tool_call' && update.sessionUpdate !== 'tool_call_update') return null;
+  const status = typeof update.status === 'string' ? update.status.toLowerCase() : '';
+  if (status !== 'failed' && status !== 'error') return null;
+
+  const toolIdentity = [update.title, update.kind]
+    .filter((value): value is string => typeof value === 'string')
+    .join(' ')
+    .toLowerCase();
+  if (!/(?:^|\b)browser(?:\b|$)/u.test(toolIdentity)) return null;
+
+  const strings: string[] = [];
+  browserToolFailureStrings(update, strings, new Set());
+  const detail = strings.join('\n').toLowerCase();
+  if (/unsupported\s+(?:file\s+)?protocol\s*["']?file:|navigation\s+blocked[^\n]*file:/iu.test(detail)) {
+    return {
+      code: 'INVALID_REQUEST',
+      message: 'Browser cannot open file:// directly. The task was released; open the workspace preview or retry with the local preview URL.',
+      retryable: true,
+    };
+  }
+  if (/\b(?:timed?\s*out|timeout|deadline\s+exceeded)\b/iu.test(detail)) {
+    return {
+      code: 'TIMEOUT',
+      message: 'Browser timed out. The task was released; retry the browser step or continue with the next request.',
+      retryable: true,
+    };
+  }
+  if (/(?:target|session)(?:id)?[^\n]{0,80}\bmismatch\b|\bmismatch\b[^\n]{0,80}(?:target|session)(?:id)?/iu.test(detail)) {
+    return {
+      code: 'INVALID_REQUEST',
+      message: 'Browser target changed or no longer matches this session. The task was released; retry the browser step.',
+      retryable: true,
+    };
+  }
+  if (/(?:localhost|127\.0\.0\.1|\[::1\]|private\s+network)[^\n]{0,100}(?:ssrf|block(?:ed)?|denied)|(?:ssrf|block(?:ed)?|denied)[^\n]{0,100}(?:localhost|127\.0\.0\.1|\[::1\]|private\s+network)/iu.test(detail)) {
+    return {
+      code: 'PERMISSION_DENIED',
+      message: 'Browser blocked the local address for safety. The task was released; use the approved workspace preview URL.',
+      retryable: true,
+    };
+  }
+  return null;
+}
+
+function turnHasVisibleOutput(timeline: AcpTimelineSnapshot, liveUserMessageId: string): boolean {
+  const userIndex = timeline.itemOrder.findIndex((itemId) => {
+    const item = timeline.itemsById[itemId];
+    return item?.kind === 'message-segment'
+      && item.role === 'user'
+      && item.messageId === liveUserMessageId;
+  });
+  if (userIndex < 0) return false;
+
+  for (let index = userIndex + 1; index < timeline.itemOrder.length; index += 1) {
+    const itemId = timeline.itemOrder[index];
+    const item = itemId ? timeline.itemsById[itemId] : undefined;
+    if (item?.kind === 'message-segment' && item.role === 'user') break;
+    if (item?.kind === 'message-segment' && item.role === 'assistant') {
+      if (item.parts.some((part) => (
+        part.kind === 'image'
+        || part.kind === 'attachment'
+        || (part.kind === 'markdown' && part.text.trim().length > 0)
+      ))) return true;
+    }
+    if (item?.kind === 'tool-call' && item.status === 'completed') return true;
+  }
+  return false;
+}
+
+function browserCancelKey(sessionKey: string, generation: number): string {
+  return JSON.stringify([sessionKey, generation]);
+}
+
+function pendingBrowserRelease(sessionKey: string, generation: number): Promise<boolean> | undefined {
+  return browserFailureCancelPromises.get(browserCancelKey(sessionKey, generation));
+}
+
+/** Cancels a known-stuck Browser turn once so ACP releases its active work and queue. */
+function releaseRecoverableBrowserToolFailure(event: AcpSessionUpdateEnvelope): void {
+  const failure = recoverableBrowserToolFailure(event);
+  if (!failure) return;
+  const state = useAcpChatSessionStore.getState();
+  if (!state.sending || !isCurrentAction(state, event.sessionKey, event.generation)) return;
+  const operation = latestLiveTranscriptOperation(event.sessionKey, event.generation);
+  if (!operation?.liveUserMessageId || browserFailureCancelOperationIds.has(operation.id)) return;
+  if (turnHasVisibleOutput(state.timeline, operation.liveUserMessageId)) return;
+
+  browserFailureCancelOperationIds.add(operation.id);
+  operation.browserReleased = true;
+  const timing = state.turnTimingsByUserMessageId[operation.liveUserMessageId];
+  const startedAtMs = timing?.status === 'running' ? timing.startedAtMs : Date.now();
+  const settledAtMs = Date.now();
+  useAcpChatSessionStore.setState((current) => {
+    if (!isCurrentAction(current, event.sessionKey, event.generation)) return {};
+    return {
+      cancelling: true,
+      error: null,
+      timeline: appendPromptFailure(current.timeline, operation.liveUserMessageId!, failure),
+      turnTimingsByUserMessageId: settledPromptTurnTimings(current.turnTimingsByUserMessageId, {
+        messageId: operation.liveUserMessageId!, success: false, startedAtMs, settledAtMs,
+      }),
+    };
+  });
+
+  const cancelKey = browserCancelKey(event.sessionKey, event.generation);
+  const cancellation = hostApi.chat.cancelAcpSession({ sessionKey: event.sessionKey })
+    .then((result) => {
+      useAcpChatSessionStore.setState((current) => {
+        if (!isCurrentAction(current, event.sessionKey, event.generation)) return {};
+        return result.success
+          ? { cancelling: false, sending: false, ...applyOperationGeneration(current, result) }
+          : {
+            cancelling: false,
+            sending: false,
+            error: failedOperationMessage(result, 'Browser task release failed'),
+          };
+      });
+      return result.success;
+    })
+    .catch((error) => {
+      useAcpChatSessionStore.setState((current) => (
+        isCurrentAction(current, event.sessionKey, event.generation)
+          ? {
+            cancelling: false,
+            sending: false,
+            error: errorMessage(error, 'Browser task release failed'),
+          }
+          : {}
+      ));
+      return false;
+    })
+    .finally(() => {
+      browserFailureCancelOperationIds.delete(operation.id);
+      if (browserFailureCancelPromises.get(cancelKey) === cancellation) {
+        browserFailureCancelPromises.delete(cancelKey);
+      }
+      if (isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation) && !operation.started) {
+        startLiveTranscriptSupplement(operation);
+      }
+    });
+  browserFailureCancelPromises.set(cancelKey, cancellation);
+}
+
 function applySessionUpdateSideEffects(event: AcpSessionUpdateEnvelope): void {
   const state = useAcpChatSessionStore.getState();
   state.recordImageGenerationStart(event);
   state.recordVideoGenerationUpdate(event);
   const evidence = extractImageGenerationCompletionFromAcpEnvelope(event);
   if (evidence) void state.projectImageGenerationCompletion(evidence);
+  releaseRecoverableBrowserToolFailure(event);
 }
 
 /** Publishes buffered adjacent text events in one timeline commit. */
@@ -1791,15 +1975,21 @@ function recordOpenClawMediaTrace(
   });
 }
 
+type ResolvedOpenClawMediaCandidate = {
+  authorized: boolean;
+  localVideoIdentity?: string;
+};
+
 async function resolveOpenClawMediaCandidate(
   operation: TranscriptSupplementOperation,
   attempt: number,
   turnId: string,
   candidate: OpenClawMediaCandidate,
-): Promise<string | null> {
+  options: { projectUnavailable?: boolean } = {},
+): Promise<ResolvedOpenClawMediaCandidate> {
   const isCurrent = () => operation.attempt === attempt
     && isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation);
-  if (!isCurrent()) return null;
+  if (!isCurrent()) return { authorized: false };
 
   let result: ResolveAttachmentResult;
   try {
@@ -1822,7 +2012,7 @@ async function resolveOpenClawMediaCandidate(
       reason: 'attachment-resolution-stale',
       evidenceHash,
     });
-    return null;
+    return { authorized: false };
   }
 
   recordOpenClawMediaTrace(
@@ -1834,6 +2024,16 @@ async function resolveOpenClawMediaCandidate(
       ...(result.ok ? { identityHash: hashOpenClawMediaDiagnostic(result.identity) } : {}),
     },
   );
+
+  // A failed prompt has no user-visible success state to attach an unavailable
+  // candidate to. Keep its failure visible and do not disclose an unapproved URI.
+  if (!result.ok && options.projectUnavailable === false) {
+    recordOpenClawMediaTrace(operation, 'openclaw-media:projection-withheld', {
+      reason: result.error,
+      evidenceHash,
+    });
+    return { authorized: false };
+  }
 
   const messageId = `compat:openclaw-media:${candidate.evidenceId}`;
   const pending = createPendingAttachment({
@@ -1872,11 +2072,14 @@ async function resolveOpenClawMediaCandidate(
     projected ? 'openclaw-media:projection-appended' : 'openclaw-media:projection-deduped',
     { reason: projected ? 'projected' : 'identity-priority', evidenceHash, attachmentCount: projected ? 1 : 0 },
   );
-  return result.ok
+  return {
+    authorized: result.ok,
+    ...(result.ok
     && result.target.kind === 'local'
     && result.mimeType.startsWith('video/')
-    ? result.identity
-    : null;
+      ? { localVideoIdentity: result.identity }
+      : {}),
+  };
 }
 
 async function runTranscriptSupplement(operation: TranscriptSupplementOperation): Promise<number> {
@@ -1895,6 +2098,9 @@ async function runTranscriptSupplement(operation: TranscriptSupplementOperation)
     isCurrent,
   });
   if (!result || !isCurrent()) return 0;
+  operation.mediaCandidateSeen ||= result.imageGeneration.starts.length > 0
+    || result.imageGeneration.completions.length > 0
+    || result.media.some((supplement) => supplement.candidates.length > 0);
 
   if (!operation.liveUserMessageId && result.turnTimings.length > 0) {
     useAcpChatSessionStore.setState((current) => (
@@ -1929,13 +2135,15 @@ async function runTranscriptSupplement(operation: TranscriptSupplementOperation)
   for (const supplement of result.media) {
     for (const candidate of supplement.candidates) {
       if (!isCurrent()) return 0;
-      const localVideoIdentity = await resolveOpenClawMediaCandidate(
+      operation.mediaCandidateSeen = true;
+      const resolved = await resolveOpenClawMediaCandidate(
         operation,
         attempt,
         supplement.acpTurnId,
         candidate,
       );
-      if (localVideoIdentity) localVideoIdentities.add(localVideoIdentity);
+      operation.authorizedMediaDelivered ||= resolved.authorized;
+      if (resolved.localVideoIdentity) localVideoIdentities.add(resolved.localVideoIdentity);
     }
     if (supplement.finalAssistant && isCurrent()) {
       commitSessionTimeline(operation.sessionKey, operation.generation, (timeline) => (
@@ -1979,7 +2187,11 @@ function scheduleLiveTranscriptSupplement(operation: TranscriptSupplementOperati
     || !isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation)
   ) return;
   const hasImageTask = operation.imageTaskIds.size > 0;
-  if (!hasImageTask && operation.retryIndex > 0) {
+  const hasVideoTask = operation.videoTaskIds.size > 0;
+  const stopNonImagePolling = hasVideoTask
+    ? operation.retryIndex > 0
+    : (!operation.mediaCandidateSeen || operation.retryIndex > 0);
+  if (!hasImageTask && stopNonImagePolling) {
     if (operation.videoTaskIds.size === 0) invalidateTranscriptSupplement(operation);
     return;
   }
@@ -2001,6 +2213,14 @@ function scheduleLiveTranscriptSupplement(operation: TranscriptSupplementOperati
 async function runLiveTranscriptSupplement(operation: TranscriptSupplementOperation): Promise<void> {
   if (operation.terminal || !isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation)) return;
   await runTranscriptSupplementSerialized(operation);
+  if (
+    operation.authorizedMediaDelivered
+    && operation.imageTaskIds.size === 0
+    && operation.videoTaskIds.size === 0
+  ) {
+    invalidateTranscriptSupplement(operation);
+    return;
+  }
   if (!operation.terminal && isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation)) {
     scheduleLiveTranscriptSupplement(operation);
   }
@@ -2368,6 +2588,13 @@ function settleOptimisticUserSegment(
   };
 }
 
+const KNOWN_ACP_CHAT_ERROR_CODES = new Set<AcpChatErrorCode>([
+  'INSUFFICIENT_QUOTA', 'AUTH_INVALID', 'RATE_LIMIT', 'PERMISSION_DENIED',
+  'TIMEOUT', 'NETWORK', 'GATEWAY_UNAVAILABLE', 'SERVICE_UNAVAILABLE',
+  'CONTEXT_OVERFLOW', 'SESSION_LOCKED', 'MODEL_UNAVAILABLE', 'CONTENT_POLICY',
+  'CONVERSATION_INVALID', 'IMAGE_TOO_LARGE', 'INVALID_REQUEST', 'CANCELLED', 'UNKNOWN',
+]);
+
 function operationFailure(
   result: AcpChatOperationResult,
   fallback = 'ACP prompt failed',
@@ -2379,7 +2606,7 @@ function operationFailure(
   }, fallback);
   return {
     ...normalized,
-    ...(result.errorCode ? { code: result.errorCode } : {}),
+    ...(result.errorCode && KNOWN_ACP_CHAT_ERROR_CODES.has(result.errorCode) ? { code: result.errorCode } : {}),
     ...(result.retryable != null ? { retryable: result.retryable } : {}),
   };
 }
@@ -2392,6 +2619,7 @@ function appendPromptFailure(
   const settled = settleOptimisticUserSegment(timeline, messageId);
   if (failure.code === 'CANCELLED') return settled;
   const id = `turn-failure:${messageId}`;
+  if (settled.itemsById[id]?.kind === 'turn-failure') return settled;
   return {
     ...settled,
     itemOrder: settled.itemOrder.includes(id) ? settled.itemOrder : [...settled.itemOrder, id],
@@ -2512,24 +2740,78 @@ function reconcileFailedAssistantSegment(
   };
 }
 
-async function reconcileFailedPromptTurn(operation: TranscriptSupplementOperation): Promise<void> {
-  const isCurrent = () => isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation);
+function isMediaSummaryRecoveryFailure(failure: AcpChatErrorDetails): boolean {
+  return failure.code === 'SERVICE_UNAVAILABLE';
+}
+
+function isFailedTurnTextRecoveryFailure(failure: AcpChatErrorDetails): boolean {
+  return isMediaSummaryRecoveryFailure(failure)
+    || failure.code === 'NETWORK'
+    || failure.code === 'TIMEOUT'
+    || failure.code === 'UNKNOWN';
+}
+
+/** Removes only the exact failure card once this same failed turn has an authorized media result. */
+function removeResolvedPromptFailure(
+  timeline: AcpTimelineSnapshot,
+  userMessageId: string,
+): AcpTimelineSnapshot {
+  const id = `turn-failure:${userMessageId}`;
+  if (timeline.itemsById[id]?.kind !== 'turn-failure') return timeline;
+  const itemsById = { ...timeline.itemsById };
+  delete itemsById[id];
+  return {
+    ...timeline,
+    itemOrder: timeline.itemOrder.filter((itemId) => itemId !== id),
+    itemsById,
+  };
+}
+
+async function reconcileFailedPromptTurn(
+  operation: TranscriptSupplementOperation,
+  options: { recoverMedia: boolean },
+): Promise<void> {
+  const attempt = operation.attempt + 1;
+  operation.attempt = attempt;
+  const isCurrent = () => operation.attempt === attempt
+    && isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation);
   if (!operation.liveUserMessageId || !isCurrent()) return;
   const supplement = await fetchFailedOpenClawTurnSupplement({
     sessionKey: operation.sessionKey,
+    executionCwd: operation.executionCwd,
     snapshot: () => operationTimeline(operation)!,
     liveUserMessageId: operation.liveUserMessageId,
     isCurrent,
   });
   if (!supplement || !isCurrent()) return;
-  commitSessionTimeline(operation.sessionKey, operation.generation, (timeline) => (
-    reconcileFailedAssistantSegment(
+  let candidateCount = 0;
+  let authorizedCount = 0;
+  for (const mediaTurn of options.recoverMedia ? supplement.media : []) {
+    for (const candidate of mediaTurn.candidates) {
+      if (!isCurrent()) return;
+      candidateCount += 1;
+      const resolved = await resolveOpenClawMediaCandidate(
+        operation,
+        attempt,
+        mediaTurn.acpTurnId,
+        candidate,
+        { projectUnavailable: false },
+      );
+      if (resolved.authorized) authorizedCount += 1;
+    }
+  }
+  if (!isCurrent()) return;
+  commitSessionTimeline(operation.sessionKey, operation.generation, (timeline) => {
+    const reconciled = reconcileFailedAssistantSegment(
       timeline,
       operation.liveUserMessageId!,
       supplement.transcriptMessageId,
       supplement.text,
-    )
-  ));
+    );
+    return candidateCount > 0 && authorizedCount === candidateCount
+      ? removeResolvedPromptFailure(reconciled, operation.liveUserMessageId!)
+      : reconciled;
+  }, { retainForReplay: true });
 }
 
 function applyOperationGeneration(
@@ -2815,8 +3097,11 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
 
   async sendPrompt(input) {
     flushPendingLiveTextBatch();
-    const startState = get();
     const sessionKey = input.sessionKey;
+    const queuedGeneration = get().generation;
+    const browserRelease = pendingBrowserRelease(sessionKey, queuedGeneration);
+    if (browserRelease && !await browserRelease) return false;
+    const startState = get();
     const generation = startState.generation;
     if (startState.activeSessionKey !== sessionKey) return false;
 
@@ -2852,6 +3137,8 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       flushPendingLiveTextBatch();
       const state = get();
       const settledAtMs = Date.now();
+      const failure = result.success ? null : operationFailure(result);
+      if (transcriptOperation.browserReleased) return result.success;
       if (!isCurrentAction(state, sessionKey, generation)) {
         settleBackgroundPromptSnapshot({
           sessionKey,
@@ -2861,21 +3148,29 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
           settledAtMs,
           success: result.success,
           resultGeneration: result.generation,
-          ...(!result.success ? { failure: operationFailure(result) } : {}),
+          ...(failure ? { failure } : {}),
         });
         if (result.success && isCurrentTranscriptSupplement(get(), transcriptOperation)) {
           startLiveTranscriptSupplement(transcriptOperation);
-        } else if (transcriptSupplements.get(transcriptOperation.key)?.id === transcriptOperation.id) {
-          void reconcileFailedPromptTurn(transcriptOperation).finally(() => {
+        } else if (
+          failure
+          && isFailedTurnTextRecoveryFailure(failure)
+          && transcriptSupplements.get(transcriptOperation.key)?.id === transcriptOperation.id
+        ) {
+          void reconcileFailedPromptTurn(transcriptOperation, {
+            recoverMedia: isMediaSummaryRecoveryFailure(failure),
+          }).finally(() => {
             invalidateTranscriptSupplement(transcriptOperation);
           });
+        } else if (transcriptSupplements.get(transcriptOperation.key)?.id === transcriptOperation.id) {
+          invalidateTranscriptSupplement(transcriptOperation);
         }
         return result.success;
       }
       deleteLiveSessionSnapshot(sessionKey, generation);
       const failedTimeline = result.success
         ? state.timeline
-        : appendPromptFailure(state.timeline, messageId, operationFailure(result));
+        : appendPromptFailure(state.timeline, messageId, failure!);
       set({
         sending: false,
         turnTimingsByUserMessageId: settledPromptTurnTimings(
@@ -2897,16 +3192,26 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         } else if (transcriptSupplements.get(transcriptOperation.key)?.id === transcriptOperation.id) {
           invalidateTranscriptSupplement(transcriptOperation);
         }
-      } else if (transcriptSupplements.get(transcriptOperation.key)?.id === transcriptOperation.id) {
-        void reconcileFailedPromptTurn(transcriptOperation).finally(() => {
+      } else if (
+        failure
+        && isFailedTurnTextRecoveryFailure(failure)
+        && transcriptSupplements.get(transcriptOperation.key)?.id === transcriptOperation.id
+      ) {
+        void reconcileFailedPromptTurn(transcriptOperation, {
+          recoverMedia: isMediaSummaryRecoveryFailure(failure),
+        }).finally(() => {
           invalidateTranscriptSupplement(transcriptOperation);
         });
+      } else if (transcriptSupplements.get(transcriptOperation.key)?.id === transcriptOperation.id) {
+        invalidateTranscriptSupplement(transcriptOperation);
       }
       return result.success;
     } catch (error) {
       flushPendingLiveTextBatch();
       const state = get();
       const settledAtMs = Date.now();
+      const failure = normalizeAcpChatError(error);
+      if (transcriptOperation.browserReleased) return false;
       if (!isCurrentAction(state, sessionKey, generation)) {
         settleBackgroundPromptSnapshot({
           sessionKey,
@@ -2915,19 +3220,18 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
           startedAtMs,
           settledAtMs,
           success: false,
-          failure: normalizeAcpChatError(error),
+          failure,
         });
       } else {
         deleteLiveSessionSnapshot(sessionKey, generation);
       }
-      invalidateTranscriptSupplement(transcriptOperation);
       set((current) => (
         isCurrentAction(current, sessionKey, generation)
           ? (() => {
             return {
               sending: false,
               error: null,
-              timeline: appendPromptFailure(current.timeline, messageId, normalizeAcpChatError(error)),
+              timeline: appendPromptFailure(current.timeline, messageId, failure),
               turnTimingsByUserMessageId: settledPromptTurnTimings(
                 current.turnTimingsByUserMessageId,
                 { messageId, success: false, startedAtMs, settledAtMs },
@@ -2936,6 +3240,18 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
           })()
           : {}
       ));
+      if (
+        isFailedTurnTextRecoveryFailure(failure)
+        && transcriptSupplements.get(transcriptOperation.key)?.id === transcriptOperation.id
+      ) {
+        void reconcileFailedPromptTurn(transcriptOperation, {
+          recoverMedia: isMediaSummaryRecoveryFailure(failure),
+        }).finally(() => {
+          invalidateTranscriptSupplement(transcriptOperation);
+        });
+      } else {
+        invalidateTranscriptSupplement(transcriptOperation);
+      }
       return false;
     }
   },
@@ -3619,18 +3935,61 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
 }));
 
 let acpChatSubscribed = false;
+let acpChatUnsubscribers: Array<() => void> = [];
+
+/** Stops process-local ACP work so a replacement Store cannot receive stale callbacks. */
+export function disposeAcpChatSessionRuntime(): void {
+  loadRequestSeq += 1;
+  pendingLoadUpdates.clear();
+
+  if (pendingLiveTextBatch) {
+    clearTimeout(pendingLiveTextBatch.timer);
+    pendingLiveTextBatch = undefined;
+  }
+  for (const timer of imageGenerationTaskTimers.values()) clearTimeout(timer);
+  imageGenerationTaskTimers.clear();
+  for (const timer of videoGenerationTaskTimers.values()) clearTimeout(timer);
+  videoGenerationTaskTimers.clear();
+
+  for (const operation of transcriptSupplements.values()) {
+    operation.cancelled = true;
+    operation.terminal = true;
+    if (operation.retryTimer) clearTimeout(operation.retryTimer);
+    if (operation.videoRetryTimer) clearTimeout(operation.videoRetryTimer);
+    operation.retryTimer = undefined;
+    operation.videoRetryTimer = undefined;
+  }
+  transcriptSupplements.clear();
+
+  for (const unsubscribe of acpChatUnsubscribers.splice(0)) {
+    try {
+      unsubscribe();
+    } catch {
+      // Teardown must continue so one stale listener cannot retain the Store.
+    }
+  }
+  acpChatSubscribed = false;
+
+  imageGenerationCompatSessions.clear();
+  browserFailureCancelOperationIds.clear();
+  browserFailureCancelPromises.clear();
+  liveSessionSnapshots.clear();
+  completedLiveTurnTimings.clear();
+  attachmentResolutionsInFlight.clear();
+  sessionTimelineCoordinator.clear();
+}
 
 export function ensureAcpChatSubscriptions(): void {
   if (acpChatSubscribed) return;
   acpChatSubscribed = true;
-  hostEvents.onAcpSessionUpdate((event) => {
+  acpChatUnsubscribers.push(hostEvents.onAcpSessionUpdate((event) => {
     enqueueSessionUpdate(event);
-  });
-  hostEvents.onAcpPermissionRequest((event) => {
+  }));
+  acpChatUnsubscribers.push(hostEvents.onAcpPermissionRequest((event) => {
     flushPendingLiveTextBatch();
     useAcpChatSessionStore.getState().applyPermissionRequest(event);
-  });
-  hostEvents.onGatewayChatMessage((event) => {
+  }));
+  acpChatUnsubscribers.push(hostEvents.onGatewayChatMessage((event) => {
     flushPendingLiveTextBatch();
     const videoTaskId = extractVideoGenerationTerminalTaskIdFromGatewayChatMessage(event);
     const evidence = extractImageGenerationCompletionFromGatewayChatMessage(event);
@@ -3640,8 +3999,8 @@ export function ensureAcpChatSubscriptions(): void {
       evidence
       && !deferInactiveImageGenerationCompletion(state.activeSessionKey, evidence)
     ) void state.projectImageGenerationCompletion(evidence);
-  });
-  hostEvents.onChatRuntimeEvent((event) => {
+  }));
+  acpChatUnsubscribers.push(hostEvents.onChatRuntimeEvent((event) => {
     flushPendingLiveTextBatch();
     const videoTaskId = extractVideoGenerationTerminalTaskIdFromRuntimeEvent(event);
     const evidence = extractImageGenerationCompletionFromRuntimeEvent(event);
@@ -3654,5 +4013,5 @@ export function ensureAcpChatSubscriptions(): void {
       evidence
       && !deferInactiveImageGenerationCompletion(state.activeSessionKey, evidence)
     ) void state.projectImageGenerationCompletion(evidence);
-  });
+  }));
 }

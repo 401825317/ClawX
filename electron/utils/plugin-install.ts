@@ -7,12 +7,28 @@
  */
 import { app } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
+import type { Dirent } from 'node:fs';
 import path from 'node:path';
-import { existsSync, cpSync, copyFileSync, statSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync, realpathSync, renameSync } from 'node:fs';
-import { readdir, stat, copyFile, mkdir } from 'node:fs/promises';
+import {
+  access,
+  copyFile,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { logger } from './logger';
-import { upsertPluginInstallRecordsIntoSqlite, ensureOpenClawStateDirExists } from './plugin-install-index';
+import { withConfigLock } from './config-mutex';
+import { upsertPluginInstallRecordsIntoSqlite } from './plugin-install-index';
 import { resolveOpenClawConfigPath, resolveOpenClawStateDir } from './paths';
 import {
   isTransientPluginInstallPath,
@@ -37,59 +53,24 @@ function fsPath(filePath: string): string {
   return normalizeFsPathForWindows(filePath);
 }
 
-function realpathSyncSafe(filePath: string): string {
-  if (process.platform === 'win32') {
-    try {
-      return realpathSync.native(fsPath(filePath));
-    } catch {
-      return realpathSync(filePath);
-    }
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await access(fsPath(filePath));
+    return true;
+  } catch {
+    return false;
   }
-  return realpathSync(filePath);
+}
+
+async function realpathSafe(filePath: string): Promise<string> {
+  return realpath(fsPath(filePath));
 }
 
 /**
- * Unicode-safe recursive directory copy.
- *
- * Node.js `cpSync` / `cp` crash on Windows when paths contain non-ASCII
- * characters such as Chinese (nodejs/node#54476).  On Windows we fall back
- * to a manual recursive walk using `copyFileSync` which is unaffected.
- */
-export function cpSyncSafe(src: string, dest: string): void {
-  if (process.platform !== 'win32') {
-    cpSync(fsPath(src), fsPath(dest), { recursive: true, dereference: true });
-    return;
-  }
-  // Windows: manual recursive copy with per-file copyFileSync
-  _copyDirSyncRecursive(fsPath(src), fsPath(dest));
-}
-
-function _copyDirSyncRecursive(src: string, dest: string): void {
-  mkdirSync(dest, { recursive: true });
-  const entries = readdirSync(src, { withFileTypes: true });
-  for (const entry of entries) {
-    const srcChild = join(src, entry.name);
-    const destChild = join(dest, entry.name);
-    // Dereference symlinks: use statSync (follows links) instead of lstatSync
-    const info = statSync(srcChild);
-    if (info.isDirectory()) {
-      _copyDirSyncRecursive(srcChild, destChild);
-    } else {
-      copyFileSync(srcChild, destChild);
-    }
-  }
-}
-
-/**
- * Async variant of `cpSyncSafe` for use with fs/promises.
+ * Unicode-safe recursive directory copy. The manual async walk also avoids
+ * Node's historical Windows non-ASCII `cp` failures.
  */
 export async function cpAsyncSafe(src: string, dest: string): Promise<void> {
-  if (process.platform !== 'win32') {
-    const { cp } = await import('node:fs/promises');
-    await cp(fsPath(src), fsPath(dest), { recursive: true, dereference: true });
-    return;
-  }
-  // Windows: manual recursive copy with per-file copyFile
   await _copyDirAsyncRecursive(fsPath(src), fsPath(dest));
 }
 
@@ -115,37 +96,86 @@ function asErrnoException(error: unknown): NodeJS.ErrnoException | null {
   return null;
 }
 
-function toErrorDiagnostic(error: unknown): { code?: string; name?: string; message: string } {
-  const errno = asErrnoException(error);
+type PluginInstallPhase =
+  | 'staging-setup'
+  | 'staging-copy'
+  | 'validation'
+  | 'dependency-hydration'
+  | 'activation'
+  | 'rollback'
+  | 'cleanup';
+
+class PluginInstallPhaseError extends Error {
+  constructor(
+    readonly phase: PluginInstallPhase,
+    message: string,
+    cause: unknown,
+  ) {
+    super(message, { cause });
+    this.name = 'PluginInstallPhaseError';
+  }
+}
+
+class PluginOwnershipConflictError extends Error {
+  constructor(readonly ownership: ManagedPluginOwnership) {
+    super(`Managed plugin ownership conflict: ${ownership.code}`);
+    this.name = 'PluginOwnershipConflictError';
+  }
+}
+
+function rootErrnoException(error: unknown): NodeJS.ErrnoException | null {
+  let current = error;
+  const seen = new Set<unknown>();
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    const errno = current as NodeJS.ErrnoException;
+    if (typeof errno.code === 'string') return errno;
+    current = 'cause' in errno ? errno.cause : null;
+  }
+  return asErrnoException(error);
+}
+
+function toErrorDiagnostic(error: unknown): {
+  code?: string;
+  name?: string;
+  phase?: PluginInstallPhase;
+  message: string;
+} {
+  const errno = rootErrnoException(error);
   if (!errno) {
     return { message: String(error) };
   }
 
   return {
     code: typeof errno.code === 'string' ? errno.code : undefined,
-    name: errno.name,
-    message: errno.message || String(error),
+    name: error instanceof Error ? error.name : errno.name,
+    phase: error instanceof PluginInstallPhaseError ? error.phase : undefined,
+    message: error instanceof Error ? error.message : errno.message || String(error),
   };
+}
+
+function asPluginInstallPhaseError(
+  error: unknown,
+  phase: PluginInstallPhase,
+  pluginLabel: string,
+): PluginInstallPhaseError {
+  if (error instanceof PluginInstallPhaseError) return error;
+  return new PluginInstallPhaseError(
+    phase,
+    `${pluginLabel} plugin install failed during ${phase}: ${toErrorDiagnostic(error).message}`,
+    error,
+  );
 }
 
 const WINDOWS_TRANSIENT_FS_ERRORS = new Set(['EACCES', 'EBUSY', 'EEXIST', 'ENOTEMPTY', 'EPERM']);
 const WINDOWS_FS_RETRY_DELAYS_MS = [0, 50, 150, 300, 600] as const;
-const SYNC_SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
-
-function sleepSync(delayMs: number): void {
-  if (delayMs > 0) {
-    Atomics.wait(SYNC_SLEEP_BUFFER, 0, 0, delayMs);
-  }
-}
-
-function runWithTransientFsRetry(operation: () => void): void {
+async function runWithTransientFsRetry<T>(operation: () => Promise<T>): Promise<T> {
   const delays = process.platform === 'win32' ? WINDOWS_FS_RETRY_DELAYS_MS : [0] as const;
   let lastError: unknown;
   for (const delayMs of delays) {
-    sleepSync(delayMs);
+    if (delayMs > 0) await delay(delayMs);
     try {
-      operation();
-      return;
+      return await operation();
     } catch (error) {
       lastError = error;
       const code = asErrnoException(error)?.code;
@@ -157,16 +187,16 @@ function runWithTransientFsRetry(operation: () => void): void {
   throw lastError;
 }
 
-export function cleanupStalePluginInstallArtifacts(): boolean {
+export async function cleanupStalePluginInstallArtifacts(): Promise<boolean> {
   const extensionsRoot = getOpenClawExtensionsDir();
   let succeeded = true;
 
   try {
-    for (const entry of readdirSync(fsPath(extensionsRoot), { withFileTypes: true })) {
+    for (const entry of await readdir(fsPath(extensionsRoot), { withFileTypes: true })) {
       if (!isTransientPluginInstallPath(entry.name)) continue;
       const stalePath = join(extensionsRoot, entry.name);
       try {
-        runWithTransientFsRetry(() => rmSync(fsPath(stalePath), { recursive: true, force: true }));
+        await runWithTransientFsRetry(() => rm(fsPath(stalePath), { recursive: true, force: true }));
         logger.info(`[plugin] Removed stale plugin install artifact: ${stalePath}`);
       } catch (error) {
         succeeded = false;
@@ -188,7 +218,7 @@ export function cleanupStalePluginInstallArtifacts(): boolean {
 
   const workRoot = resolvePluginInstallWorkRoot(extensionsRoot);
   try {
-    runWithTransientFsRetry(() => rmSync(fsPath(workRoot), { recursive: true, force: true }));
+    await runWithTransientFsRetry(() => rm(fsPath(workRoot), { recursive: true, force: true }));
   } catch (error) {
     succeeded = false;
     logger.warn('[plugin] Failed to clean plugin install work directory', {
@@ -213,17 +243,17 @@ const MANIFEST_ID_FIXES: Record<string, string> = {
  * known manifest-ID mismatches so the Gateway can load the plugin.
  * Also patches package.json fields that the Gateway uses as "entry hints".
  */
-export function fixupPluginManifest(targetDir: string): void {
+export async function fixupPluginManifest(targetDir: string): Promise<void> {
   // 1. Fix openclaw.plugin.json id
   const manifestPath = join(targetDir, 'openclaw.plugin.json');
   try {
-    const raw = readFileSync(fsPath(manifestPath), 'utf-8');
+    const raw = await readFile(fsPath(manifestPath), 'utf-8');
     const manifest = JSON.parse(raw);
     const oldId = manifest.id as string | undefined;
     if (oldId && MANIFEST_ID_FIXES[oldId]) {
       const newId = MANIFEST_ID_FIXES[oldId];
       manifest.id = newId;
-      writeFileSync(fsPath(manifestPath), JSON.stringify(manifest, null, 2) + '\n', 'utf-8');
+      await writeFile(fsPath(manifestPath), JSON.stringify(manifest, null, 2) + '\n', 'utf-8');
       logger.info(`[plugin] Fixed manifest ID: ${oldId} → ${newId}`);
     }
   } catch {
@@ -233,7 +263,7 @@ export function fixupPluginManifest(targetDir: string): void {
   // 2. Fix package.json fields that Gateway uses as "entry hints"
   const pkgPath = join(targetDir, 'package.json');
   try {
-    const raw = readFileSync(fsPath(pkgPath), 'utf-8');
+    const raw = await readFile(fsPath(pkgPath), 'utf-8');
     const pkg = JSON.parse(raw);
     let modified = false;
 
@@ -257,7 +287,7 @@ export function fixupPluginManifest(targetDir: string): void {
     }
 
     if (modified) {
-      writeFileSync(fsPath(pkgPath), JSON.stringify(pkg, null, 2) + '\n', 'utf-8');
+      await writeFile(fsPath(pkgPath), JSON.stringify(pkg, null, 2) + '\n', 'utf-8');
       logger.info(`[plugin] Fixed package.json entry hints in ${targetDir}`);
     }
   } catch {
@@ -266,7 +296,7 @@ export function fixupPluginManifest(targetDir: string): void {
 
   // 3. Fix hardcoded plugin IDs in compiled JS entry files.
   //    The Gateway validates that the JS export's `id` matches the manifest.
-  patchPluginEntryIds(targetDir);
+  await patchPluginEntryIds(targetDir);
 }
 
 /**
@@ -274,11 +304,11 @@ export function fixupPluginManifest(targetDir: string): void {
  * plugin export matches the manifest.  Without this, the Gateway rejects
  * the plugin with "plugin id mismatch".
  */
-function patchPluginEntryIds(targetDir: string): void {
+async function patchPluginEntryIds(targetDir: string): Promise<void> {
   const pkgPath = join(targetDir, 'package.json');
   let pkg: Record<string, unknown>;
   try {
-    pkg = JSON.parse(readFileSync(fsPath(pkgPath), 'utf-8'));
+    pkg = JSON.parse(await readFile(fsPath(pkgPath), 'utf-8'));
   } catch {
     return;
   }
@@ -287,11 +317,11 @@ function patchPluginEntryIds(targetDir: string): void {
 
   for (const entry of entryFiles) {
     const entryPath = join(targetDir, entry);
-    if (!existsSync(fsPath(entryPath))) continue;
+    if (!(await pathExists(entryPath))) continue;
 
     let content: string;
     try {
-      content = readFileSync(fsPath(entryPath), 'utf-8');
+      content = await readFile(fsPath(entryPath), 'utf-8');
     } catch {
       continue;
     }
@@ -310,7 +340,7 @@ function patchPluginEntryIds(targetDir: string): void {
     }
 
     if (patched) {
-      writeFileSync(fsPath(entryPath), content, 'utf-8');
+      await writeFile(fsPath(entryPath), content, 'utf-8');
     }
   }
 }
@@ -346,6 +376,60 @@ function getOpenClawExtensionsDir(): string {
   return join(resolveOpenClawStateDir(), 'extensions');
 }
 
+export const UCLAW_MANAGED_PLUGIN_MARKER_FILENAME = '.uclaw-managed-plugin.json';
+const UCLAW_MANAGED_PLUGIN_MARKER_VERSION = 1;
+
+export type ManagedPluginOwnership = Readonly<{
+  status: 'absent' | 'managed' | 'user-owned-or-unknown' | 'indeterminate';
+  evidence:
+    | 'none'
+    | 'managed-marker'
+    | 'trusted-install-record'
+    | 'bundled-content-match'
+    | 'invalid-marker'
+    | 'state-read-failed';
+  code: string;
+  contentModified?: boolean;
+}>;
+
+export type ManagedPluginRemovalResult = Readonly<{
+  removed: boolean;
+  preserved: boolean;
+  code: 'absent' | 'removed' | 'ownership-conflict' | 'remove-failed';
+  ownership: ManagedPluginOwnership;
+  warning?: string;
+}>;
+
+export type PluginInstallResult = Readonly<{
+  installed: boolean;
+  warning?: string;
+  code?: 'managed-plugin-ownership-conflict';
+  action?: 'preserved';
+  ownership?: ManagedPluginOwnership;
+}>;
+
+type ManagedPluginMarker = Readonly<{
+  schemaVersion: number;
+  managedBy: string;
+  pluginId: string;
+  contentFingerprint: string;
+  installedAt: string;
+}>;
+
+type ManagedPluginOwnershipOptions = Readonly<{
+  targetDir?: string;
+  candidateSources?: string[];
+}>;
+
+function normalizeComparablePluginPath(filePath: string): string {
+  const normalized = path.resolve(filePath);
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function fingerprintToIntegrity(fingerprint: string): string {
+  return `sha256-${Buffer.from(fingerprint, 'hex').toString('base64')}`;
+}
+
 type TrustedOfficialPluginInstallRecord = {
   source: 'npm';
   spec: string;
@@ -354,29 +438,33 @@ type TrustedOfficialPluginInstallRecord = {
   resolvedName: string;
   resolvedVersion: string;
   resolvedSpec: string;
+  integrity: string;
   installedAt: string;
 };
 
 /** Store plain paths for OpenClaw install-record matching (no Windows \\?\ prefix). */
-function normalizePluginInstallPathForRecord(targetDir: string): string | null {
+async function normalizePluginInstallPathForRecord(targetDir: string): Promise<string | null> {
   try {
-    const resolved = realpathSync(targetDir);
+    const resolved = await realpath(fsPath(targetDir));
     return path.normalize(resolved);
   } catch {
     return path.normalize(targetDir);
   }
 }
 
-function buildTrustedOfficialPluginInstallRecord(
+async function buildTrustedOfficialPluginInstallRecord(
   pluginDirName: string,
   targetDir: string,
-): TrustedOfficialPluginInstallRecord | null {
+): Promise<TrustedOfficialPluginInstallRecord | null> {
   const npmName = TRUSTED_OFFICIAL_EXTENSION_PLUGINS[pluginDirName];
   if (!npmName) return null;
 
-  const version = readPluginVersion(join(targetDir, 'package.json'));
-  const installPath = normalizePluginInstallPathForRecord(targetDir);
-  if (!version || !installPath) return null;
+  const [version, installPath, contentFingerprint] = await Promise.all([
+    readPluginVersion(join(targetDir, 'package.json')),
+    normalizePluginInstallPathForRecord(targetDir),
+    readPluginContentFingerprint(targetDir),
+  ]);
+  if (!version || !installPath || !contentFingerprint) return null;
 
   return {
     source: 'npm',
@@ -386,6 +474,7 @@ function buildTrustedOfficialPluginInstallRecord(
     resolvedName: npmName,
     resolvedVersion: version,
     resolvedSpec: `${npmName}@${version}`,
+    integrity: fingerprintToIntegrity(contentFingerprint),
     installedAt: new Date().toISOString(),
   };
 }
@@ -394,6 +483,30 @@ function persistTrustedOfficialPluginInstallRecordsToSqlite(
   records: Record<string, Record<string, unknown>>,
 ): boolean {
   return upsertPluginInstallRecordsIntoSqlite(records);
+}
+
+async function replaceConfigAtomically(configPath: string, content: string): Promise<void> {
+  const directory = path.dirname(configPath);
+  const temporaryPath = join(
+    directory,
+    `.${path.basename(configPath)}.uclaw-plugin-${process.pid}-${randomUUID()}.tmp`,
+  );
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  let published = false;
+  await mkdir(fsPath(directory), { recursive: true, mode: 0o700 });
+  try {
+    handle = await open(fsPath(temporaryPath), 'wx', 0o600);
+    await handle.writeFile(content, 'utf-8');
+    await handle.chmod(0o600);
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await runWithTransientFsRetry(() => rename(fsPath(temporaryPath), fsPath(configPath)));
+    published = true;
+  } finally {
+    await handle?.close().catch(() => undefined);
+    if (!published) await unlink(fsPath(temporaryPath)).catch(() => undefined);
+  }
 }
 
 function trustedInstallRecordMatches(
@@ -410,7 +523,8 @@ function trustedInstallRecordMatches(
     && record.version === expected.version
     && record.resolvedName === expected.resolvedName
     && record.resolvedVersion === expected.resolvedVersion
-    && record.resolvedSpec === expected.resolvedSpec;
+    && record.resolvedSpec === expected.resolvedSpec
+    && record.integrity === expected.integrity;
 }
 
 /**
@@ -418,81 +532,115 @@ function trustedInstallRecordMatches(
  * Also persists the record into openclaw.sqlite for OpenClaw 2026.6+ trust checks.
  * Safe to call repeatedly; no-ops when metadata is already current.
  */
-export function syncTrustedOfficialPluginInstallRecord(
-  pluginDirName: string,
-  targetDir: string,
-): boolean {
-  const expected = buildTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
-  if (!expected) return false;
-
-  if (!existsSync(fsPath(join(targetDir, 'openclaw.plugin.json')))) {
-    return false;
+async function syncTrustedOfficialPluginInstallRecords(
+  targets: Array<{ pluginDirName: string; targetDir: string }>,
+): Promise<boolean> {
+  const expectedRecords: Record<string, TrustedOfficialPluginInstallRecord> = {};
+  for (const { pluginDirName, targetDir } of targets) {
+    if (!(await pathExists(join(targetDir, 'openclaw.plugin.json')))) continue;
+    const ownership = await inspectManagedPluginOwnership(pluginDirName, {
+      targetDir,
+      candidateSources: buildCandidateSources(pluginDirName),
+    });
+    if (ownership.status !== 'managed') {
+      logger.warn('[plugin] Trusted install metadata was not claimed for an unmanaged plugin', {
+        event: 'managed_plugin_ownership',
+        pluginId: pluginDirName,
+        operation: 'sync-install-record',
+        outcome: 'preserved',
+        ownership,
+      });
+      continue;
+    }
+    const expected = await buildTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
+    if (expected) expectedRecords[pluginDirName] = expected;
   }
+  if (Object.keys(expectedRecords).length === 0) return false;
 
-  let jsonChanged = false;
-  try {
-    ensureOpenClawStateDirExists();
+  return withConfigLock(async () => {
     const configPath = resolveOpenClawConfigPath();
-    if (!existsSync(fsPath(configPath))) {
+    let raw: string;
+    try {
+      raw = await readFile(fsPath(configPath), 'utf-8');
+    } catch (error) {
+      if (asErrnoException(error)?.code !== 'ENOENT') {
+        logger.warn('[plugin] Failed to read trusted install metadata target', toErrorDiagnostic(error));
+      }
       return false;
     }
 
-    const raw = readFileSync(fsPath(configPath), 'utf-8');
-    const config = JSON.parse(raw) as Record<string, unknown>;
+    let config: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+      config = parsed as Record<string, unknown>;
+    } catch (error) {
+      logger.warn('[plugin] Failed to parse trusted install metadata target', toErrorDiagnostic(error));
+      return false;
+    }
+
     let plugins = config.plugins;
     if (!plugins || typeof plugins !== 'object' || Array.isArray(plugins)) {
       plugins = { enabled: true, installs: {} };
       config.plugins = plugins;
     }
-
     const pluginsRecord = plugins as Record<string, unknown>;
     const installs = pluginsRecord.installs;
     const installsRecord = installs && typeof installs === 'object' && !Array.isArray(installs)
       ? installs as Record<string, unknown>
       : {};
 
-    const existing = installsRecord[pluginDirName];
-    if (!trustedInstallRecordMatches(existing, expected)) {
+    const changedPluginIds: string[] = [];
+    for (const [pluginDirName, expected] of Object.entries(expectedRecords)) {
+      if (trustedInstallRecordMatches(installsRecord[pluginDirName], expected)) continue;
       installsRecord[pluginDirName] = expected;
-      pluginsRecord.installs = installsRecord;
-      writeFileSync(
-        fsPath(configPath),
-        `${JSON.stringify(config, null, 2)}\n`,
-        'utf-8',
-      );
-      logger.info(`[plugin] Synced trusted install metadata for ${pluginDirName}`);
-      jsonChanged = true;
+      changedPluginIds.push(pluginDirName);
     }
-  } catch (error) {
-    logger.warn(`[plugin] Failed to sync trusted install metadata for ${pluginDirName}:`, error);
-    return false;
-  }
+    pluginsRecord.installs = installsRecord;
 
-  const sqliteChanged = persistTrustedOfficialPluginInstallRecordsToSqlite({
-    [pluginDirName]: expected,
+    if (changedPluginIds.length > 0) {
+      try {
+        await replaceConfigAtomically(configPath, `${JSON.stringify(config, null, 2)}\n`);
+        logger.info(`[plugin] Synced trusted install metadata for: ${changedPluginIds.join(', ')}`);
+      } catch (error) {
+        logger.warn('[plugin] Failed to atomically sync trusted install metadata', {
+          pluginIds: changedPluginIds,
+          ...toErrorDiagnostic(error),
+        });
+        return false;
+      }
+    }
+
+    const sqliteChanged = persistTrustedOfficialPluginInstallRecordsToSqlite(expectedRecords);
+    return changedPluginIds.length > 0 || sqliteChanged;
   });
-  return jsonChanged || sqliteChanged;
+}
+
+export async function syncTrustedOfficialPluginInstallRecord(
+  pluginDirName: string,
+  targetDir: string,
+): Promise<boolean> {
+  return syncTrustedOfficialPluginInstallRecords([{ pluginDirName, targetDir }]);
 }
 
 /** Repair trusted install metadata for all mirrored official plugins on disk. */
-export function repairTrustedOfficialPluginInstallRecords(): void {
-  for (const pluginDirName of Object.keys(TRUSTED_OFFICIAL_EXTENSION_PLUGINS)) {
-    const targetDir = join(resolveOpenClawStateDir(), 'extensions', pluginDirName);
-    if (!existsSync(fsPath(join(targetDir, 'openclaw.plugin.json')))) {
-      continue;
-    }
-    syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
-  }
+export async function repairTrustedOfficialPluginInstallRecords(): Promise<void> {
+  await syncTrustedOfficialPluginInstallRecords(
+    Object.keys(TRUSTED_OFFICIAL_EXTENSION_PLUGINS).map((pluginDirName) => ({
+      pluginDirName,
+      targetDir: join(resolveOpenClawStateDir(), 'extensions', pluginDirName),
+    })),
+  );
 }
 
-export function resolvePluginNpmPackagePath(npmName: string): string | null {
+export async function resolvePluginNpmPackagePath(npmName: string): Promise<string | null> {
   const candidateRoots = app.isPackaged
     ? [app.getAppPath(), process.resourcesPath]
     : [app.getAppPath(), process.cwd(), join(app.getAppPath(), '..')];
 
   for (const root of candidateRoots) {
     const npmPkgPath = join(root, 'node_modules', ...npmName.split('/'));
-    if (existsSync(fsPath(join(npmPkgPath, 'openclaw.plugin.json')))) {
+    if (await pathExists(join(npmPkgPath, 'openclaw.plugin.json'))) {
       return npmPkgPath;
     }
   }
@@ -500,9 +648,9 @@ export function resolvePluginNpmPackagePath(npmName: string): string | null {
   return null;
 }
 
-function readPluginVersion(pkgJsonPath: string): string | null {
+async function readPluginVersion(pkgJsonPath: string): Promise<string | null> {
   try {
-    const raw = readFileSync(fsPath(pkgJsonPath), 'utf-8');
+    const raw = await readFile(fsPath(pkgJsonPath), 'utf-8');
     const parsed = JSON.parse(raw) as { version?: string };
     return parsed.version ?? null;
   } catch {
@@ -528,12 +676,14 @@ type PluginManifestMetadata = {
   entry?: string;
 };
 
-function readPluginMetadata(pluginDir: string): {
+async function readPluginMetadata(pluginDir: string): Promise<{
   pkg: PluginPackageMetadata;
   manifest: PluginManifestMetadata;
-} {
-  const packageRaw = readFileSync(fsPath(join(pluginDir, 'package.json')), 'utf-8');
-  const manifestRaw = readFileSync(fsPath(join(pluginDir, 'openclaw.plugin.json')), 'utf-8');
+}> {
+  const [packageRaw, manifestRaw] = await Promise.all([
+    readFile(fsPath(join(pluginDir, 'package.json')), 'utf-8'),
+    readFile(fsPath(join(pluginDir, 'openclaw.plugin.json')), 'utf-8'),
+  ]);
   const pkg = JSON.parse(packageRaw) as unknown;
   const manifest = JSON.parse(manifestRaw) as unknown;
   if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) {
@@ -558,10 +708,14 @@ function getDeclaredPluginEntries(pkg: PluginPackageMetadata, manifest: PluginMa
   ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0))];
 }
 
-function assertPluginPackageReady(pluginDir: string, pluginDirName: string, pluginLabel: string): void {
-  let metadata: ReturnType<typeof readPluginMetadata>;
+async function assertPluginPackageReady(
+  pluginDir: string,
+  pluginDirName: string,
+  pluginLabel: string,
+): Promise<void> {
+  let metadata: Awaited<ReturnType<typeof readPluginMetadata>>;
   try {
-    metadata = readPluginMetadata(pluginDir);
+    metadata = await readPluginMetadata(pluginDir);
   } catch (error) {
     throw new Error(`${pluginLabel} plugin metadata is invalid: ${toErrorDiagnostic(error).message}`, {
       cause: error,
@@ -580,7 +734,8 @@ function assertPluginPackageReady(pluginDir: string, pluginDirName: string, plug
   }
 
   const entries = getDeclaredPluginEntries(pkg, manifest);
-  if (entries.length === 0 || !entries.some((entry) => existsSync(fsPath(join(pluginDir, entry))))) {
+  const existingEntries = await Promise.all(entries.map((entry) => pathExists(join(pluginDir, entry))));
+  if (entries.length === 0 || !existingEntries.some(Boolean)) {
     throw new Error(`${pluginLabel} plugin has no existing declared entrypoint (${entries.join(', ') || 'none'})`);
   }
 
@@ -604,12 +759,14 @@ function assertPluginPackageReady(pluginDir: string, pluginDirName: string, plug
   }
 }
 
-function readPluginContentFingerprint(pluginDir: string): string | null {
+async function readPluginContentFingerprint(pluginDir: string): Promise<string | null> {
   try {
     const manifestPath = join(pluginDir, 'openclaw.plugin.json');
     const pkgJsonPath = join(pluginDir, 'package.json');
-    const manifestRaw = readFileSync(fsPath(manifestPath), 'utf-8');
-    const packageRaw = readFileSync(fsPath(pkgJsonPath), 'utf-8');
+    const [manifestRaw, packageRaw] = await Promise.all([
+      readFile(fsPath(manifestPath), 'utf-8'),
+      readFile(fsPath(pkgJsonPath), 'utf-8'),
+    ]);
     const manifest = JSON.parse(manifestRaw) as { entry?: string };
     const pkg = JSON.parse(packageRaw) as PluginPackageMetadata;
     const entryFiles = getDeclaredPluginEntries(pkg, manifest);
@@ -620,9 +777,9 @@ function readPluginContentFingerprint(pluginDir: string): string | null {
     hash.update(packageRaw);
     for (const entryFile of entryFiles) {
       const entryPath = join(pluginDir, entryFile);
-      if (!existsSync(fsPath(entryPath))) continue;
+      if (!(await pathExists(entryPath))) continue;
       hash.update(`\n---entry:${entryFile}---\n`);
-      hash.update(readFileSync(fsPath(entryPath), 'utf-8'));
+      hash.update(await readFile(fsPath(entryPath), 'utf-8'));
     }
     return hash.digest('hex');
   } catch {
@@ -630,9 +787,9 @@ function readPluginContentFingerprint(pluginDir: string): string | null {
   }
 }
 
-function readPluginRuntimeDependencyNames(pluginDir: string): string[] {
+async function readPluginRuntimeDependencyNames(pluginDir: string): Promise<string[]> {
   try {
-    const raw = readFileSync(fsPath(join(pluginDir, 'package.json')), 'utf-8');
+    const raw = await readFile(fsPath(join(pluginDir, 'package.json')), 'utf-8');
     const pkg = JSON.parse(raw) as { dependencies?: Record<string, unknown> };
     return Object.keys(pkg.dependencies || {}).sort();
   } catch {
@@ -644,15 +801,22 @@ function pluginDependencyDir(pluginDir: string, dependencyName: string): string 
   return join(pluginDir, 'node_modules', ...dependencyName.split('/'));
 }
 
-export function findMissingPluginRuntimeDependencies(pluginDir: string): string[] {
-  return readPluginRuntimeDependencyNames(pluginDir).filter((dependencyName) => {
-    const depDir = pluginDependencyDir(pluginDir, dependencyName);
-    return !existsSync(fsPath(join(depDir, 'package.json')));
-  });
+export async function findMissingPluginRuntimeDependencies(pluginDir: string): Promise<string[]> {
+  const dependencies = await readPluginRuntimeDependencyNames(pluginDir);
+  const present = await Promise.all(dependencies.map((dependencyName) => (
+    pathExists(join(pluginDependencyDir(pluginDir, dependencyName), 'package.json'))
+  )));
+  return dependencies.filter((_dependencyName, index) => !present[index]);
 }
 
-export function findBestBundledPluginSource(candidateSources: string[], _targetDir?: string): string | null {
-  const availableSources = candidateSources.filter((dir) => existsSync(fsPath(join(dir, 'openclaw.plugin.json'))));
+export async function findBestBundledPluginSource(
+  candidateSources: string[],
+  _targetDir?: string,
+): Promise<string | null> {
+  const sourcePresence = await Promise.all(
+    candidateSources.map((dir) => pathExists(join(dir, 'openclaw.plugin.json'))),
+  );
+  const availableSources = candidateSources.filter((_dir, index) => sourcePresence[index]);
   if (availableSources.length === 0) return null;
 
   let bestSource: { dir: string; mtimeMs: number; missingRuntimeDeps: string[] } | null = null;
@@ -660,37 +824,36 @@ export function findBestBundledPluginSource(candidateSources: string[], _targetD
     let mtimeMs = 0;
     for (const fileName of ['openclaw.plugin.json', 'package.json']) {
       try {
-        mtimeMs = Math.max(mtimeMs, statSync(fsPath(join(dir, fileName))).mtimeMs);
+        mtimeMs = Math.max(mtimeMs, (await stat(fsPath(join(dir, fileName)))).mtimeMs);
       } catch {
         // Install validation will report unreadable metadata for the chosen source.
       }
     }
 
-    const entryFiles: unknown[] = (() => {
-      try {
-        const raw = readFileSync(fsPath(join(dir, 'package.json')), 'utf-8');
-        const pkg = JSON.parse(raw) as PluginPackageMetadata;
-        return [
-          pkg.main,
-          pkg.module,
-          ...(Array.isArray(pkg.openclaw?.extensions) ? pkg.openclaw.extensions : []),
-          ...(Array.isArray(pkg.openclaw?.runtimeExtensions) ? pkg.openclaw.runtimeExtensions : []),
-        ];
-      } catch {
-        return [];
-      }
-    })();
+    let entryFiles: unknown[] = [];
+    try {
+      const raw = await readFile(fsPath(join(dir, 'package.json')), 'utf-8');
+      const pkg = JSON.parse(raw) as PluginPackageMetadata;
+      entryFiles = [
+        pkg.main,
+        pkg.module,
+        ...(Array.isArray(pkg.openclaw?.extensions) ? pkg.openclaw.extensions : []),
+        ...(Array.isArray(pkg.openclaw?.runtimeExtensions) ? pkg.openclaw.runtimeExtensions : []),
+      ];
+    } catch {
+      // Install validation will report unreadable metadata for the chosen source.
+    }
 
     for (const entryFile of entryFiles) {
       if (typeof entryFile !== 'string' || !entryFile.trim()) continue;
       try {
-        mtimeMs = Math.max(mtimeMs, statSync(fsPath(join(dir, entryFile))).mtimeMs);
+        mtimeMs = Math.max(mtimeMs, (await stat(fsPath(join(dir, entryFile)))).mtimeMs);
       } catch {
         // Install validation will report missing entrypoints for the chosen source.
       }
     }
 
-    const missingRuntimeDeps = findMissingPluginRuntimeDependencies(dir);
+    const missingRuntimeDeps = await findMissingPluginRuntimeDependencies(dir);
     const isBetterPackagedSource = Boolean(
       bestSource && app.isPackaged && missingRuntimeDeps.length < bestSource.missingRuntimeDeps.length,
     );
@@ -721,17 +884,22 @@ function findParentNodeModules(startPath: string): string | null {
 }
 
 /** List packages inside a node_modules dir (handles @scoped packages). */
-function listPackagesInDir(nodeModulesDir: string): Array<{ name: string; fullPath: string }> {
+async function listPackagesInDir(nodeModulesDir: string): Promise<Array<{ name: string; fullPath: string }>> {
   const result: Array<{ name: string; fullPath: string }> = [];
-  if (!existsSync(fsPath(nodeModulesDir))) return result;
   const SKIP = new Set(['.bin', '.package-lock.json', '.modules.yaml', '.pnpm']);
-  for (const entry of readdirSync(fsPath(nodeModulesDir), { withFileTypes: true })) {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(fsPath(nodeModulesDir), { withFileTypes: true });
+  } catch {
+    return result;
+  }
+  for (const entry of entries) {
     if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
     if (SKIP.has(entry.name)) continue;
     const entryPath = join(nodeModulesDir, entry.name);
     if (entry.name.startsWith('@')) {
       try {
-        for (const sub of readdirSync(fsPath(entryPath))) {
+        for (const sub of await readdir(fsPath(entryPath))) {
           result.push({ name: `${entry.name}/${sub}`, fullPath: join(entryPath, sub) });
         }
       } catch { /* ignore */ }
@@ -747,18 +915,22 @@ function listPackagesInDir(nodeModulesDir: string): Array<{ name: string; fullPa
  * transitive runtime dependencies (replicates bundle-openclaw-plugins.mjs
  * logic).
  */
-export function copyPluginFromNodeModules(npmPkgPath: string, targetDir: string, npmName: string): void {
+export async function copyPluginFromNodeModules(
+  npmPkgPath: string,
+  targetDir: string,
+  npmName: string,
+): Promise<void> {
   let realPath: string;
   try {
-    realPath = realpathSyncSafe(npmPkgPath);
+    realPath = await realpathSafe(npmPkgPath);
   } catch {
     throw new Error(`Cannot resolve real path for ${npmPkgPath}`);
   }
 
   // 1. Copy plugin package itself
-  rmSync(fsPath(targetDir), { recursive: true, force: true });
-  mkdirSync(fsPath(targetDir), { recursive: true });
-  cpSyncSafe(realPath, targetDir);
+  await rm(fsPath(targetDir), { recursive: true, force: true });
+  await mkdir(fsPath(targetDir), { recursive: true });
+  await cpAsyncSafe(realPath, targetDir);
 
   // 2. Collect transitive deps from pnpm virtual store
   const rootVirtualNM = findParentNodeModules(realPath);
@@ -770,7 +942,7 @@ export function copyPluginFromNodeModules(npmPkgPath: string, targetDir: string,
   // Read peer deps to skip (they're provided by the host gateway)
   const SKIP_PACKAGES = new Set(['typescript', '@playwright/test']);
   try {
-    const pluginPkg = JSON.parse(readFileSync(fsPath(join(targetDir, 'package.json')), 'utf-8'));
+    const pluginPkg = JSON.parse(await readFile(fsPath(join(targetDir, 'package.json')), 'utf-8'));
     for (const peer of Object.keys(pluginPkg.peerDependencies || {})) {
       SKIP_PACKAGES.add(peer);
     }
@@ -783,12 +955,12 @@ export function copyPluginFromNodeModules(npmPkgPath: string, targetDir: string,
 
   while (queue.length > 0) {
     const { nodeModulesDir, skipPkg } = queue.shift()!;
-    for (const { name, fullPath } of listPackagesInDir(nodeModulesDir)) {
+    for (const { name, fullPath } of await listPackagesInDir(nodeModulesDir)) {
       if (name === skipPkg) continue;
       if (SKIP_PACKAGES.has(name) || name.startsWith('@types/')) continue;
       let depRealPath: string;
       try {
-        depRealPath = realpathSyncSafe(fullPath);
+        depRealPath = await realpathSafe(fullPath);
       } catch { continue; }
       if (collected.has(depRealPath)) continue;
       collected.set(depRealPath, name);
@@ -801,28 +973,31 @@ export function copyPluginFromNodeModules(npmPkgPath: string, targetDir: string,
 
   // 3. Copy flattened deps into targetDir/node_modules/
   const outputNM = join(targetDir, 'node_modules');
-  mkdirSync(fsPath(outputNM), { recursive: true });
+  await mkdir(fsPath(outputNM), { recursive: true });
   const copiedNames = new Set<string>();
   for (const [depRealPath, pkgName] of collected) {
     if (copiedNames.has(pkgName)) continue;
     copiedNames.add(pkgName);
     const dest = join(outputNM, pkgName);
     try {
-      mkdirSync(fsPath(path.dirname(dest)), { recursive: true });
-      cpSyncSafe(depRealPath, dest);
+      await mkdir(fsPath(path.dirname(dest)), { recursive: true });
+      await cpAsyncSafe(depRealPath, dest);
     } catch { /* skip individual dep failures */ }
   }
 
   logger.info(`[plugin] Copied ${copiedNames.size} deps for ${npmName}`);
 }
 
-function copyLocalPluginRuntimeDependenciesFromNodeModules(targetDir: string, pluginLabel: string): void {
-  const dependencies = readPluginRuntimeDependencyNames(targetDir);
+async function copyLocalPluginRuntimeDependenciesFromNodeModules(
+  targetDir: string,
+  pluginLabel: string,
+): Promise<void> {
+  const dependencies = await readPluginRuntimeDependencyNames(targetDir);
   if (dependencies.length === 0) return;
 
   const skipPackages = new Set(['typescript', '@playwright/test']);
   try {
-    const pluginPkg = JSON.parse(readFileSync(fsPath(join(targetDir, 'package.json')), 'utf-8'));
+    const pluginPkg = JSON.parse(await readFile(fsPath(join(targetDir, 'package.json')), 'utf-8'));
     for (const peer of Object.keys(pluginPkg.peerDependencies || {})) {
       skipPackages.add(peer);
     }
@@ -839,12 +1014,18 @@ function copyLocalPluginRuntimeDependenciesFromNodeModules(targetDir: string, pl
       join(app.getAppPath(), 'node_modules', ...dependencyParts),
       join(__dirname, '../../node_modules', ...dependencyParts),
     ];
-    const depPath = dependencyCandidates.find((candidate) => existsSync(fsPath(join(candidate, 'package.json'))));
+    let depPath: string | undefined;
+    for (const candidate of dependencyCandidates) {
+      if (await pathExists(join(candidate, 'package.json'))) {
+        depPath = candidate;
+        break;
+      }
+    }
     if (!depPath) {
       throw new Error(`Missing dependency "${depName}" for ${pluginLabel}. Run pnpm install first.`);
     }
 
-    const realDepPath = realpathSyncSafe(depPath);
+    const realDepPath = await realpathSafe(depPath);
     collected.set(realDepPath, depName);
     const rootVirtualNM = findParentNodeModules(realDepPath);
     if (rootVirtualNM) {
@@ -854,12 +1035,12 @@ function copyLocalPluginRuntimeDependenciesFromNodeModules(targetDir: string, pl
 
   while (queue.length > 0) {
     const { nodeModulesDir, skipPkg } = queue.shift()!;
-    for (const { name, fullPath } of listPackagesInDir(nodeModulesDir)) {
+    for (const { name, fullPath } of await listPackagesInDir(nodeModulesDir)) {
       if (name === skipPkg || skipPackages.has(name) || name.startsWith('@types/')) continue;
 
       let depRealPath: string;
       try {
-        depRealPath = realpathSyncSafe(fullPath);
+        depRealPath = await realpathSafe(fullPath);
       } catch {
         continue;
       }
@@ -874,27 +1055,27 @@ function copyLocalPluginRuntimeDependenciesFromNodeModules(targetDir: string, pl
   }
 
   const outputNM = join(targetDir, 'node_modules');
-  mkdirSync(fsPath(outputNM), { recursive: true });
+  await mkdir(fsPath(outputNM), { recursive: true });
   const copiedNames = new Set<string>();
   for (const [depRealPath, pkgName] of collected) {
     if (copiedNames.has(pkgName)) continue;
     copiedNames.add(pkgName);
     const dest = join(outputNM, pkgName);
-    mkdirSync(fsPath(path.dirname(dest)), { recursive: true });
-    cpSyncSafe(depRealPath, dest);
+    await mkdir(fsPath(path.dirname(dest)), { recursive: true });
+    await cpAsyncSafe(depRealPath, dest);
   }
 
   logger.info(`[plugin] Hydrated ${copiedNames.size} runtime deps for ${pluginLabel} from root node_modules`);
 }
 
-function ensurePluginRuntimeDependencies(targetDir: string, pluginLabel: string): string[] {
-  let missingDeps = findMissingPluginRuntimeDependencies(targetDir);
+async function ensurePluginRuntimeDependencies(targetDir: string, pluginLabel: string): Promise<string[]> {
+  let missingDeps = await findMissingPluginRuntimeDependencies(targetDir);
   if (missingDeps.length === 0) return [];
 
   if (!app.isPackaged) {
     try {
-      copyLocalPluginRuntimeDependenciesFromNodeModules(targetDir, pluginLabel);
-      missingDeps = findMissingPluginRuntimeDependencies(targetDir);
+      await copyLocalPluginRuntimeDependenciesFromNodeModules(targetDir, pluginLabel);
+      missingDeps = await findMissingPluginRuntimeDependencies(targetDir);
     } catch (error) {
       logger.warn('[plugin] Failed to hydrate runtime dependencies', {
         pluginLabel,
@@ -911,50 +1092,69 @@ function ensurePluginRuntimeDependencies(targetDir: string, pluginLabel: string)
 
 // ── Core install / upgrade logic ─────────────────────────────────────────────
 
-function prepareAndActivatePlugin(
+async function prepareAndActivatePlugin(
   targetDir: string,
+  pluginDirName: string,
+  candidateSources: string[],
   pluginLabel: string,
-  prepareStaging: (stagingDir: string) => void,
-): void {
+  prepareStaging: (stagingDir: string) => Promise<void>,
+): Promise<void> {
   const nonce = `${process.pid}-${randomUUID()}`;
   const { workRoot, stagingDir, backupDir } = resolvePluginInstallWorkPaths(targetDir, nonce);
   let oldVersionMoved = false;
   let newVersionActivated = false;
+  let phase: PluginInstallPhase = 'staging-setup';
 
   // Keep incomplete trees outside extensions so OpenClaw never scans a partial install.
-  mkdirSync(fsPath(path.dirname(targetDir)), { recursive: true });
-  mkdirSync(fsPath(workRoot), { recursive: true });
-  rmSync(fsPath(stagingDir), { recursive: true, force: true });
-  rmSync(fsPath(backupDir), { recursive: true, force: true });
-
   try {
-    prepareStaging(stagingDir);
-    if (!existsSync(fsPath(join(stagingDir, 'openclaw.plugin.json')))) {
+    await mkdir(fsPath(path.dirname(targetDir)), { recursive: true });
+    await mkdir(fsPath(workRoot), { recursive: true });
+    await Promise.all([
+      rm(fsPath(stagingDir), { recursive: true, force: true }),
+      rm(fsPath(backupDir), { recursive: true, force: true }),
+    ]);
+
+    phase = 'staging-copy';
+    await prepareStaging(stagingDir);
+    phase = 'validation';
+    const [hasManifest, hasPackageJson] = await Promise.all([
+      pathExists(join(stagingDir, 'openclaw.plugin.json')),
+      pathExists(join(stagingDir, 'package.json')),
+    ]);
+    if (!hasManifest) {
       throw new Error(`Failed to stage ${pluginLabel} plugin mirror (manifest missing).`);
     }
-    if (!existsSync(fsPath(join(stagingDir, 'package.json')))) {
+    if (!hasPackageJson) {
       throw new Error(`Failed to stage ${pluginLabel} plugin mirror (package.json missing).`);
     }
-
-    fixupPluginManifest(stagingDir);
-    assertPluginPackageReady(stagingDir, path.basename(targetDir), pluginLabel);
-    const missingRuntimeDeps = ensurePluginRuntimeDependencies(stagingDir, pluginLabel);
+    await fixupPluginManifest(stagingDir);
+    await assertPluginPackageReady(stagingDir, path.basename(targetDir), pluginLabel);
+    phase = 'dependency-hydration';
+    const missingRuntimeDeps = await ensurePluginRuntimeDependencies(stagingDir, pluginLabel);
     if (missingRuntimeDeps.length > 0) {
       throw new Error(
         `Failed to stage ${pluginLabel} plugin mirror (runtime dependencies missing: ${missingRuntimeDeps.join(', ')})`,
       );
     }
+    await writeManagedPluginMarker(stagingDir, pluginDirName);
 
-    if (existsSync(fsPath(targetDir))) {
-      runWithTransientFsRetry(() => renameSync(fsPath(targetDir), fsPath(backupDir)));
+    phase = 'activation';
+    const activationOwnership = await inspectManagedPluginOwnership(pluginDirName, {
+      targetDir,
+      candidateSources,
+    });
+    if (activationOwnership.status === 'managed') {
+      await runWithTransientFsRetry(() => rename(fsPath(targetDir), fsPath(backupDir)));
       oldVersionMoved = true;
+    } else if (activationOwnership.status !== 'absent') {
+      throw new PluginOwnershipConflictError(activationOwnership);
     }
-    runWithTransientFsRetry(() => renameSync(fsPath(stagingDir), fsPath(targetDir)));
+    await runWithTransientFsRetry(() => rename(fsPath(stagingDir), fsPath(targetDir)));
     newVersionActivated = true;
 
     if (oldVersionMoved) {
       try {
-        runWithTransientFsRetry(() => rmSync(fsPath(backupDir), { recursive: true, force: true }));
+        await runWithTransientFsRetry(() => rm(fsPath(backupDir), { recursive: true, force: true }));
         oldVersionMoved = false;
       } catch (error) {
         logger.warn(`[plugin] ${pluginLabel} upgraded but its backup could not be removed`, {
@@ -964,28 +1164,33 @@ function prepareAndActivatePlugin(
       }
     }
   } catch (error) {
-    if (!newVersionActivated && oldVersionMoved && !existsSync(fsPath(targetDir)) && existsSync(fsPath(backupDir))) {
+    const installError = asPluginInstallPhaseError(error, phase, pluginLabel);
+    const [targetExists, backupExists] = await Promise.all([
+      pathExists(targetDir),
+      pathExists(backupDir),
+    ]);
+    if (!newVersionActivated && oldVersionMoved && !targetExists && backupExists) {
       try {
-        runWithTransientFsRetry(() => renameSync(fsPath(backupDir), fsPath(targetDir)));
+        await runWithTransientFsRetry(() => rename(fsPath(backupDir), fsPath(targetDir)));
         oldVersionMoved = false;
       } catch (rollbackError) {
         logger.error(`[plugin] Failed to roll back ${pluginLabel} after install failure`, {
           backupDir,
           targetDir,
-          ...toErrorDiagnostic(rollbackError),
+          ...toErrorDiagnostic(asPluginInstallPhaseError(rollbackError, 'rollback', pluginLabel)),
         });
       }
     }
-    throw error;
+    throw installError;
   } finally {
     try {
-      runWithTransientFsRetry(() => rmSync(fsPath(stagingDir), { recursive: true, force: true }));
+      await runWithTransientFsRetry(() => rm(fsPath(stagingDir), { recursive: true, force: true }));
     } catch {
       // A unique staging directory can be cleaned at the next launch.
     }
-    if (!oldVersionMoved && existsSync(fsPath(backupDir))) {
+    if (!oldVersionMoved && await pathExists(backupDir)) {
       try {
-        runWithTransientFsRetry(() => rmSync(fsPath(backupDir), { recursive: true, force: true }));
+        await runWithTransientFsRetry(() => rm(fsPath(backupDir), { recursive: true, force: true }));
       } catch {
         // Preserve the active target if backup cleanup is temporarily blocked.
       }
@@ -993,33 +1198,398 @@ function prepareAndActivatePlugin(
   }
 }
 
-export function ensurePluginInstalled(
+type PluginInstallOptions = { deferTrustedRecordSync?: boolean };
+const pluginInstallTails = new Map<string, Promise<void>>();
+
+function normalizePluginInstallLockKey(targetDir: string): string {
+  const resolved = path.resolve(targetDir);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+async function withPluginInstallLock<T>(targetDir: string, operation: () => Promise<T>): Promise<T> {
+  const key = normalizePluginInstallLockKey(targetDir);
+  const previous = pluginInstallTails.get(key) ?? Promise.resolve();
+  const ready = previous.catch(() => undefined);
+  let release: () => void = () => undefined;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = ready.then(() => current);
+  pluginInstallTails.set(key, tail);
+
+  await ready;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (pluginInstallTails.get(key) === tail) pluginInstallTails.delete(key);
+  }
+}
+
+function ownershipConflictInstallResult(
+  pluginDirName: string,
+  pluginLabel: string,
+  ownership: ManagedPluginOwnership,
+): PluginInstallResult {
+  logManagedPluginPreservation(pluginDirName, 'install-or-upgrade', ownership);
+  return {
+    installed: false,
+    code: 'managed-plugin-ownership-conflict',
+    action: 'preserved',
+    ownership,
+    warning: `${pluginLabel} plugin was preserved because UClaw ownership was not proven`,
+  };
+}
+
+function findOwnershipConflict(error: unknown): PluginOwnershipConflictError | null {
+  let current = error;
+  const seen = new Set<unknown>();
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    if (current instanceof PluginOwnershipConflictError) return current;
+    current = 'cause' in current ? current.cause : null;
+  }
+  return null;
+}
+
+type ManagedMarkerReadResult =
+  | { status: 'missing' }
+  | { status: 'valid'; marker: ManagedPluginMarker }
+  | { status: 'invalid' };
+
+async function readManagedPluginMarker(
+  pluginDir: string,
+  pluginDirName: string,
+): Promise<ManagedMarkerReadResult> {
+  const markerPath = join(pluginDir, UCLAW_MANAGED_PLUGIN_MARKER_FILENAME);
+  let raw: string;
+  try {
+    raw = await readFile(fsPath(markerPath), 'utf-8');
+  } catch (error) {
+    return asErrnoException(error)?.code === 'ENOENT'
+      ? { status: 'missing' }
+      : { status: 'invalid' };
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<ManagedPluginMarker>;
+    if (
+      !parsed
+      || typeof parsed !== 'object'
+      || parsed.schemaVersion !== UCLAW_MANAGED_PLUGIN_MARKER_VERSION
+      || parsed.managedBy !== 'uclaw'
+      || parsed.pluginId !== pluginDirName
+      || typeof parsed.contentFingerprint !== 'string'
+      || !/^[a-f0-9]{64}$/u.test(parsed.contentFingerprint)
+      || typeof parsed.installedAt !== 'string'
+      || !parsed.installedAt.trim()
+    ) {
+      return { status: 'invalid' };
+    }
+    return { status: 'valid', marker: parsed as ManagedPluginMarker };
+  } catch {
+    return { status: 'invalid' };
+  }
+}
+
+async function writeManagedPluginMarker(pluginDir: string, pluginDirName: string): Promise<void> {
+  const contentFingerprint = await readPluginContentFingerprint(pluginDir);
+  if (!contentFingerprint) {
+    throw new Error(`Cannot establish managed ownership for ${pluginDirName}: content fingerprint unavailable`);
+  }
+  const marker: ManagedPluginMarker = {
+    schemaVersion: UCLAW_MANAGED_PLUGIN_MARKER_VERSION,
+    managedBy: 'uclaw',
+    pluginId: pluginDirName,
+    contentFingerprint,
+    installedAt: new Date().toISOString(),
+  };
+  await writeFile(
+    fsPath(join(pluginDir, UCLAW_MANAGED_PLUGIN_MARKER_FILENAME)),
+    `${JSON.stringify(marker, null, 2)}\n`,
+    { encoding: 'utf-8', mode: 0o600 },
+  );
+}
+
+type ConfiguredInstallRecordReadResult =
+  | { status: 'missing' }
+  | { status: 'found'; record: Record<string, unknown> }
+  | { status: 'invalid' };
+
+async function readConfiguredPluginInstallRecord(
+  pluginDirName: string,
+): Promise<ConfiguredInstallRecordReadResult> {
+  let raw: string;
+  try {
+    raw = await readFile(fsPath(resolveOpenClawConfigPath()), 'utf-8');
+  } catch (error) {
+    return asErrnoException(error)?.code === 'ENOENT'
+      ? { status: 'missing' }
+      : { status: 'invalid' };
+  }
+
+  let config: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { status: 'invalid' };
+    config = parsed as Record<string, unknown>;
+  } catch {
+    return { status: 'invalid' };
+  }
+
+  if (config.plugins === undefined) return { status: 'missing' };
+  if (!config.plugins || typeof config.plugins !== 'object' || Array.isArray(config.plugins)) {
+    return { status: 'invalid' };
+  }
+  const installs = (config.plugins as Record<string, unknown>).installs;
+  if (installs === undefined) return { status: 'missing' };
+  if (!installs || typeof installs !== 'object' || Array.isArray(installs)) {
+    return { status: 'invalid' };
+  }
+  const record = (installs as Record<string, unknown>)[pluginDirName];
+  if (record === undefined) return { status: 'missing' };
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return { status: 'invalid' };
+  return { status: 'found', record: record as Record<string, unknown> };
+}
+
+async function trustedInstallRecordOwnsTarget(
+  pluginDirName: string,
+  targetDir: string,
+  record: Record<string, unknown>,
+): Promise<boolean> {
+  const expected = await buildTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
+  if (!expected || !trustedInstallRecordMatches(record, expected)) return false;
+
+  const recordedPath = typeof record.installPath === 'string' ? record.installPath : '';
+  if (!recordedPath || !path.isAbsolute(recordedPath)) return false;
+  const targetPaths = new Set([normalizeComparablePluginPath(targetDir)]);
+  try {
+    targetPaths.add(normalizeComparablePluginPath(await realpathSafe(targetDir)));
+  } catch {
+    // The metadata and content checks below remain authoritative.
+  }
+  return targetPaths.has(normalizeComparablePluginPath(recordedPath));
+}
+
+/**
+ * Resolve whether UClaw may mutate a plugin directory. Any ambiguous state is
+ * deliberately non-destructive: a same-name extension is user-owned until
+ * positive UClaw ownership evidence is available.
+ */
+export async function inspectManagedPluginOwnership(
+  pluginDirName: string,
+  options: ManagedPluginOwnershipOptions = {},
+): Promise<ManagedPluginOwnership> {
+  const targetDir = options.targetDir ?? join(getOpenClawExtensionsDir(), pluginDirName);
+  let targetInfo: Awaited<ReturnType<typeof lstat>>;
+  try {
+    targetInfo = await lstat(fsPath(targetDir));
+  } catch (error) {
+    if (asErrnoException(error)?.code === 'ENOENT') {
+      return { status: 'absent', evidence: 'none', code: 'target_absent' };
+    }
+    return { status: 'indeterminate', evidence: 'state-read-failed', code: 'target_inspection_failed' };
+  }
+
+  if (targetInfo.isSymbolicLink() || !targetInfo.isDirectory()) {
+    return { status: 'indeterminate', evidence: 'state-read-failed', code: 'target_type_unsafe' };
+  }
+
+  const markerResult = await readManagedPluginMarker(targetDir, pluginDirName);
+  if (markerResult.status === 'invalid') {
+    return { status: 'indeterminate', evidence: 'invalid-marker', code: 'managed_marker_invalid' };
+  }
+  if (markerResult.status === 'valid') {
+    const currentFingerprint = await readPluginContentFingerprint(targetDir);
+    return {
+      status: 'managed',
+      evidence: 'managed-marker',
+      code: 'managed_marker_valid',
+      contentModified: currentFingerprint !== null
+        && currentFingerprint !== markerResult.marker.contentFingerprint,
+    };
+  }
+
+  const configuredRecord = await readConfiguredPluginInstallRecord(pluginDirName);
+  if (configuredRecord.status === 'invalid') {
+    return { status: 'indeterminate', evidence: 'state-read-failed', code: 'install_record_state_invalid' };
+  }
+  if (
+    configuredRecord.status === 'found'
+    && await trustedInstallRecordOwnsTarget(pluginDirName, targetDir, configuredRecord.record)
+  ) {
+    return { status: 'managed', evidence: 'trusted-install-record', code: 'trusted_install_record_valid' };
+  }
+
+  const targetFingerprint = await readPluginContentFingerprint(targetDir);
+  if (targetFingerprint) {
+    for (const sourceDir of options.candidateSources ?? []) {
+      try {
+        const sourceInfo = await lstat(fsPath(sourceDir));
+        if (!sourceInfo.isDirectory()) continue;
+      } catch (error) {
+        if (asErrnoException(error)?.code === 'ENOENT') continue;
+        return { status: 'indeterminate', evidence: 'state-read-failed', code: 'source_inspection_failed' };
+      }
+      const sourceFingerprint = await readPluginContentFingerprint(sourceDir);
+      if (!sourceFingerprint) {
+        return { status: 'indeterminate', evidence: 'state-read-failed', code: 'source_fingerprint_failed' };
+      }
+      if (sourceFingerprint === targetFingerprint) {
+        return { status: 'managed', evidence: 'bundled-content-match', code: 'bundled_content_match' };
+      }
+    }
+  }
+
+  return {
+    status: 'user-owned-or-unknown',
+    evidence: 'none',
+    code: configuredRecord.status === 'found' ? 'install_record_not_uclaw_owned' : 'ownership_not_proven',
+  };
+}
+
+function logManagedPluginPreservation(
+  pluginDirName: string,
+  operation: string,
+  ownership: ManagedPluginOwnership,
+): void {
+  logger.warn('[plugin] Preserved same-name plugin because UClaw ownership was not proven', {
+    event: 'managed_plugin_ownership',
+    pluginId: pluginDirName,
+    operation,
+    outcome: 'preserved',
+    ownership,
+  });
+}
+
+export async function removeManagedPluginInstall(
+  pluginDirName: string,
+  options: ManagedPluginOwnershipOptions & { operation?: string } = {},
+): Promise<ManagedPluginRemovalResult> {
+  const targetDir = options.targetDir ?? join(getOpenClawExtensionsDir(), pluginDirName);
+  return withPluginInstallLock(targetDir, async () => {
+    const ownership = await inspectManagedPluginOwnership(pluginDirName, options);
+    if (ownership.status === 'absent') {
+      return { removed: false, preserved: false, code: 'absent', ownership };
+    }
+    if (ownership.status !== 'managed') {
+      logManagedPluginPreservation(pluginDirName, options.operation ?? 'remove', ownership);
+      return {
+        removed: false,
+        preserved: true,
+        code: 'ownership-conflict',
+        ownership,
+        warning: `Preserved ${pluginDirName}: UClaw ownership was not proven`,
+      };
+    }
+
+    try {
+      await runWithTransientFsRetry(() => rm(fsPath(targetDir), { recursive: true, force: true }));
+      return { removed: true, preserved: false, code: 'removed', ownership };
+    } catch (error) {
+      const warning = `Failed to remove UClaw-managed plugin ${pluginDirName}`;
+      logger.warn('[plugin] Managed plugin removal failed', {
+        event: 'managed_plugin_ownership',
+        pluginId: pluginDirName,
+        operation: options.operation ?? 'remove',
+        outcome: 'failed',
+        ownership,
+        ...toErrorDiagnostic(error),
+      });
+      return { removed: false, preserved: true, code: 'remove-failed', ownership, warning };
+    }
+  });
+}
+
+export async function ensurePluginInstalled(
   pluginDirName: string,
   candidateSources: string[],
   pluginLabel: string,
-): { installed: boolean; warning?: string } {
+  options: PluginInstallOptions = {},
+): Promise<PluginInstallResult> {
   const targetDir = join(getOpenClawExtensionsDir(), pluginDirName);
+  return withPluginInstallLock(targetDir, () => ensurePluginInstalledUnlocked(
+    pluginDirName,
+    candidateSources,
+    pluginLabel,
+    options,
+    targetDir,
+  ));
+}
+
+async function ensurePluginInstalledUnlocked(
+  pluginDirName: string,
+  candidateSources: string[],
+  pluginLabel: string,
+  options: PluginInstallOptions,
+  targetDir: string,
+): Promise<PluginInstallResult> {
   const targetManifest = join(targetDir, 'openclaw.plugin.json');
   const targetPkgJson = join(targetDir, 'package.json');
+  const syncTrustedRecord = async (): Promise<void> => {
+    if (!options.deferTrustedRecordSync) {
+      await syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
+    }
+  };
 
-  const sourceDir = findBestBundledPluginSource(candidateSources, targetDir);
+  const finalizeInstalled = async (): Promise<PluginInstallResult> => {
+    const marker = await readManagedPluginMarker(targetDir, pluginDirName);
+    if (marker.status === 'invalid') {
+      const ownership: ManagedPluginOwnership = {
+        status: 'indeterminate',
+        evidence: 'invalid-marker',
+        code: 'managed_marker_invalid',
+      };
+      return ownershipConflictInstallResult(pluginDirName, pluginLabel, ownership);
+    }
+    if (marker.status === 'missing') {
+      try {
+        await writeManagedPluginMarker(targetDir, pluginDirName);
+      } catch (error) {
+        logger.warn('[plugin] Installed plugin could not be marked as UClaw-managed', {
+          event: 'managed_plugin_ownership',
+          pluginId: pluginDirName,
+          operation: 'write-managed-marker',
+          outcome: 'failed',
+          ...toErrorDiagnostic(error),
+        });
+        return {
+          installed: true,
+          warning: `${pluginLabel} is installed, but its UClaw ownership marker could not be written`,
+        };
+      }
+    }
+    await syncTrustedRecord();
+    return { installed: true };
+  };
+
+  const sourceDir = await findBestBundledPluginSource(candidateSources, targetDir);
+  const ownership = await inspectManagedPluginOwnership(pluginDirName, {
+    targetDir,
+    candidateSources: sourceDir ? [sourceDir] : candidateSources,
+  });
+  if (ownership.status !== 'absent' && ownership.status !== 'managed') {
+    return ownershipConflictInstallResult(pluginDirName, pluginLabel, ownership);
+  }
+  const targetHasManifest = await pathExists(targetManifest);
 
   // If already installed, check whether an upgrade is available
-  if (existsSync(fsPath(targetManifest))) {
+  if (targetHasManifest) {
     let installedPackageReady = true;
     try {
-      assertPluginPackageReady(targetDir, pluginDirName, pluginLabel);
+      await assertPluginPackageReady(targetDir, pluginDirName, pluginLabel);
     } catch (error) {
       installedPackageReady = false;
       logger.info(`[plugin] Refreshing ${pluginLabel} plugin: ${toErrorDiagnostic(error).message}`);
     }
 
     if (!sourceDir && app.isPackaged) {
-      const installedVersion = readPluginVersion(targetPkgJson);
-      const missingRuntimeDeps = findMissingPluginRuntimeDependencies(targetDir);
+      const [installedVersion, missingRuntimeDeps] = await Promise.all([
+        readPluginVersion(targetPkgJson),
+        findMissingPluginRuntimeDependencies(targetDir),
+      ]);
       if (installedPackageReady && installedVersion && missingRuntimeDeps.length === 0) {
-        syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
-        return { installed: true };
+        return finalizeInstalled();
       }
       return {
         installed: false,
@@ -1028,10 +1598,12 @@ export function ensurePluginInstalled(
     }
 
     if (!sourceDir) {
-      syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
+      return finalizeInstalled();
     } else {
-      const installedVersion = readPluginVersion(targetPkgJson);
-      const sourceVersion = readPluginVersion(join(sourceDir, 'package.json'));
+      const [installedVersion, sourceVersion] = await Promise.all([
+        readPluginVersion(targetPkgJson),
+        readPluginVersion(join(sourceDir, 'package.json')),
+      ]);
       if (!sourceVersion || !installedVersion) {
         logger.info(`[plugin] Refreshing ${pluginLabel} plugin: package metadata is missing or unreadable`);
       } else if (sourceVersion !== installedVersion) {
@@ -1039,9 +1611,11 @@ export function ensurePluginInstalled(
           `[plugin] Upgrading ${pluginLabel} plugin: ${installedVersion} → ${sourceVersion}`,
         );
       } else {
-        const installedFingerprint = readPluginContentFingerprint(targetDir);
-        const sourceFingerprint = readPluginContentFingerprint(sourceDir);
-        const missingRuntimeDeps = findMissingPluginRuntimeDependencies(targetDir);
+        const [installedFingerprint, sourceFingerprint, missingRuntimeDeps] = await Promise.all([
+          readPluginContentFingerprint(targetDir),
+          readPluginContentFingerprint(sourceDir),
+          findMissingPluginRuntimeDependencies(targetDir),
+        ]);
         if (
           installedPackageReady
           && missingRuntimeDeps.length === 0
@@ -1049,8 +1623,7 @@ export function ensurePluginInstalled(
           && sourceFingerprint
           && installedFingerprint === sourceFingerprint
         ) {
-          syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
-          return { installed: true };
+          return finalizeInstalled();
         }
         if (missingRuntimeDeps.length > 0) {
           logger.info(
@@ -1065,21 +1638,31 @@ export function ensurePluginInstalled(
 
   // Fresh install or upgrade — try bundled/build sources first
   if (sourceDir) {
-    const attempts: Array<{ attempt: number; code?: string; name?: string; message: string }> = [];
+    const attempts: Array<{
+      attempt: number;
+      code?: string;
+      name?: string;
+      phase?: PluginInstallPhase;
+      message: string;
+    }> = [];
     const maxAttempts = process.platform === 'win32' ? 2 : 1;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        prepareAndActivatePlugin(targetDir, pluginLabel, (stagingDir) => {
-          cpSyncSafe(sourceDir, stagingDir);
+        await prepareAndActivatePlugin(targetDir, pluginDirName, [sourceDir], pluginLabel, async (stagingDir) => {
+          await cpAsyncSafe(sourceDir, stagingDir);
         });
-        syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
+        const result = await finalizeInstalled();
         logger.info(`Installed ${pluginLabel} plugin from bundled mirror: ${sourceDir}`);
-        return { installed: true };
+        return result;
       } catch (error) {
+        const conflict = findOwnershipConflict(error);
+        if (conflict) {
+          return ownershipConflictInstallResult(pluginDirName, pluginLabel, conflict.ownership);
+        }
         const diagnostic = toErrorDiagnostic(error);
         attempts.push({ attempt, ...diagnostic });
-        if (attempt < maxAttempts) sleepSync(150 * attempt);
+        if (attempt < maxAttempts) await delay(150 * attempt);
       }
     }
 
@@ -1102,18 +1685,17 @@ export function ensurePluginInstalled(
   if (!app.isPackaged) {
     const npmName = PLUGIN_NPM_NAMES[pluginDirName];
     if (npmName) {
-      const npmPkgPath = resolvePluginNpmPackagePath(npmName);
-      if (npmPkgPath && existsSync(fsPath(join(npmPkgPath, 'openclaw.plugin.json')))) {
-        const installedVersion = existsSync(fsPath(targetPkgJson)) ? readPluginVersion(targetPkgJson) : null;
-        const sourceVersion = readPluginVersion(join(npmPkgPath, 'package.json'));
-        const installedFingerprint = existsSync(fsPath(targetManifest))
-          ? readPluginContentFingerprint(targetDir)
-          : null;
-        const sourceFingerprint = readPluginContentFingerprint(npmPkgPath);
-        const missingRuntimeDeps = existsSync(fsPath(targetManifest))
-          ? findMissingPluginRuntimeDependencies(targetDir)
-          : [];
-        const needsRefresh = !existsSync(fsPath(targetManifest))
+      const npmPkgPath = await resolvePluginNpmPackagePath(npmName);
+      if (npmPkgPath && await pathExists(join(npmPkgPath, 'openclaw.plugin.json'))) {
+        const targetManifestStillExists = await pathExists(targetManifest);
+        const [installedVersion, sourceVersion, installedFingerprint, sourceFingerprint, missingRuntimeDeps] = await Promise.all([
+          targetManifestStillExists ? readPluginVersion(targetPkgJson) : Promise.resolve(null),
+          readPluginVersion(join(npmPkgPath, 'package.json')),
+          targetManifestStillExists ? readPluginContentFingerprint(targetDir) : Promise.resolve(null),
+          readPluginContentFingerprint(npmPkgPath),
+          targetManifestStillExists ? findMissingPluginRuntimeDependencies(targetDir) : Promise.resolve([]),
+        ]);
+        const needsRefresh = !targetManifestStillExists
           || !sourceVersion
           || !installedVersion
           || sourceVersion !== installedVersion
@@ -1128,14 +1710,17 @@ export function ensurePluginInstalled(
             `${installedVersion ? `: ${installedVersion} → ${sourceVersion}` : `: ${sourceVersion}`} (dev/node_modules)`,
           );
           try {
-            prepareAndActivatePlugin(targetDir, pluginLabel, (stagingDir) => {
-              copyPluginFromNodeModules(npmPkgPath, stagingDir, npmName);
+            await prepareAndActivatePlugin(targetDir, pluginDirName, [npmPkgPath], pluginLabel, async (stagingDir) => {
+              await copyPluginFromNodeModules(npmPkgPath, stagingDir, npmName);
             });
-            if (existsSync(fsPath(join(targetDir, 'openclaw.plugin.json')))) {
-              syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
-              return { installed: true };
+            if (await pathExists(join(targetDir, 'openclaw.plugin.json'))) {
+              return finalizeInstalled();
             }
           } catch (err) {
+            const conflict = findOwnershipConflict(err);
+            if (conflict) {
+              return ownershipConflictInstallResult(pluginDirName, pluginLabel, conflict.ownership);
+            }
             logger.warn(
               `[plugin] Failed to install ${pluginLabel} plugin from node_modules`,
               {
@@ -1150,8 +1735,7 @@ export function ensurePluginInstalled(
             );
           }
         } else {
-          syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
-          return { installed: true };
+          return finalizeInstalled();
         }
       }
     }
@@ -1166,13 +1750,14 @@ export function ensurePluginInstalled(
 // ── Candidate source path builder ────────────────────────────────────────────
 
 export function buildCandidateSources(pluginDirName: string): string[] {
+  const resourcesPath = process.resourcesPath || app.getAppPath();
   return app.isPackaged
     ? [
-      join(process.resourcesPath, 'openclaw-plugins', pluginDirName),
-      join(process.resourcesPath, 'resources', 'openclaw-plugins', pluginDirName),
-      join(process.resourcesPath, 'app.asar.unpacked', 'build', 'openclaw-plugins', pluginDirName),
-      join(process.resourcesPath, 'app.asar.unpacked', 'resources', 'openclaw-plugins', pluginDirName),
-      join(process.resourcesPath, 'app.asar.unpacked', 'openclaw-plugins', pluginDirName),
+      join(resourcesPath, 'openclaw-plugins', pluginDirName),
+      join(resourcesPath, 'resources', 'openclaw-plugins', pluginDirName),
+      join(resourcesPath, 'app.asar.unpacked', 'build', 'openclaw-plugins', pluginDirName),
+      join(resourcesPath, 'app.asar.unpacked', 'resources', 'openclaw-plugins', pluginDirName),
+      join(resourcesPath, 'app.asar.unpacked', 'openclaw-plugins', pluginDirName),
     ]
     : [
       join(app.getAppPath(), 'build', 'openclaw-plugins', pluginDirName),
@@ -1186,53 +1771,74 @@ export function buildCandidateSources(pluginDirName: string): string[] {
 
 // ── Per-channel plugin helpers ───────────────────────────────────────────────
 
-export function ensureDingTalkPluginInstalled(): { installed: boolean; warning?: string } {
-  return ensurePluginInstalled('dingtalk', buildCandidateSources('dingtalk'), 'DingTalk');
+export function ensureDingTalkPluginInstalled(
+  options: PluginInstallOptions = {},
+): Promise<PluginInstallResult> {
+  return ensurePluginInstalled('dingtalk', buildCandidateSources('dingtalk'), 'DingTalk', options);
 }
 
-export function ensureWeComPluginInstalled(): { installed: boolean; warning?: string } {
-  return ensurePluginInstalled('wecom', buildCandidateSources('wecom'), 'WeCom');
+export function ensureWeComPluginInstalled(
+  options: PluginInstallOptions = {},
+): Promise<PluginInstallResult> {
+  return ensurePluginInstalled('wecom', buildCandidateSources('wecom'), 'WeCom', options);
 }
 
-export function ensureFeishuPluginInstalled(): { installed: boolean; warning?: string } {
+export function ensureFeishuPluginInstalled(
+  options: PluginInstallOptions = {},
+): Promise<PluginInstallResult> {
   return ensurePluginInstalled(
     'feishu-openclaw-plugin',
     buildCandidateSources('feishu-openclaw-plugin'),
     'Feishu',
+    options,
   );
 }
 
 
 
-export function ensureWeChatPluginInstalled(): { installed: boolean; warning?: string } {
-  return ensurePluginInstalled('openclaw-weixin', buildCandidateSources('openclaw-weixin'), 'WeChat');
+export function ensureWeChatPluginInstalled(
+  options: PluginInstallOptions = {},
+): Promise<PluginInstallResult> {
+  return ensurePluginInstalled('openclaw-weixin', buildCandidateSources('openclaw-weixin'), 'WeChat', options);
 }
 
-export function ensureDiscordPluginInstalled(): { installed: boolean; warning?: string } {
-  return ensurePluginInstalled('discord', buildCandidateSources('discord'), 'Discord');
+export function ensureDiscordPluginInstalled(
+  options: PluginInstallOptions = {},
+): Promise<PluginInstallResult> {
+  return ensurePluginInstalled('discord', buildCandidateSources('discord'), 'Discord', options);
 }
 
-export function ensureQQBotPluginInstalled(): { installed: boolean; warning?: string } {
-  return ensurePluginInstalled('qqbot', buildCandidateSources('qqbot'), 'QQBot');
+export function ensureQQBotPluginInstalled(
+  options: PluginInstallOptions = {},
+): Promise<PluginInstallResult> {
+  return ensurePluginInstalled('qqbot', buildCandidateSources('qqbot'), 'QQBot', options);
 }
 
-export function ensureWhatsAppPluginInstalled(): { installed: boolean; warning?: string } {
-  return ensurePluginInstalled('whatsapp', buildCandidateSources('whatsapp'), 'WhatsApp');
+export function ensureWhatsAppPluginInstalled(
+  options: PluginInstallOptions = {},
+): Promise<PluginInstallResult> {
+  return ensurePluginInstalled('whatsapp', buildCandidateSources('whatsapp'), 'WhatsApp', options);
 }
 
-export function ensureClawXOpenAiImagePluginInstalled(): { installed: boolean; warning?: string } {
+export function ensureClawXOpenAiImagePluginInstalled(
+  options: PluginInstallOptions = {},
+): Promise<PluginInstallResult> {
   return ensurePluginInstalled(
     'clawx-openai-image',
     buildCandidateSources('clawx-openai-image'),
     'UClaw OpenAI Image',
+    options,
   );
 }
 
-export function ensureParallelPluginInstalled(): { installed: boolean; warning?: string } {
+export function ensureParallelPluginInstalled(
+  options: PluginInstallOptions = {},
+): Promise<PluginInstallResult> {
   return ensurePluginInstalled(
     'parallel',
     buildCandidateSources('parallel'),
     'Parallel Search',
+    options,
   );
 }
 
@@ -1262,7 +1868,7 @@ const ALL_BUNDLED_PLUGINS = [
 export async function ensureAllBundledPluginsInstalled(): Promise<void> {
   for (const { fn, label } of ALL_BUNDLED_PLUGINS) {
     try {
-      const result = fn();
+      const result = await fn({ deferTrustedRecordSync: true });
       if (result.warning) {
         logger.warn(`[plugin] ${label}: ${result.warning}`);
       }
@@ -1270,5 +1876,5 @@ export async function ensureAllBundledPluginsInstalled(): Promise<void> {
       logger.warn(`[plugin] Failed to install/upgrade ${label} plugin:`, error);
     }
   }
-  repairTrustedOfficialPluginInstallRecords();
+  await repairTrustedOfficialPluginInstallRecords();
 }

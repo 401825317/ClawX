@@ -42,12 +42,12 @@ The persistent partition retains cookies and site storage. Only artifact-panel w
 2. Reject Unix-rooted, slash- or backslash-rooted, Windows drive-rooted, UNC-like, and tilde-rooted filesystem paths. ClawX never converts a plain path into a URL.
 3. Detect an explicit URI scheme with `^[a-z][a-z\d+.-]*:`. A host token followed by a numeric port is the deliberate exception: inputs such as `localhost:3000`, `127.0.0.1:8080/status`, and `example.com:8443/path` are treated as a schemeless host plus numeric port, not as a custom scheme, and receive `https://`.
 4. Prefix every other schemeless value with `https://`, parse with the platform `URL` implementation, and return its canonical `href`.
-5. Accept only absolute `http:`, `https:`, and explicit standard `file:///` URLs. The file spelling must begin with `file:///`; hostful file URLs and abbreviated `file:` forms are rejected. Accepted file URLs must parse with an empty hostname.
+5. The address parser recognizes absolute `http:`, `https:`, and explicit standard `file:///` syntax, but the privileged Main navigation policy rejects every direct `file:` navigation. Hostful file URLs and abbreviated `file:` forms are rejected before that policy decision.
 6. Reject the reserved `about:blank` URL, malformed URLs, `chrome:`, `javascript:`, `data:`, `ftp:`, and every other protocol.
 
-`normalizeWebBrowserTopLevelUrl` is the stricter Main-facing policy. It trims and canonicalizes but never completes a missing scheme, never converts a path, and accepts the same `http:`, `https:`, and `file:///` set while rejecting `about:blank`. The initial `about:blank` is allowed only as part of the verified attachment identity before guest navigation policy is installed.
+`normalizeWebBrowserTopLevelUrl` is the syntax-normalization step for the stricter Main-facing policy. It never completes a missing scheme or converts a path; `classifyWebBrowserNavigation` then rejects direct `file:` URLs and private or special hosts, while privileged navigation also rejects DNS destinations that cannot be verified as public. The initial `about:blank` is allowed only as part of the verified attachment identity before guest navigation policy is installed.
 
-Main applies that strict policy to typed navigation, crash recovery, main-frame `will-navigate`, main-frame `will-redirect`, popup targets, and the registered guest's current URL before external opening. Subframe redirects and ordinary document subresources are not filtered by this top-level policy. Explicit `file:///` support deliberately permits a user to load locally readable files, subject to Chromium origin isolation and enabled web security.
+Main applies that policy to typed navigation, crash recovery, main-frame `will-navigate`, main-frame `will-redirect`, popup targets, and the registered guest's current URL before external opening. Subframes and ordinary document resources are additionally checked by the dedicated Session request filter. A tokenized workspace preview is allowed only while its exact Main-owned capability remains active; TTL expiry, replacement, feature-gate shutdown, and explicit close revoke it. Direct `file:///` navigation is never allowed.
 
 ## One-Guest Host Geometry, Visibility, And Focus
 
@@ -112,7 +112,7 @@ Electron default download behavior and the operating system's native flow remain
 
 The dedicated Session uses Electron/Chromium system proxy resolution. It does not inherit or synchronize ClawX client proxy settings, call `setProxy`, recycle browser connections after client-proxy changes, or alter `defaultSession` behavior.
 
-External opening takes no Renderer URL argument. Main reads the registered guest's current URL, strictly validates and normalizes it, then calls `shell.openExternal`. `about:blank` is disabled. An allowed file URL remains a URL and is never passed to `shell.openPath`; the operating system may open its associated application rather than a browser.
+External opening takes no Renderer URL argument. Main reads the registered guest's current URL, strictly validates it, verifies public DNS when applicable, and then calls `shell.openExternal`. `about:blank`, direct `file:` URLs, private-network destinations, and workspace-preview URLs are disabled; no local file URL is passed to the shell.
 
 ## Failure Semantics And Crash Recovery
 

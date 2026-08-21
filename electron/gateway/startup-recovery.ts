@@ -18,6 +18,11 @@ const OPENCLAW_FUTURE_CONFIG_GUARD_PATTERNS: RegExp[] = [
   /OPENCLAW_ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS=1 only for an intentional downgrade or recovery action/i,
 ];
 
+const DETERMINISTIC_RUNTIME_FAILURE_PATTERNS: RegExp[] = [
+  /ERR_PACKAGE_IMPORT_NOT_DEFINED/i,
+  /Package import specifier\s+["']?#[^\s"']+["']?\s+is not defined/i,
+];
+
 const TRANSIENT_START_ERROR_PATTERNS: RegExp[] = [
   /WebSocket closed before handshake/i,
   /ECONNREFUSED/i,
@@ -30,8 +35,35 @@ const TRANSIENT_START_ERROR_PATTERNS: RegExp[] = [
   /Port \d+ still occupied after \d+ms/i,
 ];
 
-/** Backoff between connect() attempts when the Gateway rejects with "still starting". */
-export const GATEWAY_CONNECT_STARTUP_RETRY_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000, 8_000] as const;
+/**
+ * One initial connection plus four retries. Keep this budget explicit so a
+ * slow Gateway cannot turn one startup into an unbounded restart storm.
+ */
+export const GATEWAY_CONNECT_STARTUP_RETRY_DELAYS_MS = [500, 1_000, 2_000, 4_000] as const;
+export const GATEWAY_CONNECT_STARTUP_MAX_ATTEMPTS = GATEWAY_CONNECT_STARTUP_RETRY_DELAYS_MS.length + 1;
+
+/**
+ * Marks a connect retry budget that was exhausted inside a single startup flow.
+ * The startup orchestrator must not restart the process and replay this budget.
+ */
+export class GatewayConnectRetryExhaustedError extends Error {
+  readonly code = 'gateway_connect_retry_limit_exhausted';
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause ?? 'Gateway connect failed'));
+    this.name = 'GatewayConnectRetryExhaustedError';
+    this.cause = cause;
+  }
+}
+
+export function isGatewayConnectRetryExhaustedError(error: unknown): error is GatewayConnectRetryExhaustedError {
+  return error instanceof GatewayConnectRetryExhaustedError
+    || (typeof error === 'object'
+      && error !== null
+      && 'code' in error
+      && error.code === 'gateway_connect_retry_limit_exhausted');
+}
 
 function normalizeLogLine(value: string): string {
   return value.trim();
@@ -113,13 +145,49 @@ export function isGatewayStillStartingError(error: unknown): boolean {
   return /gateway starting/i.test(errorText);
 }
 
+export function hasDeterministicGatewayRuntimeFailureSignal(
+  startupError: unknown,
+  startupStderrLines: string[],
+): boolean {
+  const errorText = startupError instanceof Error
+    ? `${startupError.name}: ${startupError.message}`
+    : String(startupError ?? '');
+  return [...startupStderrLines, errorText].some((line) => (
+    DETERMINISTIC_RUNTIME_FAILURE_PATTERNS.some((pattern) => pattern.test(normalizeLogLine(line)))
+  ));
+}
+
+export class GatewayRuntimePackageResolutionError extends Error {
+  readonly code = 'gateway_runtime_package_resolution_failed';
+
+  constructor(cause?: unknown) {
+    super('Gateway runtime package imports could not be resolved', { cause });
+    this.name = 'GatewayRuntimePackageResolutionError';
+  }
+}
+
+export function isTransientGatewayConnectError(error: unknown): boolean {
+  const errorText = error instanceof Error
+    ? `${error.name}: ${error.message}`
+    : String(error ?? '');
+  return [
+    /gateway starting/i,
+    /WebSocket closed before handshake/i,
+    /ECONNREFUSED/i,
+    /Timed out waiting for connect\.challenge/i,
+    /Connect handshake timeout/i,
+    /Gateway WebSocket closed while loading handshake credentials/i,
+  ].some((pattern) => pattern.test(errorText));
+}
+
 export async function connectGatewayWithStartupRetry(options: {
   connect: (port: number, externalToken?: string) => Promise<void>;
   port: number;
   externalToken?: string;
   delay: (ms: number) => Promise<void>;
   retryDelaysMs?: readonly number[];
-  beforeAttempt?: () => void;
+  beforeAttempt?: (attemptNo: number, maxAttempts: number) => void;
+  onAttempt?: (attemptNo: number, maxAttempts: number) => void;
   logWarn?: (message: string) => void;
   logInfo?: (message: string) => void;
 }): Promise<void> {
@@ -127,24 +195,30 @@ export async function connectGatewayWithStartupRetry(options: {
   const logWarn = options.logWarn ?? (() => {});
   const logInfo = options.logInfo ?? (() => {});
   let lastError: unknown;
+  const maxAttempts = retryDelaysMs.length + 1;
 
-  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
-    options.beforeAttempt?.();
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const attemptNo = attempt + 1;
+    options.beforeAttempt?.(attemptNo, maxAttempts);
+    options.onAttempt?.(attemptNo, maxAttempts);
     try {
       await options.connect(options.port, options.externalToken);
       if (attempt > 0) {
-        logInfo(`Gateway connect succeeded after ${attempt + 1} attempt(s)`);
+        logInfo(`Gateway connect succeeded after ${attemptNo} attempt(s)`);
       }
       return;
     } catch (error) {
       lastError = error;
-      if (!isGatewayStillStartingError(error) || attempt >= retryDelaysMs.length) {
+      if (!isTransientGatewayConnectError(error)) {
         throw error;
+      }
+      if (attemptNo >= maxAttempts) {
+        throw new GatewayConnectRetryExhaustedError(error);
       }
       const delayMs = retryDelaysMs[attempt] ?? retryDelaysMs[retryDelaysMs.length - 1]!;
       logWarn(
-        `Gateway connect rejected while still starting (${String(error)}); `
-        + `retrying in ${delayMs}ms (${attempt + 1}/${retryDelaysMs.length})`,
+        `Gateway connect transiently unavailable (${String(error)}); `
+        + `retrying in ${delayMs}ms (retry ${attemptNo}/${maxAttempts})`,
       );
       await options.delay(delayMs);
     }
@@ -164,6 +238,10 @@ export function getGatewayStartupRecoveryAction(options: {
 }): GatewayStartupRecoveryAction {
   // Doctor and retries cannot repair a deliberate binary/config version guard.
   if (hasOpenClawFutureConfigGuardSignal(options.startupError, options.startupStderrLines)) {
+    return 'fail';
+  }
+
+  if (hasDeterministicGatewayRuntimeFailureSignal(options.startupError, options.startupStderrLines)) {
     return 'fail';
   }
 

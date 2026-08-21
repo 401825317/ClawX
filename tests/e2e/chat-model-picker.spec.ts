@@ -52,7 +52,12 @@ test.describe('ClawX chat model picker', () => {
         });
 
         ipcMain.removeHandler('gateway:status');
-        ipcMain.handle('gateway:status', async () => ({ state: 'running', port: 18789, pid: 12345 }));
+        ipcMain.handle('gateway:status', async () => ({
+          state: 'running',
+          gatewayReady: true,
+          port: 18789,
+          pid: 12345,
+        }));
 
         ipcMain.removeHandler('gateway:rpc');
         ipcMain.handle('gateway:rpc', async (_event: unknown, method: string, params: unknown) => {
@@ -67,7 +72,7 @@ test.describe('ClawX chat model picker', () => {
                   model: currentSessionModelRef,
                   thinkingLevel: currentSessionThinkingLevel,
                   thinkingDefault: 'medium',
-                  thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'],
+                  thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'adaptive'],
                 }],
               },
             };
@@ -156,17 +161,14 @@ test.describe('ClawX chat model picker', () => {
             hostRequests.push({ path: `gateway:${method}`, method: 'RPC', body: params });
             if (method === 'sessions.list') {
               return makeResponse(request.id, {
-                success: true,
-                result: {
-                  sessions: [{
-                    key: 'agent:main:main',
-                    displayName: 'main',
-                    model: currentSessionModelRef,
-                    thinkingLevel: currentSessionThinkingLevel,
-                    thinkingDefault: 'medium',
-                    thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'],
-                  }],
-                },
+                sessions: [{
+                  key: 'agent:main:main',
+                  displayName: 'main',
+                  model: currentSessionModelRef,
+                  thinkingLevel: currentSessionThinkingLevel,
+                  thinkingDefault: 'medium',
+                  thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'adaptive'],
+                }],
               });
             }
             if (method === 'sessions.patch') {
@@ -178,13 +180,10 @@ test.describe('ClawX chat model picker', () => {
                 currentSessionThinkingLevel = patch.thinkingLevel ?? 'medium';
               }
               return makeResponse(request.id, {
-                success: true,
-                result: {
-                  entry: { model: currentSessionModelRef, thinkingLevel: currentSessionThinkingLevel },
-                  resolved: {
-                    modelProvider: currentSessionModelRef.split('/')[0],
-                    model: currentSessionModelRef.split('/').slice(1).join('/'),
-                  },
+                entry: { model: currentSessionModelRef, thinkingLevel: currentSessionThinkingLevel },
+                resolved: {
+                  modelProvider: currentSessionModelRef.split('/')[0],
+                  model: currentSessionModelRef.split('/').slice(1).join('/'),
                 },
               });
             }
@@ -192,20 +191,17 @@ test.describe('ClawX chat model picker', () => {
               const create = params as { key?: string; model?: string | null };
               const model = create.model ?? refs.alphaModelRef;
               return makeResponse(request.id, {
-                success: true,
-                result: {
-                  entry: { key: create.key, model },
-                  resolved: {
-                    modelProvider: model.split('/')[0],
-                    model: model.split('/').slice(1).join('/'),
-                  },
+                entry: { key: create.key, model },
+                resolved: {
+                  modelProvider: model.split('/')[0],
+                  model: model.split('/').slice(1).join('/'),
                 },
               });
             }
             if (method === 'chat.history') {
-              return makeResponse(request.id, { success: true, result: { messages: [] } });
+              return makeResponse(request.id, { messages: [] });
             }
-            return makeResponse(request.id, { success: true, result: {} });
+            return makeResponse(request.id, {});
           }
           if (request?.module === 'agents' && request.action === 'list') {
             return makeResponse(request.id, agentsSnapshot());
@@ -214,6 +210,8 @@ test.describe('ClawX chat model picker', () => {
             await clientModelsReady;
             return makeResponse(request.id, {
               defaultModel: 'smart-latest',
+              defaultThinkingLevel: 'medium',
+              fallbackModels: [],
               models: [
                 { id: 'smart-latest', label: 'Smart routing' },
                 { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
@@ -389,6 +387,7 @@ test.describe('ClawX chat model picker', () => {
       await page.getByTestId('chat-settings-thinking-row').hover();
       await expect(page.getByTestId('chat-thinking-picker-menu')).toBeVisible();
       await expect(page.getByTestId('chat-thinking-picker-menu')).toContainText('Extra high');
+      await expect(page.getByTestId('chat-thinking-option-adaptive')).toBeVisible();
       await page.getByTestId('chat-thinking-option-high').click();
       await expect(page.getByTestId('chat-settings-thinking-summary')).toContainText('High');
       await expect(page.getByTestId('chat-settings-picker-menu')).toBeHidden();

@@ -350,6 +350,113 @@ describe('WeChat dangling plugin cleanup', () => {
     expect(config.plugins).toBeUndefined();
     expect(existsSync(join(testHome, '.openclaw', 'openclaw-weixin'))).toBe(false);
   });
+
+  it('fails closed and preserves WeChat state when openclaw.json is malformed', async () => {
+    const { captureChannelStartupSnapshot, cleanupDanglingWeChatPluginState } = await import('@electron/utils/channel-config');
+    const configDir = join(testHome, '.openclaw');
+    const stateDir = join(configDir, 'openclaw-weixin', 'accounts');
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(join(configDir, 'openclaw.json'), '{"channels":', 'utf8');
+    await writeFile(join(stateDir, 'account.json'), '{"state":"preserve"}', 'utf8');
+
+    await expect(cleanupDanglingWeChatPluginState()).rejects.toThrow();
+    await expect(captureChannelStartupSnapshot()).rejects.toThrow();
+    await expect(readFile(join(configDir, 'openclaw.json'), 'utf8')).resolves.toBe('{"channels":');
+    await expect(readFile(join(stateDir, 'account.json'), 'utf8')).resolves.toBe('{"state":"preserve"}');
+  });
+
+  it.each([
+    ['null', null],
+    ['an array', []],
+  ])('fails closed and preserves WeChat state when openclaw.json has %s as its root', async (_label, root) => {
+    const { captureChannelStartupSnapshot } = await import('@electron/utils/channel-config');
+    const configDir = join(testHome, '.openclaw');
+    const stateDir = join(configDir, 'openclaw-weixin', 'accounts');
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(join(configDir, 'openclaw.json'), JSON.stringify(root), 'utf8');
+    await writeFile(join(stateDir, 'account.json'), '{"state":"preserve"}', 'utf8');
+
+    await expect(captureChannelStartupSnapshot()).rejects.toThrow('JSON object');
+    await expect(readFile(join(stateDir, 'account.json'), 'utf8')).resolves.toBe('{"state":"preserve"}');
+  });
+
+  it('preserves WeChat state when openclaw.json is missing', async () => {
+    const { captureChannelStartupSnapshot, cleanupDanglingWeChatPluginState } = await import('@electron/utils/channel-config');
+    const stateDir = join(testHome, '.openclaw', 'openclaw-weixin', 'accounts');
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(join(stateDir, 'account.json'), '{"state":"preserve"}', 'utf8');
+
+    await expect(cleanupDanglingWeChatPluginState()).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(captureChannelStartupSnapshot()).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readFile(join(stateDir, 'account.json'), 'utf8')).resolves.toBe('{"state":"preserve"}');
+  });
+
+  it('uses one trusted snapshot for cleanup and channel startup policy', async () => {
+    const { captureChannelStartupSnapshot, writeOpenClawConfig } = await import('@electron/utils/channel-config');
+    await writeOpenClawConfig({
+      channels: {
+        'openclaw-weixin': {
+          enabled: true,
+          accounts: {
+            default: { enabled: true, token: 'configured-token' },
+          },
+        },
+      },
+      plugins: {
+        allow: ['openclaw-weixin'],
+        entries: { 'openclaw-weixin': { enabled: true } },
+      },
+    });
+
+    const snapshot = await captureChannelStartupSnapshot();
+
+    expect(snapshot.configuredChannels).toEqual(['openclaw-weixin']);
+    expect(snapshot.cleanedDanglingWeChatState).toBe(false);
+    expect(snapshot.config.plugins?.allow).toContain('openclaw-weixin');
+  });
+
+  it('returns configured channels in stable order for Gateway startup', async () => {
+    const { captureChannelStartupSnapshot, writeOpenClawConfig } = await import('@electron/utils/channel-config');
+    await writeOpenClawConfig({
+      channels: {
+        wecom: { enabled: true, accounts: { default: { enabled: true } } },
+        dingtalk: { enabled: true, accounts: { default: { enabled: true } } },
+        feishu: { enabled: true, accounts: { default: { enabled: true } } },
+      },
+    });
+
+    const snapshot = await captureChannelStartupSnapshot();
+
+    expect(snapshot.configuredChannels).toEqual(['dingtalk', 'feishu', 'wecom']);
+  });
+
+  it('keeps the last connected channels during a transient empty restart read', async () => {
+    const {
+      captureChannelStartupSnapshot,
+      markChannelStartupSnapshotConnected,
+      writeOpenClawConfig,
+    } = await import('@electron/utils/channel-config');
+    await writeOpenClawConfig({
+      channels: {
+        wecom: { enabled: true, accounts: { default: { enabled: true, botId: 'bot-1' } } },
+      },
+      plugins: {
+        allow: ['wecom'],
+        entries: { wecom: { enabled: true } },
+      },
+    });
+
+    const connectedSnapshot = await captureChannelStartupSnapshot();
+    markChannelStartupSnapshotConnected();
+    await writeOpenClawConfig({});
+
+    const restartSnapshot = await captureChannelStartupSnapshot();
+
+    expect(connectedSnapshot.configuredChannels).toEqual(['wecom']);
+    expect(restartSnapshot.configuredChannels).toEqual(['wecom']);
+    expect(restartSnapshot.cleanedDanglingWeChatState).toBe(false);
+    expect(restartSnapshot.config.plugins?.entries?.wecom).toEqual({ enabled: true });
+  });
 });
 
 describe('configured channel account extraction', () => {

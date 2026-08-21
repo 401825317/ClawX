@@ -102,4 +102,33 @@ describe('plugin install index sqlite persistence', () => {
     const persisted = JSON.parse(row.install_records_json) as Record<string, Record<string, unknown>>;
     expect(persisted.whatsapp.installPath).toBe(fresh.installPath);
   });
+
+  it('updates a legacy record when UClaw adds integrity ownership evidence', async () => {
+    const { upsertPluginInstallRecordsIntoSqlite } = await import('@electron/utils/plugin-install-index');
+    const sqlitePath = join(stateDir, 'openclaw.sqlite');
+    const legacy = {
+      source: 'npm',
+      spec: '@openclaw/whatsapp',
+      installPath: '/home/test/.openclaw/extensions/whatsapp',
+      version: '2026.6.10',
+      resolvedName: '@openclaw/whatsapp',
+      resolvedVersion: '2026.6.10',
+      resolvedSpec: '@openclaw/whatsapp@2026.6.10',
+    };
+    expect(upsertPluginInstallRecordsIntoSqlite({ whatsapp: legacy })).toBe(true);
+
+    const withIntegrity = { ...legacy, integrity: `sha256-${'a'.repeat(44)}` };
+    expect(upsertPluginInstallRecordsIntoSqlite({ whatsapp: withIntegrity })).toBe(true);
+
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(sqlitePath);
+    const row = db.prepare(`
+      SELECT install_records_json
+        FROM installed_plugin_index
+       WHERE index_key = 'installed-plugin-index'
+    `).get() as { install_records_json: string };
+    db.close();
+    const persisted = JSON.parse(row.install_records_json) as Record<string, Record<string, unknown>>;
+    expect(persisted.whatsapp.integrity).toBe(withIntegrity.integrity);
+  });
 });

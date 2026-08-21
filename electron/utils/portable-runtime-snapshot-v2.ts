@@ -65,6 +65,11 @@ export type PortableSnapshotV2Manifest = {
 
 export type PortableSnapshotV2SyncResult = {
   skipped: boolean;
+  /** The source could not be captured consistently; no source data was modified. */
+  deferred: boolean;
+  deferredReason?: 'sqlite-unstable' | 'file-group-unstable';
+  deferredPaths: string[];
+  reusedPreviousSnapshot: boolean;
   snapshotPath?: string;
   snapshotId?: string;
   generation?: number;
@@ -102,6 +107,8 @@ type StableFile = {
   size: number;
   mtimeMs: number;
 };
+
+type PersistStableObjectResult = 'written' | 'reused' | 'unstable';
 
 type SnapshotFileGroup = {
   files: ScannedFile[];
@@ -435,7 +442,10 @@ function objectPath(layout: PortableSnapshotV2Layout, object: string): string {
 function syncPublishedPath(filePath: string): void {
   let descriptor: number | undefined;
   try {
-    descriptor = openSync(filePath, 'r');
+    // Windows rejects FlushFileBuffers for a read-only Node handle. All callers
+    // pass a temporary file we just created; r+ keeps the durable publish path
+    // valid there while directory handles remain best-effort below.
+    descriptor = openSync(filePath, 'r+');
     fsyncSync(descriptor);
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
@@ -443,10 +453,14 @@ function syncPublishedPath(filePath: string): void {
 }
 
 function syncDirectoryBestEffort(directory: string): void {
+  let descriptor: number | undefined;
   try {
-    syncPublishedPath(directory);
+    descriptor = openSync(directory, 'r');
+    fsyncSync(descriptor);
   } catch {
-    // Windows may reject opening a directory handle through node:fs.
+    // Windows and some filesystems reject opening or syncing a directory.
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
   }
 }
 
@@ -455,34 +469,54 @@ async function persistStableObject(
   file: ScannedFile,
   stable: StableFile,
   signal?: AbortSignal,
-): Promise<boolean> {
+): Promise<PersistStableObjectResult> {
   signal?.throwIfAborted();
   const destination = objectPath(layout, stable.object);
   if (existsSync(destination)) {
     try {
       const metadata = await stat(destination);
       if (metadata.isFile() && metadata.size === stable.size && await hashFile(destination, signal) === stable.object) {
-        return false;
+        return 'reused';
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
-    await rm(destination, { force: true });
   }
   await mkdir(path.dirname(destination), { recursive: true });
   const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
   try {
     const before = await stat(file.sourcePath);
-    if (before.size !== stable.size || before.mtimeMs !== stable.mtimeMs) return false;
+    if (before.size !== stable.size || before.mtimeMs !== stable.mtimeMs) return 'unstable';
     await copyFile(file.sourcePath, temporary);
     signal?.throwIfAborted();
     const after = await stat(file.sourcePath);
-    if (after.size !== stable.size || after.mtimeMs !== stable.mtimeMs) return false;
+    if (after.size !== stable.size || after.mtimeMs !== stable.mtimeMs) return 'unstable';
+    const copied = await stat(temporary);
+    if (
+      !copied.isFile()
+      || copied.size !== stable.size
+      || await hashFile(temporary, signal) !== stable.object
+    ) {
+      return 'unstable';
+    }
     syncPublishedPath(temporary);
-    if (existsSync(destination)) return false;
+    if (existsSync(destination)) {
+      try {
+        const current = await stat(destination);
+        if (
+          current.isFile()
+          && current.size === stable.size
+          && await hashFile(destination, signal) === stable.object
+        ) {
+          return 'reused';
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
     await rename(temporary, destination);
     syncDirectoryBestEffort(path.dirname(destination));
-    return true;
+    return 'written';
   } finally {
     await rm(temporary, { force: true }).catch(() => undefined);
   }
@@ -593,6 +627,71 @@ function sameSourceFileVersions(
     && JSON.stringify(entry?.sourceFiles) === JSON.stringify(sourceFileVersions(files));
 }
 
+const SQLITE_CAPTURE_ATTEMPTS = 4;
+const SQLITE_CAPTURE_RETRY_BASE_MS = 25;
+
+function firstPragmaValue(row: unknown): unknown {
+  return row && typeof row === 'object' && !Array.isArray(row)
+    ? Object.values(row as Record<string, unknown>)[0]
+    : undefined;
+}
+
+function sqliteIntegrityOk(database: DatabaseSync): boolean {
+  try {
+    const integrity = firstPragmaValue(
+      database.prepare('PRAGMA integrity_check').get(),
+    );
+    return integrity === 'ok';
+  } catch {
+    return false;
+  }
+}
+
+async function readSourceFileVersions(
+  files: ScannedFile[],
+): Promise<Record<string, { size: number; mtimeMs: number }>> {
+  const refreshed = await Promise.all(files.map(async (file) => {
+    try {
+      const metadata = await stat(file.sourcePath);
+      return metadata.isFile()
+        ? { ...file, size: metadata.size, mtimeMs: metadata.mtimeMs }
+        : undefined;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    }
+  }));
+  return sourceFileVersions(refreshed.filter((file): file is ScannedFile => Boolean(file)));
+}
+
+async function waitForSqliteRetry(attempt: number, signal?: AbortSignal): Promise<void> {
+  if (attempt + 1 >= SQLITE_CAPTURE_ATTEMPTS) return;
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, Math.min(250, SQLITE_CAPTURE_RETRY_BASE_MS * (2 ** attempt)));
+  });
+  signal?.throwIfAborted();
+}
+
+async function verifySqliteFile(
+  databaseFile: ScannedFile,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < SQLITE_CAPTURE_ATTEMPTS; attempt += 1) {
+    signal?.throwIfAborted();
+    let database: DatabaseSync | undefined;
+    try {
+      database = new DatabaseSync(databaseFile.sourcePath, { readOnly: true });
+      if (sqliteIntegrityOk(database)) return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).name === 'AbortError') throw error;
+    } finally {
+      database?.close();
+    }
+    await waitForSqliteRetry(attempt, signal);
+  }
+  return false;
+}
+
 async function captureSqliteDatabase(
   layout: PortableSnapshotV2Layout,
   databaseFile: ScannedFile,
@@ -603,12 +702,24 @@ async function captureSqliteDatabase(
   sourceFiles: Record<string, { size: number; mtimeMs: number }>;
   written: boolean;
 } | undefined> {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < SQLITE_CAPTURE_ATTEMPTS; attempt += 1) {
     signal?.throwIfAborted();
-    const temporary = `${layout.stateDir}.sqlite-backup.${process.pid}.${randomUUID()}.tmp`;
+    // Keep the online-backup output outside the live OpenClaw state tree. A
+    // failed backup must never create, delete, or rebuild files beside its DB.
+    const temporary = path.join(
+      layout.snapshotDir,
+      'staging',
+      `sqlite-backup.${process.pid}.${randomUUID()}.tmp`,
+    );
     let database: DatabaseSync | undefined;
     try {
       database = new DatabaseSync(databaseFile.sourcePath, { readOnly: true });
+      const sourceBefore = await readSourceFileVersions(files);
+      if (!sourceBefore[databaseFile.relativePath]) {
+        await waitForSqliteRetry(attempt, signal);
+        continue;
+      }
+      await mkdir(path.dirname(temporary), { recursive: true });
       await backupSqlite(database, temporary);
       database.close();
       database = undefined;
@@ -620,18 +731,36 @@ async function captureSqliteDatabase(
         mtimeMs: metadata.mtimeMs,
       };
       const stable = await hashStableFile(backupFile, signal);
-      if (!stable) continue;
-
-      // Record source versions after SQLite has completed its consistent online backup.
-      const refreshed = await Promise.all(files.map(async (file) => {
-        const source = await stat(file.sourcePath);
-        return { ...file, size: source.size, mtimeMs: source.mtimeMs };
-      }));
-      const written = await persistStableObject(layout, backupFile, stable, signal);
-      if (!written && !existsSync(objectPath(layout, stable.object))) continue;
-      return { stable, sourceFiles: sourceFileVersions(refreshed), written };
+      if (
+        !stable
+        || stable.size !== metadata.size
+        || stable.mtimeMs !== metadata.mtimeMs
+      ) {
+        await waitForSqliteRetry(attempt, signal);
+        continue;
+      }
+      let backupDatabase: DatabaseSync | undefined;
+      try {
+        backupDatabase = new DatabaseSync(temporary, { readOnly: true });
+        if (!sqliteIntegrityOk(backupDatabase)) {
+          await waitForSqliteRetry(attempt, signal);
+          continue;
+        }
+      } finally {
+        backupDatabase?.close();
+      }
+      const persisted = await persistStableObject(layout, backupFile, stable, signal);
+      if (persisted === 'unstable') {
+        await waitForSqliteRetry(attempt, signal);
+        continue;
+      }
+      // SQLite backup is a consistent point-in-time copy even when the live
+      // WAL advances. Pre-capture versions guarantee that any concurrent write
+      // leaves this entry dirty for the next scan instead of being skipped.
+      return { stable, sourceFiles: sourceBefore, written: persisted === 'written' };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).name === 'AbortError') throw error;
+      await waitForSqliteRetry(attempt, signal);
     } finally {
       database?.close();
       await rm(temporary, { force: true }).catch(() => undefined);
@@ -695,6 +824,28 @@ export async function syncPortableRuntimeSnapshotV2(
   let unstableFiles = 0;
   const writeStartedAt = Date.now();
 
+  const deferredResult = (
+    reasonCode: NonNullable<PortableSnapshotV2SyncResult['deferredReason']>,
+    relativePath: string,
+  ): PortableSnapshotV2SyncResult => ({
+    skipped: true,
+    deferred: true,
+    deferredReason: reasonCode,
+    deferredPaths: [relativePath],
+    reusedPreviousSnapshot: Boolean(previous),
+    ...(previous?.snapshotId ? { snapshotId: previous.snapshotId } : {}),
+    ...(previous?.generation !== undefined ? { generation: previous.generation } : {}),
+    scannedFiles: files.length,
+    changedFiles,
+    reusedFiles,
+    writtenObjects,
+    writtenBytes,
+    unstableFiles,
+    scanDurationMs,
+    writeDurationMs: Date.now() - writeStartedAt,
+    totalDurationMs: Date.now() - startedAt,
+  });
+
   const previousEntries = previous?.entries ?? {};
   const groups = buildSnapshotFileGroups(files, previousEntries);
   for (const group of groups) {
@@ -709,6 +860,10 @@ export async function syncPortableRuntimeSnapshotV2(
         });
     if (unchanged) {
       if (sqliteFile) {
+        if (verifyExistingObjects && !await verifySqliteFile(sqliteFile, signal)) {
+          unstableFiles += 1;
+          return deferredResult('sqlite-unstable', sqliteFile.relativePath);
+        }
         entries[sqliteFile.relativePath] = previousEntries[sqliteFile.relativePath];
       } else {
         for (const file of group.files) entries[file.relativePath] = previousEntries[file.relativePath];
@@ -725,13 +880,8 @@ export async function syncPortableRuntimeSnapshotV2(
     if (sqliteFile) {
       const captured = await captureSqliteDatabase(layout, sqliteFile, group.files, signal);
       if (!captured) {
-        if (group.previousPaths.length === 0) {
-          throw new Error(`Portable Runtime v2 baseline deferred because a SQLite database is unstable: ${sqliteFile.relativePath}`);
-        }
-        for (const relativePath of group.previousPaths) entries[relativePath] = previousEntries[relativePath];
-        reusedFiles += group.previousPaths.length;
         unstableFiles += 1;
-        continue;
+        return deferredResult('sqlite-unstable', sqliteFile.relativePath);
       }
       entries[sqliteFile.relativePath] = {
         ...captured.stable,
@@ -760,13 +910,13 @@ export async function syncPortableRuntimeSnapshotV2(
     if (groupStable) {
       for (const file of group.files) {
         const stable = captured.get(file.relativePath)!;
-        const written = await persistStableObject(layout, file, stable, signal);
-        if (!written && !existsSync(objectPath(layout, stable.object))) {
+        const persisted = await persistStableObject(layout, file, stable, signal);
+        if (persisted === 'unstable') {
           unstableFiles += 1;
           groupStable = false;
           break;
         }
-        if (written) {
+        if (persisted === 'written') {
           writtenObjects += 1;
           writtenBytes += stable.size;
         }
@@ -774,14 +924,8 @@ export async function syncPortableRuntimeSnapshotV2(
     }
 
     if (!groupStable) {
-      if (group.previousPaths.length === 0) {
-        throw new Error(`Portable Runtime v2 baseline deferred because a required file group is unstable: ${group.files[0]?.relativePath ?? 'unknown'}`);
-      }
-      for (const relativePath of group.previousPaths) {
-        entries[relativePath] = previousEntries[relativePath];
-      }
-      reusedFiles += group.previousPaths.length;
-      continue;
+      const relativePath = group.files[0]?.relativePath ?? 'unknown';
+      return deferredResult('file-group-unstable', relativePath);
     }
 
     for (const file of group.files) {
@@ -806,6 +950,9 @@ export async function syncPortableRuntimeSnapshotV2(
   ) {
     return {
       skipped: true,
+      deferred: false,
+      deferredPaths: [],
+      reusedPreviousSnapshot: Boolean(previous),
       snapshotId: previous.snapshotId,
       generation: previous.generation,
       scannedFiles: files.length,
@@ -850,6 +997,9 @@ export async function syncPortableRuntimeSnapshotV2(
 
   return {
     skipped: false,
+    deferred: false,
+    deferredPaths: [],
+    reusedPreviousSnapshot: Boolean(previous),
     snapshotPath,
     snapshotId: manifest.snapshotId,
     generation: manifest.generation,

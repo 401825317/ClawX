@@ -68,6 +68,7 @@ export default defineConfig({
           resolve: { alias },
           build: {
             outDir: 'dist-electron/main',
+            sourcemap: 'hidden',
             rollupOptions: {
               external: isMainProcessExternal,
             },
@@ -84,6 +85,7 @@ export default defineConfig({
           resolve: { alias },
           build: {
             outDir: 'dist-electron/preload',
+            sourcemap: 'hidden',
             rollupOptions: {
               external: ['electron'],
             },
@@ -103,5 +105,6 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    sourcemap: 'hidden',
   },
 });

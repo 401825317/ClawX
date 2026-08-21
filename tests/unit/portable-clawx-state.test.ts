@@ -8,11 +8,37 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 const restorePublishFailureTargets = vi.hoisted(() => new Set<string>());
 const backupPublishFailureTargets = vi.hoisted(() => new Set<string>());
 const backupRollbackFailureTargets = vi.hoisted(() => new Set<string>());
+const descriptorFlags = vi.hoisted(() => new Map<number, string | number>());
+const rejectReadonlyFsync = vi.hoisted(() => ({ value: false }));
+const failNextFsync = vi.hoisted(() => ({ value: false }));
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
+    openSync(path: import('node:fs').PathLike, flags: string | number, mode?: number) {
+      const descriptor = actual.openSync(path, flags, mode);
+      descriptorFlags.set(descriptor, flags);
+      return descriptor;
+    },
+    fsyncSync(descriptor: number) {
+      if (failNextFsync.value) {
+        failNextFsync.value = false;
+        const error = new Error('Injected durable flush failure') as NodeJS.ErrnoException;
+        error.code = 'EIO';
+        throw error;
+      }
+      if (rejectReadonlyFsync.value && descriptorFlags.get(descriptor) === 'r') {
+        const error = new Error('Windows rejects fsync on read-only descriptors') as NodeJS.ErrnoException;
+        error.code = 'EPERM';
+        throw error;
+      }
+      return actual.fsyncSync(descriptor);
+    },
+    closeSync(descriptor: number) {
+      descriptorFlags.delete(descriptor);
+      return actual.closeSync(descriptor);
+    },
     renameSync(source: import('node:fs').PathLike, target: import('node:fs').PathLike) {
       if (restorePublishFailureTargets.has(String(target))) {
         const error = new Error('Injected core-state publish failure') as NodeJS.ErrnoException;
@@ -55,6 +81,9 @@ afterEach(async () => {
   restorePublishFailureTargets.clear();
   backupPublishFailureTargets.clear();
   backupRollbackFailureTargets.clear();
+  descriptorFlags.clear();
+  rejectReadonlyFsync.value = false;
+  failNextFsync.value = false;
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -140,5 +169,32 @@ describe('portable ClawX core state', () => {
       join(layout.backupDir, recoveryGeneration!, 'settings.json'),
       'utf8',
     )).resolves.toBe('{"version":1}\n');
+  });
+
+  it('uses a writable descriptor so Windows durable flush succeeds', async () => {
+    const layout = await createLayout();
+    await writeFile(join(layout.sourceDir, 'settings.json'), '{"theme":"dark"}\n', 'utf8');
+    rejectReadonlyFsync.value = true;
+
+    await expect(syncPortableClawXState(layout)).resolves.toMatchObject({
+      skipped: false,
+      fileCount: 1,
+    });
+    await expect(readFile(join(layout.backupDir, 'current', 'settings.json'), 'utf8')).resolves.toBe(
+      '{"theme":"dark"}\n',
+    );
+  });
+
+  it('keeps the current generation intact when durable staging flush fails', async () => {
+    const layout = await createLayout();
+    await writeFile(join(layout.sourceDir, 'settings.json'), '{"version":1}\n', 'utf8');
+    await syncPortableClawXState(layout);
+    await writeFile(join(layout.sourceDir, 'settings.json'), '{"version":2}\n', 'utf8');
+    failNextFsync.value = true;
+
+    await expect(syncPortableClawXState(layout)).rejects.toThrow('Injected durable flush failure');
+    await expect(readFile(join(layout.backupDir, 'current', 'settings.json'), 'utf8')).resolves.toBe(
+      '{"version":1}\n',
+    );
   });
 });

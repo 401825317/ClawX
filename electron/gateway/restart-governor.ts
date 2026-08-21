@@ -33,7 +33,7 @@ const DEFAULT_OPTIONS: RestartGovernorOptions = {
  */
 export class GatewayRestartGovernor {
   private readonly options: RestartGovernorOptions;
-  private lastRestartAt = 0;
+  private lastRestartAt: number | null = null;
   private suppressedTotal = 0;
   private executedTotal = 0;
 
@@ -48,7 +48,13 @@ export class GatewayRestartGovernor {
   }
 
   decide(now = Date.now()): RestartDecision {
-    if (this.lastRestartAt > 0) {
+    if (this.lastRestartAt !== null) {
+      // A Windows wall-clock correction must not extend a short cooldown into
+      // an arbitrary lockout. Treat the corrected clock as a fresh baseline.
+      if (now < this.lastRestartAt) {
+        this.lastRestartAt = null;
+        return { allow: true };
+      }
       const sinceLast = now - this.lastRestartAt;
       if (sinceLast < this.options.cooldownMs) {
         this.suppressedTotal = this.safeIncrement(this.suppressedTotal);

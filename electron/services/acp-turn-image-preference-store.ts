@@ -2,20 +2,20 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { AcpImageGenerationOptions } from '@shared/acp-chat/types';
+import type { ManagedClientImageModelPolicy } from '@shared/managed-client-config';
 import { resolveOpenClawStateDir } from '../utils/paths';
+import { getVerifiedManagedClientImageModelPolicySnapshot } from './managed-client-config-service';
 
 const TURN_PREFERENCE_DIRECTORY_NAME = 'uclaw-turn-preferences';
 const TURN_PREFERENCE_TTL_MS = 5 * 60 * 1000;
 const TURN_PREFERENCE_FILE_PREFIX = 'turn-';
 const TURN_PREFERENCE_FILE_SUFFIX = '.json';
-const IMAGE_SIZES = new Set<AcpImageGenerationOptions['size']>([
-  '1024x1536',
-  '1536x1024',
-  '1024x1024',
-  '2160x3840',
-  '3840x2160',
-]);
-const IMAGE_QUALITIES = new Set<AcpImageGenerationOptions['quality']>(['low', 'medium', 'high']);
+
+export type AcpTurnImagePolicyResolver = () => ManagedClientImageModelPolicy | null;
+
+type AcpTurnImagePreferenceStoreDependencies = {
+  resolvePolicy: AcpTurnImagePolicyResolver;
+};
 
 export type AcpTurnImagePreferenceStore = {
   enqueue(input: {
@@ -27,7 +27,7 @@ export type AcpTurnImagePreferenceStore = {
 };
 
 type StoredTurnImagePreference = {
-  version: 1;
+  version: 2;
   id: string;
   sessionKey: string;
   messageDigest: string;
@@ -41,11 +41,84 @@ function digestMessage(message: string): string {
   return createHash('sha256').update(message, 'utf8').digest('hex');
 }
 
-function normalizeImageOptions(value: AcpImageGenerationOptions): AcpImageGenerationOptions | null {
-  if (!IMAGE_SIZES.has(value.size) || !IMAGE_QUALITIES.has(value.quality)) {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizedString(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized ? normalized : null;
+}
+
+function normalizedStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map(normalizedString).filter((entry): entry is string => Boolean(entry)))];
+}
+
+function normalizePolicy(value: unknown): ManagedClientImageModelPolicy | null {
+  if (!isRecord(value) || !Array.isArray(value.models)) return null;
+  const seen = new Set<string>();
+  const models = value.models.flatMap((entry): ManagedClientImageModelPolicy['models'] => {
+    if (!isRecord(entry)) return [];
+    const id = normalizedString(entry.id);
+    const sizes = normalizedStringList(entry.sizes);
+    const qualities = normalizedStringList(entry.qualities);
+    if (!id || seen.has(id) || sizes.length === 0 || qualities.length === 0) return [];
+    seen.add(id);
+    const defaultSize = normalizedString(entry.defaultSize);
+    const defaultQuality = normalizedString(entry.defaultQuality);
+    if (!defaultSize || !sizes.includes(defaultSize) || !defaultQuality || !qualities.includes(defaultQuality)) {
+      return [];
+    }
+    return [{
+      id,
+      sizes,
+      qualities,
+      defaultSize,
+      defaultQuality,
+      supportsEditing: entry.supportsEditing === true,
+    }];
+  });
+  const defaultModel = normalizedString(value.defaultModel);
+  const selected = models.find((model) => model.id === defaultModel);
+  const defaultSize = normalizedString(value.defaultSize);
+  const defaultQuality = normalizedString(value.defaultQuality);
+  if (
+    !selected
+    || !defaultSize
+    || !selected.sizes.includes(defaultSize)
+    || !defaultQuality
+    || !selected.qualities.includes(defaultQuality)
+  ) return null;
+  return { models, defaultModel: selected.id, defaultSize, defaultQuality };
+}
+
+function normalizeImageOptions(
+  value: AcpImageGenerationOptions,
+  resolvePolicy: AcpTurnImagePolicyResolver,
+): AcpImageGenerationOptions | null {
+  const modelId = normalizedString(value.modelId);
+  const size = normalizedString(value.size);
+  const quality = normalizedString(value.quality);
+  if (!modelId || !size || !quality) return null;
+
+  let policy: ManagedClientImageModelPolicy | null;
+  try {
+    policy = normalizePolicy(resolvePolicy());
+  } catch {
     return null;
   }
-  return { size: value.size, quality: value.quality };
+  const model = policy?.models.find((entry) => entry.id === modelId);
+  if (!model || !model.sizes.includes(size) || !model.qualities.includes(quality)) {
+    return null;
+  }
+  return {
+    modelId,
+    size,
+    quality,
+    ...(value.preset ? { preset: value.preset } : {}),
+  };
 }
 
 function preferenceFileName(id: string): string {
@@ -59,8 +132,10 @@ function isPreferenceFileName(fileName: string): boolean {
 /** Stores only a message digest so the gateway plugin can claim one turn's UI intent. */
 export function createAcpTurnImagePreferenceStore(
   stateDirectory = resolveOpenClawStateDir(),
+  dependencies: Partial<AcpTurnImagePreferenceStoreDependencies> = {},
 ): AcpTurnImagePreferenceStore {
   const directory = path.join(stateDirectory, TURN_PREFERENCE_DIRECTORY_NAME);
+  const resolvePolicy = dependencies.resolvePolicy ?? getVerifiedManagedClientImageModelPolicySnapshot;
 
   const removeExpiredEntries = async (now: number): Promise<void> => {
     let entries: string[];
@@ -88,7 +163,7 @@ export function createAcpTurnImagePreferenceStore(
     /** Creates one independent file so concurrent sessions cannot overwrite each other's preference. */
     async enqueue(input) {
       const message = input.message.trim();
-      const imageOptions = normalizeImageOptions(input.imageOptions);
+      const imageOptions = normalizeImageOptions(input.imageOptions, resolvePolicy);
       if (!input.sessionKey || !message || !imageOptions) {
         return null;
       }
@@ -99,7 +174,7 @@ export function createAcpTurnImagePreferenceStore(
       const id = randomUUID();
       const createdAt = Date.now();
       const entry: StoredTurnImagePreference = {
-        version: 1,
+        version: 2,
         id,
         sessionKey: input.sessionKey,
         messageDigest: digestMessage(message),

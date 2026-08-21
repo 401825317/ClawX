@@ -16,7 +16,8 @@ import { registerZoomShortcuts } from './zoom-shortcuts';
 import { appUpdater, registerUpdateHandlers } from './updater';
 import { logger } from '../utils/logger';
 import { warmupNetworkOptimization } from '../utils/uv-env';
-import { initTelemetry } from '../utils/telemetry';
+import { captureFatalException, initTelemetry, shutdownTelemetry } from '../utils/telemetry';
+import { HOST_EVENT_CHANNELS } from '@shared/host-events/contract';
 
 import { ClawHubService } from '../gateway/clawhub';
 import { extensionRegistry } from '../extensions/registry';
@@ -35,7 +36,17 @@ import { getSetting } from '../utils/store';
 import { applyProxySettings } from './proxy';
 import { syncLaunchAtStartupSettingFromStore } from './launch-at-startup';
 import { writePortableUpdateReadyMarker } from './portable-update-ready';
+import { longTermRuleService } from '../services/long-term-rule-service';
+import { artifactTaskService } from '../services/artifact-task-service';
+import {
+  startManagedClientRuntimeConfigRefresh,
+  subscribeManagedClientRuntimeConfig,
+} from '../services/managed-client-config-service';
 import { PortableRuntimeSnapshotService } from '../utils/portable-runtime-state';
+import {
+  PortableRuntimeHealthMonitor,
+  setActivePortableRuntimeHealthMonitor,
+} from '../utils/portable-runtime-health';
 import {
   isConfiguredPortableOpenClawRuntimePrepared,
   prepareConfiguredPortableOpenClawRuntime,
@@ -57,6 +68,12 @@ import {
 import { createSignalQuitHandler } from './signal-quit';
 import { acquireProcessInstanceFileLock } from './process-instance-lock';
 import { ensureBuiltinSkillsInstalled, removeRetiredPreinstalledSkills } from '../utils/skill-config';
+import { createFatalHandler } from './fatal-handler';
+import { getUclawBackendOrigin } from '../utils/junfeiai-distribution';
+import {
+  getUclawDiagnosticHeaders,
+  mergeUclawDiagnosticHeaders,
+} from '../utils/uclaw-request-diagnostics';
 
 import { deviceOAuthManager } from '../utils/device-oauth';
 import { browserOAuthManager } from '../utils/browser-oauth';
@@ -179,14 +196,102 @@ let clawHubService!: ClawHubService;
 const hostApiRegistry = new HostApiRegistry();
 const webBrowserGuestRegistry = new WebBrowserGuestRegistry();
 let webBrowserSession!: Session;
+let stopManagedRuntimeConfigRefresh: (() => void) | null = null;
+let unsubscribeManagedRuntimeConfig: (() => void) | null = null;
+let telemetryInitializationPromise: Promise<void> | null = null;
+let managedRuntimeShutdownRequested = false;
+let managedRuntimeShutdownPromise: Promise<void> | null = null;
+let mainRendererRecoveryTimer: NodeJS.Timeout | null = null;
+let mainRendererRecoveryInFlight: Promise<void> | null = null;
 const mainWindowFocusState = createMainWindowFocusState();
 const quitLifecycleState = createQuitLifecycleState();
+
+function stopManagedRuntimeServices(): Promise<void> {
+  if (managedRuntimeShutdownPromise) return managedRuntimeShutdownPromise;
+  managedRuntimeShutdownRequested = true;
+
+  const stopRefresh = stopManagedRuntimeConfigRefresh;
+  stopManagedRuntimeConfigRefresh = null;
+  const unsubscribe = unsubscribeManagedRuntimeConfig;
+  unsubscribeManagedRuntimeConfig = null;
+  const telemetryInitialization = telemetryInitializationPromise;
+
+  managedRuntimeShutdownPromise = Promise.resolve().then(async () => {
+    try {
+      stopRefresh?.();
+    } catch (error) {
+      logger.warn('Failed to stop managed runtime config refresh during quit:', error);
+    }
+    try {
+      unsubscribe?.();
+    } catch (error) {
+      logger.warn('Failed to unsubscribe managed runtime config during quit:', error);
+    }
+    if (!telemetryInitialization) return;
+    try {
+      await telemetryInitialization;
+      await shutdownTelemetry();
+    } catch (error) {
+      logger.warn('Failed to stop telemetry during quit:', error);
+    }
+  });
+
+  return managedRuntimeShutdownPromise;
+}
+
+function isPortableRuntimeWarning(details: unknown): boolean {
+  if (!details || typeof details !== 'object' || Array.isArray(details)) return false;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(details, 'severity');
+    return Boolean(descriptor && 'value' in descriptor && descriptor.value === 'warning');
+  } catch {
+    return false;
+  }
+}
+
+const portableRuntimeHealthMonitor = portableModeInfo.portableRuntimeLayout
+  ? new PortableRuntimeHealthMonitor({
+      markerPath: portableModeInfo.portableRuntimeLayout.markerPath,
+      onChange: snapshot => sendMainWindowEvent(
+        HOST_EVENT_CHANNELS.app.portableRuntimeHealthChanged,
+        snapshot,
+      ),
+    })
+  : null;
+setActivePortableRuntimeHealthMonitor(portableRuntimeHealthMonitor);
+
 const portableRuntimeSnapshotService = portableModeInfo.portableRuntimeLayout
   ? new PortableRuntimeSnapshotService(
       portableModeInfo.portableRuntimeLayout,
-      (message, details) => logger.info(message, details),
+      (message, details) => {
+        portableRuntimeHealthMonitor?.observeSnapshotEvent(details);
+        if (isPortableRuntimeWarning(details)) {
+          logger.warn(message, details);
+          return;
+        }
+        logger.info(message, details);
+      },
     )
   : null;
+
+function registerUclawRequestDiagnostics(targetSession: Session): void {
+  let urlPattern: string;
+  try {
+    urlPattern = `${new URL(getUclawBackendOrigin()).origin}/*`;
+  } catch {
+    return;
+  }
+  targetSession.webRequest.onBeforeSendHeaders(
+    { urls: [urlPattern] },
+    (details, callback) => {
+      void getUclawDiagnosticHeaders().then((diagnostics) => {
+        callback({
+          requestHeaders: mergeUclawDiagnosticHeaders(details.requestHeaders, diagnostics),
+        });
+      }).catch(() => callback({ requestHeaders: details.requestHeaders }));
+    },
+  );
+}
 
 function sendMainWindowEvent(channel: string, payload: unknown): void {
   const win = mainWindow;
@@ -369,8 +474,44 @@ function createMainWindow(): BrowserWindow {
   });
 
   win.on('closed', () => {
+    if (mainRendererRecoveryTimer) {
+      clearTimeout(mainRendererRecoveryTimer);
+      mainRendererRecoveryTimer = null;
+    }
     if (mainWindow === win) {
       mainWindow = null;
+    }
+  });
+
+  const recoverRenderer = (reason: 'render-process-gone' | 'unresponsive'): void => {
+    if (mainWindow !== win || win.isDestroyed() || isQuitting()) return;
+    if (mainRendererRecoveryTimer) clearTimeout(mainRendererRecoveryTimer);
+    mainRendererRecoveryTimer = setTimeout(() => {
+      mainRendererRecoveryTimer = null;
+      if (mainRendererRecoveryInFlight || mainWindow !== win || win.isDestroyed() || isQuitting()) return;
+      mainRendererRecoveryInFlight = Promise.resolve().then(() => {
+        if (!win.isDestroyed()) win.webContents.reload();
+      }).catch(() => undefined).finally(() => {
+        mainRendererRecoveryInFlight = null;
+      });
+    }, reason === 'unresponsive' ? 5_000 : 0);
+  };
+
+  win.webContents.on('render-process-gone', (_event, details) => {
+    logger.warn('Main renderer process gone; recovering renderer in isolation', {
+      reason: details.reason,
+      exitCode: details.exitCode,
+    });
+    recoverRenderer('render-process-gone');
+  });
+  win.webContents.on('unresponsive', () => {
+    logger.warn('Main renderer became unresponsive; scheduling isolated recovery');
+    recoverRenderer('unresponsive');
+  });
+  win.webContents.on('responsive', () => {
+    if (mainRendererRecoveryTimer) {
+      clearTimeout(mainRendererRecoveryTimer);
+      mainRendererRecoveryTimer = null;
     }
   });
 
@@ -385,6 +526,7 @@ async function initialize(): Promise<void> {
   // Initialize logger first
   logger.init();
   logger.info('=== ClawX Application Starting ===');
+  portableRuntimeHealthMonitor?.start();
   portableRuntimeSnapshotService?.start();
   logger.debug(
     `Runtime: platform=${process.platform}/${process.arch}, electron=${process.versions.electron}, node=${process.versions.node}, packaged=${app.isPackaged}, pid=${process.pid}, ppid=${process.ppid}`
@@ -406,14 +548,26 @@ async function initialize(): Promise<void> {
   });
 
   if (!isE2EMode) {
-    // Warm up network optimization (non-blocking)
-    void warmupNetworkOptimization();
-
-    // Initialize Telemetry early
-    await initTelemetry();
-
-    // Apply persisted proxy settings before creating windows or network requests.
+    // Apply persisted proxy settings before any managed network request.
     await applyProxySettings();
+    registerUclawRequestDiagnostics(session.defaultSession);
+    unsubscribeManagedRuntimeConfig = subscribeManagedClientRuntimeConfig((current, previous) => {
+      const wasEnabled = previous.config.features.longTermRules?.enabled === true;
+      const isEnabled = current.config.features.longTermRules?.enabled === true;
+      if (!wasEnabled && isEnabled) {
+        void longTermRuleService.repairKnownWorkspaces().catch((error) => {
+          logger.warn('Failed to repair long-term rule projections:', error);
+        });
+      }
+    });
+    stopManagedRuntimeConfigRefresh = startManagedClientRuntimeConfigRefresh();
+    // Warm up network optimization without blocking the window or Gateway.
+    void warmupNetworkOptimization();
+    // Initialize telemetry after proxy setup so remote observability policy is reachable.
+    if (!managedRuntimeShutdownRequested) {
+      telemetryInitializationPromise = initTelemetry();
+      await telemetryInitializationPromise;
+    }
     if (portableModeInfo.enabled) {
       logger.info('Portable mode enabled: launch-at-startup sync is skipped');
     } else {
@@ -778,6 +932,10 @@ if (gotTheLock) {
 
     void extensionRegistry.teardownAll();
 
+    // Disable remote refreshes and telemetry transport as soon as shutdown
+    // starts. The memoized promise makes repeated quit requests harmless.
+    const managedRuntimeShutdown = stopManagedRuntimeServices();
+
     const stopPromise = Promise.all([
       gatewayManager.stop().catch((err) => {
         logger.warn('gatewayManager.stop() error during quit:', err);
@@ -785,12 +943,16 @@ if (gotTheLock) {
       stopBlenderBridgeServer().catch((err) => {
         logger.warn('stopBlenderBridgeServer() error during quit:', err);
       }),
+      artifactTaskService.dispose().catch((err) => {
+        logger.warn('artifactTaskService.dispose() error during quit:', err);
+      }),
     ]).then(() => undefined);
     const timeoutPromise = new Promise<'timeout'>((resolve) => {
       setTimeout(() => resolve('timeout'), 5000);
     });
 
     const finalizeShutdown = async (): Promise<void> => {
+      await managedRuntimeShutdown;
       portableRuntimeSnapshotService?.stop();
       if (portableRuntimeSnapshotService) {
         const snapshotResult = await runAbortableQuitTask(
@@ -803,6 +965,7 @@ if (gotTheLock) {
           logger.warn('Portable Runtime final snapshot timed out during app quit');
         }
       }
+      portableRuntimeHealthMonitor?.stop();
       markQuitCleanupCompleted(quitLifecycleState);
       app.quit();
     };
@@ -828,23 +991,14 @@ if (gotTheLock) {
   // Best-effort Gateway cleanup on unexpected crashes.
   // These handlers attempt to terminate the Gateway child process within a
   // short timeout before force-exiting, preventing orphaned processes.
-  const emergencyGatewayCleanup = (reason: string, error: unknown): void => {
-    logger.error(`${reason}:`, error);
-    try {
-      void stopBlenderBridgeServer().catch(() => { /* ignore */ });
-    } catch {
-      // ignore — bridge state may already be corrupted
-    }
-    try {
-      void gatewayManager?.stop().catch(() => { /* ignore */ });
-    } catch {
-      // ignore — stop() may not be callable if state is corrupted
-    }
-    // Give Gateway stop a brief window, then force-exit.
-    setTimeout(() => {
-      process.exit(1);
-    }, 3000).unref();
-  };
+  const emergencyGatewayCleanup = createFatalHandler({
+    getEmergencyLogPath: () => logger.getLogFilePath(),
+    stopBlender: () => stopBlenderBridgeServer(),
+    stopGateway: () => gatewayManager.stop(),
+    forceTerminateGateway: () => gatewayManager.forceTerminateOwnedProcessForQuit(),
+    exit: code => process.exit(code),
+    captureFatal: captureFatalException,
+  });
 
   process.on('uncaughtException', (error) => {
     emergencyGatewayCleanup('Uncaught exception in main process', error);

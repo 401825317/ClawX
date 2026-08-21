@@ -14,6 +14,7 @@ const MAIN_SESSION_KEY = 'agent:main:main';
 const OTHER_SESSION_KEY = 'agent:main:other';
 const WORKSPACE = '/workspace';
 const SESSIONS_LIST_PAYLOAD = { includeDerivedTitles: true, includeLastMessage: true };
+const HTML_PREVIEW_URL = `http://127.0.0.1:49152/${'a'.repeat(43)}/index.html`;
 
 type AcpSessionUpdate = Record<string, unknown> & { sessionUpdate: string };
 type SessionFixture = { key: string; title: string; updates?: AcpSessionUpdate[] };
@@ -98,6 +99,10 @@ async function installFileActivityMocks(app: ElectronApplication, options: {
       workspaceRoot: WORKSPACE,
       executionCwd: WORKSPACE,
     }])]: { ok: true, workspaceRoot: WORKSPACE, executionCwd: WORKSPACE },
+    [stableStringify(['artifactTasks', 'validateWebpage', {
+      workspaceRoot: WORKSPACE,
+      filePath: `${WORKSPACE}/site/demo.html`,
+    }])]: { ok: true, browserUrl: HTML_PREVIEW_URL },
     [stableStringify(['sessions', 'summaries', { sessionKeys: sessions.map((session) => session.key) }])]: {
       summaries: sessions.map((session, index) => ({
         sessionKey: session.key,
@@ -283,8 +288,9 @@ test.describe('ClawX chat file changes', () => {
       await expect.poll(async () => (await getRecordedHostInvocations(app)).some((request) => (
         request.module === 'webBrowser'
         && request.action === 'navigate'
-        && request.payload?.url === 'file:///workspace/site/demo.html'
+        && request.payload?.url === HTML_PREVIEW_URL
       ))).toBe(true);
+      expect(HTML_PREVIEW_URL).not.toMatch(/^file:/u);
     } finally {
       await closeElectronApp(app);
     }

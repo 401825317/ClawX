@@ -3,12 +3,25 @@ import { Type } from '@sinclair/typebox';
 import PptxGenJS from 'pptxgenjs';
 import JSZip from 'jszip';
 import * as XLSX from 'xlsx';
-import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, statSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { existsSync, realpath as realpathCallback, statSync } from 'node:fs';
+import { lstat, mkdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
+import {
+  CAD_DXF_SCHEMA,
+  validateDxfContent,
+  writeValidatedDxf,
+} from './cad-dxf.mjs';
+import {
+  closeAllWorkspaceHtmlPreviews,
+  closeWorkspaceHtmlPreviewsForOwner,
+  isAuthorizedWorkspaceHtmlPreviewUrl,
+  isLoopbackBrowserUrl,
+  serializeWorkspacePreviewError,
+  startWorkspaceHtmlPreview,
+} from './workspace-http-preview.mjs';
 
 const PLUGIN_ID = 'uclaw-local-artifacts';
 const DEFAULT_OUTPUT_DIR = 'outputs';
@@ -29,9 +42,11 @@ const MIME = {
   md: 'text/markdown',
   txt: 'text/plain',
   html: 'text/html',
+  dxf: 'application/dxf',
 };
 const BASE_HTML_APP_CSS = '[hidden]{display:none!important}';
 const STUDIO_REPAIR_TTL_MS = 30 * 60 * 1000;
+const canonicalRealpath = promisify(realpathCallback.native);
 const STUDIO_REPAIR_DRAFT_LIMIT = 20;
 const studioRepairDrafts = new Map();
 
@@ -247,47 +262,90 @@ function expandHome(value) {
   return value.startsWith('~/') ? path.join(homedir(), value.slice(2)) : value;
 }
 
-function resolveOutputDir(ctx, requested) {
+function isPathInside(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
+}
+
+function hasParentTraversal(value) {
+  return String(value).split(/[\\/]+/u).some((segment) => segment === '..');
+}
+
+async function nearestExistingPath(candidate) {
+  let current = candidate;
+  while (true) {
+    try {
+      await lstat(current);
+      return current;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      const parent = path.dirname(current);
+      if (parent === current) throw error;
+      current = parent;
+    }
+  }
+}
+
+async function resolveOutputDir(ctx, requested) {
   const workspaceDir = resolveWorkspaceDir(ctx);
-  const raw = cleanText(requested);
-  if (!raw) return path.join(workspaceDir, DEFAULT_OUTPUT_DIR);
-  const expanded = expandHome(raw);
-  return path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(workspaceDir, expanded);
+  await mkdir(workspaceDir, { recursive: true });
+  const canonicalWorkspace = await canonicalRealpath(workspaceDir);
+  const raw = typeof requested === 'string' ? requested.trim() : '';
+  if (hasParentTraversal(raw)) {
+    throw new Error('outputDir must not contain parent-directory traversal');
+  }
+
+  const expanded = raw ? expandHome(raw) : DEFAULT_OUTPUT_DIR;
+  const candidate = path.isAbsolute(expanded)
+    ? path.resolve(expanded)
+    : path.resolve(workspaceDir, expanded);
+  const resolvedWorkspace = path.resolve(workspaceDir);
+  if (!isPathInside(resolvedWorkspace, candidate) && !isPathInside(canonicalWorkspace, candidate)) {
+    throw new Error('outputDir must stay inside the active workspace');
+  }
+
+  const existingAncestor = await nearestExistingPath(candidate);
+  const canonicalAncestor = await canonicalRealpath(existingAncestor);
+  if (!isPathInside(canonicalWorkspace, canonicalAncestor)) {
+    throw new Error('outputDir resolves outside the active workspace');
+  }
+
+  await mkdir(candidate, { recursive: true });
+  const canonicalOutputDir = await canonicalRealpath(candidate);
+  if (!isPathInside(canonicalWorkspace, canonicalOutputDir)) {
+    throw new Error('outputDir resolves outside the active workspace');
+  }
+  return canonicalOutputDir;
+}
+
+async function pathEntryExists(candidate) {
+  try {
+    await lstat(candidate);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
 }
 
 async function uniqueOutputPath(ctx, params, extension, fallbackName) {
-  const outputDir = resolveOutputDir(ctx, params?.outputDir);
-  await mkdir(outputDir, { recursive: true });
+  const outputDir = await resolveOutputDir(ctx, params?.outputDir);
   const requested = cleanText(params?.filename);
   const base = requested
     ? sanitizeBaseName(path.basename(requested, path.extname(requested)), fallbackName)
     : `${sanitizeBaseName(params?.title, fallbackName)}_${compactTimestamp()}_${randomUUID().slice(0, 6)}`;
   let candidate = path.join(outputDir, withExtension(base, extension));
-  if (!existsSync(candidate)) return candidate;
+  if (!await pathEntryExists(candidate)) return candidate;
   for (let index = 2; index < 1000; index += 1) {
     candidate = path.join(outputDir, withExtension(`${base}_${index}`, extension));
-    if (!existsSync(candidate)) return candidate;
+    if (!await pathEntryExists(candidate)) return candidate;
   }
   return path.join(outputDir, withExtension(`${base}_${randomUUID().slice(0, 8)}`, extension));
 }
 
-function maybeOpenFile(filePath, openAfterCreate) {
-  if (!openAfterCreate) return;
-  const command = process.platform === 'darwin'
-    ? 'open'
-    : process.platform === 'win32'
-      ? 'cmd'
-      : 'xdg-open';
-  const args = process.platform === 'win32' ? ['/c', 'start', '', filePath] : [filePath];
-  try {
-    const child = spawn(command, args, {
-      detached: true,
-      stdio: 'ignore',
-    });
-    child.unref();
-  } catch {
-    // Opening is best-effort; artifact creation has already succeeded.
-  }
+function maybeOpenFile(_filePath, _openAfterCreate) {
+  // The plugin must not invoke an OS command interpreter. The host UI owns
+  // opening returned artifacts through its non-shell APIs.
 }
 
 function artifactResult(filePath, mimeType, kind, title, openAfterCreate = false, extra = {}) {
@@ -328,6 +386,35 @@ function toolErrorResult(message, details = {}) {
     details: payload,
     isError: true,
   };
+}
+
+function cadFailureResult(error, filePath) {
+  const detail = error instanceof Error ? error.message : String(error);
+  const code = typeof error?.code === 'string' && error.code.startsWith('cad_')
+    ? error.code
+    : filePath
+      ? 'cad_generation_failed'
+      : 'cad_output_path_failed';
+  const verification = error?.verification ?? {
+    ok: false,
+    status: 'blocked',
+    kind: 'cad.structure',
+    required: true,
+    detail,
+  };
+  return toolErrorResult(detail, {
+    code,
+    kind: 'cad',
+    recoverable: error?.recoverable !== false,
+    restartGateway: false,
+    ...(filePath ? { filePath } : {}),
+    ...(typeof error?.stage === 'string' ? { stage: error.stage } : {}),
+    ...(typeof error?.field === 'string' ? { field: error.field } : {}),
+    ...(Number.isFinite(error?.minimum) ? { minimum: error.minimum } : {}),
+    ...(Number.isFinite(error?.maximum) ? { maximum: error.maximum } : {}),
+    ...(Array.isArray(error?.allowed) ? { allowed: error.allowed } : {}),
+    verification,
+  });
 }
 
 function relsXml(relationships) {
@@ -1510,7 +1597,7 @@ const sectionSchema = Type.Object({
 const baseFileSchema = {
   filename: Type.Optional(Type.String({ description: 'Optional output filename. A non-overwriting filename is generated when omitted.' })),
   outputDir: Type.Optional(Type.String({ description: 'Optional output directory. Relative paths resolve under the OpenClaw workspace.' })),
-  openAfterCreate: Type.Optional(Type.Boolean({ description: 'Open the generated file after creation. Default false.' })),
+  openAfterCreate: Type.Optional(Type.Boolean({ description: 'Legacy compatibility flag. The host UI owns opening generated files.' })),
 };
 
 async function renderValidatedStudioDeck(safeParams, validation, ctx) {
@@ -1698,6 +1785,75 @@ function createTools() {
       },
     },
     {
+      name: 'create_dxf_file',
+      label: 'Create Editable DXF',
+      description: 'Create and structurally verify a real editable DXF architectural floor plan. This tool is mandatory for CAD, DXF, DWG, editable floor-plan, or editable layout requests; image_generate may only provide an explicitly requested supplemental rendering and can never substitute for the DXF deliverable.',
+      promptSnippet: 'create_dxf_file: mandatory for CAD/DXF/DWG/editable floor plans and layouts. Generate a real .dxf, then require verification.status=passed with boundary, walls, doors, windows, stairs, dimensions, annotations, entity counts, and layer evidence. Never use image_generate or a CAD-styled PNG as the CAD deliverable. Return MEDIA:<absolute .dxf path>.',
+      parameters: Type.Object({
+        ...baseFileSchema,
+        title: Type.Optional(Type.String()),
+        unit: Type.Optional(Type.Union([
+          Type.Literal('m'), Type.Literal('cm'), Type.Literal('mm'),
+          Type.Literal('ft'), Type.Literal('in'), Type.Literal('unitless'),
+        ], { description: 'Drawing unit. Always set this when the user supplied dimensions.' })),
+        width: Type.Optional(Type.Number({ exclusiveMinimum: 0, description: 'Footprint width in the selected unit.' })),
+        depth: Type.Optional(Type.Number({ exclusiveMinimum: 0, description: 'Footprint depth in the selected unit.' })),
+        floors: Type.Optional(Type.Integer({ minimum: 1, maximum: 12 })),
+        wallThickness: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+        doorWidth: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+        windowWidth: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+        stairWidth: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+        includeDimensions: Type.Optional(Type.Boolean({ description: 'Keep true for normal CAD delivery so dimensions can be structurally verified.' })),
+      }),
+      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        const safeParams = normalizeBrandValue(params);
+        if (signal?.aborted) {
+          return toolErrorResult('DXF generation was cancelled before file creation', {
+            code: 'cad_generation_aborted',
+            kind: 'cad',
+            recoverable: true,
+            restartGateway: false,
+          });
+        }
+        let filePath;
+        try {
+          filePath = await uniqueOutputPath(ctx, safeParams, 'dxf', 'UClaw_CAD');
+          const { plan, verification } = await writeValidatedDxf(filePath, safeParams);
+          if (signal?.aborted) {
+            return toolErrorResult('DXF generation completed but the request was cancelled before delivery', {
+              code: 'cad_delivery_aborted',
+              kind: 'cad',
+              recoverable: true,
+              restartGateway: false,
+              filePath,
+              verification,
+            });
+          }
+          return artifactResult(
+            filePath,
+            MIME.dxf,
+            'cad',
+            cleanText(safeParams?.title),
+            safeParams?.openAfterCreate === true,
+            {
+              schema: CAD_DXF_SCHEMA,
+              editableFormat: 'DXF',
+              assumptions: plan.assumptions,
+              plan: {
+                unit: plan.unit,
+                width: plan.width,
+                depth: plan.depth,
+                floors: plan.floors,
+              },
+              verification,
+            },
+          );
+        } catch (error) {
+          return cadFailureResult(error, filePath);
+        }
+      },
+    },
+    {
       name: 'create_text_file',
       label: 'Create Text',
       description: 'Create a real local Markdown or plain-text file. Use this for copywriting, drafts, scripts, outlines, notes, and text deliverables that must be an artifact.',
@@ -1750,20 +1906,175 @@ function createTools() {
           });
         }
         await writeFile(filePath, html, 'utf8');
-        return artifactResult(filePath, MIME.html, 'webpage', cleanText(safeParams?.title), safeParams?.openAfterCreate === true);
+        // Renderer owns HTML preview so one successful tool call cannot open both
+        // an external application and UClaw's built-in browser.
+        return artifactResult(filePath, MIME.html, 'webpage', cleanText(safeParams?.title), false);
+      },
+    },
+    {
+      name: 'prepare_workspace_html_preview',
+      label: 'Prepare Workspace HTML Preview',
+      description: 'Convert one workspace-local HTML path or file URL into a short-lived tokenized loopback HTTP URL for the browser tool. It never enables arbitrary file access, directory serving, outbound proxying, or private-network SSRF.',
+      promptSnippet: 'prepare_workspace_html_preview: before asking browser to open a local HTML file, convert its absolute workspace path or file: URL to the returned tokenized http://127.0.0.1 URL. Never pass file: directly to browser. If this tool returns recoverable=true, stop and report the recovery action; do not restart Gateway or repeatedly retry browser. After one browser timeout, report a recoverable browser timeout instead of queueing another identical call.',
+      parameters: Type.Object({
+        filePath: Type.String({ description: 'Absolute path, workspace-relative path, or file: URL for one HTML file inside the active workspace.' }),
+      }),
+      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        try {
+          const preview = await startWorkspaceHtmlPreview({
+            workspaceDir: resolveWorkspaceDir(ctx),
+            filePath: params?.filePath,
+            signal,
+            owner: {
+              runId: ctx?.runId,
+              sessionKey: ctx?.sessionKey,
+              sessionId: ctx?.sessionId,
+            },
+          });
+          const payload = {
+            ok: true,
+            kind: 'webpage',
+            browserUrl: preview.browserUrl,
+            sourcePath: preview.filePath,
+            fileSize: preview.fileSize,
+            expiresAt: preview.expiresAt,
+            protocol: 'http:',
+            host: '127.0.0.1',
+            security: {
+              exactWorkspaceFile: true,
+              tokenizedPath: true,
+              outboundProxy: false,
+              directoryServing: false,
+              restartGatewayOnBrowserTimeout: false,
+            },
+          };
+          return {
+            content: [{ type: 'text', text: JSON.stringify(payload) }],
+            details: payload,
+          };
+        } catch (error) {
+          const failure = serializeWorkspacePreviewError(error);
+          return toolErrorResult(failure.message, {
+            ...failure,
+            kind: 'webpage',
+          });
+        }
       },
     },
   ];
 }
 
+function normalizedToolName(value) {
+  return typeof value === 'string' ? value.split(':').at(-1)?.trim().toLowerCase() : '';
+}
+
+function workspacePreviewOwner(event, ctx) {
+  return {
+    runId: event?.runId ?? ctx?.runId,
+    sessionKey: ctx?.sessionKey,
+    sessionId: ctx?.sessionId,
+  };
+}
+
+function browserNavigationTarget(params) {
+  const action = typeof params?.action === 'string' ? params.action.trim().toLowerCase() : '';
+  if (action !== 'open' && action !== 'navigate') return null;
+  for (const key of ['targetUrl', 'url']) {
+    if (typeof params?.[key] === 'string' && params[key].trim()) return params[key].trim();
+  }
+  return null;
+}
+
+function recoverableBrowserBlock(code, message, recovery) {
+  return {
+    block: true,
+    blockReason: JSON.stringify({
+      code,
+      message,
+      recoverable: true,
+      restartGateway: false,
+      recovery,
+    }),
+  };
+}
+
+function registerWorkspacePreviewBrowserHooks(api) {
+  if (typeof api.on !== 'function') return;
+
+  api.on('before_tool_call', (event, ctx) => {
+    if (normalizedToolName(event?.toolName) !== 'browser') return undefined;
+    const targetUrl = browserNavigationTarget(event?.params);
+    if (!targetUrl) return undefined;
+    if (/^file:/iu.test(targetUrl)) {
+      return recoverableBrowserBlock(
+        'browser_file_requires_workspace_preview',
+        'Browser cannot navigate to a file URL directly',
+        'Call prepare_workspace_html_preview for the workspace HTML file, then open its returned URL once.',
+      );
+    }
+    if (!isLoopbackBrowserUrl(targetUrl)) return undefined;
+    const owner = workspacePreviewOwner(event, ctx);
+    if (!isAuthorizedWorkspaceHtmlPreviewUrl(targetUrl, owner)) {
+      return recoverableBrowserBlock(
+        'browser_loopback_not_authorized',
+        'Browser blocked an untrusted loopback destination',
+        'Use the exact active URL returned by prepare_workspace_html_preview; private-network access remains disabled.',
+      );
+    }
+
+    const params = { ...event.params, target: 'host', profile: 'openclaw' };
+    delete params.node;
+    return { params };
+  }, {
+    name: `${PLUGIN_ID}:workspace-preview-browser-policy`,
+    description: 'Allow only active tokenized workspace previews through Browser loopback navigation.',
+    priority: 1000,
+  });
+
+  api.on('after_tool_call', async (event, ctx) => {
+    if (normalizedToolName(event?.toolName) !== 'browser') return;
+    const action = typeof event?.params?.action === 'string'
+      ? event.params.action.trim().toLowerCase()
+      : '';
+    if (!event?.error && action !== 'close' && action !== 'stop') return;
+    await closeWorkspaceHtmlPreviewsForOwner(
+      workspacePreviewOwner(event, ctx),
+      event?.error ? 'browser_tool_failed' : 'browser_closed',
+    );
+  }, {
+    name: `${PLUGIN_ID}:workspace-preview-browser-terminal-cleanup`,
+    description: 'Release preview servers after Browser failure, timeout, cancellation, close, or stop.',
+  });
+
+  api.on('agent_end', async (event, ctx) => {
+    await closeWorkspaceHtmlPreviewsForOwner(workspacePreviewOwner(event, ctx), 'agent_end');
+  }, {
+    name: `${PLUGIN_ID}:workspace-preview-agent-cleanup`,
+    description: 'Release preview servers when the owning agent run becomes terminal.',
+  });
+
+  api.on('session_end', async (event, ctx) => {
+    await closeWorkspaceHtmlPreviewsForOwner(workspacePreviewOwner(event, ctx), 'session_end');
+  }, {
+    name: `${PLUGIN_ID}:workspace-preview-session-cleanup`,
+    description: 'Release preview servers when the owning session ends.',
+  });
+}
+
 export const pluginEntry = definePluginEntry({
   id: PLUGIN_ID,
   name: 'UClaw Local Artifacts',
-  description: 'Creates reliable local PPTX, DOCX, XLSX, text, and runnable HTML artifacts without desktop automation.',
+  description: 'Creates and verifies reliable local PPTX, DOCX, XLSX, DXF, text, and safely previewable HTML artifacts without desktop automation.',
   register(api) {
     for (const tool of createTools()) {
       api.registerTool(tool);
     }
+    registerWorkspacePreviewBrowserHooks(api);
+    api.lifecycle?.registerRuntimeLifecycle({
+      id: 'uclaw-local-artifacts-workspace-preview-cleanup',
+      description: 'Close tokenized loopback HTML preview servers on run, session, or Gateway cleanup.',
+      cleanup: () => closeAllWorkspaceHtmlPreviews('plugin_cleanup'),
+    });
   },
 });
 
@@ -1783,5 +2094,10 @@ export const __test = {
   renderTextContent,
   renderHtmlApp,
   validateHtmlAppContent,
+  validateDxfContent,
+  startWorkspaceHtmlPreview,
+  closeAllWorkspaceHtmlPreviews,
+  closeWorkspaceHtmlPreviewsForOwner,
+  registerWorkspacePreviewBrowserHooks,
   uniqueOutputPath,
 };

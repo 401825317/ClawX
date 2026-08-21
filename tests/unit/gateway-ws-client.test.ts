@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const wsState = vi.hoisted(() => ({
   sockets: [] as unknown[],
   MockWebSocket: class MockWebSocket {
+    static readonly OPEN = 1;
     readonly sentFrames: string[] = [];
     readonly listeners = new Map<string, Set<(...args: unknown[]) => void>>();
     readyState = 1;
@@ -65,7 +66,9 @@ import {
   GATEWAY_CONNECT_HANDSHAKE_TIMEOUT_MS,
   connectGatewaySocket,
   probeGatewayReady,
+  waitForGatewayReady,
 } from '@electron/gateway/ws-client';
+import { logger } from '@electron/utils/logger';
 
 async function flushMicrotasks(): Promise<void> {
   await Promise.resolve();
@@ -188,6 +191,141 @@ describe('connectGatewaySocket', () => {
     await flushMicrotasks();
     expect(socket.close).toHaveBeenCalledTimes(1);
     expect(pendingRequests.size).toBe(0);
+  });
+
+  it('enforces the total handshake deadline while credentials are loading', async () => {
+    const getToken = vi.fn(() => new Promise<string>(() => {}));
+    const connectionPromise = connectGatewaySocket({
+      port: 18789,
+      deviceIdentity: null,
+      platform: 'win32',
+      pendingRequests: new Map(),
+      getToken,
+      onHandshakeComplete: vi.fn(),
+      onMessage: vi.fn(),
+      onCloseAfterHandshake: vi.fn(),
+      handshakeTimeoutMs: 1_000,
+    });
+    const connectionErrorPromise = connectionPromise.then(() => null, (error) => error);
+    const socket = getLatestSocket();
+
+    socket.emitJsonMessage({
+      type: 'event',
+      event: 'connect.challenge',
+      payload: { nonce: 'nonce-123' },
+    });
+    await flushMicrotasks();
+    expect(getToken).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(connectionErrorPromise).resolves.toMatchObject({
+      message: 'Gateway handshake deadline exceeded',
+    });
+    expect(socket.terminate).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects promptly when the socket closes while credentials are loading', async () => {
+    let rejectToken: (error: Error) => void = () => {};
+    const connectionPromise = connectGatewaySocket({
+      port: 18789,
+      deviceIdentity: null,
+      platform: 'win32',
+      pendingRequests: new Map(),
+      getToken: () => new Promise<string>((_resolve, reject) => { rejectToken = reject; }),
+      onHandshakeComplete: vi.fn(),
+      onMessage: vi.fn(),
+      onCloseAfterHandshake: vi.fn(),
+      handshakeTimeoutMs: 10_000,
+    });
+    const connectionErrorPromise = connectionPromise.then(() => null, (error) => error);
+    const socket = getLatestSocket();
+
+    socket.emitJsonMessage({
+      type: 'event',
+      event: 'connect.challenge',
+      payload: { nonce: 'nonce-123' },
+    });
+    await flushMicrotasks();
+    socket.emit('close', 1006, Buffer.from('closed'));
+    await expect(connectionErrorPromise).resolves.toMatchObject({
+      message: 'WebSocket closed before handshake (code=1006, reason=closed)',
+    });
+
+    rejectToken(new Error('credential storage unavailable'));
+    await flushMicrotasks();
+  });
+
+  it('rejects without an unhandled rejection when credential loading fails', async () => {
+    const connectionPromise = connectGatewaySocket({
+      port: 18789,
+      deviceIdentity: null,
+      platform: 'win32',
+      pendingRequests: new Map(),
+      getToken: vi.fn().mockRejectedValue(new Error('credential storage unavailable')),
+      onHandshakeComplete: vi.fn(),
+      onMessage: vi.fn(),
+      onCloseAfterHandshake: vi.fn(),
+      handshakeTimeoutMs: 10_000,
+    });
+    const connectionErrorPromise = connectionPromise.then(() => null, (error) => error);
+    const socket = getLatestSocket();
+
+    socket.emitJsonMessage({
+      type: 'event',
+      event: 'connect.challenge',
+      payload: { nonce: 'nonce-123' },
+    });
+
+    await expect(connectionErrorPromise).resolves.toMatchObject({
+      message: 'credential storage unavailable',
+    });
+    expect(socket.terminate).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels an in-flight handshake and clears its socket, request, and timers', async () => {
+    const controller = new AbortController();
+    const pendingRequests = new Map();
+    const connectionPromise = connectGatewaySocket({
+      port: 18789,
+      deviceIdentity: null,
+      platform: 'win32',
+      pendingRequests,
+      getToken: vi.fn().mockResolvedValue('token-123'),
+      onHandshakeComplete: vi.fn(),
+      onMessage: (message) => {
+        if (typeof message !== 'object' || message === null) return;
+        const msg = message as { type?: string; id?: string; ok?: boolean };
+        if (msg.type !== 'res' || typeof msg.id !== 'string') return;
+        const request = pendingRequests.get(msg.id);
+        if (!request) return;
+        if (msg.ok === false) request.reject(new Error('connect rejected'));
+        else request.resolve(msg);
+      },
+      onCloseAfterHandshake: vi.fn(),
+      handshakeTimeoutMs: 30_000,
+      signal: controller.signal,
+    });
+    const connectionErrorPromise = connectionPromise.then(() => null, (error) => error);
+    const socket = getLatestSocket();
+
+    socket.emitJsonMessage({
+      type: 'event',
+      event: 'connect.challenge',
+      payload: { nonce: 'nonce-123' },
+    });
+    await flushMicrotasks();
+    expect(pendingRequests.size).toBe(1);
+
+    const abortReason = new Error('Gateway startup cancelled by stop');
+    controller.abort(abortReason);
+
+    await expect(connectionErrorPromise).resolves.toBe(abortReason);
+    expect(socket.terminate).toHaveBeenCalledTimes(1);
+    expect(pendingRequests.size).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(31_000);
+    expect(vi.mocked(logger.error)).not.toHaveBeenCalledWith('Gateway connect handshake timed out');
+    expect(vi.mocked(logger.error)).not.toHaveBeenCalledWith('Gateway handshake deadline exceeded');
   });
 
   it('terminates the pre-handshake socket when connect is rejected', async () => {
@@ -361,5 +499,100 @@ describe('probeGatewayReady', () => {
 
     await vi.advanceTimersByTimeAsync(1001);
     await expect(probePromise).resolves.toBe(false);
+  });
+});
+
+describe('waitForGatewayReady', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    wsState.sockets.length = 0;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+    wsState.sockets.length = 0;
+  });
+
+  it('uses a single cancellation check per probe and stops before opening a socket', async () => {
+    const beforeProbe = vi.fn(() => {
+      throw new Error('Gateway start superseded');
+    });
+
+    await expect(waitForGatewayReady({
+      port: 18789,
+      getProcessExitCode: () => null,
+      beforeProbe,
+      timeoutMs: 1_000,
+    })).rejects.toThrow('Gateway start superseded');
+
+    expect(beforeProbe).toHaveBeenCalledTimes(1);
+    expect(wsState.sockets).toHaveLength(0);
+  });
+
+  it('reports retry_limit_exhausted separately from the deadline', async () => {
+    const sensitiveProbeError = [
+      'Z:\\private\\gateway\\openclaw.json',
+      '\\\\fileserver\\private\\gateway.log',
+      'ws://gateway.example.invalid/ws?token=secret-token-value',
+      'Bearer secret-token-value',
+    ].join(' ');
+    const readyPromise = waitForGatewayReady({
+      port: 18789,
+      getProcessExitCode: () => null,
+      retries: 2,
+      intervalMs: 10,
+      timeoutMs: 1_000,
+      generation: 17,
+    });
+    const errorPromise = readyPromise.then(() => null, (error) => error);
+
+    for (let index = 0; index < 2; index += 1) {
+      getLatestSocket().emit('error', new Error(sensitiveProbeError));
+      await vi.advanceTimersByTimeAsync(10);
+    }
+
+    await expect(errorPromise).resolves.toMatchObject({ code: 'retry_limit_exhausted' });
+    expect(vi.mocked(logger.error)).toHaveBeenCalledWith('Gateway readiness failed', {
+      event: 'gateway_ready_failed',
+      code: 'retry_limit_exhausted',
+      attempts: 2,
+      elapsedMs: 20,
+      deadlineMs: 1_000,
+      generation: 17,
+    });
+
+    const serializedLogs = JSON.stringify(vi.mocked(logger.error).mock.calls);
+    expect(serializedLogs).not.toContain('Z:\\\\private');
+    expect(serializedLogs).not.toContain('fileserver');
+    expect(serializedLogs).not.toContain('ws://');
+    expect(serializedLogs).not.toContain('secret-token-value');
+    expect(serializedLogs).not.toContain('Bearer');
+  });
+
+  it('truncates probe and sleep to the absolute ready deadline', async () => {
+    const beforeProbe = vi.fn();
+    const readyPromise = waitForGatewayReady({
+      port: 18789,
+      getProcessExitCode: () => null,
+      intervalMs: 200,
+      timeoutMs: 250,
+      beforeProbe,
+    });
+    const errorPromise = readyPromise.then(() => null, (error) => error);
+
+    const socket = getLatestSocket();
+    await vi.advanceTimersByTimeAsync(251);
+    await expect(errorPromise).resolves.toMatchObject({ code: 'ready_deadline_exceeded' });
+    expect(beforeProbe).toHaveBeenCalledTimes(1);
+    expect(socket.terminate).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(logger.error)).toHaveBeenCalledWith('Gateway readiness failed', {
+      event: 'gateway_ready_failed',
+      code: 'ready_deadline_exceeded',
+      attempts: 1,
+      elapsedMs: 250,
+      deadlineMs: 250,
+      generation: 0,
+    });
   });
 });

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 
 const hostInvoke = vi.fn();
 
@@ -13,6 +13,68 @@ beforeEach(() => {
 });
 
 describe('hostApi facade', () => {
+  it('passes dynamic managed media policies through the typed Host API', async () => {
+    const imagePolicy = {
+      defaultModel: 'future-image-model',
+      defaultSize: '3072x1728',
+      defaultQuality: 'ultra',
+      models: [{
+        id: 'future-image-model',
+        sizes: ['3072x1728'],
+        qualities: ['ultra'],
+        defaultSize: '3072x1728',
+        defaultQuality: 'ultra',
+      }],
+    };
+    const videoPolicy = {
+      defaultModel: 'future-video-model',
+      defaultSize: '2560x1080',
+      defaultDurationSeconds: 23,
+      models: [{
+        id: 'future-video-model',
+        modes: ['cinematic-video'],
+        sizes: ['2560x1080'],
+        aspectRatios: ['64:27'],
+        resolutions: ['UWQHD'],
+        durations: [23],
+        defaultSize: '2560x1080',
+        defaultAspectRatio: '64:27',
+        defaultResolution: 'UWQHD',
+        defaultDurationSeconds: 23,
+        requiresImage: false,
+      }],
+    };
+    hostInvoke
+      .mockResolvedValueOnce({ id: 'image', ok: true, data: imagePolicy })
+      .mockResolvedValueOnce({ id: 'video', ok: true, data: videoPolicy });
+    const { hostApi } = await import('@/lib/host-api');
+
+    await expect(hostApi.managedClientConfig.imageModels({ refresh: true }))
+      .resolves.toEqual(imagePolicy);
+    await expect(hostApi.managedClientConfig.videoModels({ refresh: false }))
+      .resolves.toEqual(videoPolicy);
+    expect(hostInvoke).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      module: 'managedClientConfig',
+      action: 'imageModels',
+      payload: { refresh: true },
+    }));
+    expect(hostInvoke).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      module: 'managedClientConfig',
+      action: 'videoModels',
+      payload: { refresh: false },
+    }));
+  });
+
+  it('preserves disabled managed media responses as null', async () => {
+    hostInvoke
+      .mockResolvedValueOnce({ id: 'image', ok: true, data: null })
+      .mockResolvedValueOnce({ id: 'video', ok: true, data: null });
+    const { hostApi } = await import('@/lib/host-api');
+
+    await expect(hostApi.managedClientConfig.imageModels()).resolves.toBeNull();
+    await expect(hostApi.managedClientConfig.videoModels()).resolves.toBeNull();
+  });
+
   it('calls settings.getAll through hostInvoke', async () => {
     hostInvoke.mockResolvedValueOnce({ id: 'req', ok: true, data: { theme: 'dark' } });
     const { hostApi } = await import('@/lib/host-api');
@@ -795,10 +857,10 @@ describe('hostApi facade', () => {
     };
 
     const findViolations = (root: string, patterns: RegExp[]): string[] => collectFiles(root).flatMap((file) => {
-      const relative = file.replace(`${process.cwd()}/`, '');
+      const relativeFile = relative(process.cwd(), file).replaceAll('\\', '/');
       const text = readFileSync(file, 'utf8');
       return patterns.flatMap((pattern) => (
-        [...text.matchAll(pattern)].map((match) => `${relative}: ${match[0]}`)
+        [...text.matchAll(pattern)].map((match) => `${relativeFile}: ${match[0]}`)
       ));
     });
 
@@ -813,7 +875,10 @@ describe('hostApi facade', () => {
       /\bfrom\s+['"][^'"]*(?:electron\/|dist-electron|preload|ipc-handlers|host-contract)/g,
       /\bimport\(\s*['"][^'"]*(?:@electron\/|electron\/|dist-electron|preload|ipc-handlers|host-contract)/g,
       /\brequire\(\s*['"][^'"]*(?:@electron\/|electron\/|dist-electron|preload|ipc-handlers|host-contract)/g,
-    ]).filter((violation) => violation !== "src/types/web-browser.ts: from 'electron'");
+    ]).filter((violation) => (
+      violation !== "src/types/web-browser.ts: from 'electron'"
+      && !violation.startsWith("src/lib/observability.ts: import('@sentry/electron/")
+    ));
     const sharedToAppLayer = findViolations('shared', [
       /\bfrom\s+['"]@\//g,
       /\bfrom\s+['"]@electron\//g,

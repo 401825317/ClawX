@@ -26,6 +26,10 @@ export interface GatewayStatus {
   connectedAt?: number;
   version?: string;
   reconnectAttempts?: number;
+  reconnectMaxAttempts?: number;
+  /** Current WebSocket/handshake connection attempt inside one startup flow. */
+  connectionAttempt?: number;
+  connectionMaxAttempts?: number;
   /** True once the gateway's internal subsystems (skills, plugins) are ready for RPC calls. */
   gatewayReady?: boolean;
 }

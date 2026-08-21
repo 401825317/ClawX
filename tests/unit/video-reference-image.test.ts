@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,6 +11,16 @@ import {
 } from '../../electron/utils/video-reference-image';
 
 const temporaryDirectories: string[] = [];
+
+async function writeUncompressedTiff(
+  filePath: string,
+  width: number,
+  height: number,
+): Promise<void> {
+  await sharp({
+    create: { width, height, channels: 3, background: '#4a90e2' },
+  }).tiff({ compression: 'none' }).toFile(filePath);
+}
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => (
@@ -49,16 +58,15 @@ describe('video reference image preparation', () => {
   it('returns compressed bytes below 1 MiB without changing or duplicating the staged original', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'uclaw-video-reference-'));
     temporaryDirectories.push(directory);
-    const filePath = join(directory, 'large.png');
-    const pixels = randomBytes(700 * 700 * 3);
-    await sharp(pixels, { raw: { width: 700, height: 700, channels: 3 } }).png().toFile(filePath);
+    const filePath = join(directory, 'large.tiff');
+    await writeUncompressedTiff(filePath, 1024, 512);
 
     const original = await readFile(filePath);
     expect(original.byteLength).toBeGreaterThan(1024 * 1024);
     const result = await prepareVideoReferenceImage({
       filePath,
-      fileName: 'large.png',
-      mimeType: 'image/png',
+      fileName: 'large.tiff',
+      mimeType: 'image/tiff',
       maxBytes: 1024 * 1024,
     });
 
@@ -66,9 +74,9 @@ describe('video reference image preparation', () => {
     expect(result.fileName).toBe('large.jpg');
     expect(result.mimeType).toBe('image/jpeg');
     expect(result.outputBytes).toBeLessThanOrEqual(1024 * 1024);
-    await expect(readFile(filePath)).resolves.toEqual(original);
-    await expect(readdir(directory)).resolves.toEqual(['large.png']);
-  }, 15_000);
+    expect((await readFile(filePath)).equals(original)).toBe(true);
+    await expect(readdir(directory)).resolves.toEqual(['large.tiff']);
+  });
 
   it('fails clearly when the compressed copy cannot meet the configured limit', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'uclaw-video-reference-'));
@@ -91,9 +99,8 @@ describe('ACP chat image preparation', () => {
   it('uses original binary bytes instead of base64 size for the 6 MiB limit', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'uclaw-acp-chat-image-'));
     temporaryDirectories.push(directory);
-    const filePath = join(directory, 'base64-larger.png');
-    const pixels = randomBytes(1_450 * 1_150 * 3);
-    await sharp(pixels, { raw: { width: 1_450, height: 1_150, channels: 3 } }).png().toFile(filePath);
+    const filePath = join(directory, 'base64-larger.tiff');
+    await writeUncompressedTiff(filePath, 1600, 1000);
 
     const original = await readFile(filePath);
     expect(original.byteLength).toBeLessThanOrEqual(ACP_CHAT_IMAGE_MAX_BYTES);
@@ -101,34 +108,33 @@ describe('ACP chat image preparation', () => {
 
     const result = await prepareAcpChatImage({
       filePath,
-      fileName: 'base64-larger.png',
-      mimeType: 'image/png',
+      fileName: 'base64-larger.tiff',
+      mimeType: 'image/tiff',
     });
 
     expect(result).toMatchObject({
-      fileName: 'base64-larger.png',
-      mimeType: 'image/png',
+      fileName: 'base64-larger.tiff',
+      mimeType: 'image/tiff',
       compressed: false,
       inputBytes: original.byteLength,
       outputBytes: original.byteLength,
     });
-    expect(result.buffer).toEqual(original);
-  }, 15_000);
+    expect(result.buffer.equals(original)).toBe(true);
+  });
 
   it('converts an oversized source to a JPEG below 6 MiB without changing the source', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'uclaw-acp-chat-image-'));
     temporaryDirectories.push(directory);
-    const filePath = join(directory, 'oversized.png');
-    const pixels = randomBytes(1_600 * 1_400 * 3);
-    await sharp(pixels, { raw: { width: 1_600, height: 1_400, channels: 3 } }).png().toFile(filePath);
+    const filePath = join(directory, 'oversized.tiff');
+    await writeUncompressedTiff(filePath, 1600, 1400);
 
     const original = await readFile(filePath);
     expect(original.byteLength).toBeGreaterThan(ACP_CHAT_IMAGE_MAX_BYTES);
 
     const result = await prepareAcpChatImage({
       filePath,
-      fileName: 'oversized.png',
-      mimeType: 'image/png',
+      fileName: 'oversized.tiff',
+      mimeType: 'image/tiff',
     });
 
     expect(result).toMatchObject({
@@ -138,15 +144,15 @@ describe('ACP chat image preparation', () => {
       compressed: true,
     });
     expect(result.outputBytes).toBeLessThanOrEqual(ACP_CHAT_IMAGE_MAX_BYTES);
-    await expect(readFile(filePath)).resolves.toEqual(original);
-    await expect(readdir(directory)).resolves.toEqual(['oversized.png']);
-  }, 20_000);
+    expect((await readFile(filePath)).equals(original)).toBe(true);
+    await expect(readdir(directory)).resolves.toEqual(['oversized.tiff']);
+  });
 
   it('throws a stable image-too-large error when an oversized source cannot be compressed', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'uclaw-acp-chat-image-'));
     temporaryDirectories.push(directory);
     const filePath = join(directory, 'invalid-image.bin');
-    await writeFile(filePath, randomBytes(ACP_CHAT_IMAGE_MAX_BYTES + 1));
+    await writeFile(filePath, Buffer.alloc(ACP_CHAT_IMAGE_MAX_BYTES + 1, 0x7f));
 
     const failure = await prepareAcpChatImage({
       filePath,

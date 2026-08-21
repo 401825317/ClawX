@@ -10,6 +10,10 @@ import { resolveSupportedLanguage } from '@shared/language';
 import { DEFAULT_WORKSPACE_CWD, MAX_RECENT_WORKSPACES } from '@shared/workspace';
 import { normalizeWorkspacePath } from '@/lib/workspace-context';
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 type Theme = 'light' | 'dark' | 'system';
 type UpdateChannel = 'stable' | 'beta' | 'dev';
 
@@ -52,7 +56,7 @@ interface SettingsState {
   setLanguage: (language: string) => void;
   setStartMinimized: (value: boolean) => void;
   setLaunchAtStartup: (value: boolean) => void;
-  setTelemetryEnabled: (value: boolean) => void;
+  setTelemetryEnabled: (value: boolean) => Promise<void>;
   setGatewayAutoStart: (value: boolean) => void;
   setGatewayPort: (port: number) => void;
   setProxyEnabled: (value: boolean) => void;
@@ -102,7 +106,10 @@ const clampSidebarWidth = (value: number) => Math.min(420, Math.max(220, Math.ro
 
 export const useSettingsStore = create<SettingsState>()(
   persist(
-    (set) => ({
+    (set) => {
+      let telemetryMutationId = 0;
+
+      return ({
       ...defaultSettings,
 
       init: async () => {
@@ -143,9 +150,23 @@ export const useSettingsStore = create<SettingsState>()(
         set({ launchAtStartup });
         void hostApi.settings.set('launchAtStartup', launchAtStartup).catch(() => { });
       },
-      setTelemetryEnabled: (telemetryEnabled) => {
+      setTelemetryEnabled: async (telemetryEnabled) => {
+        const mutationId = ++telemetryMutationId;
         set({ telemetryEnabled });
-        void hostApi.settings.set('telemetryEnabled', telemetryEnabled).catch(() => { });
+        try {
+          const result = await hostApi.settings.set('telemetryEnabled', telemetryEnabled);
+          if (isRecord(result) && result.success === false) throw new Error('Settings save failed');
+        } catch {
+          if (mutationId !== telemetryMutationId) return;
+          try {
+            const settings = await hostApi.settings.getAll();
+            if (typeof settings.telemetryEnabled === 'boolean') {
+              set({ telemetryEnabled: settings.telemetryEnabled });
+            }
+          } catch {
+            // Keep the optimistic value when Main cannot report its current state.
+          }
+        }
       },
       setGatewayAutoStart: (gatewayAutoStart) => {
         set({ gatewayAutoStart });
@@ -223,7 +244,8 @@ export const useSettingsStore = create<SettingsState>()(
       },
       markSetupComplete: () => set({ setupComplete: true }),
       resetSettings: () => set(defaultSettings),
-    }),
+      });
+    },
     {
       name: 'clawx-settings',
     }

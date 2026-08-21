@@ -29,6 +29,8 @@ export type TranscriptSupplementResult = {
 export type FailedAssistantTurnSupplement = {
   text: string;
   transcriptMessageId?: string;
+  /** Explicit MEDIA directives from the same failed live Turn, never whole-history replay. */
+  media: OpenClawMediaTurnSupplement[];
 };
 
 type TranscriptSupplementInput = {
@@ -74,6 +76,14 @@ function messageText(content: unknown): string {
   }).join('\n');
 }
 
+function visibleFailedAssistantText(content: unknown): string {
+  return messageText(content)
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*MEDIA:\s*/i.test(line))
+    .join('\n')
+    .trim();
+}
+
 function failedAssistantTurn(messages: RawMessage[]): FailedAssistantTurnSupplement | null {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
@@ -81,23 +91,37 @@ function failedAssistantTurn(messages: RawMessage[]): FailedAssistantTurnSupplem
     const failed = (message.stopReason ?? message.stop_reason)?.toLowerCase() === 'error'
       || Boolean(message.errorMessage ?? message.error_message);
     if (!failed) continue;
-    const text = messageText(message.content).trim();
-    if (!text) return null;
-    return { text, ...(message.id ? { transcriptMessageId: message.id } : {}) };
+    const text = visibleFailedAssistantText(message.content);
+    return { text, media: [], ...(message.id ? { transcriptMessageId: message.id } : {}) };
   }
   return null;
 }
 
 /** Reads one failed live turn without replaying transcript history into the timeline. */
 export async function fetchFailedOpenClawTurnSupplement(
-  input: Pick<TranscriptSupplementInput, 'sessionKey' | 'snapshot' | 'liveUserMessageId' | 'isCurrent'>,
+  input: Pick<TranscriptSupplementInput,
+    'sessionKey' | 'executionCwd' | 'snapshot' | 'liveUserMessageId' | 'isCurrent'
+  >,
 ): Promise<FailedAssistantTurnSupplement | null> {
   if (!input.liveUserMessageId || !input.isCurrent()) return null;
   const response = await hostApi.sessions.history({ sessionKey: input.sessionKey, limit: 1000 }).catch(() => null);
   if (!response?.success || !Array.isArray(response.messages) || !input.isCurrent()) return null;
   const snapshot = typeof input.snapshot === 'function' ? input.snapshot() : input.snapshot;
   const messages = selectOpenClawTranscriptTurn(response.messages, snapshot, input.liveUserMessageId);
-  return failedAssistantTurn(messages);
+  const transcriptMediaTurns = extractOpenClawMediaTurns(messages, {
+    executionCwd: input.executionCwd,
+    suppressedUris: new Set(),
+  });
+  const media = alignOpenClawMediaTurns(snapshot, transcriptMediaTurns, {
+    liveUserMessageId: input.liveUserMessageId,
+  });
+  const failed = failedAssistantTurn(messages);
+  if (!failed && media.length === 0) return null;
+  return {
+    text: failed?.text ?? '',
+    ...(failed?.transcriptMessageId ? { transcriptMessageId: failed.transcriptMessageId } : {}),
+    media,
+  };
 }
 
 // OpenClaw ACP currently projects only assistant text/thought content and strips MEDIA

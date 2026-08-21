@@ -9,9 +9,9 @@
  * equivalents could stall for 500 ms – 2 s+ per call, causing "Not
  * Responding" hangs.
  */
-import { access, lstat, mkdir, open, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'fs/promises';
+import { access, chmod, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from 'fs/promises';
 import { constants, readdirSync, readFileSync, existsSync } from 'fs';
-import { basename, dirname, join } from 'path';
+import { basename, dirname, isAbsolute, join } from 'path';
 import { createHash } from 'node:crypto';
 import { listConfiguredAgentIds } from './agent-config';
 import { getOpenClawResolvedDir, resolveOpenClawConfigPath, resolveOpenClawStateDir } from './paths';
@@ -29,6 +29,7 @@ import {
 } from './provider-keys';
 import { normalizePiAiModelCost, type PiAiModelCostRates } from '../shared/pi-ai-model-cost';
 import { withConfigLock } from './config-mutex';
+import { updateModelCatalog, withModelCatalogWriteLock } from './model-catalog-store';
 import { ensureMemorySearchDisabledDefault, hasUserMemorySearchConfig } from './openclaw-memory-search';
 import { PORTS } from './config';
 import { getSetting } from './store';
@@ -40,10 +41,13 @@ import { inferCustomModelContextWindow, inferCustomModelInputModalities } from '
 import {
   UCLAW_COMPATIBILITY_PROVIDER_ID,
   UCLAW_MANAGED_PROVIDER_ID,
+  UCLAW_MANAGED_PROVIDER_BASE_URL,
+  UCLAW_PRODUCTION_ORIGIN,
   UCLAW_VIDEO_PROVIDER_ID,
 } from '../../shared/junfeiai-endpoints';
 import { isUclawManagedRuntimeProviderEntry } from '../services/providers/managed-runtime-config';
 import { isOpenAiProviderIdentity } from '../services/providers/provider-mutation-lock';
+import { removeManagedPluginInstall } from './plugin-install';
 import {
   CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
   CLAWX_OPENAI_IMAGE_PROVIDER_KEY,
@@ -65,6 +69,7 @@ const AUTH_PROFILE_FILENAME = 'auth-profiles.json';
 const LEGACY_MINIMAX_OAUTH_PLUGIN_ID = 'minimax-portal-auth';
 const MERGED_MINIMAX_PLUGIN_ID = 'minimax';
 export const REQUIRED_UCLAW_RUNTIME_PLUGIN_IDS = [
+  'uclaw-artifact-orchestrator',
   'uclaw-local-artifacts',
   'uclaw-blender',
 ] as const;
@@ -74,7 +79,6 @@ const RETIRED_UCLAW_PLUGIN_IDS = [
   'uclaw-task-bridge',
   'uclaw-video-project',
 ] as const;
-const RETIRED_PLUGIN_REMOVE_MAX_RETRIES = process.platform === 'win32' ? 10 : 3;
 
 interface BundledPluginManifest {
   id: string;
@@ -321,17 +325,6 @@ async function fileExists(p: string): Promise<boolean> {
   }
 }
 
-/** Detect filesystem entries without following symlinks. */
-async function pathEntryExists(p: string): Promise<boolean> {
-  try {
-    await lstat(p);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-    throw error;
-  }
-}
-
 /** Ensure a directory exists (replaces mkdirSync). */
 async function ensureDir(dir: string): Promise<void> {
   if (!(await fileExists(dir))) {
@@ -361,10 +354,56 @@ type ManagedFileGeneration = Readonly<
   | { exists: true; contentHash: string }
 >;
 
+type ManagedFileReplaceResult = Readonly<
+  | { status: 'committed' }
+  | { status: 'committed-but-metadata-warning'; warningKind: string }
+>;
+
 let managedAtomicWriteSequence = 0;
+
+const MAX_MANAGED_CREDENTIAL_FILE_MODE = 0o640;
+
+function restrictManagedCredentialFileMode(mode: number): number {
+  const restricted = mode & MAX_MANAGED_CREDENTIAL_FILE_MODE;
+  return (restricted & 0o400) !== 0 ? restricted : 0o600;
+}
 
 function isManagedFileMissingError(error: unknown): boolean {
   return error instanceof Error && (error as NodeJS.ErrnoException).code === 'ENOENT';
+}
+
+function managedFileFailureKind(error: unknown): string {
+  const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
+  if (code && /^[A-Z][A-Z0-9_]{1,31}$/u.test(code)) {
+    return `fs_${code.toLowerCase()}`;
+  }
+  if (error instanceof Error && error.name === 'ManagedFileGenerationConflictError') {
+    return 'generation_conflict';
+  }
+  return 'operation_failed';
+}
+
+function safeManagedIdentifier(value: string): string {
+  const normalized = value.trim();
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(normalized)
+    ? normalized
+    : '<redacted>';
+}
+
+function managedFileOperationError(message: string, cause: unknown): Error {
+  return new Error(`${message} (reason=${managedFileFailureKind(cause)})`);
+}
+
+function reportManagedFileMetadataWarning(scope: string, result: ManagedFileReplaceResult): void {
+  if (result.status !== 'committed-but-metadata-warning') return;
+  try {
+    console.warn('[managed-file] committed-but-metadata-warning', {
+      scope,
+      warningKind: result.warningKind,
+    });
+  } catch {
+    // Diagnostics must never turn an already committed write into a failure.
+  }
 }
 
 function managedFileGeneration(content: Buffer | null): ManagedFileGeneration {
@@ -402,7 +441,9 @@ async function assertManagedFileGeneration(
 ): Promise<void> {
   const current = await readManagedFileState(filePath);
   if (!sameManagedFileGeneration(current.generation, expected)) {
-    throw new Error(`Managed file changed after snapshot at ${filePath}`);
+    const error = new Error('Managed file generation changed');
+    error.name = 'ManagedFileGenerationConflictError';
+    throw error;
   }
 }
 
@@ -412,7 +453,8 @@ async function replaceManagedFileAtomically(
   content: Buffer,
   mode: number,
   expectedCurrent: ManagedFileGeneration,
-): Promise<void> {
+): Promise<ManagedFileReplaceResult> {
+  const restrictedMode = restrictManagedCredentialFileMode(mode);
   const directory = dirname(filePath);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const tempPath = join(
@@ -423,9 +465,9 @@ async function replaceManagedFileAtomically(
   let renamed = false;
 
   try {
-    handle = await open(tempPath, 'wx', mode);
+    handle = await open(tempPath, 'wx', restrictedMode);
     await handle.writeFile(content);
-    await handle.chmod(mode);
+    await handle.chmod(restrictedMode);
     await handle.sync();
     await handle.close();
     handle = null;
@@ -434,6 +476,21 @@ async function replaceManagedFileAtomically(
     await assertManagedFileGeneration(filePath, expectedCurrent);
     await rename(tempPath, filePath);
     renamed = true;
+    // chmod on the final path is required after replacement: Windows does not
+    // preserve POSIX mode bits through rename in stat(), while POSIX must not
+    // inherit a broader umask-derived mode for credential-bearing files.
+    try {
+      await chmod(filePath, restrictedMode);
+      return { status: 'committed' };
+    } catch (cause) {
+      // The durable rename already committed. The staged file was chmodded
+      // before rename, so a final-path metadata failure is a warning rather
+      // than an uncommitted write that callers should roll back.
+      return {
+        status: 'committed-but-metadata-warning',
+        warningKind: managedFileFailureKind(cause),
+      };
+    }
   } finally {
     if (handle) {
       await handle.close().catch(() => undefined);
@@ -641,7 +698,10 @@ export async function snapshotManagedAgentAuthProfiles(): Promise<ManagedAgentAu
         originalMode = (await stat(filePath)).mode & 0o777;
       }
     } catch (cause) {
-      throw new Error(`Failed to snapshot auth profiles for agent "${agentId}" at ${filePath}`, { cause });
+      throw managedFileOperationError(
+        `Failed to snapshot auth profiles for agent "${safeManagedIdentifier(agentId)}"`,
+        cause,
+      );
     }
 
     let sqlite: AuthProfilesSqlitePrimaryRowsSnapshot;
@@ -655,7 +715,7 @@ export async function snapshotManagedAgentAuthProfiles(): Promise<ManagedAgentAu
       throw new Error(`Invalid SQLite auth profile store for agent "${agentId}"`);
     }
     if (originalContent && !jsonStore) {
-      throw new Error(`Invalid auth-profiles.json for agent "${agentId}" at ${filePath}`);
+      throw new Error(`Invalid auth-profiles.json for agent "${safeManagedIdentifier(agentId)}"`);
     }
     const baselines = managedAuthProfilesStoreBaselines(jsonStore, sqlite.parsedStore);
     agents.push({
@@ -788,9 +848,9 @@ async function applyManagedAgentAuthProfiles(
     try {
       await assertManagedFileGeneration(agent.filePath, agent.beforeGeneration);
     } catch (cause) {
-      throw new Error(
-        `Auth profiles changed after snapshot for agent "${agent.agentId}" at ${agent.filePath}`,
-        { cause },
+      throw managedFileOperationError(
+        `Auth profiles changed after snapshot for agent "${safeManagedIdentifier(agent.agentId)}"`,
+        cause,
       );
     }
   }
@@ -807,14 +867,20 @@ async function applyManagedAgentAuthProfiles(
       // Record the expected generation immediately before JSON I/O so an
       // ambiguous filesystem result can be rolled back without exposing content.
       agent.appliedGeneration = appliedGeneration;
-      await replaceManagedFileAtomically(
-        agent.filePath,
-        serializedJson,
-        0o600,
-        agent.beforeGeneration,
-      );
+      const replaceResult = await withModelCatalogWriteLock(agent.filePath, () => (
+        replaceManagedFileAtomically(
+          agent.filePath,
+          serializedJson,
+          0o600,
+          agent.beforeGeneration,
+        )
+      ));
+      reportManagedFileMetadataWarning('auth-profiles-apply', replaceResult);
     } catch (cause) {
-      throw new Error(`Failed to ${action} auth profiles for agent "${agent.agentId}"`, { cause });
+      throw managedFileOperationError(
+        `Failed to ${action} auth profiles for agent "${safeManagedIdentifier(agent.agentId)}"`,
+        cause,
+      );
     }
   }
 }
@@ -839,31 +905,34 @@ export async function installManagedAgentOpenAiApiKey(
 async function restoreManagedAuthProfilesJson(
   agent: ManagedAgentAuthProfilesFileSnapshot,
 ): Promise<void> {
-  const current = await readManagedFileState(agent.filePath);
-  if (sameManagedFileGeneration(current.generation, agent.beforeGeneration)) return;
-  if (
-    !agent.appliedGeneration
-    || !sameManagedFileGeneration(current.generation, agent.appliedGeneration)
-  ) {
-    throw new Error(`Refusing to overwrite concurrently changed auth profiles at ${agent.filePath}`);
-  }
-
-  if (agent.originalContent === null) {
-    try {
-      await assertManagedFileGeneration(agent.filePath, agent.appliedGeneration);
-      await unlink(agent.filePath);
-    } catch (cause) {
-      if (!isManagedFileMissingError(cause)) throw cause;
+  await withModelCatalogWriteLock(agent.filePath, async () => {
+    const current = await readManagedFileState(agent.filePath);
+    if (sameManagedFileGeneration(current.generation, agent.beforeGeneration)) return;
+    if (
+      !agent.appliedGeneration
+      || !sameManagedFileGeneration(current.generation, agent.appliedGeneration)
+    ) {
+      throw new Error('Refusing to overwrite concurrently changed auth profiles');
     }
-    return;
-  }
 
-  await replaceManagedFileAtomically(
-    agent.filePath,
-    agent.originalContent,
-    agent.originalMode ?? 0o600,
-    agent.appliedGeneration,
-  );
+    if (agent.originalContent === null) {
+      try {
+        await assertManagedFileGeneration(agent.filePath, agent.appliedGeneration);
+        await unlink(agent.filePath);
+      } catch (cause) {
+        if (!isManagedFileMissingError(cause)) throw cause;
+      }
+      return;
+    }
+
+    const replaceResult = await replaceManagedFileAtomically(
+      agent.filePath,
+      agent.originalContent,
+      agent.originalMode ?? 0o600,
+      agent.appliedGeneration,
+    );
+    reportManagedFileMetadataWarning('auth-profiles-restore', replaceResult);
+  });
 }
 
 /** Restore all frozen SQLite rows and JSON files before reporting aggregated failures. */
@@ -884,9 +953,9 @@ export async function restoreManagedAgentAuthProfiles(
       try {
         await restoreManagedAuthProfilesJson(agent);
       } catch (cause) {
-        failures.push(new Error(
-          `Failed to restore auth-profiles.json for agent "${agent.agentId}" at ${agent.filePath}`,
-          { cause },
+        failures.push(managedFileOperationError(
+          `Failed to restore auth-profiles.json for agent "${safeManagedIdentifier(agent.agentId)}"`,
+          cause,
         ));
       }
     }
@@ -1096,7 +1165,18 @@ function expandProviderKeysForDeletion(provider: string): string[] {
 }
 
 function normalizePluginPathForCompare(pluginPath: string): string {
-  return pluginPath.replace(/\\/g, '/').replace(/\/+$/, '');
+  const normalized = pluginPath.trim().replace(/\\/g, '/').replace(/\/+$/, '');
+  return /^[A-Z]:\//.test(normalized)
+    ? `${normalized[0].toLowerCase()}${normalized.slice(1)}`
+    : normalized;
+}
+
+function isAbsolutePluginLoadPath(pluginPath: string): boolean {
+  const value = pluginPath.trim();
+  return isAbsolute(value)
+    || /^[a-zA-Z]:[\\/]/.test(value)
+    || /^\\\\[^\\]/.test(value)
+    || /^\/\//.test(value);
 }
 
 function isBundledOpenClawPluginPath(pluginPath: string): boolean {
@@ -1342,19 +1422,23 @@ async function discoverLoadedPluginIdsFromConfig(config: Record<string, unknown>
 }
 
 /** Match only product-owned retired plugin IDs in explicit load paths. */
-function isRetiredUclawPluginLoadPath(value: unknown): boolean {
+function isRetiredUclawPluginLoadPath(value: unknown, retiredPluginIds: ReadonlySet<string>): boolean {
   if (typeof value !== 'string') return false;
   const normalized = value.replace(/\\/g, '/').replace(/\/+$/, '');
-  return RETIRED_UCLAW_PLUGIN_IDS.some((pluginId) => (
+  return [...retiredPluginIds].some((pluginId) => (
     normalized === pluginId || normalized.split('/').includes(pluginId)
   ));
 }
 
 /** Remove explicit plugin registrations while preserving unrelated user extensions. */
-function removeRetiredUclawPluginConfig(config: Record<string, unknown>): boolean {
+function removeRetiredUclawPluginConfig(
+  config: Record<string, unknown>,
+  retiredPluginIds: ReadonlySet<string>,
+): boolean {
+  if (retiredPluginIds.size === 0) return false;
   const plugins = config.plugins;
   if (Array.isArray(plugins)) {
-    const retained = plugins.filter((value) => !isRetiredUclawPluginLoadPath(value));
+    const retained = plugins.filter((value) => !isRetiredUclawPluginLoadPath(value, retiredPluginIds));
     if (retained.length === plugins.length) return false;
     if (retained.length > 0) config.plugins = retained;
     else delete config.plugins;
@@ -1365,7 +1449,7 @@ function removeRetiredUclawPluginConfig(config: Record<string, unknown>): boolea
   let modified = false;
   if (Array.isArray(plugins.allow)) {
     const retained = plugins.allow.filter((value) => (
-      typeof value !== 'string' || !RETIRED_UCLAW_PLUGIN_IDS.includes(value as typeof RETIRED_UCLAW_PLUGIN_IDS[number])
+      typeof value !== 'string' || !retiredPluginIds.has(value)
     ));
     if (retained.length !== plugins.allow.length) {
       if (retained.length > 0) plugins.allow = retained;
@@ -1377,7 +1461,7 @@ function removeRetiredUclawPluginConfig(config: Record<string, unknown>): boolea
   for (const key of ['entries', 'installs'] as const) {
     if (!isPlainRecord(plugins[key])) continue;
     const registrations = plugins[key] as Record<string, unknown>;
-    for (const pluginId of RETIRED_UCLAW_PLUGIN_IDS) {
+    for (const pluginId of retiredPluginIds) {
       if (!(pluginId in registrations)) continue;
       delete registrations[pluginId];
       modified = true;
@@ -1389,14 +1473,14 @@ function removeRetiredUclawPluginConfig(config: Record<string, unknown>): boolea
   }
 
   if (Array.isArray(plugins.load)) {
-    const retained = plugins.load.filter((value) => !isRetiredUclawPluginLoadPath(value));
+    const retained = plugins.load.filter((value) => !isRetiredUclawPluginLoadPath(value, retiredPluginIds));
     if (retained.length !== plugins.load.length) {
       if (retained.length > 0) plugins.load = retained;
       else delete plugins.load;
       modified = true;
     }
   } else if (isPlainRecord(plugins.load) && Array.isArray(plugins.load.paths)) {
-    const retained = plugins.load.paths.filter((value) => !isRetiredUclawPluginLoadPath(value));
+    const retained = plugins.load.paths.filter((value) => !isRetiredUclawPluginLoadPath(value, retiredPluginIds));
     if (retained.length !== plugins.load.paths.length) {
       if (retained.length > 0) plugins.load.paths = retained;
       else delete plugins.load.paths;
@@ -1414,50 +1498,17 @@ function removeRetiredUclawPluginConfig(config: Record<string, unknown>): boolea
 
 /** Remove master-only UClaw plugins before OpenClaw can auto-discover local extensions. */
 async function retireMasterOnlyUclawPlugins(config: Record<string, unknown>): Promise<boolean> {
-  const extensionsRoot = join(resolveOpenClawStateDir(), 'extensions');
+  const retiredManagedPluginIds = new Set<string>();
   for (const pluginId of RETIRED_UCLAW_PLUGIN_IDS) {
-    const pluginPath = join(extensionsRoot, pluginId);
-    let pluginExists: boolean;
-    try {
-      pluginExists = await pathEntryExists(pluginPath);
-    } catch (error) {
-      throw new RetiredUclawPluginCleanupError(
-        `Unable to inspect retired UClaw plugin "${pluginId}" at ${pluginPath}`,
-        { cause: error },
-      );
-    }
-    if (!pluginExists) continue;
-
-    try {
-      await rm(pluginPath, {
-        recursive: true,
-        force: true,
-        maxRetries: RETIRED_PLUGIN_REMOVE_MAX_RETRIES,
-        retryDelay: 200,
-      });
-    } catch (error) {
-      throw new RetiredUclawPluginCleanupError(
-        `Unable to remove retired UClaw plugin "${pluginId}" from ${pluginPath}`,
-        { cause: error },
-      );
-    }
-    try {
-      pluginExists = await pathEntryExists(pluginPath);
-    } catch (error) {
-      throw new RetiredUclawPluginCleanupError(
-        `Unable to verify retired UClaw plugin cleanup for "${pluginId}" at ${pluginPath}`,
-        { cause: error },
-      );
-    }
-    if (pluginExists) {
-      throw new RetiredUclawPluginCleanupError(
-        `Retired UClaw plugin "${pluginId}" still exists after cleanup: ${pluginPath}`,
-      );
-    }
-    console.log(`[sanitize] Removed retired UClaw plugin: ${pluginId}`);
+    const result = await removeManagedPluginInstall(pluginId, {
+      operation: 'retire-legacy-uclaw-plugin',
+    });
+    if (!result.removed) continue;
+    retiredManagedPluginIds.add(pluginId);
+    console.log(`[sanitize] Removed UClaw-managed retired plugin: ${pluginId}`);
   }
 
-  return removeRetiredUclawPluginConfig(config);
+  return removeRetiredUclawPluginConfig(config, retiredManagedPluginIds);
 }
 
 function normalizeAgentsDefaultsCompactionMode(config: Record<string, unknown>): void {
@@ -1857,13 +1908,23 @@ export async function removeProviderFromOpenClaw(provider: string): Promise<void
         const data = JSON.parse(raw) as Record<string, unknown>;
         const providers = data.providers as Record<string, unknown> | undefined;
         if (providers && providers[provider]) {
-          delete providers[provider];
-          await writeFile(modelsPath, JSON.stringify(data, null, 2), 'utf-8');
-          console.log(`Removed models.json entry for provider "${provider}" (agent "${id}")`);
+          await updateModelCatalog(modelsPath, (current) => {
+            const currentProviders = isPlainRecord(current.providers)
+              ? { ...current.providers }
+              : {};
+            delete currentProviders[provider];
+            return { ...current, providers: currentProviders };
+          });
+          console.log('[model-catalog] provider entry removed', {
+            agentId: safeManagedIdentifier(id),
+          });
         }
       }
-    } catch (err) {
-      console.warn(`Failed to remove provider ${provider} from models.json (agent "${id}"):`, err);
+    } catch (cause) {
+      console.warn('[model-catalog] provider entry removal failed', {
+        agentId: safeManagedIdentifier(id),
+        failureKind: managedFileFailureKind(cause),
+      });
     }
   }
 
@@ -2817,6 +2878,18 @@ function ensurePluginRegistrationEnabled(config: Record<string, unknown>, plugin
     entry.enabled = true;
     modified = true;
   }
+  if (pluginId === 'uclaw-artifact-orchestrator') {
+    const previousHooks = entry.hooks;
+    const hooks = isPlainRecord(previousHooks) ? previousHooks : {};
+    if (hooks !== previousHooks) {
+      entry.hooks = hooks;
+      modified = true;
+    }
+    if (hooks.allowPromptInjection !== true) {
+      hooks.allowPromptInjection = true;
+      modified = true;
+    }
+  }
 
   const previousAllow = plugins.allow;
   const allow = Array.isArray(previousAllow)
@@ -3155,9 +3228,9 @@ export async function syncGatewayTokenToConfig(token: string): Promise<void> {
 }
 
 /**
- * Default web_fetch SSRF policy for fake-IP / transparent-proxy environments
- * (e.g. Clash/Surge resolving public hostnames into 198.18.0.0/15). OpenClaw's
- * web_fetch tool does not read browser.ssrfPolicy — it uses tools.web.fetch only.
+ * Keep web_fetch private-network access deny-by-default. Explicit boolean
+ * values remain a config-level compatibility contract; proxy settings must not
+ * implicitly widen this policy.
  */
 function ensureWebFetchSsrfPolicyInConfig(config: Record<string, unknown>): boolean {
   const tools = (
@@ -3183,12 +3256,12 @@ function ensureWebFetchSsrfPolicyInConfig(config: Record<string, unknown>): bool
   ) as Record<string, unknown>;
 
   let changed = false;
-  if (ssrfPolicy.allowRfc2544BenchmarkRange === undefined) {
-    ssrfPolicy.allowRfc2544BenchmarkRange = true;
+  if (ssrfPolicy.allowRfc2544BenchmarkRange !== true && ssrfPolicy.allowRfc2544BenchmarkRange !== false) {
+    ssrfPolicy.allowRfc2544BenchmarkRange = false;
     changed = true;
   }
-  if (ssrfPolicy.allowIpv6UniqueLocalRange === undefined) {
-    ssrfPolicy.allowIpv6UniqueLocalRange = true;
+  if (ssrfPolicy.allowIpv6UniqueLocalRange !== true && ssrfPolicy.allowIpv6UniqueLocalRange !== false) {
+    ssrfPolicy.allowIpv6UniqueLocalRange = false;
     changed = true;
   }
 
@@ -3199,6 +3272,60 @@ function ensureWebFetchSsrfPolicyInConfig(config: Record<string, unknown>): bool
   tools.web = web;
   config.tools = tools;
   return true;
+}
+
+const UCLAW_BROWSER_LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]'] as const;
+
+function getTrustedUclawBrowserHosts(): string[] {
+  const hosts = new Set<string>(UCLAW_BROWSER_LOCAL_HOSTS);
+  for (const origin of [UCLAW_PRODUCTION_ORIGIN, UCLAW_MANAGED_PROVIDER_BASE_URL]) {
+    try {
+      const parsed = new URL(origin);
+      if (parsed.protocol === 'https:' && !parsed.username && !parsed.password) {
+        hosts.add(parsed.hostname);
+      }
+    } catch {
+      // The compile-time endpoint contract validates these origins. Do not widen
+      // browser access if an invalid value somehow reaches this boundary.
+    }
+  }
+  return [...hosts];
+}
+
+/**
+ * Browser navigation defaults to deny private networks. The only exceptions are
+ * exact loopback hosts needed by the locally managed UClaw runtime and the
+ * compile-time managed relay origin. Do not preserve wildcard or user-supplied
+ * grants here: this sync path owns a secure default, not an enterprise override.
+ */
+function ensureBrowserSsrfPolicy(browser: Record<string, unknown>): boolean {
+  const current = browser.ssrfPolicy;
+  const hasValidPolicy = Boolean(current && typeof current === 'object' && !Array.isArray(current));
+  const policy = hasValidPolicy
+    ? { ...(current as Record<string, unknown>) }
+    : {};
+  const allowedHostnames = getTrustedUclawBrowserHosts();
+  let changed = !hasValidPolicy;
+
+  if (policy.dangerouslyAllowPrivateNetwork !== false) {
+    policy.dangerouslyAllowPrivateNetwork = false;
+    changed = true;
+  }
+  if (
+    !Array.isArray(policy.allowedHostnames)
+    || policy.allowedHostnames.length !== allowedHostnames.length
+    || policy.allowedHostnames.some((hostname, index) => hostname !== allowedHostnames[index])
+  ) {
+    policy.allowedHostnames = allowedHostnames;
+    changed = true;
+  }
+  if (policy.hostnameAllowlist !== undefined) {
+    delete policy.hostnameAllowlist;
+    changed = true;
+  }
+
+  if (changed) browser.ssrfPolicy = policy;
+  return changed;
 }
 
 /**
@@ -3226,17 +3353,7 @@ export async function syncBrowserConfigToOpenClaw(): Promise<void> {
       changed = true;
     }
 
-    // Default ssrfPolicy to allow private network access for enterprise/internal use
-    if (browser.ssrfPolicy == null) {
-      browser.ssrfPolicy = { dangerouslyAllowPrivateNetwork: true };
-      changed = true;
-    } else if (
-      typeof browser.ssrfPolicy === 'object' &&
-      (browser.ssrfPolicy as Record<string, unknown>).dangerouslyAllowPrivateNetwork === undefined
-    ) {
-      (browser.ssrfPolicy as Record<string, unknown>).dangerouslyAllowPrivateNetwork = true;
-      changed = true;
-    }
+    changed = ensureBrowserSsrfPolicy(browser) || changed;
 
     changed = ensureWebFetchSsrfPolicyInConfig(config) || changed;
     changed = ensureFreeWebSearchProviderInConfig(config) || changed;
@@ -3343,21 +3460,12 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
       config.browser = browser;
       modified = true;
     }
-    // Default ssrfPolicy to allow private network access for enterprise/internal use
-    if (browser.ssrfPolicy == null) {
-      browser.ssrfPolicy = { dangerouslyAllowPrivateNetwork: true };
-      config.browser = browser;
-      modified = true;
-    } else if (
-      typeof browser.ssrfPolicy === 'object' &&
-      (browser.ssrfPolicy as Record<string, unknown>).dangerouslyAllowPrivateNetwork === undefined
-    ) {
-      (browser.ssrfPolicy as Record<string, unknown>).dangerouslyAllowPrivateNetwork = true;
+    if (ensureBrowserSsrfPolicy(browser)) {
       config.browser = browser;
       modified = true;
     }
 
-    // ── web_fetch SSRF policy (fake-IP / transparent-proxy environments) ──
+    // ── web_fetch SSRF policy (secure default; explicit config opt-in only) ──
     if (ensureWebFetchSsrfPolicyInConfig(config)) {
       modified = true;
     }
@@ -3512,18 +3620,20 @@ function isManagedAgentModelProvider(
 
 function parseManagedAgentModelsDocument(
   agentId: string,
-  filePath: string,
   content: Buffer,
 ): Record<string, unknown> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(content.toString('utf8'));
   } catch (cause) {
-    throw new Error(`Invalid models.json for managed agent "${agentId}" at ${filePath}`, { cause });
+    throw managedFileOperationError(
+      `Invalid models.json for managed agent "${safeManagedIdentifier(agentId)}"`,
+      cause,
+    );
   }
 
   if (!isPlainRecord(parsed) || (parsed.providers !== undefined && !isPlainRecord(parsed.providers))) {
-    throw new Error(`Invalid models.json for managed agent "${agentId}" at ${filePath}`);
+    throw new Error(`Invalid models.json for managed agent "${safeManagedIdentifier(agentId)}"`);
   }
   return parsed;
 }
@@ -3543,7 +3653,10 @@ export async function snapshotManagedAgentModelsFiles(): Promise<ManagedAgentMod
     try {
       fileState = await readManagedFileState(filePath);
     } catch (cause) {
-      throw new Error(`Failed to read models.json for managed agent "${agentId}" at ${filePath}`, { cause });
+      throw managedFileOperationError(
+        `Failed to read models.json for managed agent "${safeManagedIdentifier(agentId)}"`,
+        cause,
+      );
     }
 
     const { content: originalContent, generation: beforeGeneration } = fileState;
@@ -3559,12 +3672,15 @@ export async function snapshotManagedAgentModelsFiles(): Promise<ManagedAgentMod
       continue;
     }
 
-    const document = parseManagedAgentModelsDocument(agentId, filePath, originalContent);
+    const document = parseManagedAgentModelsDocument(agentId, originalContent);
     let originalMode: number;
     try {
       originalMode = (await stat(filePath)).mode & 0o777;
     } catch (cause) {
-      throw new Error(`Failed to read models.json permissions for managed agent "${agentId}" at ${filePath}`, { cause });
+      throw managedFileOperationError(
+        `Failed to read models.json permissions for managed agent "${safeManagedIdentifier(agentId)}"`,
+        cause,
+      );
     }
     files.push({
       agentId,
@@ -3624,24 +3740,28 @@ async function applyManagedAgentModelsFiles(
     try {
       await assertManagedFileGeneration(file.filePath, file.beforeGeneration);
     } catch (cause) {
-      throw new Error(
-        `models.json changed after snapshot for managed agent "${file.agentId}" at ${file.filePath}`,
-        { cause },
+      throw managedFileOperationError(
+        `models.json changed after snapshot for managed agent "${safeManagedIdentifier(file.agentId)}"`,
+        cause,
       );
     }
   }
 
   for (const { file, content, appliedGeneration } of serializedFiles) {
     try {
-      file.appliedGeneration = appliedGeneration;
-      await replaceManagedFileAtomically(
+      const replaceResult = await withModelCatalogWriteLock(file.filePath, () => replaceManagedFileAtomically(
         file.filePath,
         content,
         file.originalMode ?? 0o600,
         file.beforeGeneration,
-      );
+      ));
+      file.appliedGeneration = appliedGeneration;
+      reportManagedFileMetadataWarning('agent-models-apply', replaceResult);
     } catch (cause) {
-      throw new Error(`Failed to ${action} models.json for managed agent "${file.agentId}" at ${file.filePath}`, { cause });
+      throw managedFileOperationError(
+        `Failed to ${action} models.json for managed agent "${safeManagedIdentifier(file.agentId)}"`,
+        cause,
+      );
     }
   }
 }
@@ -3716,35 +3836,38 @@ export async function restoreManagedAgentModelsFiles(
 
   for (const file of state.files) {
     try {
-      const current = await readManagedFileState(file.filePath);
-      if (sameManagedFileGeneration(current.generation, file.beforeGeneration)) continue;
-      if (
-        !file.appliedGeneration
-        || !sameManagedFileGeneration(current.generation, file.appliedGeneration)
-      ) {
-        throw new Error(`Refusing to overwrite concurrently changed models.json at ${file.filePath}`);
-      }
-
-      if (file.originalContent === null) {
-        try {
-          await assertManagedFileGeneration(file.filePath, file.appliedGeneration);
-          await unlink(file.filePath);
-        } catch (cause) {
-          if (!isManagedFileMissingError(cause)) throw cause;
+      await withModelCatalogWriteLock(file.filePath, async () => {
+        const current = await readManagedFileState(file.filePath);
+        if (sameManagedFileGeneration(current.generation, file.beforeGeneration)) return;
+        if (
+          !file.appliedGeneration
+          || !sameManagedFileGeneration(current.generation, file.appliedGeneration)
+        ) {
+          throw new Error('Refusing to overwrite concurrently changed models.json');
         }
-        continue;
-      }
 
-      await replaceManagedFileAtomically(
-        file.filePath,
-        file.originalContent,
-        file.originalMode ?? 0o600,
-        file.appliedGeneration,
-      );
+        if (file.originalContent === null) {
+          try {
+            await assertManagedFileGeneration(file.filePath, file.appliedGeneration);
+            await unlink(file.filePath);
+          } catch (cause) {
+            if (!isManagedFileMissingError(cause)) throw cause;
+          }
+          return;
+        }
+
+        const replaceResult = await replaceManagedFileAtomically(
+          file.filePath,
+          file.originalContent,
+          file.originalMode ?? 0o600,
+          file.appliedGeneration,
+        );
+        reportManagedFileMetadataWarning('agent-models-restore', replaceResult);
+      });
     } catch (cause) {
-      failures.push(new Error(
-        `Failed to restore models.json for managed agent "${file.agentId}" at ${file.filePath}`,
-        { cause },
+      failures.push(managedFileOperationError(
+        `Failed to restore models.json for managed agent "${safeManagedIdentifier(file.agentId)}"`,
+        cause,
       ));
     }
   }
@@ -3759,62 +3882,67 @@ async function updateModelsJsonProviderEntriesForAgents(
   providerType: string,
   entry: AgentModelProviderEntry,
 ): Promise<void> {
+  const failures: Error[] = [];
+  let updatedCount = 0;
+
   for (const agentId of agentIds) {
     const modelsPath = join(resolveOpenClawStateDir(), 'agents', agentId, 'agent', 'models.json');
-    let data: Record<string, unknown> = {};
     try {
-      data = (await readJsonFile<Record<string, unknown>>(modelsPath)) ?? {};
-    } catch {
-      // corrupt / missing – start with an empty object
+      await updateModelCatalog(modelsPath, (data) => {
+        const providers = (
+          data.providers && typeof data.providers === 'object' ? data.providers : {}
+        ) as Record<string, Record<string, unknown>>;
+
+        const existing: Record<string, unknown> =
+          providers[providerType] && typeof providers[providerType] === 'object'
+            ? { ...providers[providerType] }
+            : {};
+
+        const existingModels = Array.isArray(existing.models)
+          ? (existing.models as Array<Record<string, unknown>>)
+          : [];
+
+        const mergedModels = (entry.models ?? []).map((m) => {
+          const prev = existingModels.find((e) => e.id === m.id);
+          const base = prev ? { ...prev, id: m.id, name: m.name } : { ...m };
+          if (
+            providerType.startsWith('custom-')
+            && typeof base.contextWindow !== 'number'
+            && typeof base.contextTokens !== 'number'
+          ) {
+            base.contextWindow = inferCustomModelContextWindow(m.id);
+          }
+          return {
+            ...base,
+            cost: normalizePiAiModelCost((base as { cost?: unknown }).cost),
+          };
+        });
+
+        if (entry.baseUrl !== undefined) existing.baseUrl = entry.baseUrl;
+        if (entry.api !== undefined) existing.api = entry.api;
+        if (mergedModels.length > 0) existing.models = mergedModels;
+        if (entry.apiKey !== undefined) existing.apiKey = entry.apiKey;
+        if (entry.authHeader !== undefined) existing.authHeader = entry.authHeader;
+        ensureAnthropicMessagesProviderDefaults(existing, providerType);
+
+        return { ...data, providers: { ...providers, [providerType]: existing } };
+      });
+      updatedCount += 1;
+    } catch (cause) {
+      failures.push(managedFileOperationError(
+        `Failed to update models.json for agent "${safeManagedIdentifier(agentId)}"`,
+        cause,
+      ));
     }
+  }
 
-    const providers = (
-      data.providers && typeof data.providers === 'object' ? data.providers : {}
-    ) as Record<string, Record<string, unknown>>;
-
-    const existing: Record<string, unknown> =
-      providers[providerType] && typeof providers[providerType] === 'object'
-        ? { ...providers[providerType] }
-        : {};
-
-    const existingModels = Array.isArray(existing.models)
-      ? (existing.models as Array<Record<string, unknown>>)
-      : [];
-
-    const mergedModels = (entry.models ?? []).map((m) => {
-      const prev = existingModels.find((e) => e.id === m.id);
-      const base = prev ? { ...prev, id: m.id, name: m.name } : { ...m };
-      // Custom-provider rows need an explicit contextWindow so the embedded
-      // runner can budget compaction (see backfillCustomProviderModelContextWindows).
-      if (
-        providerType.startsWith('custom-')
-        && typeof base.contextWindow !== 'number'
-        && typeof base.contextTokens !== 'number'
-      ) {
-        base.contextWindow = inferCustomModelContextWindow(m.id);
-      }
-      return {
-        ...base,
-        cost: normalizePiAiModelCost((base as { cost?: unknown }).cost),
-      };
+  if (failures.length > 0) {
+    console.warn('[model-catalog] provider update incomplete', {
+      attemptedCount: agentIds.length,
+      updatedCount,
+      failedCount: failures.length,
     });
-
-    if (entry.baseUrl !== undefined) existing.baseUrl = entry.baseUrl;
-    if (entry.api !== undefined) existing.api = entry.api;
-    if (mergedModels.length > 0) existing.models = mergedModels;
-    if (entry.apiKey !== undefined) existing.apiKey = entry.apiKey;
-    if (entry.authHeader !== undefined) existing.authHeader = entry.authHeader;
-    ensureAnthropicMessagesProviderDefaults(existing, providerType);
-
-    providers[providerType] = existing;
-    data.providers = providers;
-
-    try {
-      await writeJsonFile(modelsPath, data);
-      console.log(`Updated models.json for agent "${agentId}" provider "${providerType}"`);
-    } catch (err) {
-      console.warn(`Failed to update models.json for agent "${agentId}":`, err);
-    }
+    throw new AggregateError(failures, 'Failed to update one or more agent model catalogs');
   }
 }
 
@@ -4019,7 +4147,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       if (Array.isArray(plugins)) {
         const validPlugins: unknown[] = [];
         for (const p of plugins) {
-          if (typeof p === 'string' && p.startsWith('/')) {
+          if (typeof p === 'string' && isAbsolutePluginLoadPath(p)) {
             if (isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
               console.log(`[sanitize] Removing stale/bundled plugin path "${p}" from openclaw.json`);
               modified = true;
@@ -4036,7 +4164,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
         if (Array.isArray(pluginsObj.load)) {
           const validLoad: unknown[] = [];
           for (const p of pluginsObj.load) {
-            if (typeof p === 'string' && p.startsWith('/')) {
+            if (typeof p === 'string' && isAbsolutePluginLoadPath(p)) {
               if (isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
                 console.log(`[sanitize] Removing stale/bundled plugin path "${p}" from openclaw.json`);
                 modified = true;
@@ -4055,7 +4183,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
             const validPaths: unknown[] = [];
             const countBefore = loadObj.paths.length;
             for (const p of loadObj.paths) {
-              if (typeof p === 'string' && p.startsWith('/')) {
+              if (typeof p === 'string' && isAbsolutePluginLoadPath(p)) {
                 if (isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
                   console.log(`[sanitize] Removing stale/bundled plugin path "${p}" from plugins.load.paths`);
                   modified = true;

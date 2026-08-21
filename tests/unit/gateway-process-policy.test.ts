@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_RECONNECT_CONFIG,
   getDeferredRestartAction,
   getReconnectScheduleDecision,
   getReconnectSkipReason,
@@ -9,6 +10,10 @@ import {
 } from '@electron/gateway/process-policy';
 
 describe('gateway process policy helpers', () => {
+  it('bounds automatic process reconnects to five attempts', () => {
+    expect(DEFAULT_RECONNECT_CONFIG.maxAttempts).toBe(5);
+  });
+
   describe('lifecycle epoch helpers', () => {
     it('increments lifecycle epoch by one', () => {
       expect(nextLifecycleEpoch(0)).toBe(1);

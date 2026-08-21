@@ -29,8 +29,12 @@ import type {
   ManagedAuthVerifyPayload,
 } from '../managed-auth';
 import type {
+  ManagedClientImageModelPolicy,
+  ManagedClientImageModelRequest,
   ManagedClientTextModelPolicy,
   ManagedClientTextModelRequest,
+  ManagedClientRuntimeConfig,
+  ManagedClientRuntimeConfigRequest,
   ManagedClientVideoModelPolicy,
   ManagedClientVideoModelRequest,
 } from '../managed-client-config';
@@ -45,6 +49,26 @@ import type {
   BillingResult,
 } from '../billing';
 import type { SupportContactConfig } from '../support';
+import type { PortableRuntimeHealthSnapshot } from '../portable-runtime-health';
+import type {
+  ArtifactTaskPreparePayload,
+  ArtifactTaskPrepareResult,
+  ArtifactWebpageValidationPayload,
+  ArtifactWebpageValidationResult,
+} from '../artifact-tasks';
+import type {
+  LongTermRule,
+  LongTermRuleCapturePayload,
+  LongTermRuleCaptureResult,
+  LongTermRuleContext,
+  LongTermRuleCreatePayload,
+  LongTermRuleDeletePayload,
+  LongTermRuleListPayload,
+  LongTermRuleListResult,
+  LongTermRuleMutationResult,
+  LongTermRuleUndoPayload,
+  LongTermRuleUpdatePayload,
+} from '../long-term-rules';
 
 export type JsonRecord = Record<string, unknown>;
 export type HostSuccess = { success: boolean; error?: string };
@@ -925,6 +949,7 @@ export type DeliveryTargetsResult = HostSuccess & { targets: DeliveryChannelGrou
 export type HostApiContract = {
   app: {
     quit: () => void;
+    portableRuntimeHealth: () => PortableRuntimeHealthSnapshot | null;
     openClawDoctor: (payload: OpenClawDoctorPayload) => Omit<OpenClawDoctorResult, 'mode'>;
   };
   openclaw: {
@@ -1065,7 +1090,22 @@ export type HostApiContract = {
   };
   managedClientConfig: {
     textModels: (payload?: ManagedClientTextModelRequest) => ManagedClientTextModelPolicy;
-    videoModels: (payload?: ManagedClientVideoModelRequest) => ManagedClientVideoModelPolicy;
+    imageModels: (payload?: ManagedClientImageModelRequest) => ManagedClientImageModelPolicy | null;
+    videoModels: (payload?: ManagedClientVideoModelRequest) => ManagedClientVideoModelPolicy | null;
+    runtimeConfig: (payload?: ManagedClientRuntimeConfigRequest) => ManagedClientRuntimeConfig;
+  };
+  artifactTasks: {
+    prepare: (payload: ArtifactTaskPreparePayload) => ArtifactTaskPrepareResult;
+    validateWebpage: (payload: ArtifactWebpageValidationPayload) => ArtifactWebpageValidationResult;
+  };
+  longTermRules: {
+    list: (payload: LongTermRuleListPayload) => LongTermRuleListResult;
+    create: (payload: LongTermRuleCreatePayload) => LongTermRuleMutationResult;
+    update: (payload: LongTermRuleUpdatePayload) => LongTermRuleMutationResult;
+    delete: (payload: LongTermRuleDeletePayload) => LongTermRuleMutationResult;
+    undo: (payload: LongTermRuleUndoPayload) => LongTermRuleMutationResult;
+    capture: (payload: LongTermRuleCapturePayload) => LongTermRuleCaptureResult;
+    repair: (payload: LongTermRuleContext) => LongTermRule[];
   };
   billing: {
     overview: () => BillingResult<BillingOverview>;

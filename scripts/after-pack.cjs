@@ -212,6 +212,134 @@ function writeBuildIdentity(resourcesDir, context, platform, arch) {
     'utf8',
   );
   console.log(`[after-pack] Build identity: ${identity.buildId} (${identity.appVersion}, ${platform}/${arch})`);
+  return identity;
+}
+
+const SENTRY_RELEASE_ENV_KEYS = [
+  'SENTRY_URL',
+  'SENTRY_AUTH_TOKEN',
+  'SENTRY_ORG',
+  'SENTRY_PROJECT',
+];
+
+const SENTRY_CHILD_ENV_ALLOWLIST = [
+  'COMSPEC',
+  'HTTPS_PROXY',
+  'HTTP_PROXY',
+  'NODE_EXTRA_CA_CERTS',
+  'NO_PROXY',
+  'Path',
+  'PATH',
+  'PATHEXT',
+  'SSL_CERT_DIR',
+  'SSL_CERT_FILE',
+  'SystemRoot',
+  'TEMP',
+  'TMP',
+  'WINDIR',
+];
+
+function releaseEnvValue(environment, name) {
+  return String(environment[name] || '').trim();
+}
+
+function resolveSentryReleaseUploadConfig(environment = process.env) {
+  const authToken = releaseEnvValue(environment, 'SENTRY_AUTH_TOKEN');
+  if (!authToken) return null;
+
+  const missing = SENTRY_RELEASE_ENV_KEYS
+    .filter((name) => name !== 'SENTRY_AUTH_TOKEN' && !releaseEnvValue(environment, name));
+  if (missing.length > 0) {
+    throw new Error(`[after-pack] Incomplete Sentry release configuration: ${missing.join(', ')}`);
+  }
+
+  let sentryUrl;
+  try {
+    sentryUrl = new URL(releaseEnvValue(environment, 'SENTRY_URL'));
+  } catch {
+    throw new Error('[after-pack] SENTRY_URL must be a valid release API base URL.');
+  }
+  const isLoopbackHttp = sentryUrl.protocol === 'http:'
+    && ['127.0.0.1', '::1', 'localhost'].includes(sentryUrl.hostname.toLowerCase());
+  if (sentryUrl.protocol !== 'https:' && !isLoopbackHttp) {
+    throw new Error('[after-pack] SENTRY_URL must use HTTPS (HTTP is allowed only for loopback testing).');
+  }
+  if (sentryUrl.username || sentryUrl.password || sentryUrl.search || sentryUrl.hash) {
+    throw new Error('[after-pack] SENTRY_URL must not contain credentials, query parameters, or a fragment.');
+  }
+
+  const org = releaseEnvValue(environment, 'SENTRY_ORG');
+  const project = releaseEnvValue(environment, 'SENTRY_PROJECT');
+  const safeSlug = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+  if (!safeSlug.test(org) || !safeSlug.test(project)) {
+    throw new Error('[after-pack] Sentry organization and project must be valid release identifiers.');
+  }
+
+  return {
+    url: sentryUrl.toString(),
+    authToken,
+    org,
+    project,
+  };
+}
+
+function buildSentryReleaseEnvironment(environment, config, release) {
+  const childEnvironment = {};
+  for (const name of SENTRY_CHILD_ENV_ALLOWLIST) {
+    if (typeof environment[name] === 'string') childEnvironment[name] = environment[name];
+  }
+  return {
+    ...childEnvironment,
+    SENTRY_AUTH_TOKEN: config.authToken,
+    SENTRY_LOG_LEVEL: 'error',
+    SENTRY_ORG: config.org,
+    SENTRY_PROJECT: config.project,
+    SENTRY_RELEASE: release,
+    SENTRY_URL: config.url,
+  };
+}
+
+function uploadSentrySourceMaps(projectDir, identity, options = {}) {
+  const environment = options.environment || process.env;
+  const log = options.log || console.log;
+  const config = resolveSentryReleaseUploadConfig(environment);
+  if (!config) {
+    log('[after-pack] Sentry source map upload skipped: release authorization is not configured.');
+    return { status: 'skipped' };
+  }
+
+  const cli = (options.resolveCli || (() => require.resolve('@sentry/cli/bin/sentry-cli')))();
+  const execute = options.execFileSync || execFileSync;
+  const release = `uclaw@${identity.appVersion}+${identity.buildId}`;
+  const childEnvironment = buildSentryReleaseEnvironment(environment, config, release);
+  const run = (step, args) => {
+    try {
+      execute(process.execPath, [cli, ...args], {
+        cwd: projectDir,
+        encoding: 'utf8',
+        env: childEnvironment,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+    } catch (error) {
+      const exitCode = Number.isInteger(error?.status) ? ` (exit code ${error.status})` : '';
+      throw new Error(`[after-pack] Sentry source map ${step} failed${exitCode}.`);
+    }
+  };
+
+  run('release creation', ['releases', 'new', release]);
+  run('upload', [
+    'sourcemaps',
+    'upload',
+    '--release', release,
+    '--strict',
+    '--validate',
+    join(projectDir, 'dist'),
+    join(projectDir, 'dist-electron'),
+  ]);
+  run('release finalization', ['releases', 'finalize', release]);
+  log(`[after-pack] Sentry source maps uploaded for ${release}.`);
+  return { status: 'uploaded', release };
 }
 
 // ── General cleanup ──────────────────────────────────────────────────────────
@@ -262,6 +390,64 @@ function cleanupUnnecessaryFiles(dir) {
 
   walk(dir);
   return removedCount;
+}
+
+function removeSourceMapFiles(rootDir) {
+  let removed = 0;
+  const stack = [rootDir];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    let entries;
+    try { entries = readdirSync(normWin(dir), { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      const fullPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+      } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.map')) {
+        rmSync(normWin(fullPath), { force: true });
+        removed++;
+      }
+    }
+  }
+  return removed;
+}
+
+function findPackagedSourceMaps(resourcesDir, listAsarPackage) {
+  const findings = [];
+  const stack = [resourcesDir];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    let entries;
+    try { entries = readdirSync(normWin(dir), { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      const fullPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+      } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.map')) {
+        findings.push(relative(resourcesDir, fullPath).replace(/\\/g, '/'));
+      }
+    }
+  }
+
+  const asarPath = join(resourcesDir, 'app.asar');
+  if (existsSync(normWin(asarPath))) {
+    const listPackage = listAsarPackage || require('@electron/asar').listPackage;
+    for (const entry of listPackage(normWin(asarPath))) {
+      if (String(entry).toLowerCase().endsWith('.map')) {
+        findings.push(`app.asar:${String(entry).replace(/\\/g, '/')}`);
+      }
+    }
+  }
+  return findings.sort();
+}
+
+function assertNoPackagedSourceMaps(resourcesDir, listAsarPackage) {
+  const findings = findPackagedSourceMaps(resourcesDir, listAsarPackage);
+  if (findings.length > 0) {
+    throw new Error(
+      `[after-pack] Source map packaging gate failed (${findings.length} file(s)).`,
+    );
+  }
 }
 
 // ── Platform-specific: koffi ─────────────────────────────────────────────────
@@ -458,6 +644,12 @@ function cleanupKnownRuntimeJunk(rootDir, platform, arch) {
 exports.__test = {
   cleanupNativePlatformPackages,
   cleanupNodeModulesRuntimeJunk,
+  removeSourceMapFiles,
+  findPackagedSourceMaps,
+  assertNoPackagedSourceMaps,
+  resolveSentryReleaseUploadConfig,
+  buildSentryReleaseEnvironment,
+  uploadSentrySourceMaps,
 };
 
 // ── Broken module patcher ─────────────────────────────────────────────────────
@@ -1124,10 +1316,18 @@ exports.default = async function afterPack(context) {
       console.log(`[after-pack] 🩹 Patched ${asarLruCount} lru-cache instance(s) in app.asar.unpacked`);
     }
   }
-  // 6. Persist source/build identity for USB and release validation.
-  writeBuildIdentity(resourcesDir, context, platform, arch);
+  // 6. Remove source maps copied by dependencies/extraResources and verify both
+  // filesystem resources and the already-created app.asar. Build-directory maps
+  // remain available for the optional Sentry upload below.
+  const removedSourceMaps = removeSourceMapFiles(resourcesDir);
+  assertNoPackagedSourceMaps(resourcesDir);
+  console.log(`[after-pack] Source map packaging gate passed (removed ${removedSourceMaps}).`);
 
-  // 7. [Windows only] Ensure NSIS templates are patched (also done pre-build in package:win).
+  // 7. Persist source/build identity for USB and release validation.
+  const buildIdentity = writeBuildIdentity(resourcesDir, context, platform, arch);
+  uploadSentrySourceMaps(context.packager.projectDir || join(__dirname, '..'), buildIdentity);
+
+  // 8. [Windows only] Ensure NSIS templates are patched (also done pre-build in package:win).
   if (platform === 'win32') {
     if (process.env.CLAWX_SKIP_NSIS_PATCH === '1') {
       console.log('[after-pack] NSIS template patch skipped for directory/portable packaging.');

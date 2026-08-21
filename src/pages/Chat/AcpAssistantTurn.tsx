@@ -122,11 +122,18 @@ export function AcpAssistantTurn({
 
           const { item } = entry;
           if (item.kind === 'message-segment') {
-            if (item.role === 'user') return <AcpMessageSegment key={item.id} item={item} />;
+            if (item.role === 'user') {
+              return <AcpMessageSegment key={item.id} item={item} workspaceRoot={workspaceRoot} />;
+            }
             return (
               <div key={item.id} data-acp-item-id={item.id} data-testid="acp-assistant-message" className="flex min-w-0 flex-col gap-2">
                 {item.parts.map((part, index) => (
-                  <AcpRenderPart key={`${part.kind}:${index}`} part={part} tone="assistant" />
+                  <AcpRenderPart
+                    key={`${part.kind}:${index}`}
+                    part={part}
+                    tone="assistant"
+                    workspaceRoot={workspaceRoot}
+                  />
                 ))}
               </div>
             );
@@ -176,7 +183,11 @@ export function AcpAssistantTurn({
         })}
 
         {group.attachments.map((attachment) => (
-          <AcpAttachmentPart key={attachment.attachmentId} part={attachment} />
+          <AcpAttachmentPart
+            key={attachment.attachmentId}
+            part={attachment}
+            workspaceRoot={workspaceRoot}
+          />
         ))}
 
         {workspaceRoot && <AcpTurnFileActivity summaries={fileSummaries} workspaceRoot={workspaceRoot} />}

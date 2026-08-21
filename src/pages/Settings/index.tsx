@@ -26,6 +26,8 @@ import { toast } from 'sonner';
 import { useSettingsStore } from '@/stores/settings';
 import { useGatewayStore } from '@/stores/gateway';
 import { UpdateSettings } from '@/components/settings/UpdateSettings';
+import { LongTermRulesSettings } from '@/components/settings/LongTermRulesSettings';
+import { PortableRuntimeHealthNotice } from '@/components/settings/PortableRuntimeHealthNotice';
 import { toUserMessage } from '@/lib/error-message';
 import {
   clearUiTelemetry,
@@ -497,6 +499,8 @@ export function Settings() {
 
         {/* Content Area */}
         <div className="flex-1 overflow-y-auto pr-2 pb-10 min-h-0 -mr-2 space-y-12">
+          <PortableRuntimeHealthNotice />
+
           {managedAuthStatus?.managed === true && (
           <div data-testid="settings-managed-auth-section">
             <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -676,6 +680,10 @@ export function Settings() {
               </div>
             </div>
           </div>
+
+          <Separator className="bg-black/5 dark:bg-white/5" />
+
+          <LongTermRulesSettings />
 
           <Separator className="bg-black/5 dark:bg-white/5" />
 

@@ -183,7 +183,12 @@ describe('provider-runtime-sync refresh strategy', () => {
     mocks.isUclawManagedDistribution.mockReturnValue(true);
     mocks.getManagedClientTextModelPolicy.mockResolvedValue({
       defaultModel: 'smart-latest',
-      models: [{ id: 'smart-latest' }, { id: 'reasoning-pro' }],
+      fallbackModels: ['reasoning-pro', 'standard-chat'],
+      models: [
+        { id: 'smart-latest' },
+        { id: 'reasoning-pro' },
+        { id: 'standard-chat' },
+      ],
     });
     mocks.getManagedClientVideoModelPolicy.mockResolvedValue({
       defaultModel: 'grok-image-video',
@@ -221,7 +226,12 @@ describe('provider-runtime-sync refresh strategy', () => {
     expect(mocks.reconcileManagedProviderRuntimeForStartup).toHaveBeenCalledWith(
       {
         defaultModel: 'smart-latest',
-        models: [{ id: 'smart-latest' }, { id: 'reasoning-pro' }],
+        fallbackModels: ['reasoning-pro', 'standard-chat'],
+        models: [
+          { id: 'smart-latest' },
+          { id: 'reasoning-pro' },
+          { id: 'standard-chat' },
+        ],
       },
       {
         defaultModel: 'grok-image-video',
@@ -239,7 +249,11 @@ describe('provider-runtime-sync refresh strategy', () => {
     let reconcileLockHeld: boolean | null = null;
     mocks.getManagedClientTextModelPolicy.mockImplementationOnce(async () => {
       policyLockHeld = isProviderMutationLockHeld();
-      return { defaultModel: 'smart-latest', models: [{ id: 'smart-latest' }] };
+      return {
+        defaultModel: 'smart-latest',
+        fallbackModels: [],
+        models: [{ id: 'smart-latest' }],
+      };
     });
     mocks.reconcileManagedProviderRuntimeForStartup.mockImplementationOnce(async () => {
       reconcileLockHeld = isProviderMutationLockHeld();

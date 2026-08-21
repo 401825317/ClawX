@@ -1,5 +1,4 @@
 import type { ElectronApplication, Page } from '@playwright/test';
-import { pathToFileURL } from 'node:url';
 import * as XLSX from 'xlsx';
 import {
   closeElectronApp,
@@ -10,6 +9,10 @@ import {
   test,
   type RecordedHostInvocation,
 } from './fixtures/electron';
+import {
+  executeInWebBrowserGuest,
+  getWebBrowserMainSnapshot,
+} from './fixtures/web-browser';
 
 const MAIN_SESSION_KEY = 'agent:main:main';
 const OTHER_SESSION_KEY = 'agent:main:other';
@@ -93,11 +96,17 @@ test.describe('ACP media attachments', () => {
     // Electron's webview support is unstable on Linux.
     test.skip(process.platform !== 'win32' && process.platform !== 'darwin');
 
-    const app = await launchElectronApp({ skipSetup: true });
+    const app = await launchElectronApp({ skipSetup: true, managedProvider: true });
 
     try {
       const fixture = await installAttachmentHostFixture(app, {
         sessions: [{ key: MAIN_SESSION_KEY, title: 'Main session' }],
+        managedClientConfig: {
+          features: {
+            htmlPreview: { enabled: true },
+          },
+        },
+        useProductionHtmlPreview: true,
       });
       const htmlPath = await fixture.createWorkspaceFile(
         'browser demo.html',
@@ -126,19 +135,43 @@ test.describe('ACP media attachments', () => {
       );
       await browserItem.click();
 
-      const expectedUrl = pathToFileURL(htmlPath).href;
+      const tokenizedPreviewUrl = /^http:\/\/127\.0\.0\.1:\d+\/[A-Za-z0-9_-]{43}\/index\.html$/u;
+      await expect.poll(async () => (await fixture.getHostInvocations()).filter((request) => (
+        request.module === 'artifactTasks' && request.action === 'validateWebpage'
+      ))).not.toHaveLength(0);
+      await expect.poll(async () => {
+        const calls = await fixture.getHostInvocations();
+        return calls.filter((request) => request.module === 'webBrowser' && request.action === 'navigate');
+      }).toHaveLength(1);
+      const calls = await fixture.getHostInvocations();
+      const validationCall = calls.find((request) => (
+        request.module === 'artifactTasks' && request.action === 'validateWebpage'
+      ));
+      expect(validationCall?.payload).toEqual({
+        workspaceRoot: fixture.workspaceDir,
+        filePath: htmlPath,
+      });
+      const navigateUrl = calls.find((request) => (
+        request.module === 'webBrowser' && request.action === 'navigate'
+      ))?.payload?.url;
+      expect(navigateUrl).toEqual(expect.stringMatching(tokenizedPreviewUrl));
+      expect(navigateUrl).not.toMatch(/^file:/iu);
+
       const panel = page.getByTestId('artifact-panel');
       await expect(panel).toBeVisible();
       await expect(panel.getByTestId('artifact-panel-tab-web-browser')).toHaveClass(/bg-foreground\/10/);
       await expect(page.getByTestId('web-browser-host')).toHaveAttribute('aria-hidden', 'false');
-      await expect.poll(async () => (await fixture.getHostInvocations()).some((request) => (
-        request.module === 'webBrowser'
-        && request.action === 'navigate'
-        && request.payload?.url === expectedUrl
-      ))).toBe(true);
-      await expect(page.getByTestId('web-browser-address-display')).toHaveAccessibleName(
-        new RegExp(expectedUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
-      );
+      await expect.poll(() => getWebBrowserMainSnapshot(app)).toMatchObject({
+        url: expect.stringMatching(tokenizedPreviewUrl),
+        title: 'Attachment Browser Demo',
+        matchingGuestCount: 1,
+      });
+      const browserSnapshot = await getWebBrowserMainSnapshot(app);
+      await expect(executeInWebBrowserGuest<string>(
+        app,
+        browserSnapshot.guestId!,
+        'document.querySelector("h1")?.textContent ?? ""',
+      )).resolves.toBe('Demo');
     } finally {
       await closeElectronApp(app);
     }
@@ -491,6 +524,41 @@ test.describe('ACP media attachments', () => {
       const secondStreamUrl = await player.getAttribute('src');
       expect(secondStreamUrl).toMatch(/^uclaw-media:\/\/attachment\/[A-Za-z0-9_-]+$/);
       expect(secondStreamUrl).not.toBe(firstStreamUrl);
+      await expect(page.getByTestId('acp-video-attachment')).toHaveCount(1);
+
+      // A real renderer reload must rebuild the historical attachment and issue a
+      // fresh playback grant, rather than relying on the previous in-memory card.
+      await openChat(app);
+      await expect(player).toBeVisible({ timeout: 30_000 });
+      const refreshedStreamUrl = await player.getAttribute('src');
+      expect(refreshedStreamUrl).toMatch(/^uclaw-media:\/\/attachment\/[A-Za-z0-9_-]+$/);
+      expect(refreshedStreamUrl).not.toBe(secondStreamUrl);
+      const refreshedPlaybackState = await player.evaluate(async (node) => {
+        const video = node as HTMLVideoElement;
+        if (video.readyState < HTMLMediaElement.HAVE_METADATA) {
+          await new Promise<void>((resolveMetadata, rejectMetadata) => {
+            video.addEventListener('loadedmetadata', () => resolveMetadata(), { once: true });
+            video.addEventListener('error', () => rejectMetadata(new Error('Refreshed video metadata failed to load')), { once: true });
+          });
+        }
+        if (!Number.isFinite(video.duration) || video.duration <= 0) {
+          throw new Error(`Expected a finite refreshed video duration, received ${video.duration}`);
+        }
+        const targetTime = Math.min(video.duration / 2, 0.08);
+        video.currentTime = targetTime;
+        await new Promise<void>((resolveSeek, rejectSeek) => {
+          video.addEventListener('seeked', () => resolveSeek(), { once: true });
+          video.addEventListener('error', () => rejectSeek(new Error('Refreshed video seek failed')), { once: true });
+        });
+        return {
+          currentTime: video.currentTime,
+          duration: video.duration,
+          readyState: video.readyState,
+        };
+      });
+      expect(refreshedPlaybackState.duration).toBeGreaterThan(0);
+      expect(refreshedPlaybackState.currentTime).toBeGreaterThan(0);
+      expect(refreshedPlaybackState.readyState).toBeGreaterThanOrEqual(1);
       await expect(page.getByTestId('acp-video-attachment')).toHaveCount(1);
       expect(await getRecordedLegacyIpcInvocations(app)).toEqual([]);
     } finally {
@@ -1153,6 +1221,7 @@ test.describe('ACP media attachments', () => {
     const app = await launchElectronApp({ skipSetup: true });
     const retryPrompt = 'Prepare the delayed attachment';
     const reply = 'The attachment will arrive shortly.';
+    const taskId = '5b7801f6-a004-4f95-bc9f-54bca6979515';
 
     try {
       const fixture = await installAttachmentHostFixture(app, {
@@ -1171,6 +1240,16 @@ test.describe('ACP media attachments', () => {
           content: `MEDIA:${delayedPath}\n${reply}`,
         },
       ];
+      const pendingTranscriptMessages = [
+        { role: 'user' as const, id: 'delayed-pending-user', content: retryPrompt },
+        {
+          role: 'toolresult' as const,
+          toolCallId: 'delayed-pending-tool',
+          toolName: 'image_generate',
+          content: `Background task started for image generation (${taskId}).`,
+          details: { taskId },
+        },
+      ];
       await fixture.setTranscriptResponses(MAIN_SESSION_KEY, [[]]);
       await fixture.setPromptUpdates(retryPrompt, [{
         sessionUpdate: 'agent_message',
@@ -1185,13 +1264,12 @@ test.describe('ACP media attachments', () => {
       // read can consume the deferred slot and make the 1500ms gap look ~0ms.
       await fixture.waitForHistoryQuiet(MAIN_SESSION_KEY);
       await fixture.setTranscriptResponses(MAIN_SESSION_KEY, [
-        [],
+        pendingTranscriptMessages,
         {
           deferId: 'delayed-retry',
           messages: transcriptMessages,
         },
-      ]);
-      await fixture.clearHistoryRequestTimes(MAIN_SESSION_KEY);
+      ], { resetHistoryRequestTimes: true });
       await expect(fixture.releaseTranscriptResponse('delayed-retry')).rejects.toThrow(
         'Deferred transcript response is not ready: delayed-retry',
       );

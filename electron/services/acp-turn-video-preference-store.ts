@@ -2,8 +2,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { AcpVideoGenerationOptions } from '@shared/acp-chat/types';
-import { UCLAW_VIDEO_MODELS } from '@shared/junfeiai-endpoints';
+import type { ManagedClientVideoModelPolicy } from '@shared/managed-client-config';
+import { validateVideoGenerationOptions } from '@shared/video-generation-contract';
 import { resolveOpenClawStateDir } from '../utils/paths';
+import { getManagedClientVideoModelPolicy } from './managed-client-config-service';
 
 const TURN_PREFERENCE_DIRECTORY_NAME = 'uclaw-turn-preferences';
 const TURN_PREFERENCE_TTL_MS = 5 * 60 * 1000;
@@ -28,7 +30,7 @@ export type AcpTurnVideoPreferenceStore = {
 };
 
 type StoredTurnVideoPreference = {
-  version: 1;
+  version: 2;
   id: string;
   sessionKey: string;
   messageDigest: string;
@@ -47,20 +49,15 @@ function digestMessage(message: string): string {
   return createHash('sha256').update(message, 'utf8').digest('hex');
 }
 
-function normalizeVideoOptions(value: AcpVideoGenerationOptions): AcpVideoGenerationOptions | null {
-  const supported = UCLAW_VIDEO_MODELS.some((model) => (
-    (model.aspectRatios as readonly string[]).includes(value.aspectRatio)
-    && (model.resolutions as readonly string[]).includes(value.resolution)
-    && (model.durations as readonly number[]).includes(value.durationSeconds)
-  ));
-  if (!supported) {
-    return null;
-  }
-  return {
-    aspectRatio: value.aspectRatio,
-    resolution: value.resolution,
-    durationSeconds: value.durationSeconds,
-  };
+function normalizeVideoOptions(
+  value: AcpVideoGenerationOptions,
+  policy: ManagedClientVideoModelPolicy | null,
+): AcpVideoGenerationOptions | null {
+  if (!policy) return null;
+  const model = policy.models.find((entry) => entry.id === value.modelId);
+  if (!model) return null;
+  const validation = validateVideoGenerationOptions(value, model);
+  return validation.ok ? validation.options : null;
 }
 
 function preferenceFileName(id: string): string {
@@ -90,6 +87,9 @@ function isManagedReferenceImagePath(directory: string, filePath: unknown): file
 /** Stores one turn's normalized video intent without persisting the prompt text. */
 export function createAcpTurnVideoPreferenceStore(
   stateDirectory = resolveOpenClawStateDir(),
+  resolvePolicy: () => Promise<ManagedClientVideoModelPolicy | null> = () => (
+    getManagedClientVideoModelPolicy({ refresh: false })
+  ),
 ): AcpTurnVideoPreferenceStore {
   // OpenClaw accepts local tool media only from its managed media roots.
   const directory = path.join(stateDirectory, 'media', TURN_PREFERENCE_DIRECTORY_NAME);
@@ -177,7 +177,8 @@ export function createAcpTurnVideoPreferenceStore(
     /** Creates an independent file so concurrent sessions cannot overwrite each other. */
     async enqueue(input) {
       const message = input.message.trim();
-      const videoOptions = normalizeVideoOptions(input.videoOptions);
+      const policy = await resolvePolicy().catch(() => null);
+      const videoOptions = normalizeVideoOptions(input.videoOptions, policy);
       if (!input.sessionKey || !message || !videoOptions) return null;
 
       await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -192,7 +193,7 @@ export function createAcpTurnVideoPreferenceStore(
         )
         : undefined;
       const entry: StoredTurnVideoPreference = {
-        version: 1,
+        version: 2,
         id,
         sessionKey: input.sessionKey,
         messageDigest: digestMessage(message),

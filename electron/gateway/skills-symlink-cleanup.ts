@@ -1,51 +1,25 @@
 /**
- * Pre-launch cleanup for stray skill symlinks under OpenClaw skill roots.
+ * Async pre-launch cleanup for skill symlinks rejected by OpenClaw's managed
+ * skill-root containment checks and for stale plugin runtime dependency roots.
  *
- * Background: since openclaw commit 253e159700 ("fix: harden workspace skill
- * path containment"), the Gateway rejects any candidate under a skills root
- * whose realpath escapes that root, logging a noisy
- *   `Skipping escaped skill path outside its configured root.
- *    reason=symlink-escape source=openclaw-managed ...`
- * warning per offending entry on every start.
- *
- * Common offenders are one-shot install scripts that drop symlinks into:
- *   - ~/.openclaw/skills/<name> -> ~/.agents/skills/<name>
- *   - ~/.openclaw/workspace/skills/<name> -> ~/.openclaw/workspace/.agents/skills/<name>
- *   - ~/.openclaw/skills/<name> -> ~/workspace/<repo>/skills/<name>
- * The hardened loader rejects these because their realpath escapes the
- * configured managed root, so they are pure log noise — entries that the
- * loader can never accept from this root.
- *
- * This helper is invoked before each Gateway launch to remove those
- * specific symlinks.  Scope is intentionally narrow:
- *   - source dirs: ~/.openclaw/skills and ~/.openclaw/workspace/skills
- *   - target dirs: anything outside the matching managed skills root
- * Symlinks whose realpath stays inside the same managed skills root are left
- * untouched.
- *
- * Removal uses fs.rmSync({ force: true, recursive: true }) rather than
- * fs.unlinkSync so that directory symlinks and Windows junctions (the form
- * that non-admin Windows installs end up creating) are deleted correctly.
- * unlinkSync raises EPERM on those on Windows, and rmSync without recursive
- * can reject directory symlinks on some platforms.
- *
- * This is a transitional workaround.  Once openclaw/openclaw#59219 lands and
- * the loader stops rejecting managed-source symlinks whose realpath escapes
- * the managed root, this helper can be removed entirely.
+ * Startup can encounter thousands of entries on long-lived installations, so
+ * every filesystem operation uses node:fs/promises and traversal yields to the
+ * event loop in bounded batches. Removal remains deliberately narrow:
+ *   - only symlinks immediately below the configured managed skill roots;
+ *   - only immediate, real directories named openclaw-* below runtime-deps;
+ *   - only runtime roots containing an OpenClaw symlink outside the current
+ *     bundled OpenClaw package.
  */
-import {
-  existsSync,
-  lstatSync,
-  readlinkSync,
-  readdirSync,
-  realpathSync,
-  rmSync,
-  type Dirent,
-} from 'node:fs';
+import type { Dirent, Stats } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { lstat, readdir, readlink, realpath, rename, rm, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { getOpenClawConfigDir, getOpenClawResolvedDir, getOpenClawSkillsDir } from '../utils/paths';
 import { logger } from '../utils/logger';
+
+const TRAVERSAL_YIELD_INTERVAL = 64;
+const MAX_RUNTIME_DEPS_SYMLINKS = 5_000;
 
 export interface CleanupOptions {
   /** Override for ~/.openclaw/skills (mainly for tests). */
@@ -59,7 +33,7 @@ export interface CleanupOptions {
 }
 
 export interface CleanupResult {
-  /** Symlink names that were unlinked from the skills dir. */
+  /** Symlink/cache-root names removed from the managed directory. */
   removed: string[];
   /** Total number of symlink entries that were inspected. */
   examined: number;
@@ -74,12 +48,41 @@ export interface PluginRuntimeDepsCleanupOptions {
   currentOpenClawDir?: string;
 }
 
-function defaultSkillsDir(): string {
-  return getOpenClawSkillsDir();
+export interface CleanupDependencies {
+  readdir(directoryPath: string): Promise<Dirent[]>;
+  lstat(entryPath: string): Promise<Stats>;
+  readlink(entryPath: string): Promise<string>;
+  realpath(entryPath: string): Promise<string>;
+  rename(oldPath: string, newPath: string): Promise<void>;
+  rm(entryPath: string, options: { force: boolean; recursive: boolean }): Promise<void>;
+  unlink(entryPath: string): Promise<void>;
+  yieldToEventLoop(): Promise<void>;
+  yieldEveryEntries: number;
+  maxRuntimeDepsSymlinks: number;
 }
 
-function recordCleanupFailure(result: CleanupResult): void {
-  result.failed = (result.failed ?? 0) + 1;
+const DEFAULT_CLEANUP_DEPENDENCIES: CleanupDependencies = {
+  readdir: (directoryPath) =>
+    readdir(directoryPath, { withFileTypes: true, encoding: 'utf8' }),
+  lstat: (entryPath) => lstat(entryPath),
+  readlink: (entryPath) => readlink(entryPath, { encoding: 'utf8' }),
+  realpath: (entryPath) => realpath(entryPath),
+  rename: (oldPath, newPath) => rename(oldPath, newPath),
+  rm: (entryPath, options) => rm(entryPath, options),
+  unlink: (entryPath) => unlink(entryPath),
+  yieldToEventLoop: () => new Promise((resolve) => setImmediate(resolve)),
+  yieldEveryEntries: TRAVERSAL_YIELD_INTERVAL,
+  maxRuntimeDepsSymlinks: MAX_RUNTIME_DEPS_SYMLINKS,
+};
+
+type RuntimeDepsScanResult = {
+  stale: boolean;
+  examined: number;
+  failed: number;
+};
+
+function defaultSkillsDir(): string {
+  return getOpenClawSkillsDir();
 }
 
 function defaultAgentsDir(): string {
@@ -98,54 +101,83 @@ function defaultPluginRuntimeDepsDir(): string {
   return path.join(getOpenClawConfigDir(), 'plugin-runtime-deps');
 }
 
-/**
- * Resolve the agents skills directory to its real path.  When the directory
- * itself does not exist yet (fresh install), fall back to realpath'ing its
- * parent and re-appending the basename so a `~/.agents -> /opt/agents`
- * indirection is still honored.  As a final fallback returns the lexical
- * resolved path.
- */
-function resolveAgentsRealRoot(agentsDir: string): string {
-  if (existsSync(agentsDir)) {
-    try {
-      return realpathSync(agentsDir);
-    } catch {
-      // fall through
-    }
-  }
-  const parent = path.dirname(agentsDir);
-  const tail = path.basename(agentsDir);
-  if (parent && parent !== agentsDir && existsSync(parent)) {
-    try {
-      return path.join(realpathSync(parent), tail);
-    } catch {
-      // fall through
-    }
-  }
-  return path.resolve(agentsDir);
+function recordCleanupFailure(result: CleanupResult, count = 1): void {
+  if (count > 0) result.failed = (result.failed ?? 0) + count;
 }
 
-/**
- * Lower-case path strings on Win32 only so the `path.relative` byte-wise
- * comparison aligns with NTFS case-insensitive semantics.  No-op elsewhere.
- */
-function normalizeForCompare(p: string): string {
-  return process.platform === 'win32' ? p.toLowerCase() : p;
+function resolveCleanupDependencies(
+  overrides: Partial<CleanupDependencies>,
+): CleanupDependencies {
+  const requestedYieldInterval = overrides.yieldEveryEntries;
+  const yieldEveryEntries =
+    Number.isSafeInteger(requestedYieldInterval) && (requestedYieldInterval ?? 0) > 0
+      ? requestedYieldInterval!
+      : TRAVERSAL_YIELD_INTERVAL;
+  const requestedSymlinkLimit = overrides.maxRuntimeDepsSymlinks;
+  const maxRuntimeDepsSymlinks =
+    Number.isSafeInteger(requestedSymlinkLimit) && (requestedSymlinkLimit ?? 0) > 0
+      ? requestedSymlinkLimit!
+      : MAX_RUNTIME_DEPS_SYMLINKS;
+
+  return {
+    readdir: overrides.readdir ?? DEFAULT_CLEANUP_DEPENDENCIES.readdir,
+    lstat: overrides.lstat ?? DEFAULT_CLEANUP_DEPENDENCIES.lstat,
+    readlink: overrides.readlink ?? DEFAULT_CLEANUP_DEPENDENCIES.readlink,
+    realpath: overrides.realpath ?? DEFAULT_CLEANUP_DEPENDENCIES.realpath,
+    rename: overrides.rename ?? DEFAULT_CLEANUP_DEPENDENCIES.rename,
+    rm: overrides.rm ?? DEFAULT_CLEANUP_DEPENDENCIES.rm,
+    unlink: overrides.unlink ?? DEFAULT_CLEANUP_DEPENDENCIES.unlink,
+    yieldToEventLoop:
+      overrides.yieldToEventLoop ?? DEFAULT_CLEANUP_DEPENDENCIES.yieldToEventLoop,
+    yieldEveryEntries,
+    maxRuntimeDepsSymlinks,
+  };
+}
+
+function errorCode(error: unknown): string | undefined {
+  return (error as NodeJS.ErrnoException | undefined)?.code;
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return errorCode(error) === 'ENOENT' || errorCode(error) === 'ENOTDIR';
+}
+
+async function yieldTraversal(index: number, dependencies: CleanupDependencies): Promise<void> {
+  if (index > 0 && index % dependencies.yieldEveryEntries === 0) {
+    await dependencies.yieldToEventLoop();
+  }
+}
+
+/** Resolve an optional context root without turning a fresh install into an error. */
+async function resolveOptionalRealRoot(
+  directoryPath: string,
+  dependencies: CleanupDependencies,
+): Promise<string> {
+  try {
+    return await dependencies.realpath(directoryPath);
+  } catch {
+    const parent = path.dirname(directoryPath);
+    const tail = path.basename(directoryPath);
+    if (parent && parent !== directoryPath) {
+      try {
+        return path.join(await dependencies.realpath(parent), tail);
+      } catch {
+        // Fall back to the lexical path for log context only.
+      }
+    }
+    return path.resolve(directoryPath);
+  }
+}
+
+/** Lower-case Win32 paths so containment follows case-insensitive NTFS semantics. */
+function normalizeForCompare(candidate: string): string {
+  return process.platform === 'win32' ? candidate.toLowerCase() : candidate;
 }
 
 function isInside(parent: string, child: string): boolean {
-  const rel = path.relative(normalizeForCompare(parent), normalizeForCompare(child));
-  if (rel === '') return true;
-  return !rel.startsWith('..') && !path.isAbsolute(rel);
-}
-
-function resolveSymlinkTarget(linkPath: string): string | null {
-  try {
-    const target = readlinkSync(linkPath);
-    return path.resolve(path.dirname(linkPath), target);
-  } catch {
-    return null;
-  }
+  const relative = path.relative(normalizeForCompare(parent), normalizeForCompare(child));
+  if (relative === '') return true;
+  return !relative.startsWith('..') && !path.isAbsolute(relative);
 }
 
 function looksLikeOpenClawPackagePath(candidate: string): boolean {
@@ -153,17 +185,123 @@ function looksLikeOpenClawPackagePath(candidate: string): boolean {
   return /\/node_modules(?:\/\.pnpm\/[^/]+\/node_modules)?\/openclaw(?:\/|$)/.test(normalized);
 }
 
-function resolveCurrentOpenClawRoots(currentOpenClawDir: string): string[] {
+async function resolveCurrentOpenClawRoots(
+  currentOpenClawDir: string,
+  dependencies: CleanupDependencies,
+): Promise<string[]> {
   const roots = new Set<string>([path.resolve(currentOpenClawDir)]);
   try {
-    roots.add(realpathSync(currentOpenClawDir));
+    roots.add(await dependencies.realpath(currentOpenClawDir));
   } catch {
-    // fall through
+    // The lexical package path still protects a partially materialized install.
   }
   return Array.from(roots);
 }
 
-export function cleanupAgentsSymlinkedSkills(opts: CleanupOptions = {}): CleanupResult {
+async function isSymlinkEntry(
+  entry: Dirent,
+  entryPath: string,
+  dependencies: CleanupDependencies,
+): Promise<boolean> {
+  if (entry.isSymbolicLink()) return true;
+  try {
+    return (await dependencies.lstat(entryPath)).isSymbolicLink();
+  } catch (error) {
+    if (!isMissingPathError(error)) throw error;
+    return false;
+  }
+}
+
+function staleTargetError(code: string): NodeJS.ErrnoException {
+  const error = new Error(code) as NodeJS.ErrnoException;
+  error.code = 'ESTALE';
+  return error;
+}
+
+function sameEntryIdentity(left: Stats, right: Stats): boolean {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.mode === right.mode
+    && left.size === right.size
+    && left.birthtimeMs === right.birthtimeMs;
+}
+
+async function quarantineAndRemove(
+  entryPath: string,
+  expectedIdentity: Stats,
+  expectedType: (info: Stats) => boolean,
+  removeQuarantined: (quarantinePath: string) => Promise<void>,
+  dependencies: CleanupDependencies,
+  staleCode: string,
+): Promise<void> {
+  const quarantinePath = path.join(
+    path.dirname(entryPath),
+    `${path.basename(entryPath)}.uclaw-cleanup-${process.pid}-${randomUUID()}`,
+  );
+  try {
+    await dependencies.rename(entryPath, quarantinePath);
+  } catch (error) {
+    if (isMissingPathError(error)) return;
+    throw error;
+  }
+
+  try {
+    const quarantined = await dependencies.lstat(quarantinePath);
+    if (!expectedType(quarantined) || !sameEntryIdentity(expectedIdentity, quarantined)) {
+      throw staleTargetError(staleCode);
+    }
+    await removeQuarantined(quarantinePath);
+  } catch (error) {
+    try {
+      await dependencies.rename(quarantinePath, entryPath);
+    } catch (restoreError) {
+      throw new AggregateError(
+        [error, restoreError],
+        `${staleCode}_restore_failed`,
+        { cause: restoreError },
+      );
+    }
+    throw error;
+  }
+}
+
+async function removeSymlink(
+  entryPath: string,
+  dependencies: CleanupDependencies,
+): Promise<void> {
+  let current;
+  try {
+    current = await dependencies.lstat(entryPath);
+  } catch (error) {
+    if (isMissingPathError(error)) return;
+    throw error;
+  }
+  if (!current.isSymbolicLink()) {
+    throw staleTargetError('skill_cleanup_target_changed');
+  }
+  await quarantineAndRemove(
+    entryPath,
+    current,
+    (info) => info.isSymbolicLink(),
+    async (quarantinePath) => {
+      try {
+        await dependencies.unlink(quarantinePath);
+      } catch (error) {
+        if (isMissingPathError(error)) return;
+        if (!['EPERM', 'EACCES', 'EISDIR'].includes(errorCode(error) ?? '')) throw error;
+        await dependencies.rm(quarantinePath, { force: true, recursive: true });
+      }
+    },
+    dependencies,
+    'skill_cleanup_target_changed',
+  );
+}
+
+export async function cleanupAgentsSymlinkedSkills(
+  opts: CleanupOptions = {},
+  dependencyOverrides: Partial<CleanupDependencies> = {},
+): Promise<CleanupResult> {
+  const dependencies = resolveCleanupDependencies(dependencyOverrides);
   const hasMainOverrides = opts.skillsDir !== undefined || opts.agentsDir !== undefined;
   const hasWorkspaceOverrides =
     opts.workspaceSkillsDir !== undefined || opts.workspaceAgentsDir !== undefined;
@@ -189,11 +327,11 @@ export function cleanupAgentsSymlinkedSkills(opts: CleanupOptions = {}): Cleanup
     if (seenRoots.has(rootKey)) continue;
     seenRoots.add(rootKey);
 
-    const rootResult = cleanupSkillsDir(root.skillsDir, root.agentsDir);
+    const rootResult = await cleanupSkillsDir(root.skillsDir, root.agentsDir, dependencies);
     result.removed.push(...rootResult.removed);
     result.examined += rootResult.examined;
     if (rootResult.failed) {
-      result.failed = (result.failed ?? 0) + rootResult.failed;
+      recordCleanupFailure(result, rootResult.failed);
     }
   }
 
@@ -203,54 +341,73 @@ export function cleanupAgentsSymlinkedSkills(opts: CleanupOptions = {}): Cleanup
 /**
  * Remove stale OpenClaw plugin runtime dependency cache roots.
  *
- * OpenClaw can materialize `~/.openclaw/plugin-runtime-deps/openclaw-*` as a
- * symlink tree back into the package's `dist` files.  After app upgrades or
- * worktree switches those symlinks can point at an old `node_modules/openclaw`
- * path.  The Gateway may then spend a long time synchronously opening/copying
- * old runtime files during plugin setup, which blocks RPC readiness.
- *
- * Scope is intentionally narrow: only immediate cache roots named `openclaw-*`
- * are removed, and only when a symlink inside points at an OpenClaw package
- * path outside the current bundled package.  The cache is regenerated by
- * OpenClaw on demand.
+ * OpenClaw may materialize plugin-runtime-deps/openclaw-* as a symlink tree
+ * into package dist files. Old worktree targets make plugin startup repeatedly
+ * open and copy obsolete files before RPC readiness. Only immediate real
+ * directories with a confirmed stale OpenClaw symlink are removed.
  */
-export function cleanupStalePluginRuntimeDeps(
+export async function cleanupStalePluginRuntimeDeps(
   opts: PluginRuntimeDepsCleanupOptions = {},
-): CleanupResult {
+  dependencyOverrides: Partial<CleanupDependencies> = {},
+): Promise<CleanupResult> {
+  const dependencies = resolveCleanupDependencies(dependencyOverrides);
   const runtimeDepsDir = opts.runtimeDepsDir ?? defaultPluginRuntimeDepsDir();
-  const currentRoots = resolveCurrentOpenClawRoots(opts.currentOpenClawDir ?? getOpenClawResolvedDir());
+  const currentRoots = await resolveCurrentOpenClawRoots(
+    opts.currentOpenClawDir ?? getOpenClawResolvedDir(),
+    dependencies,
+  );
   const result: CleanupResult = { removed: [], examined: 0 };
-
-  if (!existsSync(runtimeDepsDir)) {
-    return result;
-  }
 
   let entries: Dirent[];
   try {
-    entries = readdirSync(runtimeDepsDir, { withFileTypes: true, encoding: 'utf8' });
-  } catch (err) {
-    logger.warn(`[plugin-runtime-deps-cleanup] Failed to list ${runtimeDepsDir}:`, err);
+    entries = await dependencies.readdir(runtimeDepsDir);
+  } catch (error) {
+    if (isMissingPathError(error)) return result;
+    logger.warn(`[plugin-runtime-deps-cleanup] Failed to list ${runtimeDepsDir}:`, error);
     recordCleanupFailure(result);
     return result;
   }
 
+  let visitedRoots = 0;
   for (const entry of entries) {
-    if (!entry.isDirectory() || !entry.name.startsWith('openclaw-')) {
+    visitedRoots += 1;
+    await yieldTraversal(visitedRoots, dependencies);
+    if (!entry.isDirectory() || entry.isSymbolicLink() || !entry.name.startsWith('openclaw-')) {
       continue;
     }
 
     const cacheRoot = path.join(runtimeDepsDir, entry.name);
-    const scan = scanRuntimeDepsRootForStaleOpenClawSymlink(cacheRoot, currentRoots);
+    const scan = await scanRuntimeDepsRootForStaleOpenClawSymlink(
+      cacheRoot,
+      currentRoots,
+      dependencies,
+    );
     result.examined += scan.examined;
-    if (!scan.stale) {
-      continue;
+    if (scan.failed > 0) {
+      recordCleanupFailure(result, scan.failed);
     }
+    if (!scan.stale) continue;
 
     try {
-      rmSync(cacheRoot, { force: true, recursive: true });
+      const current = await dependencies.lstat(cacheRoot);
+      if (!current.isDirectory() || current.isSymbolicLink()) {
+        throw staleTargetError('runtime_deps_cleanup_target_changed');
+      }
+      await quarantineAndRemove(
+        cacheRoot,
+        current,
+        (info) => info.isDirectory() && !info.isSymbolicLink(),
+        (quarantinePath) => dependencies.rm(
+          quarantinePath,
+          { force: true, recursive: true },
+        ),
+        dependencies,
+        'runtime_deps_cleanup_target_changed',
+      );
       result.removed.push(entry.name);
-    } catch (err) {
-      logger.warn(`[plugin-runtime-deps-cleanup] Failed to remove ${cacheRoot}:`, err);
+    } catch (error) {
+      if (isMissingPathError(error)) continue;
+      logger.warn(`[plugin-runtime-deps-cleanup] Failed to remove ${cacheRoot}:`, error);
       recordCleanupFailure(result);
     }
   }
@@ -265,107 +422,143 @@ export function cleanupStalePluginRuntimeDeps(
   return result;
 }
 
-function scanRuntimeDepsRootForStaleOpenClawSymlink(
+async function scanRuntimeDepsRootForStaleOpenClawSymlink(
   cacheRoot: string,
   currentOpenClawRoots: string[],
-): { stale: boolean; examined: number } {
+  dependencies: CleanupDependencies,
+): Promise<RuntimeDepsScanResult> {
   const stack = [cacheRoot];
   let examined = 0;
-  const maxEntries = 5000;
+  let failed = 0;
+  let visitedEntries = 0;
+  let truncated = false;
 
-  while (stack.length > 0 && examined < maxEntries) {
-    const dir = stack.pop()!;
+  while (stack.length > 0) {
+    const directoryPath = stack.pop()!;
     let entries: Dirent[];
     try {
-      entries = readdirSync(dir, { withFileTypes: true, encoding: 'utf8' });
-    } catch {
+      entries = await dependencies.readdir(directoryPath);
+    } catch (error) {
+      if (!isMissingPathError(error)) {
+        logger.warn(`[plugin-runtime-deps-cleanup] Failed to scan ${directoryPath}:`, error);
+        failed += 1;
+      }
       continue;
     }
 
     for (const entry of entries) {
-      if (examined >= maxEntries) break;
-      const entryPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
+      if (examined >= dependencies.maxRuntimeDepsSymlinks) {
+        truncated = true;
+        break;
+      }
+      visitedEntries += 1;
+      await yieldTraversal(visitedEntries, dependencies);
+      const entryPath = path.join(directoryPath, entry.name);
+      if (entry.isDirectory() && !entry.isSymbolicLink()) {
         stack.push(entryPath);
         continue;
       }
 
-      let isSymlink = entry.isSymbolicLink();
-      if (!isSymlink) {
-        try {
-          isSymlink = lstatSync(entryPath).isSymbolicLink();
-        } catch {
-          continue;
-        }
-      }
-      if (!isSymlink) continue;
-
-      examined++;
-      const target = resolveSymlinkTarget(entryPath);
-      if (!target || !looksLikeOpenClawPackagePath(target)) {
+      let symlink: boolean;
+      try {
+        symlink = await isSymlinkEntry(entry, entryPath, dependencies);
+      } catch (error) {
+        logger.warn(`[plugin-runtime-deps-cleanup] Failed to inspect ${entryPath}:`, error);
+        failed += 1;
         continue;
       }
+      if (!symlink) continue;
+
+      examined += 1;
+      let target: string;
+      try {
+        target = path.resolve(path.dirname(entryPath), await dependencies.readlink(entryPath));
+      } catch (error) {
+        if (!isMissingPathError(error)) {
+          logger.warn(`[plugin-runtime-deps-cleanup] Failed to read ${entryPath}:`, error);
+          failed += 1;
+        }
+        continue;
+      }
+      if (!looksLikeOpenClawPackagePath(target)) continue;
 
       const pointsAtCurrentOpenClaw = currentOpenClawRoots.some((root) => isInside(root, target));
-      if (!pointsAtCurrentOpenClaw) {
-        return { stale: true, examined };
-      }
+      if (!pointsAtCurrentOpenClaw) return { stale: true, examined, failed };
     }
+    if (truncated) break;
   }
 
-  return { stale: false, examined };
+  if (truncated) {
+    logger.warn(
+      `[plugin-runtime-deps-cleanup] Scan limit reached after ${examined} symlink(s); cleanup will retry`,
+    );
+    failed += 1;
+  }
+
+  return { stale: false, examined, failed };
 }
 
-function cleanupSkillsDir(skillsDir: string, agentsDir: string): CleanupResult {
+async function cleanupSkillsDir(
+  skillsDir: string,
+  agentsDir: string,
+  dependencies: CleanupDependencies,
+): Promise<CleanupResult> {
   const result: CleanupResult = { removed: [], examined: 0 };
-  if (!existsSync(skillsDir)) {
+  let skillsRealRoot: string;
+  try {
+    skillsRealRoot = await dependencies.realpath(skillsDir);
+  } catch (error) {
+    if (isMissingPathError(error)) return result;
+    logger.warn(`[skills-cleanup] Failed to resolve ${skillsDir}:`, error);
+    recordCleanupFailure(result);
     return result;
   }
+  const agentsRealRoot = await resolveOptionalRealRoot(agentsDir, dependencies);
 
   let entries: Dirent[];
   try {
-    entries = readdirSync(skillsDir, { withFileTypes: true, encoding: 'utf8' });
-  } catch (err) {
-    logger.warn(`[skills-cleanup] Failed to list ${skillsDir}:`, err);
+    entries = await dependencies.readdir(skillsDir);
+  } catch (error) {
+    if (isMissingPathError(error)) return result;
+    logger.warn(`[skills-cleanup] Failed to list ${skillsDir}:`, error);
     recordCleanupFailure(result);
     return result;
   }
 
-  const agentsRealRoot = resolveAgentsRealRoot(agentsDir);
-  const skillsRealRoot = resolveAgentsRealRoot(skillsDir);
-
+  let visitedEntries = 0;
   for (const entry of entries) {
+    visitedEntries += 1;
+    await yieldTraversal(visitedEntries, dependencies);
     const entryPath = path.join(skillsDir, entry.name);
 
-    let isSymlink = entry.isSymbolicLink();
-    if (!isSymlink) {
-      try {
-        isSymlink = lstatSync(entryPath).isSymbolicLink();
-      } catch {
-        continue;
-      }
-    }
-    if (!isSymlink) continue;
-
-    result.examined++;
-
-    let realTarget: string;
+    let symlink: boolean;
     try {
-      realTarget = realpathSync(entryPath);
-    } catch {
+      symlink = await isSymlinkEntry(entry, entryPath, dependencies);
+    } catch (error) {
+      logger.warn(`[skills-cleanup] Failed to inspect ${entryPath}:`, error);
+      recordCleanupFailure(result);
       continue;
     }
+    if (!symlink) continue;
 
+    result.examined += 1;
+    let realTarget: string;
+    try {
+      realTarget = await dependencies.realpath(entryPath);
+    } catch (error) {
+      if (!isMissingPathError(error)) {
+        logger.warn(`[skills-cleanup] Failed to resolve ${entryPath}:`, error);
+        recordCleanupFailure(result);
+      }
+      continue;
+    }
     if (isInside(skillsRealRoot, realTarget)) continue;
 
     try {
-      // rmSync handles file symlinks, directory symlinks, and Windows
-      // junctions uniformly.  unlinkSync would raise EPERM on directory
-      // symlinks/junctions on Windows.
-      rmSync(entryPath, { force: true, recursive: true });
+      await removeSymlink(entryPath, dependencies);
       result.removed.push(entry.name);
-    } catch (err) {
-      logger.warn(`[skills-cleanup] Failed to remove ${entryPath}:`, err);
+    } catch (error) {
+      logger.warn(`[skills-cleanup] Failed to remove ${entryPath}:`, error);
       recordCleanupFailure(result);
     }
   }

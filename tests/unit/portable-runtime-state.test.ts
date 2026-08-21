@@ -3,7 +3,25 @@
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const sqliteBackupFailure = vi.hoisted(() => ({ value: false }));
+
+vi.mock('node:sqlite', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:sqlite')>();
+  return {
+    ...actual,
+    backup(...args: Parameters<typeof actual.backup>) {
+      if (sqliteBackupFailure.value) {
+        const error = new Error('Injected SQLite online backup failure') as NodeJS.ErrnoException;
+        error.code = 'SQLITE_BUSY';
+        return Promise.reject(error);
+      }
+      return actual.backup(...args);
+    },
+  };
+});
 import {
   PortableRuntimeSnapshotService,
   preparePortableRuntimeState,
@@ -19,6 +37,7 @@ const tempDirs: string[] = [];
 
 afterEach(async () => {
   vi.useRealTimers();
+  sqliteBackupFailure.value = false;
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -332,6 +351,86 @@ describe('portable runtime state', () => {
     service.markDirty();
     await service.syncIfNeeded();
     expect(logs.filter((entry) => entry.message === 'Portable Runtime snapshot completed')).toHaveLength(2);
+  });
+
+  it('backs off repeated SQLite baseline deferrals and resumes after the source stabilizes', async () => {
+    const layout = await createLayout();
+    const logs: Array<{ message: string; details?: Record<string, unknown> }> = [];
+    await mkdir(layout.stateDir, { recursive: true });
+    const database = new DatabaseSync(join(layout.stateDir, 'main-agent.sqlite'));
+    try {
+      database.exec('CREATE TABLE sessions (id INTEGER PRIMARY KEY, value TEXT NOT NULL);');
+      let now = 0;
+      sqliteBackupFailure.value = true;
+      const service = new PortableRuntimeSnapshotService(
+        layout,
+        (message, details) => logs.push({ message, details: details as Record<string, unknown> | undefined }),
+        5,
+        {
+          watch: false,
+          now: () => now,
+          deferBackoffBaseMs: 10,
+          deferBackoffMaxMs: 40,
+        },
+      );
+
+      await expect(service.syncIfNeeded()).resolves.toBe(false);
+      now = 5;
+      await expect(service.syncIfNeeded()).resolves.toBe(true);
+      now = 10;
+      await expect(service.syncIfNeeded()).resolves.toBe(false);
+      now = 29;
+      await expect(service.syncIfNeeded()).resolves.toBe(true);
+
+      const deferrals = logs.filter((entry) => entry.message === 'Portable Runtime snapshot deferred');
+      expect(deferrals).toHaveLength(2);
+      expect(deferrals.map((entry) => entry.details)).toEqual([
+        expect.objectContaining({
+          event: 'portable-runtime-snapshot-deferred',
+          severity: 'warning',
+          attempt: 1,
+          retryAfterMs: 10,
+          deferredReason: 'sqlite-unstable',
+          deferredPaths: ['main-agent.sqlite'],
+          reusedPreviousSnapshot: false,
+        }),
+        expect.objectContaining({ attempt: 2, retryAfterMs: 20 }),
+      ]);
+
+      sqliteBackupFailure.value = false;
+      now = 30;
+      await expect(service.syncIfNeeded()).resolves.toBe(true);
+      expect(logs.filter((entry) => entry.message === 'Portable Runtime snapshot completed')).toHaveLength(1);
+      expect(readLatestPortableSnapshotV2Sync({
+        stateDir: layout.stateDir,
+        snapshotDir: layout.snapshotV2Dir,
+        portableId: layout.portableId,
+      })).toBeTruthy();
+    } finally {
+      sqliteBackupFailure.value = false;
+      database.close();
+    }
+  });
+
+  it('starts the periodic snapshot service without performing startup I/O', async () => {
+    const layout = await createLayout();
+    const logs: Array<{ message: string }> = [];
+    const service = new PortableRuntimeSnapshotService(
+      layout,
+      (message) => logs.push({ message }),
+      60_000,
+      { watch: false },
+    );
+
+    service.start();
+    service.stop();
+
+    expect(logs.map((entry) => entry.message)).toEqual(['Portable Runtime snapshot service started']);
+    expect(readLatestPortableSnapshotV2Sync({
+      stateDir: layout.stateDir,
+      snapshotDir: layout.snapshotV2Dir,
+      portableId: layout.portableId,
+    })).toBeUndefined();
   });
 
   it('marks the runtime clean only after a successful shutdown snapshot', async () => {

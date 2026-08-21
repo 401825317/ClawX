@@ -128,7 +128,7 @@ function managedProviderAccount(
     baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
     apiProtocol: UCLAW_DEFAULT_API_PROTOCOL,
     model: policy.defaultModel,
-    fallbackModels: [],
+    fallbackModels: [...policy.fallbackModels],
     fallbackAccountIds: [],
     enabled: true,
     isDefault,

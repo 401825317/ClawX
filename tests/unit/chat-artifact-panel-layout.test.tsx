@@ -20,6 +20,19 @@ vi.mock('@/lib/host-api', () => ({
     files: {
       resolveWorkspaceContext: vi.fn(async ({ workspaceRoot, executionCwd }) => ({ ok: true, workspaceRoot, executionCwd })),
     },
+    artifactTasks: {
+      prepare: vi.fn(async ({ sessionKey }) => ({
+        artifactTask: false,
+        effectiveSessionKey: sessionKey,
+        createSession: false,
+      })),
+      validateWebpage: vi.fn(async () => ({ ok: false })),
+    },
+    longTermRules: {
+      capture: vi.fn(async () => ({ captured: false })),
+      repair: vi.fn(async () => ({ repaired: false })),
+      undo: vi.fn(async () => ({ restored: false })),
+    },
   },
 }));
 

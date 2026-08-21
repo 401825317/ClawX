@@ -114,6 +114,19 @@ vi.mock('@/lib/host-api', () => ({
   hostApi: {
     dialog: { open: openDialog },
     files: { resolveWorkspaceContext },
+    artifactTasks: {
+      prepare: vi.fn(async ({ sessionKey }) => ({
+        artifactTask: false,
+        effectiveSessionKey: sessionKey,
+        createSession: false,
+      })),
+      validateWebpage: vi.fn(async () => ({ ok: false })),
+    },
+    longTermRules: {
+      capture: vi.fn(async () => ({ captured: false })),
+      repair: vi.fn(async () => ({ repaired: false })),
+      undo: vi.fn(async () => ({ restored: false })),
+    },
   },
 }));
 
@@ -417,13 +430,15 @@ describe('ACP Chat page', () => {
       expect(screen.getByTestId('mock-chat-input')).toHaveAttribute('data-disabled', 'false');
     });
     fireEvent.click(screen.getByTestId('mock-send'));
-    expect(acpState.sendPrompt).toHaveBeenCalledWith({
-      sessionKey: 'agent:main:main',
-      cwd: '/workspace',
-      message: 'Ship it',
-      media: [{
-        filePath: '/tmp/ready.png', stagingId: 'staged-ready', fileName: 'ready.png', mimeType: 'image/png',
-      }],
+    await waitFor(() => {
+      expect(acpState.sendPrompt).toHaveBeenCalledWith({
+        sessionKey: 'agent:main:main',
+        cwd: '/workspace',
+        message: 'Ship it',
+        media: [{
+          filePath: '/tmp/ready.png', stagingId: 'staged-ready', fileName: 'ready.png', mimeType: 'image/png',
+        }],
+      });
     });
 
     fireEvent.click(screen.getByTestId('mock-stop'));
@@ -726,8 +741,8 @@ describe('ACP Chat page', () => {
     expect(screen.getByTestId('mock-chat-input')).toHaveAttribute('data-disabled', 'true');
   });
 
-  it('waits for Gateway readiness before loading ACP sessions or enabling the composer', async () => {
-    gatewayState.status = { state: 'stopped', gatewayReady: false, port: 18789 };
+  it('waits for an explicit Gateway not-ready signal, then accepts compatible running statuses', async () => {
+    gatewayState.status = { state: 'running', gatewayReady: false, port: 18789 };
 
     const { rerender } = render(<Chat />);
 
@@ -735,7 +750,7 @@ describe('ACP Chat page', () => {
     expect(acpState.loadSession).not.toHaveBeenCalled();
 
     gatewayState.status = {
-      state: 'running', gatewayReady: true, port: 18789, pid: 42, connectedAt: 1_786_545_000_000,
+      state: 'running', port: 18789, pid: 42, connectedAt: 1_786_545_000_000,
     };
     rerender(<Chat />);
 

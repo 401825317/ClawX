@@ -542,6 +542,8 @@ export async function syncPortableRuntimeSnapshot(
 export type PortableRuntimeSnapshotServiceOptions = {
   watch?: boolean;
   integrityIntervalMs?: number;
+  deferBackoffBaseMs?: number;
+  deferBackoffMaxMs?: number;
   now?: () => number;
 };
 
@@ -554,6 +556,8 @@ export class PortableRuntimeSnapshotService {
   private dirtyRevision = 1;
   private syncedRevision = 0;
   private lastIntegrityCheckAt = 0;
+  private deferredAttemptCount = 0;
+  private nextDeferredRetryAt = 0;
   private watchReliable = false;
   private started = false;
 
@@ -567,6 +571,36 @@ export class PortableRuntimeSnapshotService {
   /** Mark the local source dirty without performing I/O immediately. */
   markDirty(): void {
     this.dirtyRevision += 1;
+  }
+
+  private now(): number {
+    return (this.options.now ?? Date.now)();
+  }
+
+  private clearDeferredBackoff(): void {
+    this.deferredAttemptCount = 0;
+    this.nextDeferredRetryAt = 0;
+  }
+
+  private deferSnapshot(reason: string, details: Record<string, unknown>): void {
+    const now = this.now();
+    const baseDelayMs = Math.max(this.intervalMs, this.options.deferBackoffBaseMs ?? 10 * 60_000);
+    const maximumDelayMs = Math.max(baseDelayMs, this.options.deferBackoffMaxMs ?? 60 * 60_000);
+    this.deferredAttemptCount = Math.min(this.deferredAttemptCount + 1, 30);
+    const retryAfterMs = Math.min(
+      maximumDelayMs,
+      baseDelayMs * (2 ** Math.min(this.deferredAttemptCount - 1, 8)),
+    );
+    this.nextDeferredRetryAt = now + retryAfterMs;
+    this.log('Portable Runtime snapshot deferred', {
+      event: 'portable-runtime-snapshot-deferred',
+      severity: 'warning',
+      reason,
+      attempt: this.deferredAttemptCount,
+      retryAfterMs,
+      retryAt: new Date(this.nextDeferredRetryAt).toISOString(),
+      ...details,
+    });
   }
 
   private closeWatchers(): void {
@@ -624,11 +658,12 @@ export class PortableRuntimeSnapshotService {
 
   /** Run a periodic scan only when a watcher observed changes or integrity verification is due. */
   async syncIfNeeded(): Promise<boolean> {
-    const now = (this.options.now ?? Date.now)();
+    const now = this.now();
     const integrityIntervalMs = this.options.integrityIntervalMs ?? 60 * 60_000;
     const integrityDue = this.lastIntegrityCheckAt > 0
       && now - this.lastIntegrityCheckAt >= integrityIntervalMs;
     const watcherFallbackRequired = this.started && !this.watchReliable;
+    if (this.nextDeferredRetryAt > now) return true;
     if (
       this.dirtyRevision === this.syncedRevision
       && !integrityDue
@@ -656,6 +691,17 @@ export class PortableRuntimeSnapshotService {
         minimumGeneration: marker?.lastAppliedGeneration ?? 0,
         verifyExistingObjects,
       });
+      if (result.deferred) {
+        this.deferSnapshot(reason, {
+          deferredReason: result.deferredReason,
+          deferredPaths: result.deferredPaths,
+          reusedPreviousSnapshot: result.reusedPreviousSnapshot,
+          snapshotId: result.snapshotId,
+          generation: result.generation,
+          unstableFiles: result.unstableFiles,
+        });
+        return false;
+      }
       try {
         const clawxResult = await syncPortableClawXState({
           sourceDir: path.join(this.layout.dataDir, 'clawx'),
@@ -694,8 +740,10 @@ export class PortableRuntimeSnapshotService {
         lifecycle,
       });
       this.syncedRevision = revisionAtStart;
-      this.lastIntegrityCheckAt = (this.options.now ?? Date.now)();
+      this.lastIntegrityCheckAt = this.now();
+      this.clearDeferredBackoff();
       this.log('Portable Runtime snapshot completed', {
+        event: 'portable-runtime-snapshot-completed',
         reason,
         skipped: result.skipped,
         scannedFiles: result.scannedFiles,
@@ -711,10 +759,12 @@ export class PortableRuntimeSnapshotService {
       });
       return true;
     } catch (error) {
-      this.log('Portable Runtime snapshot deferred', {
-        reason,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      if (!signal.aborted) {
+        this.deferSnapshot(reason, {
+          deferredReason: 'snapshot-error',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
       return false;
     }
   }

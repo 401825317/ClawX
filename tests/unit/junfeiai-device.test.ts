@@ -37,8 +37,11 @@ const legacyIdentityPath = join(userData, 'clawx-device-identity.json');
 const legacyActivationPath = join(userData, 'clawx-device-activation.json');
 const stableActivationPath = join(appData, 'UClaw', 'uclaw-device-activation.json');
 
-async function mode(filePath: string): Promise<number> {
-  return (await stat(filePath)).mode & 0o777;
+async function expectMode(filePath: string, expected: number): Promise<void> {
+  const fileStat = await stat(filePath);
+  if (process.platform !== 'win32') {
+    expect(fileStat.mode & 0o777).toBe(expected);
+  }
 }
 
 describe('UClaw managed device identity', () => {
@@ -72,8 +75,8 @@ describe('UClaw managed device identity', () => {
     expect(snapshot.current.bytes).toEqual(currentBytes);
     expect(snapshot.stable.path).toBe(stableActivationPath);
     expect(snapshot.stable.bytes).toEqual(stableBytes);
-    expect(await mode(getUclawDeviceActivationPath())).toBe(0o644);
-    expect(await mode(stableActivationPath)).toBe(0o640);
+    await expectMode(getUclawDeviceActivationPath(), 0o644);
+    await expectMode(stableActivationPath, 0o640);
     await expect(readFile(getUclawDeviceIdentityPath())).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(readFile(getStableUclawDeviceIdentityPath())).rejects.toMatchObject({ code: 'ENOENT' });
   });
@@ -103,8 +106,8 @@ describe('UClaw managed device identity', () => {
 
     expect(await readFile(getUclawDeviceActivationPath())).toEqual(currentBytes);
     expect(await readFile(stableActivationPath)).toEqual(stableBytes);
-    expect(await mode(getUclawDeviceActivationPath())).toBe(0o600);
-    expect(await mode(stableActivationPath)).toBe(0o600);
+    await expectMode(getUclawDeviceActivationPath(), 0o600);
+    await expectMode(stableActivationPath, 0o600);
   });
 
   it('removes activation files created after a missing snapshot and ignores ENOENT', async () => {
@@ -135,7 +138,7 @@ describe('UClaw managed device identity', () => {
       expect.objectContaining({ code: expect.stringMatching(/^(EISDIR|EPERM)$/) }),
     ]);
     expect(await readFile(stableActivationPath)).toEqual(stableBytes);
-    expect(await mode(stableActivationPath)).toBe(0o600);
+    await expectMode(stableActivationPath, 0o600);
   });
 
   it('keeps one identity across loads and protects every persisted copy', async () => {
@@ -146,8 +149,8 @@ describe('UClaw managed device identity', () => {
 
     expect(second).toEqual(first);
     expect(first.deviceId).toMatch(/^[a-f0-9]{64}$/);
-    expect(await mode(getUclawDeviceIdentityPath())).toBe(0o600);
-    expect(await mode(getStableUclawDeviceIdentityPath())).toBe(0o600);
+    await expectMode(getUclawDeviceIdentityPath(), 0o600);
+    await expectMode(getStableUclawDeviceIdentityPath(), 0o600);
   });
 
   it('restores an activated stable identity before an unactivated legacy identity', async () => {
@@ -184,7 +187,7 @@ describe('UClaw managed device identity', () => {
     expect(state.username).toBe('test-user');
     expect(state.email).toBe('user@example.com');
     expect(await readUclawDeviceActivationState()).toEqual(state);
-    expect(await mode(getUclawDeviceActivationPath())).toBe(0o600);
+    await expectMode(getUclawDeviceActivationPath(), 0o600);
 
     const persisted = JSON.parse(await readFile(getUclawDeviceActivationPath(), 'utf8')) as Record<string, unknown>;
     expect(Object.keys(persisted).sort()).toEqual([
@@ -261,8 +264,8 @@ describe('UClaw managed device identity', () => {
     expect(JSON.stringify(activation)).not.toContain('must-not-be-migrated');
     expect(await readFile(legacyIdentityPath, 'utf8')).toBe(originalIdentityFile);
     expect(await readFile(legacyActivationPath, 'utf8')).toBe(originalActivationFile);
-    expect(await mode(getUclawDeviceIdentityPath())).toBe(0o600);
-    expect(await mode(getUclawDeviceActivationPath())).toBe(0o600);
+    await expectMode(getUclawDeviceIdentityPath(), 0o600);
+    await expectMode(getUclawDeviceActivationPath(), 0o600);
   });
 
   it('does not trust a legacy deviceId that differs from its public-key fingerprint', async () => {

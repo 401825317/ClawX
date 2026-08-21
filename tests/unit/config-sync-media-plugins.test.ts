@@ -16,6 +16,7 @@ describe('configured runtime plugins', () => {
       'whatsapp',
       'clawx-openai-image',
       'uclaw-video',
+      'uclaw-artifact-orchestrator',
       'uclaw-local-artifacts',
       'uclaw-blender',
     ]);
@@ -30,6 +31,7 @@ describe('configured runtime plugins', () => {
         },
       },
     })).toEqual([
+      'uclaw-artifact-orchestrator',
       'uclaw-local-artifacts',
       'uclaw-blender',
     ]);

@@ -12,6 +12,7 @@ import {
   setSetting,
 } from '../utils/store';
 import { isRecord } from './payload-utils';
+import { setTelemetryCollectionEnabled } from '../utils/telemetry';
 
 type KeyPayload = {
   key?: unknown;
@@ -74,6 +75,10 @@ function patchTouchesLanguage(patch: Partial<AppSettings>): boolean {
   return Object.prototype.hasOwnProperty.call(patch, 'language');
 }
 
+function patchTouchesTelemetry(patch: Partial<AppSettings>): boolean {
+  return Object.prototype.hasOwnProperty.call(patch, 'telemetryEnabled');
+}
+
 async function handleProxySettingsChange(gatewayManager: GatewayManager): Promise<void> {
   const settings = await getAllSettings();
   await syncProxyConfigToOpenClaw(settings, { preserveExistingWhenDisabled: false });
@@ -95,6 +100,9 @@ async function runSettingsSideEffects(
   }
   if (patchTouchesLanguage(patch)) {
     await createMenu(typeof patch.language === 'string' ? patch.language : undefined);
+  }
+  if (patchTouchesTelemetry(patch)) {
+    await setTelemetryCollectionEnabled(patch.telemetryEnabled === true);
   }
 }
 

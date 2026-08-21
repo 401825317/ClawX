@@ -65,7 +65,16 @@ function installRecordsMatch(
   left: Record<string, unknown>,
   right: Record<string, unknown>,
 ): boolean {
-  const keys = ['source', 'spec', 'installPath', 'version', 'resolvedName', 'resolvedVersion', 'resolvedSpec'] as const;
+  const keys = [
+    'source',
+    'spec',
+    'installPath',
+    'version',
+    'resolvedName',
+    'resolvedVersion',
+    'resolvedSpec',
+    'integrity',
+  ] as const;
   return keys.every((key) => left[key] === right[key]);
 }
 

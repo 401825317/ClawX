@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => {
     warmupManagedPythonReadiness: vi.fn(),
     launchGatewayProcess: vi.fn(),
     runGatewayStartupSequence: vi.fn(),
+    connectGatewaySocket: vi.fn(),
     loadGatewayReloadPolicy: vi.fn(),
     loadOrCreateDeviceIdentity: vi.fn(),
     prepareManagedOpenClawDowngrade: vi.fn(),
@@ -90,6 +91,14 @@ vi.mock('@electron/gateway/process-launcher', () => ({
 vi.mock('@electron/gateway/startup-orchestrator', () => ({
   runGatewayStartupSequence: mocks.runGatewayStartupSequence,
 }));
+
+vi.mock('@electron/gateway/ws-client', async () => {
+  const actual = await vi.importActual<typeof import('@electron/gateway/ws-client')>('@electron/gateway/ws-client');
+  return {
+    ...actual,
+    connectGatewaySocket: mocks.connectGatewaySocket,
+  };
+});
 
 vi.mock('@electron/gateway/openclaw-downgrade', () => ({
   prepareManagedOpenClawDowngrade: mocks.prepareManagedOpenClawDowngrade,
@@ -672,6 +681,101 @@ describe('GatewayManager managed runtime mutation barrier', () => {
     expect(mocks.rollbackOpenClawDowngrade).not.toHaveBeenCalled();
   });
 
+  it('does not schedule reconnect when startup has a deterministic package import failure', async () => {
+    const child = fakeChild(6115);
+    let launchOptions: {
+      onStderrLine: (line: string) => void;
+      onExit: (child: Electron.UtilityProcess, code: number | null) => void;
+    } | null = null;
+    mocks.launchGatewayProcess.mockImplementationOnce(async (options: typeof launchOptions) => {
+      launchOptions = options;
+      return { child, lastSpawnSummary: 'runtime-import-failure-spawn' };
+    });
+    mocks.runGatewayStartupSequence.mockImplementationOnce(async (hooks: {
+      startProcess: () => Promise<void>;
+    }) => {
+      await hooks.startProcess();
+      launchOptions!.onStderrLine(
+        "Error [ERR_PACKAGE_IMPORT_NOT_DEFINED]: Package import specifier '#ansi-styles' is not defined",
+      );
+      launchOptions!.onExit(child, 1);
+      throw new Error('Gateway process exited before becoming ready (code=1)');
+    });
+
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+    const reconnectSpy = vi.spyOn(
+      manager as unknown as { scheduleReconnect: () => void },
+      'scheduleReconnect',
+    );
+
+    await expect(manager.start()).rejects.toThrow('Gateway process exited before becoming ready');
+
+    expect(reconnectSpy).not.toHaveBeenCalled();
+    expect((manager as unknown as { shouldReconnect: boolean }).shouldReconnect).toBe(false);
+  });
+
+  it('does not classify a runtime package-like message as a startup failure after connection', async () => {
+    const child = fakeChild(6116);
+    let launchOptions: {
+      onStderrLine: (line: string) => void;
+      onExit: (child: Electron.UtilityProcess, code: number | null) => void;
+    } | null = null;
+    mocks.launchGatewayProcess.mockImplementationOnce(async (options: typeof launchOptions) => {
+      launchOptions = options;
+      return { child, lastSpawnSummary: 'runtime-message-after-connect' };
+    });
+    mocks.runGatewayStartupSequence.mockImplementationOnce(async (hooks: {
+      startProcess: () => Promise<void>;
+      onConnectedToManagedGateway?: () => void;
+    }) => {
+      await hooks.startProcess();
+      hooks.onConnectedToManagedGateway?.();
+      launchOptions!.onStderrLine(
+        "Error [ERR_PACKAGE_IMPORT_NOT_DEFINED]: Package import specifier '#ansi-styles' is not defined",
+      );
+      launchOptions!.onExit(child, 1);
+    });
+
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+    const internals = manager as unknown as {
+      shouldReconnect: boolean;
+      startupStderrCollectionActive: boolean;
+      recentStartupStderrLines: string[];
+      scheduleReconnect: () => void;
+    };
+    const reconnectSpy = vi.spyOn(internals, 'scheduleReconnect');
+
+    await expect(manager.start()).resolves.toBeUndefined();
+
+    expect(internals.startupStderrCollectionActive).toBe(false);
+    expect(internals.recentStartupStderrLines).toEqual([]);
+    expect(internals.shouldReconnect).toBe(true);
+    expect(reconnectSpy).toHaveBeenCalledOnce();
+
+    await manager.stop();
+  });
+
+  it('preserves an early spawn error without reading an uninitialized child binding', async () => {
+    const spawnError = new Error(
+      "Error [ERR_PACKAGE_IMPORT_NOT_DEFINED]: Package import specifier '#ansi-styles' is not defined",
+    );
+    const failedChild = fakeChild(6117);
+    mocks.launchGatewayProcess.mockImplementationOnce(async (options: {
+      onError: (child: Electron.UtilityProcess, error: Error) => void;
+    }) => {
+      options.onError(failedChild, spawnError);
+      throw spawnError;
+    });
+
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+
+    await expect(manager.start()).rejects.toBe(spawnError);
+    expect((manager as unknown as { shouldReconnect: boolean }).shouldReconnect).toBe(false);
+  });
+
   it('does not restore a backup when handoff stops before managed config mutation begins', async () => {
     const transaction = {
       configPath: '/tmp/openclaw.json',
@@ -701,6 +805,36 @@ describe('GatewayManager managed runtime mutation barrier', () => {
     expect((manager as unknown as { shouldReconnect: boolean }).shouldReconnect).toBe(false);
   });
 
+  it('does not transfer connection ownership when an existing listener has a different PID', async () => {
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+    const internals = manager as unknown as {
+      process: Electron.UtilityProcess | null;
+      ownsProcess: boolean;
+      connectedGatewayOwned: boolean;
+    };
+    internals.process = fakeChild(1111);
+    internals.ownsProcess = true;
+    mocks.findExistingGatewayProcess.mockResolvedValueOnce({ port: 18789, pid: 2222 });
+    mocks.runGatewayStartupSequence.mockImplementationOnce(async (hooks: {
+      findExistingGateway: (port: number) => Promise<{ port: number; pid?: number } | null>;
+      onConnectedToExistingGateway: (connection: {
+        gateway: { port: number; pid?: number };
+        source: 'discovered';
+      }) => void;
+    }) => {
+      const gateway = await hooks.findExistingGateway(18789);
+      expect(gateway).not.toBeNull();
+      hooks.onConnectedToExistingGateway({ gateway: gateway!, source: 'discovered' });
+    });
+
+    await manager.start();
+
+    expect(internals.ownsProcess).toBe(true);
+    expect(internals.connectedGatewayOwned).toBe(false);
+    expect(manager.getStatus().pid).toBe(2222);
+  });
+
   it('checks the lifecycle immediately before forking', async () => {
     const { GatewayManager } = await import('@electron/gateway/manager');
     const manager = new GatewayManager();
@@ -716,6 +850,61 @@ describe('GatewayManager managed runtime mutation barrier', () => {
 
     expect(guard).toHaveBeenCalledWith('start/process-before-fork');
     expect(mocks.launchGatewayProcess).not.toHaveBeenCalled();
+  });
+
+  it('rechecks the Windows port and lifecycle at the final fork boundary', async () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+    const portCheck = deferred<void>();
+    const expected = new Error('superseded during final port check');
+    mocks.waitForPortFree.mockReturnValueOnce(portCheck.promise);
+    const guard = vi.fn((phase: string) => {
+      if (phase === 'start/process-after-port-check') throw expected;
+    });
+    const startProcess = (manager as unknown as {
+      startProcess: (assertCanLaunch: (phase: string) => void) => Promise<void>;
+    }).startProcess.bind(manager);
+
+    const starting = startProcess(guard);
+    await vi.waitFor(() => expect(mocks.waitForPortFree).toHaveBeenCalledWith(18789));
+    expect(mocks.launchGatewayProcess).not.toHaveBeenCalled();
+
+    portCheck.resolve(undefined);
+    await expect(starting).rejects.toBe(expected);
+    expect(guard).toHaveBeenCalledWith('start/process-before-fork');
+    expect(guard).toHaveBeenCalledWith('start/process-after-port-check');
+    expect(mocks.launchGatewayProcess).not.toHaveBeenCalled();
+  });
+
+  it('cancels an in-flight Gateway handshake before stop waits for startup', async () => {
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+    let signal: AbortSignal | undefined;
+    mocks.connectGatewaySocket.mockImplementationOnce((options: { signal?: AbortSignal }) => {
+      signal = options.signal;
+      if (!signal) throw new Error('Gateway startup handshake did not receive an AbortSignal');
+      return new Promise<never>((_resolve, reject) => {
+        signal!.addEventListener('abort', () => reject(signal!.reason), { once: true });
+      });
+    });
+    mocks.runGatewayStartupSequence.mockImplementationOnce(async (hooks: {
+      connect: (port: number) => Promise<void>;
+    }) => {
+      await hooks.connect(18789);
+    });
+
+    const starting = manager.start();
+    await vi.waitFor(() => expect(mocks.connectGatewaySocket).toHaveBeenCalledTimes(1));
+
+    await expect(manager.stop()).resolves.toBeUndefined();
+    await expect(starting).resolves.toBeUndefined();
+    expect(signal?.aborted).toBe(true);
+    expect(signal?.reason).toMatchObject({
+      name: 'LifecycleSupersededError',
+      message: 'Gateway startup cancelled by stop',
+    });
+    expect(manager.getStatus().state).toBe('stopped');
   });
 
   it('terminates a child that spawns after a managed lease is acquired', async () => {

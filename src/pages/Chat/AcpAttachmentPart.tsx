@@ -101,7 +101,15 @@ function AcpUserImageAttachment({
   );
 }
 
-export function AcpAttachmentPart({ part, tone = 'assistant' }: { part: AttachmentRenderPart; tone?: AttachmentTone }) {
+export function AcpAttachmentPart({
+  part,
+  tone = 'assistant',
+  workspaceRoot,
+}: {
+  part: AttachmentRenderPart;
+  tone?: AttachmentTone;
+  workspaceRoot?: string;
+}) {
   const { t } = useTranslation('chat');
   const name = basenameOf(part.reference.name) || part.reference.name;
   const pending = part.access.status === 'pending';
@@ -219,7 +227,16 @@ export function AcpAttachmentPart({ part, tone = 'assistant' }: { part: Attachme
       primaryDisabled={disabled}
       onPrimary={() => void activate()}
       openWith={openWithFileRef
-        ? { target: { kind: 'attachment', ref: openWithFileRef }, name }
+        ? {
+            target: { kind: 'attachment', ref: openWithFileRef },
+            name,
+            ...(part.access.status === 'available'
+              && part.access.target.kind === 'local'
+              && part.access.target.scope === 'workspace'
+              && workspaceRoot
+              ? { workspaceRoot }
+              : {}),
+          }
         : undefined}
     >
       {attachmentContent}

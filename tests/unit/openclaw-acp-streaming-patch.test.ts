@@ -1,13 +1,15 @@
 // @vitest-environment node
 
 import { existsSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { pathToFileURL } from 'node:url';
+import { afterEach, describe, expect, it } from 'vitest';
 
 const repoRoot = process.cwd();
 const patchModulePath = resolve(repoRoot, 'scripts/openclaw-acp-streaming-patch.mjs');
+const tempRoots = new Set<string>();
 const upstreamFragments = [
   'const streamedTextFragments = [];',
   'if (!isStatusNotice && reply.trimmedText) streamedTextFragments.push(reply.trimmedText);',
@@ -15,11 +17,30 @@ const upstreamFragments = [
   'return normalize(streamedTextFragments.join("")) === normalize(reply.trimmedText);',
 ].join('\n');
 
+async function createTempRoot(prefix: string): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), prefix));
+  tempRoots.add(root);
+  return root;
+}
+
+async function importPatchModule(): Promise<typeof import('../../scripts/openclaw-acp-streaming-patch.mjs')> {
+  const root = await createTempRoot('uclaw-acp-streaming-module-');
+  const modulePath = join(root, 'openclaw-acp-streaming-patch.mjs');
+  const source = (await readFile(patchModulePath, 'utf8')).replace(/^#![^\r\n]*(?:\r?\n|$)/, '');
+  await writeFile(modulePath, source, 'utf8');
+  return await import(`${pathToFileURL(modulePath).href}?test=${Date.now()}-${Math.random()}`);
+}
+
+afterEach(async () => {
+  await Promise.all([...tempRoots].map(root => rm(root, { recursive: true, force: true })));
+  tempRoots.clear();
+});
+
 describe('OpenClaw 6.10 ACP streaming runtime patch', () => {
   it('groups streamed fragments by assistant message and remains idempotent', async () => {
     expect(existsSync(patchModulePath)).toBe(true);
 
-    const { rewriteMultiMessageStreamSuppression } = await import(patchModulePath);
+    const { rewriteMultiMessageStreamSuppression } = await importPatchModule();
     const rewritten = rewriteMultiMessageStreamSuppression(upstreamFragments);
 
     expect(rewritten.replacements).toBe(4);
@@ -35,8 +56,8 @@ describe('OpenClaw 6.10 ACP streaming runtime patch', () => {
   it('patches only the supported OpenClaw 6.10 runtime layout', async () => {
     expect(existsSync(patchModulePath)).toBe(true);
 
-    const { patchOpenClawAcpStreamingRuntime } = await import(patchModulePath);
-    const root = await mkdtemp(join(tmpdir(), 'uclaw-acp-streaming-runtime-'));
+    const { patchOpenClawAcpStreamingRuntime } = await importPatchModule();
+    const root = await createTempRoot('uclaw-acp-streaming-runtime-');
     const dist = join(root, 'dist');
     await mkdir(dist, { recursive: true });
     await writeFile(join(root, 'package.json'), JSON.stringify({ version: '2026.6.10' }), 'utf8');
@@ -62,8 +83,8 @@ describe('OpenClaw 6.10 ACP streaming runtime patch', () => {
   it('rejects an unknown OpenClaw 6.10 runtime layout', async () => {
     expect(existsSync(patchModulePath)).toBe(true);
 
-    const { patchOpenClawAcpStreamingRuntime } = await import(patchModulePath);
-    const root = await mkdtemp(join(tmpdir(), 'uclaw-acp-streaming-unknown-'));
+    const { patchOpenClawAcpStreamingRuntime } = await importPatchModule();
+    const root = await createTempRoot('uclaw-acp-streaming-unknown-');
     const dist = join(root, 'dist');
     await mkdir(dist, { recursive: true });
     await writeFile(join(root, 'package.json'), JSON.stringify({ version: '2026.6.10' }), 'utf8');

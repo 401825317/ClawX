@@ -1,10 +1,20 @@
+// @vitest-environment node
+
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { patchNsisInstallSectionTemplate } from '../../scripts/patch-nsis-install-section.mjs';
+const patchModulePath = resolve(process.cwd(), 'scripts/patch-nsis-install-section.mjs');
+
+async function importCliModule<T>(sourcePath: string, directory: string): Promise<T> {
+  const modulePath = join(directory, basename(sourcePath));
+  const source = readFileSync(sourcePath, 'utf8').replace(/^#![^\r\n]*(?:\r?\n|$)/, '');
+  writeFileSync(modulePath, source, 'utf8');
+  return await import(`${pathToFileURL(modulePath).href}?test=${Date.now()}-${Math.random()}`) as T;
+}
 
 const SAMPLE_INSTALL_SECTION = `!ifdef ONE_CLICK
   !insertmacro CHECK_APP_RUNNING
@@ -27,8 +37,12 @@ describe('patchNsisInstallSectionTemplate', () => {
     }
   });
 
-  it('runs CHECK_APP_RUNNING for assisted UAC inner installs', () => {
+  it('runs CHECK_APP_RUNNING for assisted UAC inner installs', async () => {
     tempDir = mkdtempSync(join(tmpdir(), 'clawx-patch-nsis-install-section-'));
+    const { patchNsisInstallSectionTemplate } = await importCliModule<typeof import('../../scripts/patch-nsis-install-section.mjs')>(
+      patchModulePath,
+      tempDir,
+    );
     const target = join(tempDir, 'installSection.nsh');
     writeFileSync(target, SAMPLE_INSTALL_SECTION, 'utf8');
 

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GatewayConnectionMonitor } from '@electron/gateway/connection-monitor';
 
 vi.mock('electron', () => ({
@@ -66,5 +66,38 @@ describe('GatewayConnectionMonitor heartbeat', () => {
     vi.advanceTimersByTime(100); // miss #1 again (reset confirmed)
     expect(monitor.getConsecutiveMisses()).toBe(1);
     expect(onHeartbeatTimeout).not.toHaveBeenCalled();
+  });
+});
+
+describe('GatewayConnectionMonitor read-only recovery probes', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('does not mutate runtime state when a channel probe fails', async () => {
+    const monitor = new GatewayConnectionMonitor();
+    const runtime = { configuredChannels: ['wechat'], plugins: ['wechat'] };
+    const probe = vi.fn(async () => {
+      throw new Error('channels.status unavailable');
+    });
+
+    const result = await monitor.runReadOnlyProbe(probe);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBeInstanceOf(Error);
+    expect(runtime).toEqual({ configuredChannels: ['wechat'], plugins: ['wechat'] });
+  });
+
+  it('makes a late channel probe result stale after recovery is cleared', async () => {
+    const monitor = new GatewayConnectionMonitor();
+    let resolveProbe: (() => void) | undefined;
+    const pending = monitor.runReadOnlyProbe(async () => {
+      await new Promise<void>((resolve) => { resolveProbe = resolve; });
+    });
+
+    monitor.clear();
+    resolveProbe?.();
+
+    await expect(pending).resolves.toMatchObject({ ok: false, stale: true });
   });
 });

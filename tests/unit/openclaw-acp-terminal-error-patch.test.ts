@@ -143,6 +143,14 @@ async function createTempRoot(prefix: string): Promise<string> {
   return root;
 }
 
+async function importPatchModule(): Promise<typeof import('../../scripts/openclaw-acp-terminal-error-patch.mjs')> {
+  const root = await createTempRoot('uclaw-acp-terminal-patch-module-');
+  const modulePath = join(root, 'openclaw-acp-terminal-error-patch.mjs');
+  const source = (await readFile(patchModulePath, 'utf8')).replace(/^#![^\r\n]*(?:\r?\n|$)/, '');
+  await writeFile(modulePath, source, 'utf8');
+  return await import(`${pathToFileURL(modulePath).href}?test=${Date.now()}-${Math.random()}`);
+}
+
 async function importFixture<T>(prefix: string, source: string): Promise<T> {
   const root = await createTempRoot(prefix);
   const fixturePath = join(root, 'runtime.mjs');
@@ -176,7 +184,7 @@ afterEach(async () => {
 describe('OpenClaw 6.10 ACP terminal error runtime patch', () => {
   it('rejects ACP state=error and preserves the provider error text and cause', async () => {
     expect(existsSync(patchModulePath)).toBe(true);
-    const { rewriteAcpTerminalErrors } = await import(patchModulePath);
+    const { rewriteAcpTerminalErrors } = await importPatchModule();
     const rewritten = rewriteAcpTerminalErrors(acpRuntimeSource);
 
     expect(rewritten).toMatchObject({ replacements: 5, supported: true });
@@ -196,7 +204,7 @@ describe('OpenClaw 6.10 ACP terminal error runtime patch', () => {
   });
 
   it('rejects a reconnect error and preserves nested ACP message text', async () => {
-    const { rewriteAcpTerminalErrors } = await import(patchModulePath);
+    const { rewriteAcpTerminalErrors } = await importPatchModule();
     const rewritten = rewriteAcpTerminalErrors(acpRuntimeSource);
     const runtime = await importFixture<AcpRuntimeModule>(
       'uclaw-acp-reconnect-error-',
@@ -224,7 +232,7 @@ describe('OpenClaw 6.10 ACP terminal error runtime patch', () => {
     '预扣费额度失败, 用户剩余额度不足',
     '订阅额度不足或未配置订阅',
   ])('keeps managed quota error out of auth/rate/billing and maps it to terminal format: %s', async (errorMessage) => {
-    const { rewriteManagedUserQuotaHandling } = await import(patchModulePath);
+    const { rewriteManagedUserQuotaHandling } = await importPatchModule();
     const rewritten = rewriteManagedUserQuotaHandling(classifierRuntimeSource);
 
     expect(rewritten).toMatchObject({ replacements: 5, supported: true });
@@ -244,7 +252,7 @@ describe('OpenClaw 6.10 ACP terminal error runtime patch', () => {
   });
 
   it('patches both supported runtime files and remains idempotent', async () => {
-    const { patchOpenClawAcpTerminalErrorRuntime } = await import(patchModulePath);
+    const { patchOpenClawAcpTerminalErrorRuntime } = await importPatchModule();
     const runtime = await writeOpenClawRuntime('2026.6.10');
 
     await expect(patchOpenClawAcpTerminalErrorRuntime(runtime.root)).resolves.toEqual({
@@ -267,7 +275,7 @@ describe('OpenClaw 6.10 ACP terminal error runtime patch', () => {
   });
 
   it('rejects an unsupported OpenClaw version', async () => {
-    const { patchOpenClawAcpTerminalErrorRuntime } = await import(patchModulePath);
+    const { patchOpenClawAcpTerminalErrorRuntime } = await importPatchModule();
     const runtime = await writeOpenClawRuntime('2026.6.11');
 
     await expect(patchOpenClawAcpTerminalErrorRuntime(runtime.root)).rejects.toThrow(
@@ -276,7 +284,7 @@ describe('OpenClaw 6.10 ACP terminal error runtime patch', () => {
   });
 
   it('rejects unknown ACP and error-classifier runtime layouts', async () => {
-    const { patchOpenClawAcpTerminalErrorRuntime } = await import(patchModulePath);
+    const { patchOpenClawAcpTerminalErrorRuntime } = await importPatchModule();
     const unknownAcp = await writeOpenClawRuntime(
       '2026.6.10',
       'unknown ACP runtime layout',

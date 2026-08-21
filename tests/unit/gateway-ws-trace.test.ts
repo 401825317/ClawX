@@ -19,7 +19,12 @@ describe('gateway ws trace', () => {
     expect(JSON.stringify(redacted)).not.toContain('secret-token');
     expect(JSON.stringify(redacted)).not.toContain('device-signature');
     expect(JSON.stringify(redacted)).not.toContain('Bearer abc');
-    expect(JSON.stringify(redacted)).toContain('[redacted]');
+    expect(redacted).toMatchObject({
+      params: {
+        auth: { token: { redacted: true, bytes: 12 } },
+        device: { signature: { redacted: true, bytes: 16 } },
+      },
+    });
   });
 
   it('summarizes request and event frames', () => {

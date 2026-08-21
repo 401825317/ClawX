@@ -10,6 +10,7 @@ import {
 import { waitForPortFree } from '../gateway/supervisor';
 import type { ProviderAccount, ProviderSecret } from '../shared/providers/types';
 import type {
+  ManagedClientImageModelPolicy,
   ManagedClientTextModelPolicy,
   ManagedClientVideoModelPolicy,
 } from '../../shared/managed-client-config';
@@ -36,6 +37,8 @@ import {
   UCLAW_DEFAULT_API_PROTOCOL,
   UCLAW_DEFAULT_BASE_URL,
   UCLAW_DEFAULT_MODEL,
+  UCLAW_IMAGE_GENERATION_TIMEOUT_MS,
+  UCLAW_MANAGED_PROVIDER_BASE_URL,
   UCLAW_LEGACY_AUTH_ACCOUNT_IDS,
   UCLAW_MANAGED_SERVICE_NAME,
   UCLAW_OFFLINE_GRACE_SECONDS,
@@ -85,8 +88,10 @@ import {
   removeManagedRuntimeOpenAiState,
   restoreManagedRuntimeConfig,
   snapshotManagedRuntimeConfig,
+  updateManagedRuntimeConfig,
   type ManagedRuntimeConfigSnapshot,
 } from './providers/managed-runtime-config';
+import { getUclawDiagnosticHeaders } from '../utils/uclaw-request-diagnostics';
 import {
   getManagedAgentOpenAiProviderIds,
   installManagedAgentOpenAiApiKey,
@@ -101,7 +106,10 @@ import {
   type ManagedAgentModelsFilesSnapshot,
 } from '../utils/openclaw-auth';
 import { getClawXProviderStore } from './providers/store-instance';
-import { cacheManagedClientModelPoliciesFromPayload } from './managed-client-config-service';
+import {
+  cacheManagedClientModelPoliciesFromPayload,
+  getVerifiedManagedClientImageModelPolicySnapshot,
+} from './managed-client-config-service';
 import { logger } from '../utils/logger';
 import { withProviderMutationLock } from './providers/provider-mutation-lock';
 
@@ -1126,21 +1134,159 @@ async function requestAuth(
   }));
 }
 
+const UCLAW_IMAGE_PROVIDER_ID = 'clawx-openai-image';
+
+function managedImageProviderModels(policy: ManagedClientImageModelPolicy): JsonRecord[] {
+  return policy.models.map((model) => ({
+    id: model.id,
+    name: model.label?.trim() || model.id,
+  }));
+}
+
+function managedImagePluginConfig(policy: ManagedClientImageModelPolicy): JsonRecord {
+  return {
+    defaultModel: policy.defaultModel,
+    defaultSize: policy.defaultSize,
+    defaultQuality: policy.defaultQuality,
+    models: policy.models.map((model) => ({
+      id: model.id,
+      enabled: true,
+      ...(model.label ? { label: model.label } : {}),
+      ...(model.description ? { description: model.description } : {}),
+      sizes: [...model.sizes],
+      qualities: [...model.qualities],
+      defaultSize: model.defaultSize,
+      defaultQuality: model.defaultQuality,
+      supportsEditing: model.supportsEditing,
+    })),
+  };
+}
+
+function removeManagedImageRuntimeState(config: JsonRecord): boolean {
+  let changed = false;
+  const models = isRecord(config.models) ? { ...config.models } : null;
+  if (models && isRecord(models.providers) && Object.hasOwn(models.providers, UCLAW_IMAGE_PROVIDER_ID)) {
+    const providers = { ...models.providers };
+    delete providers[UCLAW_IMAGE_PROVIDER_ID];
+    if (Object.keys(providers).length > 0) models.providers = providers;
+    else delete models.providers;
+    config.models = Object.keys(models).length > 0 ? models : undefined;
+    changed = true;
+  }
+
+  const agents = isRecord(config.agents) ? { ...config.agents } : null;
+  const defaults = agents && isRecord(agents.defaults) ? { ...agents.defaults } : null;
+  const imageModel = defaults?.imageGenerationModel;
+  const primary = typeof imageModel === 'string'
+    ? imageModel.trim()
+    : isRecord(imageModel) && typeof imageModel.primary === 'string'
+      ? imageModel.primary.trim()
+      : '';
+  if (defaults && primary.startsWith(`${UCLAW_IMAGE_PROVIDER_ID}/`)) {
+    delete defaults.imageGenerationModel;
+    agents!.defaults = defaults;
+    config.agents = agents;
+    changed = true;
+  }
+
+  if (isRecord(config.plugins)) {
+    const plugins = { ...config.plugins };
+    if (Array.isArray(plugins.allow)) {
+      const allow = plugins.allow.filter((entry) => entry !== UCLAW_IMAGE_PROVIDER_ID);
+      if (allow.length !== plugins.allow.length) {
+        changed = true;
+        if (allow.length > 0) plugins.allow = allow;
+        else delete plugins.allow;
+      }
+    }
+    if (isRecord(plugins.entries) && Object.hasOwn(plugins.entries, UCLAW_IMAGE_PROVIDER_ID)) {
+      const entries = { ...plugins.entries };
+      delete entries[UCLAW_IMAGE_PROVIDER_ID];
+      changed = true;
+      if (Object.keys(entries).length > 0) plugins.entries = entries;
+      else delete plugins.entries;
+    }
+    if (changed) config.plugins = Object.keys(plugins).length > 0 ? plugins : undefined;
+  }
+
+  return changed;
+}
+
+function applyManagedImageRuntimeState(
+  config: JsonRecord,
+  policy: ManagedClientImageModelPolicy | null,
+): boolean {
+  if (!policy) return removeManagedImageRuntimeState(config);
+
+  const models = isRecord(config.models) ? { ...config.models } : {};
+  const providers = isRecord(models.providers) ? { ...models.providers } : {};
+  providers[UCLAW_IMAGE_PROVIDER_ID] = {
+    baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
+    api: 'openai-completions',
+    request: { allowPrivateNetwork: true },
+    models: managedImageProviderModels(policy),
+  };
+  models.providers = providers;
+  config.models = models;
+
+  const agents = isRecord(config.agents) ? { ...config.agents } : {};
+  const defaults = isRecord(agents.defaults) ? { ...agents.defaults } : {};
+  defaults.imageGenerationModel = {
+    primary: `${UCLAW_IMAGE_PROVIDER_ID}/${policy.defaultModel}`,
+    fallbacks: [],
+    timeoutMs: UCLAW_IMAGE_GENERATION_TIMEOUT_MS,
+  };
+  agents.defaults = defaults;
+  config.agents = agents;
+
+  const plugins = isRecord(config.plugins) ? { ...config.plugins } : {};
+  const allow = Array.isArray(plugins.allow)
+    ? plugins.allow.filter((entry): entry is string => typeof entry === 'string')
+    : [];
+  if (!allow.includes(UCLAW_IMAGE_PROVIDER_ID)) allow.push(UCLAW_IMAGE_PROVIDER_ID);
+  const entries = isRecord(plugins.entries) ? { ...plugins.entries } : {};
+  entries[UCLAW_IMAGE_PROVIDER_ID] = {
+    enabled: true,
+    config: managedImagePluginConfig(policy),
+  };
+  plugins.allow = allow;
+  plugins.entries = entries;
+  config.plugins = plugins;
+  return true;
+}
+
+async function syncManagedImageRuntime(
+  snapshot: ManagedRuntimeConfigSnapshot,
+  policy: ManagedClientImageModelPolicy | null,
+): Promise<void> {
+  await updateManagedRuntimeConfig(snapshot, (config) => applyManagedImageRuntimeState(config, policy));
+}
+
 async function syncManagedRuntimeDefaults(
   agentModelsFiles: ManagedAgentModelsFilesSnapshot,
   runtimeSnapshot: ManagedRuntimeConfigSnapshot,
   managedProviderIds: ReadonlySet<string>,
   policy: ManagedClientTextModelPolicy,
-  videoPolicy: ManagedClientVideoModelPolicy,
+  videoPolicy: ManagedClientVideoModelPolicy | null,
 ): Promise<void> {
-  const providerEntry = createManagedRuntimeProviderEntry(policy);
+  const diagnosticHeaders = await getUclawDiagnosticHeaders({ includeRequestId: false });
+  const providerEntry = createManagedRuntimeProviderEntry(policy, diagnosticHeaders);
   await installManagedRuntimeProviderState(
     runtimeSnapshot,
     policy,
     videoPolicy,
     managedProviderIds,
+    diagnosticHeaders,
   );
   await updateManagedAgentModelProviderStrict(agentModelsFiles, providerEntry, managedProviderIds);
+  logger.info('[uclaw-auth] Managed text fallback contract synchronized', {
+    event: 'managed_text_fallback_sync',
+    result: 'synchronized',
+    defaultModel: policy.defaultModel,
+    fallbackModels: [...policy.fallbackModels],
+    fallbackCount: policy.fallbackModels.length,
+    targets: ['agents.defaults', 'agents.list', 'agent-model-catalogs'],
+  });
 }
 
 type ManagedAuthSnapshot = {
@@ -1289,9 +1435,10 @@ function selectUsableManagedRuntimeRelay(previous: ManagedAuthSnapshot): RelaySe
 
 async function clearManagedStartupRuntime(previous: ManagedAuthSnapshot): Promise<void> {
   const managedProviderIds = new Set(previous.managedOpenAiTargetAccountIds);
-  await removeManagedAgentOpenAiCredentialsFromSnapshot(previous.agentAuthProfiles, managedProviderIds);
+  const managedCredentialProviderIds = new Set([...managedProviderIds, UCLAW_IMAGE_PROVIDER_ID]);
+  await removeManagedAgentOpenAiCredentialsFromSnapshot(previous.agentAuthProfiles, managedCredentialProviderIds);
   await removeManagedAgentOpenAiProviders(previous.agentModelsFiles, managedProviderIds);
-  await removeManagedRuntimeOpenAiState(previous.managedRuntime, managedProviderIds);
+  await removeManagedRuntimeOpenAiState(previous.managedRuntime, managedCredentialProviderIds);
 }
 
 /**
@@ -1300,7 +1447,7 @@ async function clearManagedStartupRuntime(previous: ManagedAuthSnapshot): Promis
  */
 export async function reconcileManagedProviderRuntimeForStartup(
   policy: ManagedClientTextModelPolicy,
-  videoPolicy: ManagedClientVideoModelPolicy,
+  videoPolicy: ManagedClientVideoModelPolicy | null,
 ): Promise<void> {
   if (!isUclawManagedDistribution()) return;
 
@@ -1349,10 +1496,11 @@ export async function reconcileManagedProviderRuntimeForStartup(
       );
 
       const managedProviderIds = new Set(previous.managedOpenAiTargetAccountIds);
+      const managedCredentialProviderIds = new Set([...managedProviderIds, UCLAW_IMAGE_PROVIDER_ID]);
       await installManagedAgentOpenAiApiKey(
         previous.agentAuthProfiles,
         relaySecret.apiKey,
-        managedProviderIds,
+        managedCredentialProviderIds,
       );
       await syncManagedRuntimeDefaults(
         previous.agentModelsFiles,
@@ -1361,6 +1509,12 @@ export async function reconcileManagedProviderRuntimeForStartup(
         policy,
         videoPolicy,
       );
+      const imageRuntimeSnapshot = await snapshotManagedRuntimeConfig();
+      await syncManagedImageRuntime(
+        imageRuntimeSnapshot,
+        getVerifiedManagedClientImageModelPolicySnapshot(),
+      );
+      previous.managedRuntime.applied = imageRuntimeSnapshot.applied ?? previous.managedRuntime.applied;
     } catch (cause) {
       try {
         await restoreSnapshot(previous);
@@ -1388,7 +1542,8 @@ async function commitAuthenticatedSession(
   if (!relay.token.trim()) throw new ManagedAuthServiceError('relay_missing', 'UClaw did not return a usable runtime credential');
   const responseUser = authUserFromPayload(auth);
   // Cache server-owned model options before quiescing Gateway or taking the Provider lock.
-  const { text: modelPolicy, video: videoPolicy } = await cacheManagedClientModelPoliciesFromPayload(auth);
+  const { text: modelPolicy, image: imagePolicy, video: videoPolicy } =
+    await cacheManagedClientModelPoliciesFromPayload(auth);
   let rollbackFailed = false;
   let snapshotCompleted = false;
   let committedStatus: ManagedAuthStatus;
@@ -1452,7 +1607,8 @@ async function commitAuthenticatedSession(
         // Install only the managed OpenAI credential and runtime entries; generic
         // Provider synchronization can self-heal unrelated Provider ids.
         const managedProviderIds = new Set(previous.managedOpenAiTargetAccountIds);
-        await installManagedAgentOpenAiApiKey(previous.agentAuthProfiles, relay.token, managedProviderIds);
+        const managedCredentialProviderIds = new Set([...managedProviderIds, UCLAW_IMAGE_PROVIDER_ID]);
+        await installManagedAgentOpenAiApiKey(previous.agentAuthProfiles, relay.token, managedCredentialProviderIds);
         await syncManagedRuntimeDefaults(
           previous.agentModelsFiles,
           previous.managedRuntime,
@@ -1460,6 +1616,9 @@ async function commitAuthenticatedSession(
           modelPolicy,
           videoPolicy,
         );
+        const imageRuntimeSnapshot = await snapshotManagedRuntimeConfig();
+        await syncManagedImageRuntime(imageRuntimeSnapshot, imagePolicy);
+        previous.managedRuntime.applied = imageRuntimeSnapshot.applied ?? previous.managedRuntime.applied;
         const appliedVerificationCache = buildVerificationCache(user, bootstrap);
         previous.appliedVerificationCache = appliedVerificationCache;
         await persistVerificationCache(appliedVerificationCache);

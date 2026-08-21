@@ -22,6 +22,33 @@ describe('GatewayRestartGovernor', () => {
     expect(governor.decide(2001).allow).toBe(true);
   });
 
+  it('enforces cooldown when the recorded timestamp is zero', () => {
+    const governor = new GatewayRestartGovernor({ cooldownMs: 1000 });
+
+    governor.recordExecuted(0);
+
+    const blocked = governor.decide(500);
+    expect(blocked).toEqual({
+      allow: false,
+      reason: 'cooldown_active',
+      retryAfterMs: 500,
+    });
+  });
+
+  it('does not turn a wall-clock rewind into an extended lockout', () => {
+    const governor = new GatewayRestartGovernor({ cooldownMs: 1000 });
+    governor.recordExecuted(10_000);
+
+    expect(governor.decide(9_000)).toEqual({ allow: true });
+
+    governor.recordExecuted(9_000);
+    expect(governor.decide(9_500)).toEqual({
+      allow: false,
+      reason: 'cooldown_active',
+      retryAfterMs: 500,
+    });
+  });
+
   it('allows unlimited restarts as long as cooldown is respected', () => {
     const governor = new GatewayRestartGovernor({ cooldownMs: 100 });
 

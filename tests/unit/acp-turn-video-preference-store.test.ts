@@ -3,9 +3,46 @@ import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { ManagedClientVideoModelPolicy } from '../../shared/managed-client-config';
 import { createAcpTurnVideoPreferenceStore } from '../../electron/services/acp-turn-video-preference-store';
 
 const temporaryDirectories: string[] = [];
+const VIDEO_POLICY = {
+  defaultModel: 'future-video-model',
+  defaultSize: '3072x1728',
+  defaultAspectRatio: '16:9',
+  defaultResolution: '1728P',
+  defaultDurationSeconds: 17,
+  models: [{
+    id: 'future-video-model',
+    modes: ['text-to-video', 'image-to-video'],
+    sizes: ['3072x1728'],
+    aspectRatios: ['16:9'],
+    resolutions: ['1728P'],
+    durations: [17],
+    defaultSize: '3072x1728',
+    defaultAspectRatio: '16:9',
+    defaultResolution: '1728P',
+    defaultDurationSeconds: 17,
+    requiresImage: false,
+  }],
+} satisfies ManagedClientVideoModelPolicy;
+
+const resolveVideoPolicy = async () => VIDEO_POLICY;
+
+const TEXT_TO_VIDEO_OPTIONS = {
+  modelId: 'future-video-model',
+  size: '3072x1728',
+  mode: 'text-to-video',
+  aspectRatio: '16:9',
+  resolution: '1728P',
+  durationSeconds: 17,
+} as const;
+
+const IMAGE_TO_VIDEO_OPTIONS = {
+  ...TEXT_TO_VIDEO_OPTIONS,
+  mode: 'image-to-video',
+} as const;
 
 afterEach(async () => {
   vi.useRealTimers();
@@ -16,17 +53,13 @@ describe('ACP turn video preference store', () => {
   it('stores normalized options with only a message digest and supports failed-prompt cleanup', async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), 'uclaw-turn-video-preference-'));
     temporaryDirectories.push(stateDirectory);
-    const store = createAcpTurnVideoPreferenceStore(stateDirectory);
+    const store = createAcpTurnVideoPreferenceStore(stateDirectory, resolveVideoPolicy);
     const message = 'Create a six-second product video.';
 
     const entry = await store.enqueue({
       sessionKey: 'agent:main:session-1',
       message,
-      videoOptions: {
-        aspectRatio: '16:9',
-        resolution: '480P',
-        durationSeconds: 6,
-      },
+      videoOptions: TEXT_TO_VIDEO_OPTIONS,
     });
 
     expect(entry).not.toBeNull();
@@ -36,15 +69,11 @@ describe('ACP turn video preference store', () => {
     expect(files[0]).toMatch(/^video-turn-/u);
     const stored = JSON.parse(await readFile(join(preferenceDirectory, files[0]!), 'utf8')) as Record<string, unknown>;
     expect(stored).toMatchObject({
-      version: 1,
+      version: 2,
       sessionKey: 'agent:main:session-1',
       messageDigest: createHash('sha256').update(message, 'utf8').digest('hex'),
       messageLength: message.length,
-      videoOptions: {
-        aspectRatio: '16:9',
-        resolution: '480P',
-        durationSeconds: 6,
-      },
+      videoOptions: TEXT_TO_VIDEO_OPTIONS,
     });
     expect(JSON.stringify(stored)).not.toContain(message);
 
@@ -55,33 +84,71 @@ describe('ACP turn video preference store', () => {
   it('rejects aspect ratios, resolutions, and durations outside the managed local contract', async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), 'uclaw-turn-video-preference-'));
     temporaryDirectories.push(stateDirectory);
-    const store = createAcpTurnVideoPreferenceStore(stateDirectory);
+    const store = createAcpTurnVideoPreferenceStore(stateDirectory, resolveVideoPolicy);
 
     await expect(store.enqueue({
       sessionKey: 'agent:main:session-1',
       message: 'Create a video.',
       videoOptions: {
+        ...TEXT_TO_VIDEO_OPTIONS,
         aspectRatio: '4:3',
         resolution: '1080P',
         durationSeconds: 30,
-      } as never,
+      },
+    })).resolves.toBeNull();
+
+    await expect(store.enqueue({
+      sessionKey: 'agent:main:session-1',
+      message: 'Create a video.',
+      videoOptions: {
+        ...TEXT_TO_VIDEO_OPTIONS,
+        resolution: '1080P',
+      },
+    })).resolves.toBeNull();
+  });
+
+  it('rejects a declared resolution that does not match the exact declared size', async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), 'uclaw-turn-video-preference-'));
+    temporaryDirectories.push(stateDirectory);
+    const mismatchedPolicy = {
+      ...VIDEO_POLICY,
+      models: [{
+        ...VIDEO_POLICY.models[0],
+        resolutions: ['1728P', '720P'],
+      }],
+    } satisfies ManagedClientVideoModelPolicy;
+    const store = createAcpTurnVideoPreferenceStore(stateDirectory, async () => mismatchedPolicy);
+
+    await expect(store.enqueue({
+      sessionKey: 'agent:main:session-1',
+      message: 'Create a video.',
+      videoOptions: { ...TEXT_TO_VIDEO_OPTIONS, resolution: '720P' },
+    })).resolves.toBeNull();
+    await expect(readdir(join(stateDirectory, 'media', 'uclaw-turn-preferences'))).rejects.toThrow();
+  });
+
+  it('fails closed when the managed policy is unavailable', async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), 'uclaw-turn-video-preference-'));
+    temporaryDirectories.push(stateDirectory);
+    const store = createAcpTurnVideoPreferenceStore(stateDirectory, async () => null);
+
+    await expect(store.enqueue({
+      sessionKey: 'agent:main:session-1',
+      message: 'Create a video.',
+      videoOptions: TEXT_TO_VIDEO_OPTIONS,
     })).resolves.toBeNull();
   });
 
   it('owns and removes the bounded current-turn reference image', async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), 'uclaw-turn-video-preference-'));
     temporaryDirectories.push(stateDirectory);
-    const store = createAcpTurnVideoPreferenceStore(stateDirectory);
+    const store = createAcpTurnVideoPreferenceStore(stateDirectory, resolveVideoPolicy);
     const image = Buffer.from('bounded-reference-image');
 
     const entry = await store.enqueue({
       sessionKey: 'agent:main:session-1',
       message: 'Animate this image.',
-      videoOptions: {
-        aspectRatio: '16:9',
-        resolution: '480P',
-        durationSeconds: 6,
-      },
+      videoOptions: IMAGE_TO_VIDEO_OPTIONS,
       referenceImage: {
         buffer: image,
         fileName: 'reference.jpg',
@@ -112,16 +179,12 @@ describe('ACP turn video preference store', () => {
     vi.useFakeTimers();
     const stateDirectory = await mkdtemp(join(tmpdir(), 'uclaw-turn-video-preference-'));
     temporaryDirectories.push(stateDirectory);
-    const store = createAcpTurnVideoPreferenceStore(stateDirectory);
+    const store = createAcpTurnVideoPreferenceStore(stateDirectory, resolveVideoPolicy);
 
     await store.enqueue({
       sessionKey: 'agent:main:session-1',
       message: 'Animate this image.',
-      videoOptions: {
-        aspectRatio: '16:9',
-        resolution: '480P',
-        durationSeconds: 6,
-      },
+      videoOptions: IMAGE_TO_VIDEO_OPTIONS,
       referenceImage: {
         buffer: Buffer.from('bounded-reference-image'),
         fileName: 'reference.jpg',

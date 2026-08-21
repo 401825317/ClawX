@@ -2058,10 +2058,26 @@ async function loadCronFallbackMessages(sessionKey: string, limit = 200): Promis
 }
 
 async function fetchChatSessionsList(): Promise<Record<string, unknown>> {
-  return useGatewayStore.getState().rpc<Record<string, unknown>>('sessions.list', {
+  const response = await useGatewayStore.getState().rpc<Record<string, unknown>>('sessions.list', {
     includeDerivedTitles: true,
     includeLastMessage: true,
   });
+  // The current Gateway client returns the RPC result directly, while older
+  // OpenClaw-compatible bridges keep the JSON-RPC success/result envelope.
+  // Normalize at this boundary so session-scoped model and reasoning metadata
+  // is not silently discarded during a mixed-version upgrade.
+  if (
+    response
+    && typeof response === 'object'
+    && !Array.isArray(response)
+    && typeof response.result === 'object'
+    && response.result !== null
+    && !Array.isArray(response.result)
+    && Array.isArray((response.result as Record<string, unknown>).sessions)
+  ) {
+    return response.result as Record<string, unknown>;
+  }
+  return response;
 }
 
 type GatewaySessionMutationResult = {

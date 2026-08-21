@@ -16,6 +16,8 @@ export type WebBrowserAddressResult =
 
 export type WebBrowserNavigatePayload = { url: string };
 
+const WORKSPACE_HTML_PREVIEW_PATH_PATTERN = /^\/[A-Za-z0-9_-]{43}\/index\.html$/;
+
 const SCHEME_PATTERN = /^[a-z][a-z\d+.-]*:/i;
 const HOST_WITH_NUMERIC_PORT_PATTERN = /^[^/?#:\s]+:\d+(?:[/?#]|$)/;
 
@@ -80,4 +82,48 @@ export function normalizeWebBrowserTopLevelUrl(input: string): string | null {
 
 export function canOpenWebBrowserExternally(input: string): boolean {
   return normalizeWebBrowserTopLevelUrl(input) !== null;
+}
+
+export function normalizeWorkspaceHtmlPreviewUrl(input: string): string | null {
+  const normalized = normalizeWebBrowserTopLevelUrl(input);
+  if (!normalized) return null;
+
+  const parsed = new URL(normalized);
+  if (
+    parsed.protocol !== 'http:'
+    || parsed.hostname !== '127.0.0.1'
+    || !parsed.port
+    || parsed.username
+    || parsed.password
+    || parsed.search
+    || parsed.hash
+    || !WORKSPACE_HTML_PREVIEW_PATH_PATTERN.test(parsed.pathname)
+  ) return null;
+
+  return parsed.href;
+}
+
+export function normalizeWorkspaceHtmlPreviewCapabilityUrl(input: string): string | null {
+  const normalized = normalizeWebBrowserTopLevelUrl(input);
+  if (!normalized) return null;
+
+  const parsed = new URL(normalized);
+  if (parsed.search) return null;
+  parsed.hash = '';
+  return normalizeWorkspaceHtmlPreviewUrl(parsed.href);
+}
+
+export function isAllowedWorkspaceHtmlPreviewNavigation(
+  lockedPreviewUrl: string,
+  candidateUrl: string,
+): boolean {
+  const locked = normalizeWorkspaceHtmlPreviewUrl(lockedPreviewUrl);
+  const candidate = normalizeWorkspaceHtmlPreviewCapabilityUrl(candidateUrl);
+  if (!locked || !candidate) return false;
+
+  const lockedParsed = new URL(locked);
+  const candidateParsed = new URL(candidate);
+  return candidateParsed.origin === lockedParsed.origin
+    && candidateParsed.pathname === lockedParsed.pathname
+    && candidateParsed.search === lockedParsed.search;
 }

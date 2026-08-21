@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "skills": [
+    {
+      "id": "presentation-maker",
+      "installMode": "missing-only"
+    },
+    {
+      "id": "spreadsheet-maker",
+      "installMode": "missing-only"
+    },
+    {
+      "id": "document-maker",
+      "installMode": "missing-only"
+    },
+    {
+      "id": "blender-maker",
+      "installMode": "missing-only"
+    },
+    {
+      "id": "cad-editor",
+      "version": "v1",
+      "installMode": "managed-sync"
+    },
+    {
+      "id": "ecommerce-main-image",
+      "version": "v1",
+      "installMode": "managed-sync"
+    }
+  ]
+}

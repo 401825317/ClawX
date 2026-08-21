@@ -1,6 +1,7 @@
 import { app } from 'electron';
 import path from 'path';
-import { existsSync, readFileSync, mkdirSync, readdirSync, rmSync, symlinkSync } from 'fs';
+import { existsSync, type Dirent } from 'fs';
+import { lstat, mkdir, readdir, readFile, symlink } from 'fs/promises';
 import { join } from 'path';
 
 function fsPath(filePath: string): string {
@@ -26,10 +27,9 @@ import {
   isOpenClawPresent,
 } from '../utils/paths';
 import { getUvMirrorEnv } from '../utils/uv-env';
-import { cleanupDanglingWeChatPluginState, listConfiguredChannelsFromConfig, readOpenClawConfig } from '../utils/channel-config';
+import { captureChannelStartupSnapshot, readOpenClawConfig } from '../utils/channel-config';
 import {
   REQUIRED_UCLAW_RUNTIME_PLUGIN_IDS,
-  RetiredUclawPluginCleanupError,
   sanitizeOpenClawConfig,
   batchSyncConfigFields,
 } from '../utils/openclaw-auth';
@@ -44,16 +44,19 @@ import {
   ensurePluginInstalled,
   findBestBundledPluginSource,
   findMissingPluginRuntimeDependencies,
+  removeManagedPluginInstall,
   repairTrustedOfficialPluginInstallRecords,
 } from '../utils/plugin-install';
 import { CLAWX_OPENAI_IMAGE_PROVIDER_KEY } from '../utils/openclaw-image-relay-constants';
 import { UCLAW_VIDEO_PROVIDER_ID } from '../../shared/junfeiai-endpoints';
 import {
+  getUclawBackendOrigin,
   isUclawManagedDistribution,
   UCLAW_AUTH_ACCOUNT_ID,
   UCLAW_COMPATIBILITY_PROVIDER_ID,
   UCLAW_PROVIDER_ID,
 } from '../utils/junfeiai-distribution';
+import { getUclawDiagnosticHeaders } from '../utils/uclaw-request-diagnostics';
 import { getProviderAccount } from '../services/providers/provider-store';
 import {
   isUclawManagedAccount,
@@ -71,12 +74,18 @@ import {
 import { cleanupAgentsSymlinkedSkills, cleanupStalePluginRuntimeDeps } from './skills-symlink-cleanup';
 import {
   buildPrelaunchMaintenanceCacheKey,
-  directoryChildrenSignature,
-  pathSignature,
-  runCachedPrelaunchMaintenanceTask,
   type PrelaunchMaintenanceRunResult,
   type PrelaunchMaintenanceTaskName,
 } from './prelaunch-maintenance-cache';
+import {
+  type AsyncPrelaunchMaintenanceTaskName,
+  directoryChildrenSignatureAsync,
+  directoryTreeSignatureAsync,
+  pathSignatureAsync,
+  runCachedPrelaunchMaintenanceTaskAsync,
+  scheduleCachedPrelaunchMaintenanceTaskAsync,
+} from './async-prelaunch-maintenance-cache';
+import { runPrelaunchPhase } from './prelaunch-liveness';
 
 
 export interface GatewayLaunchContext {
@@ -95,7 +104,13 @@ export interface GatewayLaunchContext {
 export interface GatewayPrelaunchSyncSummary {
   timingsMs: Record<string, number>;
   maintenance: Partial<Record<PrelaunchMaintenanceTaskName, PrelaunchMaintenanceRunResult>>;
+  deferredMaintenance: Array<{
+    task: AsyncPrelaunchMaintenanceTaskName;
+    status: 'scheduled' | 'coalesced';
+  }>;
   configuredChannels: string[];
+  skipChannels: boolean;
+  channelStartupSummary: string;
 }
 
 // ── Auto-upgrade bundled plugins on startup ──────────────────────
@@ -110,12 +125,14 @@ const CHANNEL_PLUGIN_MAP: Record<string, { dirName: string; npmName: string }> =
 
   'openclaw-weixin': { dirName: 'openclaw-weixin', npmName: '@tencent-weixin/openclaw-weixin' },
   [CLAWX_OPENAI_IMAGE_PROVIDER_KEY]: { dirName: CLAWX_OPENAI_IMAGE_PROVIDER_KEY, npmName: 'clawx-openai-image-plugin' },
+  'uclaw-artifact-orchestrator': { dirName: 'uclaw-artifact-orchestrator', npmName: 'uclaw-artifact-orchestrator-plugin' },
   'uclaw-local-artifacts': { dirName: 'uclaw-local-artifacts', npmName: 'uclaw-local-artifacts-plugin' },
   'uclaw-blender': { dirName: 'uclaw-blender', npmName: 'uclaw-blender-plugin' },
   [UCLAW_VIDEO_PROVIDER_ID]: { dirName: UCLAW_VIDEO_PROVIDER_ID, npmName: 'uclaw-video-plugin' },
 };
 
 const PARALLEL_WEB_SEARCH_PROVIDERS = new Set(['parallel', 'parallel-free']);
+const DEFERRED_MAINTENANCE_DELAY_MS = 30_000;
 
 /** Check whether the current web search selection needs the Parallel plugin runtime. */
 function isParallelWebSearchConfigured(config: unknown): boolean {
@@ -139,59 +156,66 @@ function isParallelWebSearchConfigured(config: unknown): boolean {
  * Only remove extension copies whose id is actually bundled in the
  * currently resolved OpenClaw runtime (e.g. telegram in 2026.6.10).
  */
-function listBundledOpenClawExtensionPluginIds(): string[] {
+async function listBundledOpenClawExtensionPluginIds(): Promise<string[]> {
   const extensionsDir = join(getOpenClawResolvedDir(), 'dist', 'extensions');
-  if (!existsSync(fsPath(extensionsDir))) {
+  let entries: Dirent<string>[];
+  try {
+    entries = await readdir(fsPath(extensionsDir), { withFileTypes: true });
+  } catch {
     return [];
   }
 
-  const pluginIds: string[] = [];
-  for (const entry of readdirSync(fsPath(extensionsDir), { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-
-    const manifestPath = join(extensionsDir, entry.name, 'openclaw.plugin.json');
-    if (!existsSync(fsPath(manifestPath))) continue;
-
-    try {
-      const parsed = JSON.parse(readFileSync(fsPath(manifestPath), 'utf-8')) as { id?: unknown };
-      if (typeof parsed.id === 'string' && parsed.id.trim()) {
-        pluginIds.push(parsed.id.trim());
-      }
-    } catch {
-      // ignore malformed manifests
-    }
-  }
-
-  return pluginIds;
-}
-
-function cleanupStaleBuiltInExtensions(): void {
-  for (const ext of listBundledOpenClawExtensionPluginIds()) {
-    const extDir = join(getOpenClawConfigDir(), 'extensions', ext);
-    if (existsSync(fsPath(extDir))) {
-      logger.info(`[plugin] Removing stale built-in extension copy: ${ext}`);
+  const pluginIds = await Promise.all(entries
+    .filter((entry) => entry.isDirectory())
+    .map(async (entry): Promise<string | null> => {
+      const manifestPath = join(extensionsDir, entry.name, 'openclaw.plugin.json');
       try {
-        rmSync(fsPath(extDir), { recursive: true, force: true });
-      } catch (err) {
-        logger.warn(`[plugin] Failed to remove stale extension ${ext}:`, err);
+        const parsed = JSON.parse(await readFile(fsPath(manifestPath), 'utf-8')) as { id?: unknown };
+        return typeof parsed.id === 'string' && parsed.id.trim()
+          ? parsed.id.trim()
+          : null;
+      } catch {
+        return null;
       }
-    }
-  }
+    }));
+
+  return pluginIds.filter((pluginId): pluginId is string => pluginId !== null).sort();
 }
 
-function measureSync<T>(timings: Record<string, number>, key: string, fn: () => T): T {
-  const startedAt = Date.now();
-  try {
-    return fn();
-  } finally {
-    timings[key] = Date.now() - startedAt;
-  }
+async function cleanupStaleBuiltInExtensions(): Promise<void> {
+  await Promise.all((await listBundledOpenClawExtensionPluginIds()).map(async (ext) => {
+    const bundledSource = join(getOpenClawResolvedDir(), 'dist', 'extensions', ext);
+    const result = await removeManagedPluginInstall(ext, {
+      candidateSources: [bundledSource],
+      operation: 'remove-stale-builtin-copy',
+    });
+    if (result.removed) {
+      logger.info(`[plugin] Removed UClaw-managed stale built-in extension copy: ${ext}`);
+    }
+  }));
 }
 
 async function measureAsync<T>(timings: Record<string, number>, key: string, fn: () => Promise<T>): Promise<T> {
   const startedAt = Date.now();
   try {
-    return await fn();
+    const phase = key.endsWith('Ms') ? key.slice(0, -2) : key;
+    const { result } = await runPrelaunchPhase(
+      phase,
+      fn,
+      (sample) => {
+        if (!sample.eventLoopBlocked) return;
+        logger.warn('[gateway-prelaunch] Main event loop blocked', {
+          phase: sample.phase,
+          callSite: sample.callSite,
+          durationMs: Math.round(sample.durationMs),
+          eventLoopDelayMs: Math.round(sample.eventLoopDelayMs),
+          outcome: sample.outcome,
+          samplingTruncated: sample.samplingTruncated,
+        });
+      },
+      { callSite: `gateway.config-sync.${phase}` },
+    );
+    return result;
   } finally {
     timings[key] = Date.now() - startedAt;
   }
@@ -210,24 +234,22 @@ function appVersionForCache(): string {
  * - Packaged mode: uses bundled plugins from resources/ (includes deps)
  * - Dev mode: falls back to node_modules/ with pnpm-aware dep collection
  */
-function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): boolean {
-  let succeeded = true;
-  for (const channelType of configuredChannels) {
+async function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): Promise<boolean> {
+  const results = await Promise.all(configuredChannels.map(async (channelType) => {
     const pluginInfo = CHANNEL_PLUGIN_MAP[channelType];
-    if (!pluginInfo) continue;
-    const result = ensurePluginInstalled(
+    if (!pluginInfo) return true;
+    const result = await ensurePluginInstalled(
       pluginInfo.dirName,
       buildCandidateSources(pluginInfo.dirName),
       channelType === CLAWX_OPENAI_IMAGE_PROVIDER_KEY ? 'UClaw OpenAI Image' : channelType,
+      { deferTrustedRecordSync: true },
     );
     if (result.warning) {
       logger.warn(`[plugin] ${channelType}: ${result.warning}`);
     }
-    if (!result.installed) {
-      succeeded = false;
-    }
-  }
-  return succeeded;
+    return result.installed;
+  }));
+  return results.every(Boolean);
 }
 
 /**
@@ -236,26 +258,21 @@ function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): boolean 
  * from scanning residual plugin manifests that were installed by a previous
  * configuration but are no longer needed.
  */
-function cleanupUnconfiguredChannelPlugins(configuredChannels: string[]): boolean {
-  let succeeded = true;
+async function cleanupUnconfiguredChannelPlugins(configuredChannels: string[]): Promise<boolean> {
   const configuredSet = new Set(configuredChannels);
-
-  for (const [channelType, pluginInfo] of Object.entries(CHANNEL_PLUGIN_MAP)) {
-    if (configuredSet.has(channelType)) continue;
-
+  const results = await Promise.all(Object.entries(CHANNEL_PLUGIN_MAP).map(async ([channelType, pluginInfo]) => {
+    if (configuredSet.has(channelType)) return true;
     const { dirName } = pluginInfo;
-    const targetDir = join(getOpenClawConfigDir(), 'extensions', dirName);
-    if (!existsSync(fsPath(targetDir))) continue;
-
-    logger.info(`[plugin] Removing unconfigured channel plugin: ${channelType} (${dirName})`);
-    try {
-      rmSync(fsPath(targetDir), { recursive: true, force: true });
-    } catch (err) {
-      logger.warn(`[plugin] Failed to remove unconfigured channel plugin ${channelType}:`, err);
-      succeeded = false;
+    const result = await removeManagedPluginInstall(dirName, {
+      candidateSources: buildCandidateSources(dirName),
+      operation: 'remove-unconfigured-channel',
+    });
+    if (result.removed) {
+      logger.info(`[plugin] Removed UClaw-managed unconfigured channel plugin: ${channelType} (${dirName})`);
     }
-  }
-  return succeeded;
+    return !result.preserved;
+  }));
+  return results.every(Boolean);
 }
 
 function resolveImageGenerationPrimary(config: unknown): string | null {
@@ -317,54 +334,68 @@ export function withConfiguredMediaGenerationPlugins(
   return next;
 }
 
-function buildPluginSourceSignatures(configuredChannels: string[]): Record<string, unknown> {
-  const signatures: Record<string, unknown> = {};
-  for (const channelType of [...configuredChannels].sort()) {
+async function buildPluginSourceSignatures(configuredChannels: string[]): Promise<Record<string, unknown>> {
+  const entries = await Promise.all([...configuredChannels].sort().map(async (channelType) => {
     const pluginInfo = CHANNEL_PLUGIN_MAP[channelType];
-    if (!pluginInfo) continue;
+    if (!pluginInfo) return null;
     const bundledSources = buildCandidateSources(pluginInfo.dirName);
     const targetDir = join(getOpenClawConfigDir(), 'extensions', pluginInfo.dirName);
-    const sourceDir = findBestBundledPluginSource(bundledSources, targetDir)
+    const sourceDir = await findBestBundledPluginSource(bundledSources, targetDir)
       || (!app.isPackaged ? join(process.cwd(), 'node_modules', ...pluginInfo.npmName.split('/')) : '');
-    signatures[channelType] = sourceDir
+    const signature = sourceDir
       ? {
         sourceDir,
-        manifest: pathSignature(join(sourceDir, 'openclaw.plugin.json')),
-        packageJson: pathSignature(join(sourceDir, 'package.json')),
-        sourceDirectory: directoryChildrenSignature(sourceDir),
-        installedMissingRuntimeDependencies: findMissingPluginRuntimeDependencies(targetDir),
+        manifest: await pathSignatureAsync(fsPath(join(sourceDir, 'openclaw.plugin.json'))),
+        packageJson: await pathSignatureAsync(fsPath(join(sourceDir, 'package.json'))),
+        sourceDirectory: await directoryChildrenSignatureAsync(fsPath(sourceDir)),
+        installedMissingRuntimeDependencies: await findMissingPluginRuntimeDependencies(targetDir),
       }
       : 'missing';
-  }
-  return signatures;
+    return [channelType, signature] as const;
+  }));
+  return Object.fromEntries(entries.filter((entry): entry is NonNullable<typeof entry> => entry !== null));
 }
 
-function buildPluginMaintenanceCacheKey(openclawDir: string, configuredChannels: string[]): string {
+async function buildPluginMaintenanceCacheKey(
+  openclawDir: string,
+  configuredChannels: string[],
+): Promise<string> {
   return buildPrelaunchMaintenanceCacheKey({
     task: 'plugin-maintenance',
     appVersion: appVersionForCache(),
     openclawDir,
     cwd: process.cwd(),
     configuredChannels: [...configuredChannels].sort(),
-    extensionsDir: directoryChildrenSignature(join(getOpenClawConfigDir(), 'extensions')),
-    sourceSignatures: buildPluginSourceSignatures(configuredChannels),
+    extensionsDir: await directoryChildrenSignatureAsync(fsPath(join(getOpenClawConfigDir(), 'extensions'))),
+    sourceSignatures: await buildPluginSourceSignatures(configuredChannels),
   });
 }
 
-function buildSkillsSymlinkCleanupCacheKey(openclawDir: string): string {
+async function buildSkillsSymlinkCleanupCacheKey(openclawDir: string): Promise<string> {
   const workspaceSkillsDir = join(getOpenClawConfigDir(), 'workspace', 'skills');
   return buildPrelaunchMaintenanceCacheKey({
     task: 'skills-symlink-cleanup',
     appVersion: appVersionForCache(),
     openclawDir,
     skillsDir: getOpenClawSkillsDir(),
-    skillsDirSignature: directoryChildrenSignature(getOpenClawSkillsDir()),
+    skillsDirSignature: await directoryChildrenSignatureAsync(fsPath(getOpenClawSkillsDir())),
     workspaceSkillsDir,
-    workspaceSkillsDirSignature: directoryChildrenSignature(workspaceSkillsDir),
+    workspaceSkillsDirSignature: await directoryChildrenSignatureAsync(fsPath(workspaceSkillsDir)),
   });
 }
 
-function buildRuntimeDepsCleanupCacheKey(openclawDir: string): string {
+async function buildPluginInstallArtifactCleanupCacheKey(openclawDir: string): Promise<string> {
+  return buildPrelaunchMaintenanceCacheKey({
+    task: 'plugin-install-artifact-cleanup',
+    appVersion: appVersionForCache(),
+    openclawDir,
+    extensionsDirSignature: await directoryChildrenSignatureAsync(
+      fsPath(join(getOpenClawConfigDir(), 'extensions')),
+    ),
+  });
+}
+
+async function buildRuntimeDepsCleanupCacheKey(openclawDir: string): Promise<string> {
   const runtimeDepsDir = join(getOpenClawConfigDir(), 'plugin-runtime-deps');
   return buildPrelaunchMaintenanceCacheKey({
     task: 'runtime-deps-cleanup',
@@ -372,8 +403,82 @@ function buildRuntimeDepsCleanupCacheKey(openclawDir: string): string {
     openclawDir,
     currentOpenClawDir: getOpenClawResolvedDir(),
     runtimeDepsDir,
-    runtimeDepsDirSignature: directoryChildrenSignature(runtimeDepsDir),
+    // The normal launch key is intentionally shallow. A recursive audit is
+    // scheduled after launch; app/build/path changes still force a blocking
+    // cleanup before the child can see stale runtime roots.
+    runtimeDepsDirSignature: await directoryChildrenSignatureAsync(fsPath(runtimeDepsDir)),
   });
+}
+
+async function buildRuntimeDepsDeepAuditCacheKey(openclawDir: string): Promise<string> {
+  const runtimeDepsDir = join(getOpenClawConfigDir(), 'plugin-runtime-deps');
+  return buildPrelaunchMaintenanceCacheKey({
+    task: 'runtime-deps-deep-audit',
+    appVersion: appVersionForCache(),
+    openclawDir,
+    currentOpenClawDir: getOpenClawResolvedDir(),
+    runtimeDepsDir,
+    runtimeDepsDirSignature: await directoryTreeSignatureAsync(fsPath(runtimeDepsDir)),
+  });
+}
+
+function safeMaintenanceErrorCode(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return typeof code === 'string' && /^[A-Z0-9_]{1,40}$/i.test(code)
+    ? code
+    : 'unknown';
+}
+
+function scheduleDeferredMaintenance(
+  summary: GatewayPrelaunchSyncSummary['deferredMaintenance'],
+  taskName: AsyncPrelaunchMaintenanceTaskName,
+  cacheKey: () => Promise<string>,
+  task: () => Promise<void | boolean>,
+): void {
+  const scheduled = scheduleCachedPrelaunchMaintenanceTaskAsync(taskName, cacheKey, task, {
+    delayMs: DEFERRED_MAINTENANCE_DELAY_MS,
+    onComplete: (result) => {
+      logger.info('[metric] gateway.prelaunch.deferred-maintenance', {
+        task: taskName,
+        executed: result.executed,
+        reason: result.reason,
+      });
+    },
+    onError: (error) => {
+      logger.warn('[gateway-prelaunch] Deferred maintenance failed', {
+        task: taskName,
+        code: safeMaintenanceErrorCode(error),
+      });
+    },
+  });
+  summary.push({
+    task: taskName,
+    status: scheduled.scheduled ? 'scheduled' : 'coalesced',
+  });
+}
+
+function schedulePostLaunchMaintenance(
+  openclawDir: string,
+  summary: GatewayPrelaunchSyncSummary['deferredMaintenance'],
+): void {
+  scheduleDeferredMaintenance(
+    summary,
+    'plugin-install-artifact-cleanup',
+    () => buildPluginInstallArtifactCleanupCacheKey(openclawDir),
+    cleanupStalePluginInstallArtifacts,
+  );
+  scheduleDeferredMaintenance(
+    summary,
+    'skills-symlink-cleanup',
+    () => buildSkillsSymlinkCleanupCacheKey(openclawDir),
+    async () => ((await cleanupAgentsSymlinkedSkills()).failed ?? 0) === 0,
+  );
+  scheduleDeferredMaintenance(
+    summary,
+    'runtime-deps-deep-audit',
+    () => buildRuntimeDepsDeepAuditCacheKey(openclawDir),
+    async () => ((await cleanupStalePluginRuntimeDeps()).failed ?? 0) === 0,
+  );
 }
 
 /**
@@ -403,7 +508,7 @@ export function resetExtensionDepsLinked(): void {
   _extensionDepsLinked = false;
 }
 
-function ensureExtensionDepsResolvable(openclawDir: string): void {
+async function ensureExtensionDepsResolvable(openclawDir: string): Promise<void> {
   if (_extensionDepsLinked) return;
 
   const extDir = join(openclawDir, 'dist', 'extensions');
@@ -411,37 +516,57 @@ function ensureExtensionDepsResolvable(openclawDir: string): void {
   let linkedCount = 0;
 
   try {
-    if (!existsSync(extDir)) return;
+    let extensions: Dirent<string>[];
+    try {
+      extensions = await readdir(extDir, { withFileTypes: true }) as Dirent<string>[];
+    } catch {
+      return;
+    }
 
-    for (const ext of readdirSync(extDir, { withFileTypes: true })) {
+    for (const ext of extensions) {
       if (!ext.isDirectory()) continue;
       const extNM = join(extDir, ext.name, 'node_modules');
-      if (!existsSync(extNM)) continue;
+      let packages: Dirent<string>[];
+      try {
+        packages = await readdir(extNM, { withFileTypes: true }) as Dirent<string>[];
+      } catch {
+        continue;
+      }
 
-      for (const pkg of readdirSync(extNM, { withFileTypes: true })) {
+      for (const pkg of packages) {
         if (pkg.name === '.bin') continue;
 
         if (pkg.name.startsWith('@')) {
           // Scoped package — iterate sub-entries
           const scopeDir = join(extNM, pkg.name);
-          let scopeEntries;
-          try { scopeEntries = readdirSync(scopeDir, { withFileTypes: true }); } catch { continue; }
+          let scopeEntries: Dirent<string>[];
+          try { scopeEntries = await readdir(scopeDir, { withFileTypes: true }) as Dirent<string>[]; } catch { continue; }
           for (const sub of scopeEntries) {
             if (!sub.isDirectory()) continue;
             const dest = join(topNM, pkg.name, sub.name);
-            if (existsSync(dest)) continue;
             try {
-              mkdirSync(join(topNM, pkg.name), { recursive: true });
-              symlinkSync(join(scopeDir, sub.name), dest);
+              await lstat(dest);
+              continue;
+            } catch {
+              // Missing destination is expected.
+            }
+            try {
+              await mkdir(join(topNM, pkg.name), { recursive: true });
+              await symlink(join(scopeDir, sub.name), dest);
               linkedCount++;
             } catch { /* skip on error — non-fatal */ }
           }
         } else {
           const dest = join(topNM, pkg.name);
-          if (existsSync(dest)) continue;
           try {
-            mkdirSync(topNM, { recursive: true });
-            symlinkSync(join(extNM, pkg.name), dest);
+            await lstat(dest);
+            continue;
+          } catch {
+            // Missing destination is expected.
+          }
+          try {
+            await mkdir(topNM, { recursive: true });
+            await symlink(join(extNM, pkg.name), dest);
             linkedCount++;
           } catch { /* skip on error — non-fatal */ }
         }
@@ -466,8 +591,11 @@ export async function syncGatewayConfigBeforeLaunch(
 ): Promise<GatewayPrelaunchSyncSummary> {
   const timingsMs: Record<string, number> = {};
   const maintenance: GatewayPrelaunchSyncSummary['maintenance'] = {};
+  const deferredMaintenance: GatewayPrelaunchSyncSummary['deferredMaintenance'] = [];
   let configuredChannels: string[] = [];
   let shouldInstallParallelSearchPlugin = false;
+  let skipChannels = false;
+  let channelStartupSummary = 'enabled(unknown)';
 
   // Reset the extension-deps cache so that newly installed extensions
   // (e.g. user added a channel while the app was running) get their
@@ -479,31 +607,15 @@ export async function syncGatewayConfigBeforeLaunch(
   });
 
   try {
-    measureSync(timingsMs, 'pluginInstallArtifactCleanupMs', cleanupStalePluginInstallArtifacts);
-  } catch (err) {
-    logger.warn('Failed to clean stale plugin install artifacts:', err);
-  }
-
-  try {
     await measureAsync(timingsMs, 'sanitizeMs', sanitizeOpenClawConfig);
   } catch (err) {
-    if (err instanceof RetiredUclawPluginCleanupError) {
-      logger.error('Failed to retire legacy UClaw plugins; Gateway startup is blocked:', err);
-      throw err;
-    }
     logger.warn('Failed to sanitize openclaw.json:', err);
-  }
-
-  try {
-    await measureAsync(timingsMs, 'wechatStateCleanupMs', cleanupDanglingWeChatPluginState);
-  } catch (err) {
-    logger.warn('Failed to clean dangling WeChat plugin state before launch:', err);
   }
 
   // Remove stale copies of built-in extensions (Discord, Telegram) that
   // override OpenClaw's working built-in plugins and break channel loading.
   try {
-    measureSync(timingsMs, 'staleBuiltinExtensionCleanupMs', cleanupStaleBuiltInExtensions);
+    await measureAsync(timingsMs, 'staleBuiltinExtensionCleanupMs', cleanupStaleBuiltInExtensions);
   } catch (err) {
     logger.warn('Failed to clean stale built-in extensions:', err);
   }
@@ -513,63 +625,69 @@ export async function syncGatewayConfigBeforeLaunch(
   // on every launch (reason=symlink-escape) and the underlying skills are
   // still discovered via the agents-skills-personal source, so the symlinks
   // are pure log noise.  Transitional workaround for openclaw/openclaw#59219.
-  try {
-    const result = measureSync(timingsMs, 'skillsCleanupMs', () => runCachedPrelaunchMaintenanceTask(
-      'skills-symlink-cleanup',
-      () => buildSkillsSymlinkCleanupCacheKey(openclawDir),
-      () => (cleanupAgentsSymlinkedSkills().failed ?? 0) === 0,
-    ));
-    maintenance['skills-symlink-cleanup'] = result;
-  } catch (err) {
-    logger.warn('Failed to clean .agents/skills-targeted skill symlinks:', err);
-  }
-
   // Remove stale OpenClaw runtime-deps cache roots that point at an older
   // worktree/package.  Those symlink trees can make Gateway plugin setup spend
   // a long time in synchronous fs.open/copy calls before the RPC router is
   // responsive.
-  try {
-    const result = measureSync(timingsMs, 'runtimeDepsCleanupMs', () => runCachedPrelaunchMaintenanceTask(
-      'runtime-deps-cleanup',
-      () => buildRuntimeDepsCleanupCacheKey(openclawDir),
-      () => (cleanupStalePluginRuntimeDeps().failed ?? 0) === 0,
-    ));
-    maintenance['runtime-deps-cleanup'] = result;
-  } catch (err) {
-    logger.warn('Failed to clean stale OpenClaw plugin runtime deps:', err);
-  }
+  const runtimeDepsCleanupPromise = (async () => {
+    try {
+      const result = await measureAsync(
+        timingsMs,
+        'runtimeDepsCleanupMs',
+        () => runCachedPrelaunchMaintenanceTaskAsync(
+          'runtime-deps-cleanup',
+          () => buildRuntimeDepsCleanupCacheKey(openclawDir),
+          async () => ((await cleanupStalePluginRuntimeDeps()).failed ?? 0) === 0,
+        ),
+      );
+      maintenance['runtime-deps-cleanup'] = result;
+    } catch (err) {
+      logger.warn('Failed to clean stale OpenClaw plugin runtime deps:', err);
+    }
+  })();
 
+  // A deep tree walk is useful for catching an unexpected nested target but is
+  // not needed on every launch. The shallow launch key above catches app/path
+  // generations; the full audit runs after the child has had time to start.
   // Auto-upgrade installed plugins before Gateway starts so that
   // the plugin manifest ID matches what sanitize wrote to the config.
   // Only install/upgrade plugins for channels that are actually configured
   // in openclaw.json — do NOT expand the list from plugins.allow.
   try {
     configuredChannels = await measureAsync(timingsMs, 'configuredChannelsMs', async () => {
-      const rawCfg = await readOpenClawConfig();
-      shouldInstallParallelSearchPlugin = isParallelWebSearchConfigured(rawCfg);
+      const snapshot = await captureChannelStartupSnapshot();
+      shouldInstallParallelSearchPlugin = isParallelWebSearchConfigured(snapshot.config);
+      skipChannels = snapshot.configuredChannels.length === 0;
+      channelStartupSummary = skipChannels
+        ? 'skipped(no configured channels)'
+        : `enabled(${snapshot.configuredChannels.join(',')})`;
       return withConfiguredMediaGenerationPlugins(
-        await listConfiguredChannelsFromConfig(rawCfg),
-        rawCfg,
+        snapshot.configuredChannels,
+        snapshot.config,
       );
     });
 
-    const result = measureSync(timingsMs, 'pluginMaintenanceMs', () => runCachedPrelaunchMaintenanceTask(
+    const result = await measureAsync(timingsMs, 'pluginMaintenanceMs', () => runCachedPrelaunchMaintenanceTaskAsync(
       'plugin-maintenance',
       () => buildPluginMaintenanceCacheKey(openclawDir, configuredChannels),
-      () => {
-        const upgradeOk = ensureConfiguredPluginsUpgraded(configuredChannels);
-        const cleanupOk = cleanupUnconfiguredChannelPlugins(configuredChannels);
-        return upgradeOk && cleanupOk;
-      },
+      () => ensureConfiguredPluginsUpgraded(configuredChannels),
     ));
     maintenance['plugin-maintenance'] = result;
-    // Always refresh trusted install metadata through ClawX — this must not
-    // be skipped when plugin-maintenance is cache-hit, otherwise official
-    // external plugins like WhatsApp fail openKeyedStore at runtime.
-    measureSync(timingsMs, 'trustedPluginInstallSyncMs', repairTrustedOfficialPluginInstallRecords);
+    const cleanupOk = await measureAsync(
+      timingsMs,
+      'unconfiguredPluginCleanupMs',
+      () => cleanupUnconfiguredChannelPlugins(configuredChannels),
+    );
+    if (!cleanupOk) {
+      logger.warn('[plugin] One or more unconfigured channel plugins could not be removed');
+    }
   } catch (err) {
-    logger.warn('Failed to auto-upgrade plugins:', err);
+    // A missing or malformed snapshot is not evidence that the user removed
+    // every channel. Preserve installed plugins and launch channels fail-open.
+    logger.warn('Failed to capture trusted channel config; preserving channel runtime state:', err);
   }
+
+  await runtimeDepsCleanupPromise;
 
   // Batch gateway token, browser config, and session idle into one read+write cycle.
   try {
@@ -584,7 +702,11 @@ export async function syncGatewayConfigBeforeLaunch(
   try {
     shouldInstallParallelSearchPlugin ||= isParallelWebSearchConfigured(await readOpenClawConfig());
     if (shouldInstallParallelSearchPlugin) {
-      const result = measureSync(timingsMs, 'parallelPluginMaintenanceMs', ensureParallelPluginInstalled);
+      const result = await measureAsync(
+        timingsMs,
+        'parallelPluginMaintenanceMs',
+        () => ensureParallelPluginInstalled({ deferTrustedRecordSync: true }),
+      );
       if (result.warning) {
         logger.warn(`[plugin] Parallel Search: ${result.warning}`);
       }
@@ -593,10 +715,25 @@ export async function syncGatewayConfigBeforeLaunch(
     logger.warn('Failed to install Parallel Search plugin:', err);
   }
 
+  // Refresh all trusted official records in one config lock and one atomic
+  // openclaw.json replacement, including the optional Parallel install above.
+  try {
+    await measureAsync(
+      timingsMs,
+      'trustedPluginInstallSyncMs',
+      repairTrustedOfficialPluginInstallRecords,
+    );
+  } catch (err) {
+    logger.warn('Failed to repair trusted plugin install metadata:', err);
+  }
+
   return {
     timingsMs,
     maintenance,
+    deferredMaintenance,
     configuredChannels,
+    skipChannels,
+    channelStartupSummary,
   };
 }
 
@@ -647,6 +784,14 @@ async function loadProviderEnv(
       Object.assign(providerEnv, managedOpenAi.providerEnv);
       logger.warn('Failed to load the managed OpenAI credential; Gateway login is required');
     }
+    try {
+      providerEnv.CLAWX_UCLAW_ORIGIN = getUclawBackendOrigin();
+      providerEnv.CLAWX_UCLAW_DIAGNOSTIC_HEADERS = JSON.stringify(
+        await getUclawDiagnosticHeaders({ includeRequestId: false }),
+      );
+    } catch (error) {
+      logger.warn('Failed to build UClaw Gateway request diagnostics:', error);
+    }
   }
 
   try {
@@ -686,33 +831,6 @@ async function loadProviderEnv(
   return { providerEnv, loadedProviderKeyCount };
 }
 
-async function resolveChannelStartupPolicy(): Promise<{
-  skipChannels: boolean;
-  channelStartupSummary: string;
-}> {
-  try {
-    const rawCfg = await readOpenClawConfig();
-    const configuredChannels = await listConfiguredChannelsFromConfig(rawCfg);
-    if (configuredChannels.length === 0) {
-      return {
-        skipChannels: true,
-        channelStartupSummary: 'skipped(no configured channels)',
-      };
-    }
-
-    return {
-      skipChannels: false,
-      channelStartupSummary: `enabled(${configuredChannels.join(',')})`,
-    };
-  } catch (error) {
-    logger.warn('Failed to determine configured channels for gateway launch:', error);
-    return {
-      skipChannels: false,
-      channelStartupSummary: 'enabled(unknown)',
-    };
-  }
-}
-
 export async function prepareGatewayLaunchContext(port: number): Promise<GatewayLaunchContext> {
   const timingsMs: Record<string, number> = {};
   const totalStartedAt = Date.now();
@@ -749,11 +867,7 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
     'providerEnvMs',
     () => loadProviderEnv(managedDistribution),
   );
-  const { skipChannels, channelStartupSummary } = await measureAsync(
-    timingsMs,
-    'channelStartupPolicyMs',
-    resolveChannelStartupPolicy,
-  );
+  const { skipChannels, channelStartupSummary } = prelaunchSummary;
   const uvEnv = await measureAsync(timingsMs, 'uvEnvMs', getUvMirrorEnv);
   const proxyEnv = buildProxyEnv(appSettings);
   const resolvedProxy = resolveProxySettings(appSettings);
@@ -774,6 +888,8 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
   // endpoint or token from the shell or an older UClaw process.
   delete inheritedEnv.CLAWX_HOST_API_ORIGIN;
   delete inheritedEnv.CLAWX_HOST_API_TOKEN;
+  delete inheritedEnv.CLAWX_UCLAW_ORIGIN;
+  delete inheritedEnv.CLAWX_UCLAW_DIAGNOSTIC_HEADERS;
   const forkEnv: Record<string, string | undefined> = {
     ...inheritedEnv,
     ...providerEnv,
@@ -796,13 +912,18 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
   // Ensure extension-specific packages (e.g. grammy from the telegram
   // extension) are resolvable by shared dist/ chunks via symlinks in
   // openclaw/node_modules/.  NODE_PATH does NOT work for ESM imports.
-  measureSync(timingsMs, 'extensionDepsMs', () => ensureExtensionDepsResolvable(openclawDir));
+  await measureAsync(timingsMs, 'extensionDepsMs', () => ensureExtensionDepsResolvable(openclawDir));
+  // Schedule only after every launch-context barrier has completed. The
+  // unref'd grace timer gives the caller time to fork Gateway before any
+  // best-effort scan starts.
+  schedulePostLaunchMaintenance(openclawDir, prelaunchSummary.deferredMaintenance);
   timingsMs.totalMs = Date.now() - totalStartedAt;
 
   logger.info('[metric] gateway.prelaunch', {
     ...prelaunchSummary.timingsMs,
     ...timingsMs,
     maintenance: prelaunchSummary.maintenance,
+    deferredMaintenance: prelaunchSummary.deferredMaintenance,
     configuredChannelCount: prelaunchSummary.configuredChannels.length,
   });
 

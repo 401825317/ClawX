@@ -1,10 +1,19 @@
 import { logger } from '../utils/logger';
 import { LifecycleSupersededError } from './lifecycle-controller';
-import { connectGatewayWithStartupRetry, getGatewayStartupRecoveryAction } from './startup-recovery';
+import {
+  connectGatewayWithStartupRetry,
+  getGatewayStartupRecoveryAction,
+  isGatewayConnectRetryExhaustedError,
+} from './startup-recovery';
+import { runPrelaunchPhase, type PrelaunchPhaseSample } from './prelaunch-liveness';
+import { markChannelStartupSnapshotConnected } from '../utils/channel-config';
 
 export interface ExistingGatewayInfo {
   port: number;
+  pid?: number;
   externalToken?: string;
+  /** Provenance survives connection handoff so restart can only shut down verified runtimes. */
+  provenance: 'managed-process' | 'verified-orphan' | 'unknown-external';
 }
 
 type StartupHooks = {
@@ -19,7 +28,11 @@ type StartupHooks = {
   assertLifecycle: (phase: string) => void;
   findExistingGateway: (port: number) => Promise<ExistingGatewayInfo | null>;
   connect: (port: number, externalToken?: string) => Promise<void>;
-  onConnectedToExistingGateway: () => void;
+  onConnectAttempt?: (attemptNo: number, maxAttempts: number) => void;
+  onConnectedToExistingGateway: (connection: {
+    gateway: ExistingGatewayInfo;
+    source: 'discovered' | 'owned-process';
+  }) => void;
   waitForPortFree: (port: number) => Promise<void>;
   startProcess: () => Promise<void>;
   waitForReady: (port: number) => Promise<void>;
@@ -31,6 +44,23 @@ type StartupHooks = {
   canRecoverStartup?: () => boolean;
 };
 
+async function runStartupPhase<T>(
+  phase: string,
+  task: () => T | Promise<T>,
+): Promise<T> {
+  const { result } = await runPrelaunchPhase(phase, task, (phaseSample) => {
+    logStartupPhaseSample(phaseSample);
+  });
+  return result;
+}
+
+function logStartupPhaseSample(sample: PrelaunchPhaseSample): void {
+  logger.info('[metric] gateway.startup.phase', sample);
+  if (sample.slow) {
+    logger.warn('[gateway-startup] Slow main-process startup phase', sample);
+  }
+}
+
 async function connectWithStartupRetry(
   hooks: StartupHooks,
   port: number,
@@ -41,7 +71,10 @@ async function connectWithStartupRetry(
     port,
     externalToken,
     delay: hooks.delay,
-    beforeAttempt: () => hooks.assertLifecycle('start/connect-retry'),
+    beforeAttempt: (attemptNo, maxAttempts) => {
+      hooks.assertLifecycle('start/connect-retry');
+      hooks.onConnectAttempt?.(attemptNo, maxAttempts);
+    },
     logWarn: (message) => logger.warn(message),
     logInfo: (message) => logger.info(message),
   });
@@ -59,13 +92,17 @@ export async function runGatewayStartupSequence(hooks: StartupHooks): Promise<vo
 
     try {
       logger.debug('Checking for existing Gateway...');
-      const existing = await hooks.findExistingGateway(hooks.port);
+      const existing = await runStartupPhase('find-existing-gateway', () => hooks.findExistingGateway(hooks.port));
       hooks.assertLifecycle('start/find-existing');
       if (existing) {
         logger.debug(`Found existing Gateway on port ${existing.port}`);
-        await connectWithStartupRetry(hooks, existing.port, existing.externalToken);
+        await runStartupPhase(
+          'connect-existing-gateway',
+          () => connectWithStartupRetry(hooks, existing.port, existing.externalToken),
+        );
         hooks.assertLifecycle('start/connect-existing');
-        hooks.onConnectedToExistingGateway();
+        markChannelStartupSnapshotConnected();
+        hooks.onConnectedToExistingGateway({ gateway: existing, source: 'discovered' });
         return;
       }
 
@@ -77,39 +114,63 @@ export async function runGatewayStartupSequence(hooks: StartupHooks): Promise<vo
       // become ready and reconnect to it.
       if (hooks.hasOwnedProcess()) {
         logger.info('Owned Gateway process still alive (likely in-process restart); waiting for it to become ready');
-        await hooks.waitForReady(hooks.port);
+        await runStartupPhase('wait-for-ready-owned-gateway', () => hooks.waitForReady(hooks.port));
         hooks.assertLifecycle('start/wait-ready-owned');
-        await hooks.afterManagedGatewayReady?.();
+        await runStartupPhase(
+          'after-ready-owned-gateway',
+          () => hooks.afterManagedGatewayReady?.(),
+        );
         hooks.assertLifecycle('start/after-ready-owned');
-        await connectWithStartupRetry(hooks, hooks.port);
+        await runStartupPhase(
+          'connect-owned-gateway',
+          () => connectWithStartupRetry(hooks, hooks.port),
+        );
         hooks.assertLifecycle('start/connect-owned');
-        hooks.onConnectedToExistingGateway();
+        markChannelStartupSnapshotConnected();
+        hooks.onConnectedToExistingGateway({
+          gateway: { port: hooks.port, provenance: 'managed-process' },
+          source: 'owned-process',
+        });
         return;
       }
 
       logger.debug('No existing Gateway found, starting new process...');
 
       if (hooks.shouldWaitForPortFree) {
-        await hooks.waitForPortFree(hooks.port);
+        await runStartupPhase('wait-for-port-free', () => hooks.waitForPortFree(hooks.port));
         hooks.assertLifecycle('start/wait-port');
       }
 
-      await hooks.startProcess();
+      await runStartupPhase('start-gateway-process', () => hooks.startProcess());
       hooks.assertLifecycle('start/start-process');
 
-      await hooks.waitForReady(hooks.port);
+      await runStartupPhase('wait-for-ready-gateway', () => hooks.waitForReady(hooks.port));
       hooks.assertLifecycle('start/wait-ready');
 
-      await hooks.afterManagedGatewayReady?.();
+      await runStartupPhase(
+        'after-ready-gateway',
+        () => hooks.afterManagedGatewayReady?.(),
+      );
       hooks.assertLifecycle('start/after-ready');
 
-      await connectWithStartupRetry(hooks, hooks.port);
+      await runStartupPhase(
+        'connect-gateway',
+        () => connectWithStartupRetry(hooks, hooks.port),
+      );
       hooks.assertLifecycle('start/connect');
 
+      markChannelStartupSnapshotConnected();
       hooks.onConnectedToManagedGateway();
       return;
     } catch (error) {
       if (error instanceof LifecycleSupersededError) {
+        throw error;
+      }
+
+      // connectGatewayWithStartupRetry owns the complete connection retry
+      // budget. Re-entering this outer startup loop would replay it after a
+      // process restart (formerly 7 connection attempts x 3 start attempts).
+      if (isGatewayConnectRetryExhaustedError(error)) {
         throw error;
       }
 

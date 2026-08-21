@@ -54,7 +54,24 @@ export const BUNDLED_OPENCLAW_PLUGINS = [
 /** Local UClaw plugins mirrored and copied into every packaged runtime. */
 export const LOCAL_OPENCLAW_PLUGIN_IDS = [
   'clawx-openai-image',
+  'uclaw-artifact-orchestrator',
   'uclaw-local-artifacts',
   'uclaw-blender',
   'uclaw-video',
 ];
+
+/** Offline skill shims that must be available in dev and packaged OpenClaw runtimes. */
+export const OPENCLAW_SKILL_SHIM_ALLOWLIST = [
+  'presentation-maker',
+  'spreadsheet-maker',
+  'document-maker',
+  'blender-maker',
+  'cad-editor',
+  'ecommerce-main-image',
+];
+
+/** UClaw-owned shims whose versioned contents replace stale bundled copies. */
+export const VERSIONED_OPENCLAW_SKILL_SHIMS = {
+  'cad-editor': 'v1',
+  'ecommerce-main-image': 'v1',
+};

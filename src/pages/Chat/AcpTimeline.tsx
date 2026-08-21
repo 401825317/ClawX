@@ -51,14 +51,19 @@ export function AcpTimeline({
                   id={getAcpUserMessageAnchorId(item.id)}
                   data-acp-item-id={item.id}
                 >
-                  <AcpMessageSegment item={item} />
+                  <AcpMessageSegment item={item} workspaceRoot={workspaceRoot} />
                 </div>
               ))}
               {group.attachments.length > 0 && (
                 <div className="flex w-full justify-end">
                   <div className="flex w-full max-w-[50%] flex-col items-end gap-2">
                     {group.attachments.map((attachment) => (
-                      <AcpAttachmentPart key={attachment.attachmentId} part={attachment} tone="user" />
+                      <AcpAttachmentPart
+                        key={attachment.attachmentId}
+                        part={attachment}
+                        tone="user"
+                        workspaceRoot={workspaceRoot}
+                      />
                     ))}
                   </div>
                 </div>

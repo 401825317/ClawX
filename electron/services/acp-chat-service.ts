@@ -22,8 +22,12 @@ import type {
   AcpChatRespondPermissionPayload,
   AcpPermissionRequestEnvelope,
   AcpSessionUpdateEnvelope,
+  AcpTurnFailureUpdate,
 } from '@shared/acp-chat/types';
-import { normalizeAcpChatError } from '@shared/acp-chat/errors';
+import {
+  normalizeAcpChatError,
+  type AcpChatErrorCode,
+} from '@shared/acp-chat/errors';
 import { getOpenClawEmbeddedForkSpec } from '../utils/openclaw-cli';
 import {
   approvePendingLocalDeviceRequests,
@@ -42,8 +46,18 @@ import {
 } from './acp-turn-video-preference-store';
 import { resolveOpenClawWorkspacePath } from '../utils/paths';
 import { prepareAcpChatImage, prepareVideoReferenceImage } from '../utils/video-reference-image';
+import { artifactTaskService } from './artifact-task-service';
 
-type AcpConnection = Pick<ClientSideConnection, 'initialize' | 'newSession' | 'loadSession' | 'prompt' | 'cancel'>;
+type AcpConnection = Pick<
+  ClientSideConnection,
+  | 'initialize'
+  | 'newSession'
+  | 'loadSession'
+  | 'prompt'
+  | 'cancel'
+  | 'setSessionConfigOption'
+  | 'unstable_setSessionModel'
+>;
 type MainWindowLike = {
   webContents: Pick<BrowserWindow['webContents'], 'send'>;
 };
@@ -69,6 +83,10 @@ type AcpLivePromptContext = {
   mainReceivedAtMs: number;
   dispatchedAtMs: number | null;
   firstTextAtMs: number | null;
+  toolCallObserved: boolean;
+  pendingTerminalFailure: SessionNotification | null;
+  /** Rejects the current prompt wait when ACP has already emitted a terminal failure. */
+  terminalFailureReject: ((reason?: unknown) => void) | null;
 };
 type AcpChildProcess = ChildProcess & {
   stdin: NonNullable<ChildProcess['stdin']>;
@@ -86,6 +104,18 @@ type AcpPromptBuildResult = {
 
 const ACP_GATEWAY_READY_WAIT_TIMEOUT_MS = 90_000;
 const ACP_GATEWAY_READY_POLL_INTERVAL_MS = 250;
+const ACP_PROMPT_RETRY_BASE_DELAY_MS = 500;
+const ACP_PROMPT_RETRY_MAX_DELAY_MS = 4_000;
+const ACP_PROMPT_TRANSIENT_MAX_ATTEMPTS = 3;
+const ACP_PROMPT_CONTEXT_RECOVERY_MAX_ATTEMPTS = 2;
+const ACP_RECOVERY_SUMMARY_MAX_CHARS = 12_000;
+const ACP_RECOVERY_SUMMARY_HEADINGS = [
+  '## Decisions',
+  '## Open TODOs',
+  '## Constraints/Rules',
+  '## Pending user asks',
+  '## Exact identifiers',
+] as const;
 
 function gatewayNeedsReadinessWait(status: ReturnType<NonNullable<GatewayPairingRpcClient['getStatus']>>): boolean {
   return status?.state === 'stopped'
@@ -159,6 +189,150 @@ function isVisibleAgentText(notification: SessionNotification): boolean {
     && update.content?.type === 'text'
     && typeof update.content.text === 'string'
     && update.content.text.trim().length > 0;
+}
+
+function artifactToolUpdate(notification: SessionNotification): {
+  toolCallId?: string;
+  title?: string;
+  status?: string;
+  rawOutput?: unknown;
+} | null {
+  const update = (notification as { update?: Record<string, unknown> }).update;
+  if (!update || (update.sessionUpdate !== 'tool_call' && update.sessionUpdate !== 'tool_call_update')) return null;
+  return {
+    ...(typeof update.toolCallId === 'string' ? { toolCallId: update.toolCallId } : {}),
+    ...(typeof update.title === 'string' ? { title: update.title } : {}),
+    ...(typeof update.status === 'string' ? { status: update.status } : {}),
+    ...('rawOutput' in update ? { rawOutput: update.rawOutput } : {}),
+  };
+}
+
+function isTerminalPromptFailure(notification: SessionNotification): boolean {
+  return sessionUpdateType(notification) === 'uclaw_turn_failure';
+}
+
+function isPromptRetryableUpstreamError(code: AcpChatErrorCode): boolean {
+  return code === 'RATE_LIMIT' || code === 'SERVICE_UNAVAILABLE';
+}
+
+function errorRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : null;
+}
+
+function findStructuredRecoverySummary(value: unknown): string | null {
+  const queue: unknown[] = [value];
+  const seen = new Set<object>();
+  let inspected = 0;
+
+  while (queue.length > 0 && inspected < 24) {
+    const candidate = queue.shift();
+    const record = errorRecord(candidate);
+    if (!record || seen.has(record)) continue;
+    seen.add(record);
+    inspected += 1;
+
+    for (const key of ['recoverySummary', 'fallbackSummary', 'compactionSummary', 'summary']) {
+      const summary = record[key];
+      if (typeof summary !== 'string') continue;
+      const trimmed = summary.trim();
+      if (trimmed && ACP_RECOVERY_SUMMARY_HEADINGS.every((heading) => trimmed.includes(heading))) {
+        return trimmed.slice(0, ACP_RECOVERY_SUMMARY_MAX_CHARS);
+      }
+    }
+    for (const key of ['cause', 'data', 'details', 'response', 'error']) {
+      if (record[key] != null) queue.push(record[key]);
+    }
+  }
+  return null;
+}
+
+function buildMinimalStructuredRecoverySummary(): string {
+  return [
+    '## Decisions',
+    'Preserve the current session and continue from its recorded state.',
+    '',
+    '## Open TODOs',
+    'Complete the latest unresolved user request.',
+    '',
+    '## Constraints/Rules',
+    'Do not repeat completed tool actions or invent missing results.',
+    '',
+    '## Pending user asks',
+    'Use the latest user request already recorded in this session.',
+    '',
+    '## Exact identifiers',
+    'Recover exact identifiers from the recorded request and session state.',
+  ].join('\n');
+}
+
+function buildContextRecoveryPrompt(error: unknown): ContentBlock[] {
+  const summary = findStructuredRecoverySummary(error) ?? buildMinimalStructuredRecoverySummary();
+  return [{
+    type: 'text',
+    text: [
+      '[UClaw automatic context recovery]',
+      'Continue the latest unresolved user request already recorded in this session.',
+      'Use the structured recovery summary below and do not repeat completed tool actions.',
+      '',
+      summary,
+    ].join('\n'),
+  }];
+}
+
+function buildTransientRetryPrompt(): ContentBlock[] {
+  return [{
+    type: 'text',
+    text: [
+      '[UClaw automatic upstream retry]',
+      'Continue the latest unresolved user request already recorded in this session.',
+      'The previous attempt stopped before any tool call or visible assistant reply.',
+    ].join('\n'),
+  }];
+}
+
+function promptRecoveryError(message: string, cause: unknown): Error {
+  return new Error(message, { cause });
+}
+
+function promptRetryDelay(attempt: number): number {
+  return Math.min(
+    ACP_PROMPT_RETRY_MAX_DELAY_MS,
+    ACP_PROMPT_RETRY_BASE_DELAY_MS * (2 ** Math.max(0, attempt - 2)),
+  );
+}
+
+function terminalFailureNotification(
+  sessionId: string,
+  userMessageId: string,
+  failure: ReturnType<typeof normalizeAcpChatError>,
+): SessionNotification {
+  const update: AcpTurnFailureUpdate = {
+    sessionUpdate: 'uclaw_turn_failure',
+    userMessageId,
+    errorMessage: failure.message,
+    errorCode: failure.code,
+    retryable: failure.retryable,
+    ...(failure.httpStatus != null ? { httpStatus: failure.httpStatus } : {}),
+    ...(failure.upstreamCode ? { upstreamCode: failure.upstreamCode } : {}),
+  };
+  return { sessionId, update } as unknown as SessionNotification;
+}
+
+function terminalFailureError(notification: SessionNotification): Record<string, unknown> {
+  const update = (notification as {
+    update?: {
+      errorMessage?: unknown;
+      errorCode?: unknown;
+      httpStatus?: unknown;
+      upstreamCode?: unknown;
+    };
+  }).update;
+  return {
+    message: typeof update?.errorMessage === 'string' ? update.errorMessage : 'ACP turn failed',
+    ...(typeof update?.errorCode === 'string' ? { code: update.errorCode } : {}),
+    ...(typeof update?.httpStatus === 'number' ? { status: update.httpStatus } : {}),
+    ...(typeof update?.upstreamCode === 'string' ? { upstreamCode: update.upstreamCode } : {}),
+  };
 }
 
 function promptCompletionDurations(context: AcpLivePromptContext, completedAtMs: number): Record<string, unknown> {
@@ -274,7 +448,9 @@ export class AcpChatService {
   async warmupConnection(): Promise<void> {
     this.trace('connection/warmup:start', { sessionKey: null });
     try {
-      await this.ensureConnection();
+      const runtimeIdentity = await this.requireReadyGatewayRuntime();
+      await this.ensureConnection(runtimeIdentity);
+      this.requireSameGatewayRuntime(runtimeIdentity);
       this.trace('connection/warmup:success', { sessionKey: null });
     } catch (error) {
       logger.warn(`[acp-chat] ACP connection warmup failed; normal session loading will retry: ${String(error)}`);
@@ -483,8 +659,12 @@ export class AcpChatService {
       mainReceivedAtMs,
       dispatchedAtMs: null,
       firstTextAtMs: null,
+      toolCallObserved: false,
+      pendingTerminalFailure: null,
+      terminalFailureReject: null,
     };
     this.livePrompts.set(payload.sessionKey, promptContext);
+    const userMessageId = payload.messageId ?? randomUUID();
     let imagePreferenceId: string | undefined;
     let videoPreferenceId: string | undefined;
     try {
@@ -510,6 +690,30 @@ export class AcpChatService {
       this.requireSameGatewayRuntime(runtimeIdentity);
       const promptBuild = await this.buildPromptBlocks(payload);
       const prompt = promptBuild.blocks;
+      const artifactPolicy = artifactTaskService.getPolicy(payload.sessionKey);
+      if (artifactPolicy) {
+        const controls = [
+          connection.setSessionConfigOption({
+            sessionId: acpSessionId,
+            configId: 'thought_level',
+            value: artifactPolicy.thinkingLevel,
+          }),
+          connection.setSessionConfigOption({
+            sessionId: acpSessionId,
+            configId: 'fast_mode',
+            value: artifactPolicy.fastMode ? 'on' : 'off',
+          }),
+          connection.unstable_setSessionModel({
+            sessionId: acpSessionId,
+            modelId: artifactPolicy.modelAlias,
+          }),
+        ];
+        const results = await Promise.allSettled(controls);
+        const rejected = results.filter((result) => result.status === 'rejected');
+        if (rejected.length > 0) {
+          logger.warn(`[artifact-task] ${rejected.length} ACP session control(s) were rejected; runtime plugin policy remains active`);
+        }
+      }
       const message = payload.message?.trim();
       if (payload.imageOptions && message) {
         const preference = await this.turnImagePreferenceStore.enqueue({
@@ -544,6 +748,7 @@ export class AcpChatService {
       }
       this.permissionsEnabled = true;
       this.requireSameGatewayRuntime(runtimeIdentity);
+      artifactTaskService.markDispatched(payload.sessionKey);
       promptContext.dispatchedAtMs = Date.now();
       this.trace('session/prompt:dispatched', {
         sessionKey: payload.sessionKey,
@@ -554,12 +759,109 @@ export class AcpChatService {
           clientToDispatchMs: elapsedMs(clientStartedAtMs, promptContext.dispatchedAtMs),
         },
       });
-      await connection.prompt({
-        sessionId: acpSessionId,
-        prompt,
-        messageId: payload.messageId ?? randomUUID(),
-        _meta: { sessionKey: payload.sessionKey, prefixCwd: true },
-      });
+      const originalMessageId = userMessageId;
+      let attempt = 1;
+      let attemptPrompt = prompt;
+      let attemptMessageId = originalMessageId;
+      let contextRecoveryAttempted = false;
+      while (true) {
+        promptContext.pendingTerminalFailure = null;
+        let rejectTerminalFailure: ((reason?: unknown) => void) | null = null;
+        const terminalFailureWait = new Promise<never>((_, reject) => {
+          rejectTerminalFailure = reject;
+        });
+        promptContext.terminalFailureReject = rejectTerminalFailure;
+        const promptWaiter = promptContext.terminalFailureReject;
+        try {
+          await Promise.race([
+            connection.prompt({
+              sessionId: acpSessionId,
+              prompt: attemptPrompt,
+              messageId: attemptMessageId,
+              _meta: { sessionKey: payload.sessionKey, prefixCwd: true },
+            }),
+            terminalFailureWait,
+          ]);
+          if (attempt > 1) {
+            this.trace('session/prompt:recovered', {
+              sessionKey: payload.sessionKey,
+              generation,
+              details: { attempt, contextRecoveryAttempted },
+            });
+          }
+          promptContext.pendingTerminalFailure = null;
+          break;
+        } catch (attemptError) {
+          this.requireSameGatewayRuntime(runtimeIdentity);
+          const failure = normalizeAcpChatError(attemptError);
+          const replaySafe = !promptContext.toolCallObserved && promptContext.firstTextAtMs == null;
+          const isContextRecovery = failure.code === 'CONTEXT_OVERFLOW';
+          const isTransientUpstream = isPromptRetryableUpstreamError(failure.code);
+          const maxAttempts = isContextRecovery
+            ? ACP_PROMPT_CONTEXT_RECOVERY_MAX_ATTEMPTS
+            : ACP_PROMPT_TRANSIENT_MAX_ATTEMPTS;
+
+          if (!replaySafe && (isContextRecovery || isTransientUpstream)) {
+            throw promptRecoveryError(
+              promptContext.toolCallObserved
+                ? 'The upstream request failed after a tool started. UClaw did not replay the turn to avoid repeating side effects.'
+                : 'The upstream request failed after assistant output started. UClaw did not replay the turn to avoid duplicate output.',
+              attemptError,
+            );
+          }
+
+          if (isContextRecovery && !contextRecoveryAttempted && attempt < maxAttempts) {
+            contextRecoveryAttempted = true;
+            attempt += 1;
+            attemptPrompt = buildContextRecoveryPrompt(attemptError);
+            attemptMessageId = `${originalMessageId}:context-recovery:${attempt}`;
+            const delayMs = ACP_PROMPT_RETRY_BASE_DELAY_MS;
+            this.trace('session/prompt:retry', {
+              sessionKey: payload.sessionKey,
+              generation,
+              details: { attempt, delayMs, reason: failure.code, recovery: 'structured-summary' },
+            });
+            logger.warn(`[acp-chat] Context recovery retry ${attempt}/${maxAttempts} scheduled after ${delayMs}ms`);
+            await waitForDelay(delayMs);
+            this.requireSameGatewayRuntime(runtimeIdentity);
+            continue;
+          }
+
+          if (isTransientUpstream && attempt < maxAttempts) {
+            attempt += 1;
+            attemptPrompt = buildTransientRetryPrompt();
+            attemptMessageId = `${originalMessageId}:upstream-retry:${attempt}`;
+            const delayMs = promptRetryDelay(attempt);
+            this.trace('session/prompt:retry', {
+              sessionKey: payload.sessionKey,
+              generation,
+              details: { attempt, delayMs, reason: failure.code, recovery: 'continue-recorded-request' },
+            });
+            logger.warn(`[acp-chat] Replay-safe upstream retry ${attempt}/${maxAttempts} scheduled after ${delayMs}ms`);
+            await waitForDelay(delayMs);
+            this.requireSameGatewayRuntime(runtimeIdentity);
+            continue;
+          }
+
+          if (isContextRecovery && contextRecoveryAttempted) {
+            throw promptRecoveryError(
+              'Automatic context recovery failed after one replay-safe attempt. The current session and original request were preserved.',
+              attemptError,
+            );
+          }
+          if (isTransientUpstream && attempt >= maxAttempts) {
+            throw promptRecoveryError(
+              `The upstream service remained unavailable after ${attempt} replay-safe attempts. Please try again later.`,
+              attemptError,
+            );
+          }
+          throw attemptError;
+        } finally {
+          if (promptContext.terminalFailureReject === promptWaiter) {
+            promptContext.terminalFailureReject = null;
+          }
+        }
+      }
       this.requireSameGatewayRuntime(runtimeIdentity);
       const completedAtMs = Date.now();
       this.trace('session/prompt:complete', {
@@ -579,8 +881,16 @@ export class AcpChatService {
         generation,
         details: { blockCount: prompt.length, acpSessionId },
       });
+      artifactTaskService.complete(payload.sessionKey, 'success');
       return ok(generation);
     } catch (error) {
+      const failure = normalizeAcpChatError(error);
+      const terminalFailure = promptContext.pendingTerminalFailure
+        ?? terminalFailureNotification(acpSessionId, userMessageId, failure);
+      promptContext.pendingTerminalFailure = null;
+      if (terminalFailure.update && typeof (terminalFailure.update as { userMessageId?: unknown }).userMessageId === 'string') {
+        this.emitSessionUpdate(terminalFailure, true);
+      }
       if (imagePreferenceId) {
         await this.turnImagePreferenceStore.discard(imagePreferenceId).catch((discardError) => {
           logger.warn(`[acp-chat] Could not discard image generation preferences: ${String(discardError)}`);
@@ -609,6 +919,8 @@ export class AcpChatService {
         sessionKey: payload.sessionKey,
         details: { error: error instanceof Error ? error.message : String(error) },
       });
+      artifactTaskService.reportFailure(payload.sessionKey, error);
+      artifactTaskService.complete(payload.sessionKey, 'failure');
       return fail(error);
     } finally {
       if (this.livePrompts.get(payload.sessionKey) === promptContext) {
@@ -659,7 +971,13 @@ export class AcpChatService {
   private getReadyGatewayRuntimeIdentity(): string | null {
     if (!this.gateway) return null;
     const status = this.gateway.getStatus?.();
-    if (!status || status.state !== 'running' || status.gatewayReady !== true) {
+    // `gatewayReady` was added after the original running-state contract. An
+    // older Gateway (or a compatible host bridge) may omit it; only an
+    // explicit false means that the runtime is still transitioning. The
+    // GatewayManager in current builds sets false while booting and true once
+    // its readiness event/probe succeeds, so this preserves the strict path
+    // without deadlocking legacy status payloads.
+    if (!status || status.state !== 'running' || status.gatewayReady === false) {
       throw new Error(GATEWAY_TRANSITION_ERROR);
     }
     return `${status.pid ?? 'none'}:${status.connectedAt ?? 'none'}:${status.port}`;
@@ -893,7 +1211,7 @@ export class AcpChatService {
     this.livePrompts.clear();
   }
 
-  private emitSessionUpdate(notification: SessionNotification): void {
+  private emitSessionUpdate(notification: SessionNotification, forwardTerminalFailure = false): void {
     const acpSessionId = notification.sessionId;
     const livePrompt = [...this.livePrompts.values()].find((context) => context.acpSessionId === acpSessionId);
     const sessionKey = livePrompt?.sessionKey ?? this.activeSessionKey;
@@ -920,6 +1238,16 @@ export class AcpChatService {
       });
       return;
     }
+    if (livePrompt && isTerminalPromptFailure(notification) && !forwardTerminalFailure) {
+      livePrompt.pendingTerminalFailure = notification;
+      livePrompt.terminalFailureReject?.(terminalFailureError(notification));
+      this.trace('session-update:buffered', {
+        direction: 'downstream',
+        sessionKey,
+        details: { acpSessionId, updateType, reason: 'retryable-terminal-failure' },
+      });
+      return;
+    }
 
     const envelope: AcpSessionUpdateEnvelope = {
       sessionKey,
@@ -940,6 +1268,11 @@ export class AcpChatService {
       return;
     }
     this.mainWindow.webContents.send(HOST_EVENT_CHANNELS.chat.acpSessionUpdate, envelope);
+    const toolUpdate = artifactToolUpdate(notification);
+    if (livePrompt && toolUpdate) {
+      livePrompt.toolCallObserved = true;
+      artifactTaskService.recordTool(sessionKey, toolUpdate);
+    }
     if (
       livePrompt
       && livePrompt.dispatchedAtMs != null
@@ -948,6 +1281,7 @@ export class AcpChatService {
     ) {
       const firstTextAtMs = Date.now();
       livePrompt.firstTextAtMs = firstTextAtMs;
+      artifactTaskService.markFirstText(sessionKey);
       this.trace('session/prompt:first-text', {
         direction: 'downstream',
         sessionKey,

@@ -30,6 +30,7 @@ function createMockHooks(overrides: Partial<Parameters<typeof runGatewayStartupS
     assertLifecycle: vi.fn(),
     findExistingGateway: vi.fn().mockResolvedValue(null),
     connect: vi.fn().mockResolvedValue(undefined),
+    onConnectAttempt: vi.fn(),
     onConnectedToExistingGateway: vi.fn(),
     waitForPortFree: vi.fn().mockResolvedValue(undefined),
     startProcess: vi.fn().mockResolvedValue(undefined),
@@ -57,7 +58,10 @@ describe('runGatewayStartupSequence', () => {
 
     expect(hooks.findExistingGateway).toHaveBeenCalledWith(18789);
     expect(hooks.connect).toHaveBeenCalledWith(18789, 'tok-ext');
-    expect(hooks.onConnectedToExistingGateway).toHaveBeenCalledTimes(1);
+    expect(hooks.onConnectedToExistingGateway).toHaveBeenCalledWith({
+      gateway: { port: 18789, externalToken: 'tok-ext' },
+      source: 'discovered',
+    });
     expect(hooks.startProcess).not.toHaveBeenCalled();
     expect(hooks.onConnectedToManagedGateway).not.toHaveBeenCalled();
     expect(hooks.assertLifecycle).toHaveBeenCalledWith('start');
@@ -88,7 +92,10 @@ describe('runGatewayStartupSequence', () => {
     expect(hooks.waitForReady).toHaveBeenCalledWith(18789);
     expect(hooks.afterManagedGatewayReady).toHaveBeenCalledTimes(1);
     expect(hooks.connect).toHaveBeenCalledWith(18789, undefined);
-    expect(hooks.onConnectedToExistingGateway).toHaveBeenCalledTimes(1);
+    expect(hooks.onConnectedToExistingGateway).toHaveBeenCalledWith({
+      gateway: { port: 18789, provenance: 'managed-process' },
+      source: 'owned-process',
+    });
     expect(order).toEqual(['ready', 'finalize', 'connect']);
 
     // Must NOT start a new process or wait for port free
@@ -216,8 +223,21 @@ describe('runGatewayStartupSequence', () => {
 
     // First attempt fails with transient error, second succeeds
     expect(hooks.connect).toHaveBeenCalledTimes(2);
-    expect(hooks.delay).toHaveBeenCalledWith(1000);
+    expect(hooks.delay).toHaveBeenCalledWith(500);
     expect(hooks.onConnectedToManagedGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry a rejected Gateway authentication handshake', async () => {
+    const hooks = createMockHooks({
+      connect: vi.fn().mockRejectedValue(new Error('authentication failed: token mismatch')),
+      maxStartAttempts: 3,
+    });
+
+    await expect(runGatewayStartupSequence(hooks)).rejects.toThrow('authentication failed: token mismatch');
+
+    expect(hooks.connect).toHaveBeenCalledTimes(1);
+    expect(hooks.startProcess).toHaveBeenCalledTimes(1);
+    expect(hooks.delay).not.toHaveBeenCalled();
   });
 
   it('runs doctor repair on config-invalid stderr signal', async () => {
@@ -258,9 +278,10 @@ describe('runGatewayStartupSequence', () => {
       'WebSocket closed before handshake: unknown',
     );
 
-    // Should have attempted 3 times total
-    expect(hooks.connect).toHaveBeenCalledTimes(3);
-    expect(hooks.delay).toHaveBeenCalledTimes(2); // delays between retries 1→2, 2→3
+    // The connect layer owns its retry budget; the outer startup loop must not replay it.
+    expect(hooks.connect).toHaveBeenCalledTimes(5);
+    expect(hooks.delay).toHaveBeenCalledTimes(4);
+    expect(hooks.onConnectAttempt).toHaveBeenLastCalledWith(5, 5);
   });
 
   it('does not retry or run doctor when startup recovery is disabled', async () => {
@@ -347,8 +368,8 @@ describe('runGatewayStartupSequence', () => {
 
     await runGatewayStartupSequence(hooks);
 
-    // resetStartupStderrLines should be called once per attempt
-    expect(hooks.resetStartupStderrLines).toHaveBeenCalledTimes(2);
+    // The inner connection retry budget does not restart the startup sequence.
+    expect(hooks.resetStartupStderrLines).toHaveBeenCalledTimes(1);
   });
 
   it('retries connect in-place when gateway is still starting', async () => {

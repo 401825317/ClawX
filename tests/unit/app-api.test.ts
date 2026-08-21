@@ -13,4 +13,13 @@ describe('app Host API', () => {
     expect(api.quit()).toBeUndefined();
     expect(app.quit).toHaveBeenCalledOnce();
   });
+
+  it('resolves both HTTPS specifier forms to the Node builtin', async () => {
+    const [bareHttps, prefixedHttps] = await Promise.all([
+      import('https'),
+      import('node:https'),
+    ]);
+
+    expect(bareHttps.request).toBe(prefixedHttps.request);
+  });
 });

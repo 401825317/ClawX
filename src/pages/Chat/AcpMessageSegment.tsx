@@ -112,7 +112,15 @@ function AcpErrorPart({ message }: { message: string }) {
   );
 }
 
-export function AcpRenderPart({ part, tone = 'assistant' }: { part: RenderPart; tone?: RenderTone }) {
+export function AcpRenderPart({
+  part,
+  tone = 'assistant',
+  workspaceRoot,
+}: {
+  part: RenderPart;
+  tone?: RenderTone;
+  workspaceRoot?: string;
+}) {
   if (part.kind === 'markdown') {
     if (tone === 'user') {
       return (
@@ -127,11 +135,11 @@ export function AcpRenderPart({ part, tone = 'assistant' }: { part: RenderPart; 
   if (part.kind === 'image') {
     return <AcpImagePart part={part} variant={tone === 'user' ? 'thumbnail' : 'preview'} />;
   }
-  if (part.kind === 'attachment') return <AcpAttachmentPart part={part} />;
+  if (part.kind === 'attachment') return <AcpAttachmentPart part={part} workspaceRoot={workspaceRoot} />;
   return <AcpErrorPart message={part.message} />;
 }
 
-export function AcpMessageSegment({ item }: { item: MessageSegmentItem }) {
+export function AcpMessageSegment({ item, workspaceRoot }: { item: MessageSegmentItem; workspaceRoot?: string }) {
   const isUser = item.role === 'user';
   const orderedParts = useMemo(() => isUser
     ? [
@@ -152,7 +160,12 @@ export function AcpMessageSegment({ item }: { item: MessageSegmentItem }) {
       )}
       <div className={cn('flex min-w-0 flex-col gap-2', isUser ? 'max-w-[80%] items-end' : 'w-full items-start')}>
         {orderedParts.map((part, index) => (
-          <AcpRenderPart key={`${part.kind}:${index}`} part={part} tone={item.role} />
+          <AcpRenderPart
+            key={`${part.kind}:${index}`}
+            part={part}
+            tone={item.role}
+            workspaceRoot={workspaceRoot}
+          />
         ))}
       </div>
     </div>

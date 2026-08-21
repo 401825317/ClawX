@@ -16,9 +16,10 @@ type DeferredRestartContext = RestartDeferralState & {
 
 export class GatewayRestartController {
   private deferredRestartPending = false;
-  private deferredRestartRequestedAt = 0;
-  private lastRestartCompletedAt = 0;
+  private deferredRestartCompletionGeneration = 0;
+  private restartCompletionGeneration = 0;
   private restartDebounceTimer: NodeJS.Timeout | null = null;
+  private restartDebounceGeneration = 0;
 
   isRestartDeferred(context: RestartDeferralState): boolean {
     return shouldDeferRestart(context);
@@ -35,13 +36,14 @@ export class GatewayRestartController {
       );
     }
     this.deferredRestartPending = true;
-    if (this.deferredRestartRequestedAt === 0) {
-      this.deferredRestartRequestedAt = Date.now();
-    }
+    // Capture the completion generation for every request, including requests
+    // coalesced behind an older pending one. A wall-clock timestamp cannot
+    // establish causality when completion and request happen in the same ms.
+    this.deferredRestartCompletionGeneration = this.restartCompletionGeneration;
   }
 
   recordRestartCompleted(): void {
-    this.lastRestartCompletedAt = Date.now();
+    this.restartCompletionGeneration = this.nextGeneration(this.restartCompletionGeneration);
   }
 
   flushDeferredRestart(
@@ -64,9 +66,9 @@ export class GatewayRestartController {
       return;
     }
 
-    const requestedAt = this.deferredRestartRequestedAt;
+    const requestedAfterGeneration = this.deferredRestartCompletionGeneration;
     this.deferredRestartPending = false;
-    this.deferredRestartRequestedAt = 0;
+    this.deferredRestartCompletionGeneration = this.restartCompletionGeneration;
     if (action === 'drop') {
       logger.info(
         `Dropping deferred Gateway restart (${trigger}) because lifecycle already recovered (state=${context.state}, shouldReconnect=${context.shouldReconnect})`,
@@ -74,12 +76,13 @@ export class GatewayRestartController {
       return;
     }
 
-    // If a restart already completed after this deferred request was made,
-    // the current process is already running with the latest config —
-    // skip the redundant restart to avoid "just started then restart" loops.
-    if (requestedAt > 0 && this.lastRestartCompletedAt >= requestedAt) {
+    // A different completion generation proves that a restart completed after
+    // the latest pending request. Equality means the request is newer and must
+    // still execute, even if both events occurred in the same millisecond.
+    if (requestedAfterGeneration !== this.restartCompletionGeneration) {
       logger.info(
-        `Dropping deferred Gateway restart (${trigger}): a restart already completed after the request (requested=${requestedAt}, completed=${this.lastRestartCompletedAt})`,
+        `Dropping deferred Gateway restart (${trigger}): a restart already completed after the request ` +
+        `(requestedAfterGeneration=${requestedAfterGeneration}, completedGeneration=${this.restartCompletionGeneration})`,
       );
       return;
     }
@@ -92,14 +95,18 @@ export class GatewayRestartController {
     if (this.restartDebounceTimer) {
       clearTimeout(this.restartDebounceTimer);
     }
+    const generation = this.nextGeneration(this.restartDebounceGeneration);
+    this.restartDebounceGeneration = generation;
     logger.debug(`Gateway restart debounced (will fire in ${delayMs}ms)`);
     this.restartDebounceTimer = setTimeout(() => {
+      if (generation !== this.restartDebounceGeneration) return;
       this.restartDebounceTimer = null;
       executeRestart();
     }, delayMs);
   }
 
   clearDebounceTimer(): void {
+    this.restartDebounceGeneration = this.nextGeneration(this.restartDebounceGeneration);
     if (this.restartDebounceTimer) {
       clearTimeout(this.restartDebounceTimer);
       this.restartDebounceTimer = null;
@@ -108,6 +115,10 @@ export class GatewayRestartController {
 
   resetDeferredRestart(): void {
     this.deferredRestartPending = false;
-    this.deferredRestartRequestedAt = 0;
+    this.deferredRestartCompletionGeneration = this.restartCompletionGeneration;
+  }
+
+  private nextGeneration(current: number): number {
+    return current >= Number.MAX_SAFE_INTEGER ? 1 : current + 1;
   }
 }

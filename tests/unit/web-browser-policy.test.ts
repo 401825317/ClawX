@@ -2,11 +2,18 @@ import { EventEmitter } from 'node:events';
 import type { Session, WebContents, WebPreferences } from 'electron';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  classifyWebBrowserNavigation,
   WebBrowserGuestRegistry,
   hardenWebBrowserPreferences,
+  isWebBrowserPrivateNetworkHostname,
   installWebBrowserGuestPolicy,
   isExpectedWebBrowserAttachment,
+  resolveWebBrowserNavigation,
 } from '@electron/main/web-browser-policy';
+import {
+  isActiveWorkspaceHtmlPreviewUrl,
+  registerWorkspaceHtmlPreviewCapability,
+} from '@electron/services/workspace-html-preview';
 import {
   WEB_BROWSER_INITIAL_URL,
   WEB_BROWSER_PARTITION,
@@ -240,13 +247,21 @@ describe('web browser attachment policy', () => {
     });
     attachGuest(embedder, guest);
 
-    for (const url of ['https://example.com/', 'http://localhost:3000/', 'file:///tmp/page.html']) {
+    for (const url of ['https://example.com/']) {
       const event = Object.assign(preventableEvent(), { url, isMainFrame: true });
       guest.emit('will-navigate', event);
       expect(event.preventDefault).not.toHaveBeenCalled();
     }
 
-    for (const url of ['about:blank', 'chrome://settings', 'file://server/page.html']) {
+    for (const url of [
+      'about:blank',
+      'chrome://settings',
+      'file:///tmp/page.html',
+      'file://server/page.html',
+      'http://localhost:3000/',
+      'http://127.0.0.1:3000/',
+      'http://192.168.1.20/',
+    ]) {
       const event = Object.assign(preventableEvent(), { url, isMainFrame: true });
       guest.emit('will-navigate', event);
       expect(event.preventDefault).toHaveBeenCalledOnce();
@@ -272,6 +287,113 @@ describe('web browser attachment policy', () => {
     });
     guest.emit('will-redirect', subframeRedirect);
     expect(subframeRedirect.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it('normalizes special host forms and fails closed when DNS resolves to a private address', async () => {
+    for (const url of [
+      'http://localhost.:3000/',
+      'http://127.0.0.1:3000/',
+      'http://[::1]:3000/',
+      'http://[fc00::1]/',
+      'http://[::ffff:127.0.0.1]/',
+    ]) {
+      expect(classifyWebBrowserNavigation(url)).toMatchObject({
+        ok: false,
+        code: 'web_browser_private_network_blocked',
+      });
+    }
+    expect(isWebBrowserPrivateNetworkHostname('localhost.')).toBe(true);
+    expect(isWebBrowserPrivateNetworkHostname('[FE80::1]')).toBe(true);
+
+    await expect(resolveWebBrowserNavigation(
+      'https://public.example/',
+      async () => ['127.0.0.1', '2001:db8::1'],
+    )).resolves.toMatchObject({
+      ok: false,
+      code: 'web_browser_private_network_blocked',
+    });
+    await expect(resolveWebBrowserNavigation(
+      'https://public.example/',
+      async () => ['2001:4860:4860::8888'],
+    )).resolves.toMatchObject({ ok: true, kind: 'public' });
+  });
+
+  it('locks generated loopback previews against external navigation, redirects, and popups', () => {
+    const browserSession = {} as Session;
+    const embedder = new MockWebContents('window', {} as Session);
+    const guest = new MockWebContents('webview', browserSession);
+    const registry = new WebBrowserGuestRegistry();
+    installWebBrowserGuestPolicy(asWebContents(embedder), { browserSession, registry });
+    attachGuest(embedder, guest);
+    const previewUrl = `http://127.0.0.1:49152/${'a'.repeat(43)}/index.html`;
+    const revoke = registerWorkspaceHtmlPreviewCapability(previewUrl, Date.now() + 60_000);
+    registry.beginExplicitNavigation(asWebContents(guest), previewUrl).commit();
+
+    for (const url of [previewUrl, `${previewUrl}#section`]) {
+      const event = Object.assign(preventableEvent(), { url, isMainFrame: true });
+      guest.emit('will-navigate', event);
+      expect(event.preventDefault).not.toHaveBeenCalled();
+    }
+
+    for (const url of ['https://example.com/', 'file:///tmp/page.html']) {
+      const navigation = Object.assign(preventableEvent(), { url, isMainFrame: true });
+      guest.emit('will-navigate', navigation);
+      expect(navigation.preventDefault).toHaveBeenCalledOnce();
+
+      const redirect = Object.assign(preventableEvent(), { url, isMainFrame: true });
+      guest.emit('will-redirect', redirect);
+      expect(redirect.preventDefault).toHaveBeenCalledOnce();
+
+      expect(guest.windowOpenHandler!({ url } as never)).toEqual({ action: 'deny' });
+    }
+    expect(guest.loadURL).not.toHaveBeenCalled();
+
+    registry.beginExplicitNavigation(asWebContents(guest), 'https://example.com/').commit();
+    const ordinaryNavigation = Object.assign(preventableEvent(), {
+      url: 'https://other.example/',
+      isMainFrame: true,
+    });
+    guest.emit('will-navigate', ordinaryNavigation);
+    expect(ordinaryNavigation.preventDefault).not.toHaveBeenCalled();
+    revoke();
+  });
+
+  it('uses a generation so an older same-URL rollback cannot clear a newer navigation', () => {
+    const browserSession = {} as Session;
+    const guest = new MockWebContents('webview', browserSession);
+    const registry = new WebBrowserGuestRegistry();
+    expect(registry.beginAttachment()).toBe(true);
+    registry.completeAttachment(asWebContents(guest));
+
+    const first = registry.beginExplicitNavigation(asWebContents(guest), 'https://same.example/');
+    const second = registry.beginExplicitNavigation(asWebContents(guest), 'https://same.example/');
+    first.rollback();
+    expect(registry.allowsTopLevelNavigation(asWebContents(guest), 'https://same.example/')).toBe(true);
+    second.commit();
+    first.commit();
+    expect(registry.isPreviewGuest(asWebContents(guest))).toBe(false);
+    expect(registry.allowsTopLevelNavigation(asWebContents(guest), 'https://other.example/')).toBe(true);
+  });
+
+  it('fails closed after a preview capability is revoked or expires', () => {
+    const browserSession = {} as Session;
+    const guest = new MockWebContents('webview', browserSession);
+    const registry = new WebBrowserGuestRegistry();
+    expect(registry.beginAttachment()).toBe(true);
+    registry.completeAttachment(asWebContents(guest));
+    const previewUrl = `http://127.0.0.1:49152/${'b'.repeat(43)}/index.html`;
+    const revoke = registerWorkspaceHtmlPreviewCapability(previewUrl, Date.now() + 5);
+    registry.beginExplicitNavigation(asWebContents(guest), previewUrl).commit();
+    expect(registry.allowsTopLevelNavigation(asWebContents(guest), `${previewUrl}#ok`)).toBe(true);
+    expect(registry.isActiveWorkspacePreviewUrl(previewUrl)).toBe(true);
+    revoke();
+    expect(registry.isActiveWorkspacePreviewUrl(previewUrl)).toBe(false);
+    expect(registry.allowsTopLevelNavigation(asWebContents(guest), `${previewUrl}#ok`)).toBe(false);
+
+    const expired = registerWorkspaceHtmlPreviewCapability(previewUrl, Date.now() + 1);
+    expect(registry.isActiveWorkspacePreviewUrl(previewUrl)).toBe(true);
+    expect(isActiveWorkspaceHtmlPreviewUrl(previewUrl, Date.now() + 2)).toBe(false);
+    expired();
   });
 
   it('removes installed listeners on guest destruction and installer cleanup', () => {

@@ -358,6 +358,9 @@
         },
         "imageMode": "Режим изображения",
         "imageModeActive": "Режим изображения включен",
+        "imagePresetLabel": "Предустановка изображения",
+        "imagePresetStandard": "Обычное изображение",
+        "ecommerceMainImage": "Главное фото товара",
         "videoMode": "Режим видео",
         "videoReferenceImageLimit": "Для генерации видео доступно только одно референсное изображение",
         "videoAspectRatioLabel": "Соотношение сторон видео",
@@ -388,6 +391,7 @@
         "thinking": "Думаю…",
         "gatewayConnected": "подключён",
         "gatewayStarting": "запуск",
+        "gatewayRetrying": "повторное подключение ({{attempt}}/{{maxAttempts}})",
         "gatewayStatus": "шлюз {{state}} | порт: {{port}} | PID: {{pid}}",
         "retryFailedAttachments": "Повторить неудавшиеся вложения",
         "workspacePrefix": "{{workspace}}",
@@ -400,6 +404,14 @@
         "folderAttachment": "Папка",
         "skillPreviewTooltip": "Предпросмотр SKILL.md",
         "skillPreviewNotFound": "Skill не найден. Откройте список Skill, чтобы обновить его."
+    },
+    "longTermRules": {
+        "saved": "Сохранено как долгосрочное правило: {{scope}}",
+        "scopeGlobal": "глобально",
+        "scopeAgent": "текущий Agent",
+        "undo": "Отменить",
+        "undone": "Долгосрочное правило отменено",
+        "undoFailed": "Не удалось отменить это долгосрочное правило"
     },
     "sessionList": {
         "title": "Список сессий",

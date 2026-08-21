@@ -8,6 +8,17 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const unstableFiles = vi.hoisted(() => new Set<string>());
 const durableSyncCount = vi.hoisted(() => ({ value: 0 }));
+const durableSyncFlags = vi.hoisted(() => new Map<number, string>());
+const durableFsyncFlags = vi.hoisted(() => [] as string[]);
+const rejectReadOnlyFsync = vi.hoisted(() => ({ value: false }));
+const unstableSqliteBackupOutputs = vi.hoisted(() => ({ value: false }));
+const transientSqliteBackupMutations = vi.hoisted(() => ({ value: 0 }));
+const corruptStableObjectCopies = vi.hoisted(() => ({ value: false }));
+const failStableObjectCopies = vi.hoisted(() => ({ value: false }));
+const sqliteBackupCompletedHook = vi.hoisted(() => ({
+  value: undefined as (() => void | Promise<void>) | undefined,
+}));
+const sqliteBackupCalls = vi.hoisted(() => ({ value: 0 }));
 const restorePublishFailureTargets = vi.hoisted(() => new Set<string>());
 const restoreCleanupFailureTargets = vi.hoisted(() => new Set<string>());
 
@@ -15,8 +26,20 @@ vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
+    openSync(filePath: import('node:fs').PathLike, flags: import('node:fs').OpenMode, mode?: import('node:fs').Mode | null) {
+      const descriptor = actual.openSync(filePath, flags, mode);
+      durableSyncFlags.set(descriptor, String(flags));
+      return descriptor;
+    },
     fsyncSync(descriptor: number) {
       durableSyncCount.value += 1;
+      const flags = durableSyncFlags.get(descriptor);
+      if (flags) durableFsyncFlags.push(flags);
+      if (rejectReadOnlyFsync.value && flags === 'r') {
+        const error = new Error('Injected Windows read-only fsync failure') as NodeJS.ErrnoException;
+        error.code = 'EPERM';
+        throw error;
+      }
       return actual.fsyncSync(descriptor);
     },
     renameSync(source: import('node:fs').PathLike, target: import('node:fs').PathLike) {
@@ -43,7 +66,53 @@ vi.mock('node:fs', async (importOriginal) => {
       if (unstableFiles.has(String(filePath))) {
         stream.once('data', () => actual.appendFileSync(filePath, 'changed'));
       }
+      if (unstableSqliteBackupOutputs.value && String(filePath).includes('sqlite-backup.')) {
+        stream.once('data', () => actual.appendFileSync(filePath, 'changed'));
+      }
+      if (transientSqliteBackupMutations.value > 0 && String(filePath).includes('sqlite-backup.')) {
+        transientSqliteBackupMutations.value -= 1;
+        stream.once('data', () => actual.appendFileSync(filePath, 'changed'));
+      }
       return stream;
+    },
+  };
+});
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    async copyFile(
+      source: import('node:fs').PathLike,
+      destination: import('node:fs').PathLike,
+      mode?: number,
+    ) {
+      const target = String(destination);
+      const isStableObjectCopy = /[\\/]objects[\\/]/u.test(target) && target.endsWith('.tmp');
+      if (isStableObjectCopy && failStableObjectCopies.value) {
+        const error = new Error('Injected stable object copy failure') as NodeJS.ErrnoException;
+        error.code = 'EIO';
+        throw error;
+      }
+      await actual.copyFile(source, destination, mode);
+      if (isStableObjectCopy && corruptStableObjectCopies.value) {
+        const content = await actual.readFile(destination);
+        if (content.length > 0) content[0] ^= 0xff;
+        await actual.writeFile(destination, content);
+      }
+    },
+  };
+});
+
+vi.mock('node:sqlite', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:sqlite')>();
+  return {
+    ...actual,
+    async backup(...args: Parameters<typeof actual.backup>) {
+      sqliteBackupCalls.value += 1;
+      const result = await actual.backup(...args);
+      await sqliteBackupCompletedHook.value?.();
+      return result;
     },
   };
 });
@@ -61,6 +130,15 @@ const tempDirs: string[] = [];
 afterEach(async () => {
   unstableFiles.clear();
   durableSyncCount.value = 0;
+  durableSyncFlags.clear();
+  durableFsyncFlags.splice(0);
+  rejectReadOnlyFsync.value = false;
+  unstableSqliteBackupOutputs.value = false;
+  transientSqliteBackupMutations.value = 0;
+  corruptStableObjectCopies.value = false;
+  failStableObjectCopies.value = false;
+  sqliteBackupCompletedHook.value = undefined;
+  sqliteBackupCalls.value = 0;
   restorePublishFailureTargets.clear();
   restoreCleanupFailureTargets.clear();
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -253,13 +331,87 @@ describe('portable runtime snapshot v2 sync', () => {
     expect(second.parentSnapshotId).toBe(first.snapshotId);
   });
 
-  it('syncs changed objects and the manifest before publishing them', async () => {
+  it('syncs changed objects and the manifest through writable handles before publishing them', async () => {
     const layout = await createLayout();
     await writeFile(join(layout.stateDir, 'state.json'), '{"durable":true}\n', 'utf8');
 
     await syncPortableRuntimeSnapshotV2(layout, 'durability');
 
     expect(durableSyncCount.value).toBeGreaterThanOrEqual(2);
+    expect(durableFsyncFlags).toEqual(expect.arrayContaining(['r+']));
+  });
+
+  it('does not defer when Windows rejects read-only fsync handles', async () => {
+    const layout = await createLayout();
+    await writeFile(join(layout.stateDir, 'state.json'), '{"durable":true}\n', 'utf8');
+    rejectReadOnlyFsync.value = true;
+
+    const result = await syncPortableRuntimeSnapshotV2(layout, 'windows-durability');
+
+    expect(result).toMatchObject({ skipped: false, deferred: false });
+    expect(durableFsyncFlags).toEqual(expect.arrayContaining(['r+']));
+  });
+
+  it('does not publish copied bytes under a mismatched content-addressed object name', async () => {
+    const layout = await createLayout();
+    await writeFile(join(layout.stateDir, 'state.json'), '{"stable":true}\n', 'utf8');
+    corruptStableObjectCopies.value = true;
+
+    const result = await syncPortableRuntimeSnapshotV2(layout, 'copy-integrity');
+
+    expect(result).toMatchObject({
+      skipped: true,
+      deferred: true,
+      deferredReason: 'file-group-unstable',
+      deferredPaths: ['state.json'],
+    });
+    expect(readLatestPortableSnapshotV2Sync(layout)).toBeUndefined();
+    expect(await listFiles(join(layout.snapshotDir, 'objects'))).toEqual([]);
+  });
+
+  it('keeps an existing object until its verified replacement is ready', async () => {
+    const layout = await createLayout();
+    const stateFile = join(layout.stateDir, 'state.json');
+    await writeFile(stateFile, '{"stable":true}\n', 'utf8');
+    await syncPortableRuntimeSnapshotV2(layout, 'baseline');
+    const entry = readLatestPortableSnapshotV2Sync(layout)!.entries['state.json'];
+    const storedObject = join(layout.snapshotDir, 'objects', entry.object.slice(0, 2), entry.object);
+    const corrupt = Buffer.alloc(entry.size, 0x78);
+    await writeFile(storedObject, corrupt);
+    const future = new Date(Date.now() + 5_000);
+    await utimes(stateFile, future, future);
+    failStableObjectCopies.value = true;
+
+    await expect(syncPortableRuntimeSnapshotV2(layout, 'replace-corrupt-object')).rejects.toMatchObject({
+      code: 'EIO',
+    });
+
+    await expect(readFile(storedObject)).resolves.toEqual(corrupt);
+  });
+
+  it('does not reuse a corrupt object when its replacement copy fails verification', async () => {
+    const layout = await createLayout();
+    const stateFile = join(layout.stateDir, 'state.json');
+    await writeFile(stateFile, '{"stable":true}\n', 'utf8');
+    await syncPortableRuntimeSnapshotV2(layout, 'baseline');
+    const previous = readLatestPortableSnapshotV2Sync(layout)!;
+    const entry = previous.entries['state.json'];
+    const storedObject = join(layout.snapshotDir, 'objects', entry.object.slice(0, 2), entry.object);
+    const corrupt = Buffer.alloc(entry.size, 0x78);
+    await writeFile(storedObject, corrupt);
+    const future = new Date(Date.now() + 5_000);
+    await utimes(stateFile, future, future);
+    corruptStableObjectCopies.value = true;
+
+    const result = await syncPortableRuntimeSnapshotV2(layout, 'replace-corrupt-object');
+
+    expect(result).toMatchObject({
+      skipped: true,
+      deferred: true,
+      deferredReason: 'file-group-unstable',
+      reusedPreviousSnapshot: true,
+    });
+    await expect(readFile(storedObject)).resolves.toEqual(corrupt);
   });
 
   it('captures a WAL-mode SQLite database as one consistent database object', async () => {
@@ -272,8 +424,10 @@ describe('portable runtime snapshot v2 sync', () => {
         CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT NOT NULL);
         INSERT INTO messages (body) VALUES ('first'), ('second');
       `);
+      database.exec("BEGIN IMMEDIATE; INSERT INTO messages (body) VALUES ('uncommitted');");
 
       await syncPortableRuntimeSnapshotV2(layout, 'sqlite-online-backup');
+      database.exec('ROLLBACK');
     } finally {
       database.close();
     }
@@ -291,6 +445,166 @@ describe('portable runtime snapshot v2 sync', () => {
       expect(row.count).toBe(2);
     } finally {
       restored.close();
+    }
+  });
+
+  it('rechecks an unchanged SQLite source during a scheduled integrity scan', async () => {
+    const layout = await createLayout();
+    const database = new DatabaseSync(join(layout.stateDir, 'history.db'));
+    const prepare = vi.spyOn(DatabaseSync.prototype, 'prepare');
+    try {
+      database.exec('CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT NOT NULL);');
+      await syncPortableRuntimeSnapshotV2(layout, 'baseline');
+      prepare.mockClear();
+
+      await syncPortableRuntimeSnapshotV2(layout, 'integrity-scan', {
+        verifyExistingObjects: true,
+      });
+
+      const pragmas = prepare.mock.calls.map(([sql]) => String(sql));
+      expect(pragmas).toContain('PRAGMA integrity_check');
+    } finally {
+      prepare.mockRestore();
+      database.close();
+    }
+  });
+
+  it('accepts a validated point-in-time backup while the live WAL advances', async () => {
+    const layout = await createLayout();
+    const databasePath = join(layout.stateDir, 'history.db');
+    const database = new DatabaseSync(databasePath);
+    try {
+      database.exec(`
+        PRAGMA journal_mode = WAL;
+        CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT NOT NULL);
+        INSERT INTO messages (body) VALUES ('before-backup');
+      `);
+      sqliteBackupCompletedHook.value = () => {
+        database.exec("INSERT INTO messages (body) VALUES ('during-capture');");
+      };
+
+      const first = await syncPortableRuntimeSnapshotV2(layout, 'active-sqlite');
+      sqliteBackupCompletedHook.value = undefined;
+      const firstManifest = readLatestPortableSnapshotV2Sync(layout)!;
+      const second = await syncPortableRuntimeSnapshotV2(layout, 'refresh-active-sqlite');
+      const secondManifest = readLatestPortableSnapshotV2Sync(layout)!;
+
+      expect(first).toMatchObject({ skipped: false, deferred: false });
+      expect(second).toMatchObject({ skipped: false, deferred: false });
+      expect(secondManifest.entries['history.db'].object).not.toBe(firstManifest.entries['history.db'].object);
+    } finally {
+      sqliteBackupCompletedHook.value = undefined;
+      database.close();
+    }
+  });
+
+  it('recovers from a transient unstable backup within the bounded retry window', async () => {
+    const layout = await createLayout();
+    const database = new DatabaseSync(join(layout.stateDir, 'history.db'));
+    try {
+      database.exec('CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT NOT NULL);');
+      transientSqliteBackupMutations.value = 1;
+
+      const result = await syncPortableRuntimeSnapshotV2(layout, 'sqlite-transient-busy');
+
+      expect(result).toMatchObject({ skipped: false, deferred: false });
+      expect(sqliteBackupCalls.value).toBe(2);
+      expect(readLatestPortableSnapshotV2Sync(layout)?.entries['history.db']).toBeTruthy();
+    } finally {
+      database.close();
+    }
+  });
+
+  it('accepts a SQLite backup when a scanned WAL companion disappears first', async () => {
+    const layout = await createLayout();
+    const firstDatabase = new DatabaseSync(join(layout.stateDir, 'a.db'));
+    const historyPath = join(layout.stateDir, 'history.db');
+    const historyDatabase = new DatabaseSync(historyPath);
+    try {
+      firstDatabase.exec('CREATE TABLE first_state (id INTEGER PRIMARY KEY);');
+      historyDatabase.exec('CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT NOT NULL);');
+      const walPath = `${historyPath}-wal`;
+      await writeFile(walPath, '');
+      let completedBackups = 0;
+      sqliteBackupCompletedHook.value = async () => {
+        completedBackups += 1;
+        if (completedBackups === 1) await rm(walPath, { force: true });
+      };
+
+      const result = await syncPortableRuntimeSnapshotV2(layout, 'vanishing-wal');
+
+      expect(result).toMatchObject({ skipped: false, deferred: false });
+      expect(readLatestPortableSnapshotV2Sync(layout)?.entries).toMatchObject({
+        'a.db': expect.any(Object),
+        'history.db': expect.any(Object),
+      });
+    } finally {
+      sqliteBackupCompletedHook.value = undefined;
+      firstDatabase.close();
+      historyDatabase.close();
+    }
+  });
+
+  it('defers an initial unstable SQLite baseline without touching its source files', async () => {
+    const layout = await createLayout();
+    const databasePath = join(layout.stateDir, 'history.db');
+    const database = new DatabaseSync(databasePath);
+    try {
+      database.exec('CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT NOT NULL);');
+      const before = await readFile(databasePath);
+      unstableSqliteBackupOutputs.value = true;
+
+      const result = await syncPortableRuntimeSnapshotV2(layout, 'sqlite-busy');
+
+      expect(result).toMatchObject({
+        skipped: true,
+        deferred: true,
+        deferredReason: 'sqlite-unstable',
+        deferredPaths: ['history.db'],
+        reusedPreviousSnapshot: false,
+      });
+      await expect(readFile(databasePath)).resolves.toEqual(before);
+      expect(readLatestPortableSnapshotV2Sync(layout)).toBeUndefined();
+    } finally {
+      unstableSqliteBackupOutputs.value = false;
+      database.close();
+    }
+  });
+
+  it('reuses the prior SQLite snapshot when a later online backup is unstable', async () => {
+    const layout = await createLayout();
+    const databasePath = join(layout.stateDir, 'history.db');
+    const database = new DatabaseSync(databasePath);
+    try {
+      database.exec(`
+        PRAGMA journal_mode = WAL;
+        CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT NOT NULL);
+        INSERT INTO messages (body) VALUES ('baseline');
+      `);
+      await syncPortableRuntimeSnapshotV2(layout, 'baseline');
+      const previous = readLatestPortableSnapshotV2Sync(layout)!;
+      database.exec("INSERT INTO messages (body) VALUES ('pending-backup');");
+      const sourceBefore = await readFile(databasePath);
+      const walPath = `${databasePath}-wal`;
+      const walBefore = await readFile(walPath);
+      unstableSqliteBackupOutputs.value = true;
+
+      const result = await syncPortableRuntimeSnapshotV2(layout, 'sqlite-busy');
+      const latest = readLatestPortableSnapshotV2Sync(layout)!;
+
+      expect(result).toMatchObject({
+        skipped: true,
+        deferred: true,
+        deferredReason: 'sqlite-unstable',
+        deferredPaths: ['history.db'],
+        reusedPreviousSnapshot: true,
+      });
+      expect(latest.entries['history.db']).toEqual(previous.entries['history.db']);
+      await expect(readFile(databasePath)).resolves.toEqual(sourceBefore);
+      await expect(readFile(walPath)).resolves.toEqual(walBefore);
+    } finally {
+      unstableSqliteBackupOutputs.value = false;
+      database.close();
     }
   });
 
@@ -379,7 +693,7 @@ describe('portable runtime snapshot v2 sync', () => {
     await expect(readFile(join(layout.stateDir, 'state.json'), 'utf8')).resolves.toBe('{"source":"usb"}\n');
   });
 
-  it('keeps an entire SQLite file group on its previous stable version', async () => {
+  it('reuses the entire previous snapshot when a file group is unstable', async () => {
     const layout = await createLayout();
     const database = join(layout.stateDir, 'history.db');
     const wal = join(layout.stateDir, 'history.db-wal');
@@ -397,9 +711,14 @@ describe('portable runtime snapshot v2 sync', () => {
     const result = await syncPortableRuntimeSnapshotV2(layout, 'periodic');
     const latest = readLatestPortableSnapshotV2Sync(layout)!;
 
-    expect(latest.entries['history.db']).toEqual(previous.entries['history.db']);
-    expect(latest.entries['history.db-wal']).toEqual(previous.entries['history.db-wal']);
-    expect(latest.entries['agent.json']).not.toEqual(previous.entries['agent.json']);
+    expect(latest).toEqual(previous);
+    expect(result).toMatchObject({
+      skipped: true,
+      deferred: true,
+      deferredReason: 'file-group-unstable',
+      deferredPaths: ['history.db'],
+      reusedPreviousSnapshot: true,
+    });
     expect(result.unstableFiles).toBeGreaterThan(0);
   });
 

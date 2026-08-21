@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -37,8 +38,8 @@ describe('AcpSessionAccessRegistry', () => {
     })).resolves.toEqual({
       sessionKey: 'agent:main:session-1',
       generation: 1,
-      workspaceRoot: realpathSync(workspaceRoot),
-      executionCwd: realpathSync(executionCwd),
+      workspaceRoot: await realpath(workspaceRoot),
+      executionCwd: await realpath(executionCwd),
     });
 
     await expect(registry.prepareGrant({
@@ -75,8 +76,8 @@ describe('AcpSessionAccessRegistry', () => {
     })).resolves.toEqual({
       sessionKey: 'agent:main:portable-session',
       generation: 1,
-      workspaceRoot: realpathSync(workspaceRoot),
-      executionCwd: realpathSync(executionCwd),
+      workspaceRoot: await realpath(workspaceRoot),
+      executionCwd: await realpath(executionCwd),
     });
   });
 

@@ -74,12 +74,13 @@ function managedAccount(): ProviderAccount {
     baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
     apiProtocol: 'openai-responses',
     model: 'smart-latest',
+    fallbackModels: ['gpt-5.4', 'reasoning-pro'],
     isDefault: true,
     metadata: {
       managedBy: 'uclaw',
-      customModels: ['smart-latest'],
+      customModels: ['smart-latest', 'gpt-5.4', 'reasoning-pro'],
       managedDefaultModel: 'smart-latest',
-      managedAllowedModels: ['smart-latest'],
+      managedAllowedModels: ['smart-latest', 'gpt-5.4', 'reasoning-pro'],
       managedRuntimeContractVersion: UCLAW_RUNTIME_CONTRACT_VERSION,
     },
   });
@@ -91,12 +92,13 @@ function compatibilityAccount(): ProviderAccount {
     baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
     apiProtocol: 'openai-responses',
     model: 'smart-latest',
+    fallbackModels: ['gpt-5.4', 'reasoning-pro'],
     isDefault: false,
     metadata: {
       managedBy: 'uclaw',
-      customModels: ['smart-latest'],
+      customModels: ['smart-latest', 'gpt-5.4', 'reasoning-pro'],
       managedDefaultModel: 'smart-latest',
-      managedAllowedModels: ['smart-latest'],
+      managedAllowedModels: ['smart-latest', 'gpt-5.4', 'reasoning-pro'],
       managedRuntimeContractVersion: UCLAW_RUNTIME_CONTRACT_VERSION,
     },
   });
@@ -111,7 +113,12 @@ describe('managed Provider store transaction', () => {
   it('builds identical server-owned model sets for the default and compatibility accounts', () => {
     const [primary, compatibility] = buildManagedProviderAccounts({}, {
       defaultModel: 'smart-latest',
-      models: [{ id: 'smart-latest' }, { id: 'reasoning-pro' }],
+      fallbackModels: ['gpt-5.4', 'reasoning-pro'],
+      models: [
+        { id: 'smart-latest' },
+        { id: 'gpt-5.4' },
+        { id: 'reasoning-pro' },
+      ],
     }, { email: 'user@example.com' });
 
     expect(primary).toEqual(expect.objectContaining({
@@ -128,7 +135,10 @@ describe('managed Provider store transaction', () => {
       model: 'smart-latest',
       isDefault: false,
     }));
-    expect(primary.metadata?.customModels).toEqual(['smart-latest', 'reasoning-pro']);
+    expect(primary.fallbackModels).toEqual(['gpt-5.4', 'reasoning-pro']);
+    expect(compatibility.fallbackModels).toEqual(primary.fallbackModels);
+    expect(primary.metadata?.customModels)
+      .toEqual(['smart-latest', 'gpt-5.4', 'reasoning-pro']);
     expect(compatibility.metadata?.customModels).toEqual(primary.metadata?.customModels);
     expect(compatibility.metadata?.managedAllowedModels)
       .toEqual(primary.metadata?.managedAllowedModels);

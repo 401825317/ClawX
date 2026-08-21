@@ -141,7 +141,7 @@ test.describe('ClawX chat workspace session list', () => {
 
     try {
       await installIpcMocks(app, {
-        gatewayStatus: { state: 'running', port: 18789, pid: 12345, connectedAt: nowMs },
+        gatewayStatus: { state: 'running', gatewayReady: true, port: 18789, pid: 12345, connectedAt: nowMs },
         gatewayRpc: {
           [stableStringify(['sessions.list', SESSIONS_LIST_PAYLOAD])]: {
             success: true,
@@ -162,7 +162,7 @@ test.describe('ClawX chat workspace session list', () => {
             data: {
               status: 200,
               ok: true,
-              json: { state: 'running', port: 18789, pid: 12345, connectedAt: nowMs },
+              json: { state: 'running', gatewayReady: true, port: 18789, pid: 12345, connectedAt: nowMs },
             },
           },
           [stableStringify(['/api/agents', 'GET'])]: {
@@ -230,7 +230,7 @@ test.describe('ClawX chat workspace session list', () => {
 
     try {
       await installIpcMocks(app, {
-        gatewayStatus: { state: 'running', port: 18789, pid: 12345 },
+        gatewayStatus: { state: 'running', gatewayReady: true, port: 18789, pid: 12345 },
         gatewayRpc: {
           [stableStringify(['sessions.list', SESSIONS_LIST_PAYLOAD])]: {
             success: true,
@@ -257,7 +257,7 @@ test.describe('ClawX chat workspace session list', () => {
             data: {
               status: 200,
               ok: true,
-              json: { state: 'running', port: 18789, pid: 12345 },
+              json: { state: 'running', gatewayReady: true, port: 18789, pid: 12345 },
             },
           },
           [stableStringify(['/api/agents', 'GET'])]: {

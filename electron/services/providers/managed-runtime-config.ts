@@ -49,6 +49,7 @@ export type ManagedRuntimeConfigSnapshot = {
 export type ManagedRuntimeProviderEntry = {
   baseUrl: string;
   api: string;
+  headers?: Record<string, string>;
   timeoutSeconds: number;
   request: { allowPrivateNetwork: true };
   agentRuntime: { id: 'pi' };
@@ -58,6 +59,7 @@ export type ManagedRuntimeProviderEntry = {
 export type ManagedRuntimeVideoProviderEntry = {
   baseUrl: string;
   api: string;
+  headers?: Record<string, string>;
   request: { allowPrivateNetwork: true };
   models: Array<{ id: string; name: string }>;
 };
@@ -134,6 +136,7 @@ function managedRuntimeModelEntry(
 /** Create the identical runtime catalog installed for both managed Provider ids. */
 export function createManagedRuntimeProviderEntry(
   policy: ManagedClientTextModelPolicy,
+  headers: Record<string, string> = {},
 ): ManagedRuntimeProviderEntry {
   return {
     baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
@@ -141,6 +144,7 @@ export function createManagedRuntimeProviderEntry(
     timeoutSeconds: UCLAW_PROVIDER_REQUEST_TIMEOUT_SECONDS,
     request: { allowPrivateNetwork: true },
     agentRuntime: { id: 'pi' },
+    ...(Object.keys(headers).length > 0 ? { headers: { ...headers } } : {}),
     models: policy.models.map(managedRuntimeModelEntry),
   };
 }
@@ -148,11 +152,13 @@ export function createManagedRuntimeProviderEntry(
 /** Create the OpenAI-compatible transport entry consumed by the UClaw video plugin. */
 export function createManagedRuntimeVideoProviderEntry(
   policy: ManagedClientVideoModelPolicy,
+  headers: Record<string, string> = {},
 ): ManagedRuntimeVideoProviderEntry {
   return {
     baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
     api: UCLAW_VIDEO_API_PROTOCOL,
     request: { allowPrivateNetwork: true },
+    ...(Object.keys(headers).length > 0 ? { headers: { ...headers } } : {}),
     models: policy.models.map((model) => ({
       id: model.id,
       name: model.label?.trim() || model.id,
@@ -366,6 +372,49 @@ function isManagedModelRef(value: unknown, managedProviderIds: ReadonlySet<strin
   return managedProviderIds.has(providerId) || isOpenAiProviderIdentity(providerId);
 }
 
+function managedTextFallbackRefs(policy: ManagedClientTextModelPolicy): string[] {
+  return policy.fallbackModels.map((modelId) => `${UCLAW_MANAGED_PROVIDER_ID}/${modelId}`);
+}
+
+function managedModelIdFromRef(
+  value: unknown,
+  managedProviderIds: ReadonlySet<string>,
+): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  const separator = normalized.indexOf('/');
+  if (separator <= 0 || separator === normalized.length - 1) return null;
+  const providerId = normalized.slice(0, separator);
+  return managedProviderIds.has(providerId) || isOpenAiProviderIdentity(providerId)
+    ? normalized.slice(separator + 1)
+    : null;
+}
+
+function installManagedAgentFallbackOverrides(
+  agents: JsonRecord,
+  fallbackRefs: readonly string[],
+  managedProviderIds: ReadonlySet<string>,
+): void {
+  if (!Array.isArray(agents.list)) return;
+  agents.list = agents.list.map((rawEntry) => {
+    if (!isRecord(rawEntry) || rawEntry.model === undefined) return rawEntry;
+    const entry = { ...rawEntry };
+    const rawModel = rawEntry.model;
+    const model: JsonRecord | null = typeof rawModel === 'string'
+      ? { primary: rawModel.trim() }
+      : isRecord(rawModel)
+        ? { ...rawModel }
+        : null;
+    if (!model) return rawEntry;
+    const primaryModelId = managedModelIdFromRef(model.primary, managedProviderIds);
+    model.fallbacks = fallbackRefs.filter((fallbackRef) => (
+      managedModelIdFromRef(fallbackRef, managedProviderIds) !== primaryModelId
+    ));
+    entry.model = model;
+    return entry;
+  });
+}
+
 function removeManagedModelDefault(
   defaults: JsonRecord,
   key: 'model' | 'videoGenerationModel',
@@ -412,26 +461,43 @@ function removeManagedRuntimeModelDefaults(
   config: JsonRecord,
   managedProviderIds: ReadonlySet<string>,
 ): boolean {
-  if (!isRecord(config.agents) || !isRecord(config.agents.defaults)) return false;
+  if (!isRecord(config.agents)) return false;
   const agents = { ...config.agents };
-  const defaults = { ...config.agents.defaults };
-  const modelChanged = removeManagedModelDefault(defaults, 'model', managedProviderIds);
-  const videoModelChanged = removeManagedModelDefault(
-    defaults,
-    'videoGenerationModel',
-    managedProviderIds,
-  );
-  const changed = modelChanged || videoModelChanged;
+  let changed = false;
+  if (isRecord(config.agents.defaults)) {
+    const defaults = { ...config.agents.defaults };
+    const modelChanged = removeManagedModelDefault(defaults, 'model', managedProviderIds);
+    const videoModelChanged = removeManagedModelDefault(
+      defaults,
+      'videoGenerationModel',
+      managedProviderIds,
+    );
+    if (modelChanged || videoModelChanged) {
+      agents.defaults = defaults;
+      changed = true;
+    }
+  }
+
+  if (Array.isArray(agents.list)) {
+    agents.list = agents.list.map((rawEntry) => {
+      if (!isRecord(rawEntry)) return rawEntry;
+      const entry = { ...rawEntry };
+      if (!removeManagedModelDefault(entry, 'model', managedProviderIds)) return rawEntry;
+      changed = true;
+      return entry;
+    });
+  }
 
   if (!changed) return false;
-  agents.defaults = defaults;
   config.agents = agents;
   return true;
 }
 
 function managedVideoPluginConfig(policy: ManagedClientVideoModelPolicy): JsonRecord {
   return {
+    enabled: true,
     defaultModel: policy.defaultModel,
+    defaultSize: policy.defaultSize,
     defaultAspectRatio: policy.defaultAspectRatio,
     defaultResolution: policy.defaultResolution,
     defaultDurationSeconds: policy.defaultDurationSeconds,
@@ -498,34 +564,43 @@ function removeManagedVideoPlugin(config: JsonRecord): boolean {
 export async function installManagedRuntimeProviderState(
   snapshot: ManagedRuntimeConfigSnapshot,
   policy: ManagedClientTextModelPolicy,
-  videoPolicy: ManagedClientVideoModelPolicy,
+  videoPolicy: ManagedClientVideoModelPolicy | null,
   additionalProviderIds: Iterable<string> = [],
+  headers: Record<string, string> = {},
 ): Promise<void> {
   const managedProviderIds = managedOpenAiProviderIds(additionalProviderIds);
-  const providerEntry = createManagedRuntimeProviderEntry(policy);
-  const videoProviderEntry = createManagedRuntimeVideoProviderEntry(videoPolicy);
+  const providerEntry = createManagedRuntimeProviderEntry(policy, headers);
+  const fallbackRefs = managedTextFallbackRefs(policy);
+  const videoProviderEntry = videoPolicy
+    ? createManagedRuntimeVideoProviderEntry(videoPolicy, headers)
+    : null;
   await updateManagedRuntimeConfig(snapshot, (config) => {
     const before = JSON.stringify(config);
     const agents = isRecord(config.agents) ? { ...config.agents } : {};
     const defaults = isRecord(agents.defaults) ? { ...agents.defaults } : {};
     defaults.model = {
       primary: `${UCLAW_MANAGED_PROVIDER_ID}/${policy.defaultModel}`,
-      fallbacks: [],
+      fallbacks: fallbackRefs,
     };
     defaults.thinkingDefault = policy.defaultThinkingLevel;
     defaults.reasoningDefault = 'on';
-    defaults.videoGenerationModel = {
-      primary: `${UCLAW_VIDEO_PROVIDER_ID}/${videoPolicy.defaultModel}`,
-      fallbacks: [],
-      timeoutMs: UCLAW_VIDEO_GENERATION_TIMEOUT_MS,
-    };
-    // OpenClaw applies this shared cap when persisting generated video buffers.
-    const managedVideoMediaMaxMb = Math.ceil(UCLAW_VIDEO_GENERATION_MAX_DOWNLOAD_BYTES / (1024 * 1024));
-    const existingMediaMaxMb = typeof defaults.mediaMaxMb === 'number' && Number.isFinite(defaults.mediaMaxMb)
-      ? defaults.mediaMaxMb
-      : 0;
-    defaults.mediaMaxMb = Math.max(existingMediaMaxMb, managedVideoMediaMaxMb);
+    if (videoPolicy) {
+      defaults.videoGenerationModel = {
+        primary: `${UCLAW_VIDEO_PROVIDER_ID}/${videoPolicy.defaultModel}`,
+        fallbacks: [],
+        timeoutMs: UCLAW_VIDEO_GENERATION_TIMEOUT_MS,
+      };
+      // OpenClaw applies this shared cap when persisting generated video buffers.
+      const managedVideoMediaMaxMb = Math.ceil(UCLAW_VIDEO_GENERATION_MAX_DOWNLOAD_BYTES / (1024 * 1024));
+      const existingMediaMaxMb = typeof defaults.mediaMaxMb === 'number' && Number.isFinite(defaults.mediaMaxMb)
+        ? defaults.mediaMaxMb
+        : 0;
+      defaults.mediaMaxMb = Math.max(existingMediaMaxMb, managedVideoMediaMaxMb);
+    } else {
+      removeManagedModelDefault(defaults, 'videoGenerationModel', managedProviderIds);
+    }
     agents.defaults = defaults;
+    installManagedAgentFallbackOverrides(agents, fallbackRefs, managedProviderIds);
     config.agents = agents;
 
     removeManagedRuntimeAuthMetadata(config, managedProviderIds);
@@ -539,10 +614,13 @@ export async function installManagedRuntimeProviderState(
     }
     providers[UCLAW_MANAGED_PROVIDER_ID] = structuredClone(providerEntry);
     providers[UCLAW_COMPATIBILITY_PROVIDER_ID] = structuredClone(providerEntry);
-    providers[UCLAW_VIDEO_PROVIDER_ID] = structuredClone(videoProviderEntry);
+    if (videoProviderEntry) {
+      providers[UCLAW_VIDEO_PROVIDER_ID] = structuredClone(videoProviderEntry);
+    }
     models.providers = providers;
     config.models = models;
-    installManagedVideoPlugin(config, videoPolicy);
+    if (videoPolicy) installManagedVideoPlugin(config, videoPolicy);
+    else removeManagedVideoPlugin(config);
     return JSON.stringify(config) !== before;
   });
 }

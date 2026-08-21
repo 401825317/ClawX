@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dedupeTurnAttachments } from '@/lib/acp/attachments';
 import { appendSyntheticAssistantMessage } from '@/lib/acp/reducer';
 import type { AttachmentRenderPart, RenderPart } from '@/lib/acp/timeline-types';
@@ -89,8 +89,13 @@ vi.mock('@/i18n', () => ({
   },
 }));
 
-async function importStore() {
-  return import('@/stores/acp-chat-session');
+type AcpChatStoreModule = typeof import('@/stores/acp-chat-session');
+
+let activeStoreModule: AcpChatStoreModule | undefined;
+
+async function importStore(): Promise<AcpChatStoreModule> {
+  activeStoreModule = await import('@/stores/acp-chat-session');
+  return activeStoreModule;
 }
 
 function createDeferred<T>() {
@@ -164,6 +169,33 @@ describe('ACP Chat store', () => {
     hostEventsMock.onAcpPermissionRequest.mockClear();
     hostEventsMock.onGatewayChatMessage.mockClear();
     hostEventsMock.onChatRuntimeEvent.mockClear();
+  });
+
+  afterEach(() => {
+    activeStoreModule?.disposeAcpChatSessionRuntime();
+    activeStoreModule = undefined;
+    vi.useRealTimers();
+  });
+
+  it('disposes subscriptions and permits a clean replacement subscription', async () => {
+    const {
+      disposeAcpChatSessionRuntime,
+      ensureAcpChatSubscriptions,
+    } = await importStore();
+    ensureAcpChatSubscriptions();
+
+    disposeAcpChatSessionRuntime();
+
+    expect(hostEventsMock.updateListener).toBeNull();
+    expect(hostEventsMock.permissionListener).toBeNull();
+    expect(hostEventsMock.gatewayChatMessageListener).toBeNull();
+    expect(hostEventsMock.runtimeEventListener).toBeNull();
+
+    ensureAcpChatSubscriptions();
+    expect(hostEventsMock.onAcpSessionUpdate).toHaveBeenCalledTimes(2);
+    expect(hostEventsMock.onAcpPermissionRequest).toHaveBeenCalledTimes(2);
+    expect(hostEventsMock.onGatewayChatMessage).toHaveBeenCalledTimes(2);
+    expect(hostEventsMock.onChatRuntimeEvent).toHaveBeenCalledTimes(2);
   });
 
   it('prepares a local pending session by clearing renderer state without loading ACP', async () => {
@@ -2699,6 +2731,331 @@ describe('ACP Chat store', () => {
       parts: [{ kind: 'markdown', text: persistedPartial }],
     });
     expect(hostApiMock.loadAcpSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains an authorized current video and hides its 503 summary failure', async () => {
+    const prompt = '生成一个会说话的产品视频';
+    const finalText = '视频已经生成，正在为你准备播放。';
+    const videoPath = 'C:\\Users\\Tester\\.openclaw\\media\\tool-video-generation\\product.mp4';
+    hostApiMock.loadAcpSession
+      .mockResolvedValueOnce({ success: true, generation: 1 })
+      .mockResolvedValueOnce({
+        success: true,
+        generation: 2,
+        sessionUpdates: [
+          {
+            sessionKey: 'agent:pi:s1',
+            generation: 2,
+            historical: true,
+            notification: {
+              sessionId: 'agent:pi:s1',
+              update: {
+                sessionUpdate: 'user_message',
+                messageId: 'failed-video-user',
+                content: [{ type: 'text', text: prompt }],
+              },
+            },
+          },
+          {
+            sessionKey: 'agent:pi:s1',
+            generation: 2,
+            historical: true,
+            notification: {
+              sessionId: 'agent:pi:s1',
+              update: {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'failed-video-tool',
+                title: 'Generate video',
+                status: 'completed',
+                content: [],
+                locations: [],
+              },
+            },
+          },
+        ],
+      });
+    const promptResult = createDeferred<{
+      success: false;
+      error: string;
+      errorCode: string;
+      retryable: boolean;
+    }>();
+    hostApiMock.sendAcpPrompt.mockImplementationOnce(async () => {
+      hostEventsMock.updateListener?.({
+        sessionKey: 'agent:pi:s1',
+        generation: 1,
+        notification: {
+          sessionId: 'agent:pi:s1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'failed-video-tool',
+            title: 'Generate video',
+            status: 'completed',
+            content: [],
+            locations: [],
+          },
+        },
+      });
+      return promptResult.promise;
+    });
+    hostApiMock.sessionsHistory.mockResolvedValue({
+      success: true,
+      messages: [
+        { role: 'user', id: 'failed-video-transcript-user', content: prompt },
+        {
+          role: 'assistant',
+          id: 'failed-video-summary',
+          stopReason: 'error',
+          errorMessage: '503 upstream_error',
+          content: `${finalText}\nMEDIA:${videoPath}`,
+        },
+      ],
+    });
+    hostApiMock.resolveAttachment.mockImplementation(async (payload: { ref: unknown }) => ({
+      ok: true,
+      identity: 'failed-video-identity',
+      displayName: 'product.mp4',
+      mimeType: 'video/mp4',
+      size: 2_048,
+      target: { kind: 'local', scope: 'openclaw-media', ref: payload.ref },
+    }));
+    const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+    ensureAcpChatSubscriptions();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+
+    const sendPromise = useAcpChatSessionStore.getState().sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: prompt, messageId: 'failed-video-user',
+    });
+    await vi.waitFor(() => expect(useAcpChatSessionStore.getState().timeline.itemsById[
+      'tool:failed-video-tool'
+    ]).toMatchObject({ kind: 'tool-call', status: 'completed' }));
+    promptResult.resolve({
+      success: false,
+      error: 'Upstream service temporarily unavailable.',
+      errorCode: 'UPSTREAM_ERROR',
+      retryable: true,
+    });
+    await expect(sendPromise).resolves.toBe(false);
+    await vi.waitFor(() => expect(hostApiMock.resolveAttachment).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(useAcpChatSessionStore.getState().timeline.itemsById[
+      'turn-failure:failed-video-user'
+    ]).toBeUndefined());
+
+    const timeline = useAcpChatSessionStore.getState().timeline;
+    expect(hostApiMock.resolveAttachment).toHaveBeenCalledWith({
+      ref: {
+        sessionKey: 'agent:pi:s1', generation: 1, uri: videoPath, transcriptMessageId: 'failed-video-summary',
+      },
+      name: 'product.mp4',
+    });
+    expect(timeline.itemsById['turn-failure:failed-video-user']).toBeUndefined();
+    expect(JSON.stringify(timeline)).not.toContain('MEDIA:');
+    expect(Object.values(timeline.itemsById).flatMap((item) => (
+      item.kind === 'message-segment' ? item.parts : []
+    )).some((part) => (
+      part.kind === 'attachment'
+      && part.source === 'openclaw-media'
+      && part.access.status === 'available'
+      && part.access.mimeType === 'video/mp4'
+    ))).toBe(true);
+    expect(hostApiMock.mediaThumbnails).not.toHaveBeenCalled();
+
+  });
+
+  it('recovers only authorized mixed media when the summary request rejects', async () => {
+    const prompt = '生成一组商品素材';
+    const media = {
+      image: '/repo/product.png',
+      audio: '/repo/product.mp3',
+      video: '/repo/product.mp4',
+    };
+    hostApiMock.sendAcpPrompt.mockRejectedValueOnce(new Error('503 upstream_error'));
+    hostApiMock.sessionsHistory.mockResolvedValue({
+      success: true,
+      messages: [
+        { role: 'user', content: prompt },
+        {
+          role: 'assistant',
+          id: 'mixed-media-summary',
+          stopReason: 'error',
+          errorMessage: '503 upstream_error',
+          content: `MEDIA:${media.image}\nMEDIA:${media.audio}\nMEDIA:${media.video}`,
+        },
+      ],
+    });
+    hostApiMock.resolveAttachment.mockImplementation(async (payload: { ref: { uri: string } }) => {
+      const mimeType = payload.ref.uri.endsWith('.png')
+        ? 'image/png'
+        : payload.ref.uri.endsWith('.mp3') ? 'audio/mpeg' : 'video/mp4';
+      return {
+        ok: true,
+        identity: `mixed:${payload.ref.uri}`,
+        displayName: payload.ref.uri.split('/').pop() ?? 'asset',
+        mimeType,
+        size: 42,
+        target: { kind: 'local', scope: 'openclaw-media', ref: payload.ref },
+      };
+    });
+    const { useAcpChatSessionStore } = await importStore();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+
+    await expect(useAcpChatSessionStore.getState().sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: prompt, messageId: 'mixed-media-user',
+    })).resolves.toBe(false);
+    await vi.waitFor(() => expect(hostApiMock.resolveAttachment).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(useAcpChatSessionStore.getState().timeline.itemsById[
+      'turn-failure:mixed-media-user'
+    ]).toBeUndefined());
+
+    const timeline = useAcpChatSessionStore.getState().timeline;
+    const mimeTypes = Object.values(timeline.itemsById)
+      .flatMap((item) => item.kind === 'message-segment' ? item.parts : [])
+      .flatMap((part) => part.kind === 'attachment' && part.access.status === 'available'
+        ? [part.access.mimeType]
+        : []);
+    expect(mimeTypes).toEqual(expect.arrayContaining(['image/png', 'audio/mpeg', 'video/mp4']));
+    expect(timeline.itemsById['turn-failure:mixed-media-user']).toBeUndefined();
+    expect(hostApiMock.mediaThumbnails).not.toHaveBeenCalled();
+  });
+
+  it('keeps the summary failure visible when only part of mixed media is authorized', async () => {
+    const prompt = '生成一组不完整的商品素材';
+    hostApiMock.sendAcpPrompt.mockRejectedValueOnce(new Error('503 upstream_error'));
+    hostApiMock.sessionsHistory.mockResolvedValue({
+      success: true,
+      messages: [
+        { role: 'user', content: prompt },
+        {
+          role: 'assistant',
+          id: 'partial-media-summary',
+          stopReason: 'error',
+          errorMessage: '503 upstream_error',
+          content: 'MEDIA:/repo/product.png\nMEDIA:/repo/product.mp3\nMEDIA:/repo/product.mp4',
+        },
+      ],
+    });
+    hostApiMock.resolveAttachment.mockImplementation(async (payload: { ref: { uri: string } }) => {
+      if (payload.ref.uri.endsWith('.mp3')) {
+        return { ok: false, displayName: 'product.mp3', error: 'missing' };
+      }
+      const mimeType = payload.ref.uri.endsWith('.png') ? 'image/png' : 'video/mp4';
+      return {
+        ok: true,
+        identity: `partial:${payload.ref.uri}`,
+        displayName: payload.ref.uri.split('/').pop() ?? 'asset',
+        mimeType,
+        size: 42,
+        target: { kind: 'local', scope: 'openclaw-media', ref: payload.ref },
+      };
+    });
+    const { useAcpChatSessionStore } = await importStore();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+
+    await expect(useAcpChatSessionStore.getState().sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: prompt, messageId: 'partial-media-user',
+    })).resolves.toBe(false);
+    await vi.waitFor(() => expect(hostApiMock.resolveAttachment).toHaveBeenCalledTimes(3));
+
+    const timeline = useAcpChatSessionStore.getState().timeline;
+    expect(timeline.itemsById['turn-failure:partial-media-user']).toMatchObject({ kind: 'turn-failure' });
+    const attachments = Object.values(timeline.itemsById)
+      .flatMap((item) => item.kind === 'message-segment' ? item.parts : [])
+      .filter((part) => part.kind === 'attachment' && part.access.status === 'available');
+    expect(attachments).toHaveLength(2);
+  });
+
+  it('does not recover valid media from a content-policy failure', async () => {
+    hostApiMock.sendAcpPrompt.mockResolvedValueOnce({
+      success: false,
+      error: 'Generated media was blocked by the content safety policy.',
+      errorCode: 'CONTENT_POLICY',
+      retryable: false,
+    });
+    hostApiMock.sessionsHistory.mockResolvedValue({
+      success: true,
+      messages: [
+        { role: 'user', content: '生成受审核内容' },
+        {
+          role: 'assistant',
+          id: 'blocked-media-summary',
+          stopReason: 'error',
+          errorMessage: 'content policy blocked',
+          content: 'MEDIA:/repo/blocked.mp4',
+        },
+      ],
+    });
+    hostApiMock.resolveAttachment.mockResolvedValue({
+      ok: true,
+      identity: 'blocked-media',
+      displayName: 'blocked.mp4',
+      mimeType: 'video/mp4',
+      size: 42,
+      target: {
+        kind: 'local', scope: 'openclaw-media',
+        ref: { sessionKey: 'agent:pi:s1', generation: 1, uri: '/repo/blocked.mp4' },
+      },
+    });
+    const { useAcpChatSessionStore } = await importStore();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+
+    await expect(useAcpChatSessionStore.getState().sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: '生成受审核内容', messageId: 'blocked-media-user',
+    })).resolves.toBe(false);
+
+    expect(hostApiMock.sessionsHistory).not.toHaveBeenCalled();
+    expect(hostApiMock.resolveAttachment).not.toHaveBeenCalled();
+    expect(useAcpChatSessionStore.getState().timeline.itemsById['turn-failure:blocked-media-user'])
+      .toMatchObject({ kind: 'turn-failure', failure: { code: 'CONTENT_POLICY' } });
+  });
+
+  it('keeps the failure and withholds an unauthorized failed-turn media reference', async () => {
+    const prompt = '生成一个受限视频';
+    const sensitivePath = 'C:\\private\\sensitive.mp4';
+    hostApiMock.sendAcpPrompt.mockResolvedValueOnce({ success: false, error: '503 upstream_error' });
+    hostApiMock.sessionsHistory.mockResolvedValue({
+      success: true,
+      messages: [
+        { role: 'user', content: prompt },
+        {
+          role: 'assistant',
+          id: 'sensitive-media-summary',
+          stopReason: 'error',
+          errorMessage: '503 upstream_error',
+          content: `MEDIA:${sensitivePath}`,
+        },
+      ],
+    });
+    hostApiMock.resolveAttachment.mockResolvedValueOnce({
+      ok: false,
+      displayName: 'sensitive.mp4',
+      error: 'invalidReference',
+    });
+    const { useAcpChatSessionStore } = await importStore();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+
+    await expect(useAcpChatSessionStore.getState().sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: prompt, messageId: 'sensitive-media-user',
+    })).resolves.toBe(false);
+    await vi.waitFor(() => expect(hostApiMock.resolveAttachment).toHaveBeenCalledTimes(1));
+
+    const timeline = useAcpChatSessionStore.getState().timeline;
+    expect(timeline.itemsById['turn-failure:sensitive-media-user']).toMatchObject({ kind: 'turn-failure' });
+    expect(Object.values(timeline.itemsById).flatMap((item) => (
+      item.kind === 'message-segment' ? item.parts : []
+    ))).not.toEqual(expect.arrayContaining([expect.objectContaining({
+      kind: 'attachment', source: 'openclaw-media',
+    })]));
+    expect(JSON.stringify(timeline)).not.toContain(sensitivePath);
   });
 
   it('does not reconcile a failed background Turn into the active session', async () => {
@@ -5959,7 +6316,6 @@ describe('ACP Chat store', () => {
     expect(assistantParts.some((part) => part.kind === 'markdown' && part.text === truncatedMirror)).toBe(false);
     expect(assistantParts.filter((part) => part.kind === 'image')).toHaveLength(1);
     expect(timeline.itemsById['tool:open-image-exec']).toBeDefined();
-    await useAcpChatSessionStore.getState().cancel();
   });
 
   it('settles a successful video turn from the transcript without exposing its MEDIA path', async () => {
@@ -7259,7 +7615,12 @@ describe('ACP Chat store', () => {
       expect(imagePart).not.toHaveProperty('filePath');
       expect(imagePart).not.toHaveProperty('data');
     });
-    expect(hostApiMock.sessionsHistory).toHaveBeenCalledTimes(1);
+    // Other completed live turns can drain their bounded supplement in a later
+    // microtask. This assertion scopes the contract to this turn's history read.
+    expect(hostApiMock.sessionsHistory).toHaveBeenCalledWith({
+      sessionKey: 'agent:pi:s1',
+      limit: 1000,
+    });
     expect(hostApiMock.resolveAttachment).toHaveBeenCalledWith(expect.objectContaining({
       ref: expect.objectContaining({ uri: '/repo/generated.png', transcriptMessageId: 'assistant-assets' }),
     }));
@@ -7852,7 +8213,7 @@ describe('ACP Chat store', () => {
     ]);
   });
 
-  it('requests a live transcript immediately and retries exactly once at 1500 ms', async () => {
+  it('reads an ordinary live transcript once without blind delayed history polling', async () => {
     vi.useFakeTimers();
     try {
       const { useAcpChatSessionStore } = await importStore();
@@ -7865,12 +8226,8 @@ describe('ACP Chat store', () => {
       });
 
       expect(hostApiMock.sessionsHistory).toHaveBeenCalledTimes(1);
-      await vi.advanceTimersByTimeAsync(1499);
-      expect(hostApiMock.sessionsHistory).toHaveBeenCalledTimes(1);
-      await vi.advanceTimersByTimeAsync(1);
-      expect(hostApiMock.sessionsHistory).toHaveBeenCalledTimes(2);
       await vi.advanceTimersByTimeAsync(10_000);
-      expect(hostApiMock.sessionsHistory).toHaveBeenCalledTimes(2);
+      expect(hostApiMock.sessionsHistory).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
@@ -7908,7 +8265,7 @@ describe('ACP Chat store', () => {
       });
       await vi.advanceTimersByTimeAsync(60_000);
 
-      expect(hostApiMock.sessionsHistory).toHaveBeenCalledTimes(2);
+      expect(hostApiMock.sessionsHistory).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
@@ -8751,5 +9108,256 @@ describe('ACP Chat store', () => {
         mimeType: 'image/png',
       }],
     });
+  });
+
+  it.each([
+    ['unsupported file protocol', 'Navigation blocked: unsupported protocol "file:"', 'INVALID_REQUEST', 'workspace preview'],
+    ['browser timeout', 'browser navigation timed out after 30 seconds', 'TIMEOUT', 'timed out'],
+    ['browser target mismatch', 'targetId mismatch: browser target no longer belongs to this session', 'INVALID_REQUEST', 'target changed'],
+    ['localhost SSRF block', 'Navigation to http://127.0.0.1:4173 blocked by SSRF policy', 'PERMISSION_DENIED', 'blocked the local address'],
+  ])('releases a recoverable %s and allows the next queued prompt to dispatch', async (
+    _name,
+    toolError,
+    errorCode,
+    expectedMessage,
+  ) => {
+    const firstPrompt = createDeferred<{ success: boolean }>();
+    hostApiMock.sendAcpPrompt.mockReturnValueOnce(firstPrompt.promise);
+    const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+    ensureAcpChatSubscriptions();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+
+    const firstSend = useAcpChatSessionStore.getState().sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'Open the generated page', messageId: 'browser-user',
+    });
+    await vi.waitFor(() => expect(hostApiMock.sendAcpPrompt).toHaveBeenCalledTimes(1));
+    hostEventsMock.updateListener?.({
+      sessionKey: 'agent:pi:s1',
+      generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'browser-tool',
+          title: 'browser',
+          status: 'failed',
+          error: toolError,
+        },
+      },
+    });
+
+    await vi.waitFor(() => expect(hostApiMock.cancelAcpSession).toHaveBeenCalledWith({ sessionKey: 'agent:pi:s1' }));
+    await vi.waitFor(() => expect(useAcpChatSessionStore.getState()).toMatchObject({ sending: false, cancelling: false }));
+    const browserFailure = useAcpChatSessionStore.getState().timeline.itemsById['turn-failure:browser-user'];
+    expect(browserFailure).toMatchObject({
+      kind: 'turn-failure',
+      failure: { code: errorCode, message: expect.stringContaining(expectedMessage) },
+    });
+
+    firstPrompt.resolve({ success: false });
+    await expect(firstSend).resolves.toBe(false);
+    await expect(useAcpChatSessionStore.getState().sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'Continue after browser failure', messageId: 'after-browser-user',
+    })).resolves.toBe(true);
+    expect(hostApiMock.sendAcpPrompt).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['returns a failed result', false],
+    ['rejects', true],
+  ])('settles the Browser turn when automatic cancellation %s', async (_name, rejects) => {
+    const firstPrompt = createDeferred<{ success: boolean }>();
+    hostApiMock.sendAcpPrompt.mockReturnValueOnce(firstPrompt.promise);
+    if (rejects) {
+      hostApiMock.cancelAcpSession.mockRejectedValueOnce(new Error('cancel transport failed'));
+    } else {
+      hostApiMock.cancelAcpSession.mockResolvedValueOnce({ success: false, error: 'cancel was rejected' });
+    }
+    const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+    ensureAcpChatSubscriptions();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+
+    const firstSend = useAcpChatSessionStore.getState().sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'Open the generated page', messageId: 'browser-cancel-failure-user',
+    });
+    await vi.waitFor(() => expect(hostApiMock.sendAcpPrompt).toHaveBeenCalledTimes(1));
+    hostEventsMock.updateListener?.({
+      sessionKey: 'agent:pi:s1',
+      generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'browser-tool',
+          title: 'browser',
+          status: 'failed',
+          error: 'browser navigation timed out after 30 seconds',
+        },
+      },
+    });
+
+    await vi.waitFor(() => expect(useAcpChatSessionStore.getState()).toMatchObject({
+      sending: false,
+      cancelling: false,
+      error: expect.any(String),
+    }));
+    expect(useAcpChatSessionStore.getState().timeline.itemsById['turn-failure:browser-cancel-failure-user'])
+      .toMatchObject({ kind: 'turn-failure', failure: { code: 'TIMEOUT' } });
+
+    firstPrompt.resolve({ success: false });
+    await expect(firstSend).resolves.toBe(false);
+  });
+
+  it('queues one next prompt until Browser cancellation settles without cancelling media recovery', async () => {
+    const firstPrompt = createDeferred<{ success: boolean }>();
+    const cancellation = createDeferred<{ success: boolean }>();
+    hostApiMock.sendAcpPrompt
+      .mockReturnValueOnce(firstPrompt.promise)
+      .mockResolvedValueOnce({ success: true });
+    hostApiMock.cancelAcpSession.mockReturnValueOnce(cancellation.promise);
+    hostApiMock.sessionsHistory.mockResolvedValueOnce({
+      success: true,
+      messages: [
+        { role: 'user', content: 'Open the generated page' },
+        { role: 'assistant', id: 'browser-media', content: 'MEDIA:/repo/browser-output.mp4' },
+      ],
+    });
+    hostApiMock.resolveAttachment.mockResolvedValueOnce({
+      ok: true,
+      identity: 'browser-video',
+      displayName: 'browser-output.mp4',
+      mimeType: 'video/mp4',
+      size: 128,
+      target: {
+        kind: 'local',
+        scope: 'openclaw-media',
+        ref: { sessionKey: 'agent:pi:s1', generation: 1, uri: '/repo/browser-output.mp4' },
+      },
+    });
+    const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+    ensureAcpChatSubscriptions();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+
+    const firstSend = useAcpChatSessionStore.getState().sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'Open the generated page', messageId: 'browser-media-user',
+    });
+    await vi.waitFor(() => expect(hostApiMock.sendAcpPrompt).toHaveBeenCalledTimes(1));
+    hostEventsMock.updateListener?.({
+      sessionKey: 'agent:pi:s1', generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'tool_call_update', toolCallId: 'browser-tool', title: 'browser',
+          status: 'failed', error: 'browser navigation timed out after 30 seconds',
+        },
+      },
+    });
+    await vi.waitFor(() => expect(hostApiMock.cancelAcpSession).toHaveBeenCalledTimes(1));
+
+    const queuedSend = useAcpChatSessionStore.getState().sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'Continue once released', messageId: 'queued-user',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(hostApiMock.sendAcpPrompt).toHaveBeenCalledTimes(1);
+
+    cancellation.resolve({ success: true });
+    await vi.waitFor(() => expect(hostApiMock.sendAcpPrompt).toHaveBeenCalledTimes(2));
+    await expect(queuedSend).resolves.toBe(true);
+    expect(hostApiMock.sendAcpPrompt).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => {
+      const attachments = Object.values(useAcpChatSessionStore.getState().timeline.itemsById)
+        .flatMap((item) => item.kind === 'message-segment' ? item.parts : [])
+        .filter((part) => part.kind === 'attachment' && part.source === 'openclaw-media');
+      expect(attachments).toHaveLength(1);
+    });
+    expect(hostApiMock.sessionsHistory).toHaveBeenCalledTimes(2);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(hostApiMock.sessionsHistory).toHaveBeenCalledTimes(2);
+
+    firstPrompt.resolve({ success: false });
+    await expect(firstSend).resolves.toBe(false);
+    expect(hostApiMock.sendAcpPrompt).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['assistant text', {
+      sessionUpdate: 'agent_message', messageId: 'assistant-visible',
+      content: [{ type: 'text', text: 'The page was created.' }],
+    }],
+    ['assistant image', {
+      sessionUpdate: 'agent_message', messageId: 'assistant-image',
+      content: [{ type: 'image', data: 'aW1hZ2U=', mimeType: 'image/png' }],
+    }],
+    ['successful tool result', {
+      sessionUpdate: 'tool_call_update', toolCallId: 'write-tool', title: 'write',
+      status: 'completed', rawOutput: { ok: true },
+    }],
+  ])('keeps a Browser terminal failure local after visible %s output', async (_name, visibleUpdate) => {
+    const prompt = createDeferred<{ success: boolean }>();
+    hostApiMock.sendAcpPrompt.mockReturnValueOnce(prompt.promise);
+    const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+    ensureAcpChatSubscriptions();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+    const sending = useAcpChatSessionStore.getState().sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'Create and preview', messageId: 'visible-user',
+    });
+    await vi.waitFor(() => expect(hostApiMock.sendAcpPrompt).toHaveBeenCalledTimes(1));
+    hostEventsMock.updateListener?.({
+      sessionKey: 'agent:pi:s1', generation: 1,
+      notification: { sessionId: 'agent:pi:s1', update: visibleUpdate },
+    });
+    hostEventsMock.updateListener?.({
+      sessionKey: 'agent:pi:s1', generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'tool_call_update', toolCallId: 'browser-tool', title: 'browser',
+          status: 'failed', error: 'browser navigation timed out after 30 seconds',
+        },
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(hostApiMock.cancelAcpSession).not.toHaveBeenCalled();
+    expect(useAcpChatSessionStore.getState().timeline.itemsById['turn-failure:visible-user']).toBeUndefined();
+    expect(useAcpChatSessionStore.getState().sending).toBe(true);
+    prompt.resolve({ success: true });
+    await expect(sending).resolves.toBe(true);
+  });
+
+  it('does not release a completed browser tool or a completed media tool as a failed prompt', async () => {
+    const prompt = createDeferred<{ success: boolean }>();
+    hostApiMock.sendAcpPrompt.mockReturnValueOnce(prompt.promise);
+    const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+    ensureAcpChatSubscriptions();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+    const sending = useAcpChatSessionStore.getState().sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'Create and open an image', messageId: 'successful-tools-user',
+    });
+    await vi.waitFor(() => expect(hostApiMock.sendAcpPrompt).toHaveBeenCalledTimes(1));
+    for (const [toolCallId, title] of [['browser-tool', 'browser'], ['image-tool', 'image_generate']]) {
+      hostEventsMock.updateListener?.({
+        sessionKey: 'agent:pi:s1', generation: 1,
+        notification: {
+          sessionId: 'agent:pi:s1',
+          update: { sessionUpdate: 'tool_call_update', toolCallId, title, status: 'completed', rawOutput: { ok: true } },
+        },
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(hostApiMock.cancelAcpSession).not.toHaveBeenCalled();
+    expect(useAcpChatSessionStore.getState().sending).toBe(true);
+    expect(useAcpChatSessionStore.getState().timeline.itemsById['turn-failure:successful-tools-user']).toBeUndefined();
+    prompt.resolve({ success: true });
+    await expect(sending).resolves.toBe(true);
   });
 });

@@ -39,6 +39,160 @@ type LaunchOptions = {
   managed: boolean;
 };
 
+type ProcessOutput = {
+  stdout: string[];
+  stderr: string[];
+};
+
+const PROCESS_TAIL_MAX_LINES = 12;
+const PROCESS_TAIL_MAX_LINE_CHARS = 500;
+const PROCESS_TAIL_MAX_STREAM_CHARS = 2_000;
+const REDACTED = '[redacted]';
+const REDACTED_PATH = '[path-redacted]';
+const ABSOLUTE_URL_PATTERN = /\b(?:https?|wss?):\/\/[^\s"'`<>]+/giu;
+const FILE_URL_PATTERN = /\b(file:\/\/\/?)[^\s"'`<>]+/giu;
+const QUOTED_ABSOLUTE_PATH_PATTERN = /(["'`])((?:[A-Z]:[\\/]+|\\{2,}(?:[?.][\\/]+)?|\/{2}(?!\/)|\/(?!\/))(?:(?!\1)[^\r\n])*)\1/giu;
+const UNQUOTED_ABSOLUTE_PATH_PATTERN = /(^|[\s=(:,{}\x5B])((?:[A-Z]:[\\/]+|\\{2,}(?:[?.][\\/]+)?|\/{2}(?!\/)|\/(?!\/))(?:(?!\s+[A-Z_][A-Z0-9_.-]*=)[^\r\n"'`<>\x5B\x5D{},;)])*)/gimu;
+const AUTH_HEADER_PATTERN = /((?:^|\s|["'{,])(?:authorization|proxy-authorization|cookie|set-cookie)(?:["']?)\s*[:=]\s*)[^\r\n]+/gimu;
+const SENSITIVE_ASSIGNMENT_PATTERN = /((?:["']?(?:access[_-]?token|refresh[_-]?token|relay[_-]?token|id[_-]?token|session[_-]?token|token|api[_-]?key|api-key|x-api-key|x-auth-token|auth-token|access-key|secret-key|authorization|proxy-authorization|cookie|set-cookie|password|passwd|passphrase|client[_-]?secret|secret|credentials?|auth)["']?)\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]]+)/giu;
+const SENSITIVE_FLAG_PATTERN = /(\s--?(?:access[_-]?token|refresh[_-]?token|relay[_-]?token|token|api[_-]?key|password|passwd|secret|cookie|authorization)(?:=|\s+))\S+/giu;
+const AUTHORIZATION_VALUE_PATTERN = /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{4,}/giu;
+const COMMON_SECRET_PATTERN = /\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|AIza[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{12,})\b/gu;
+const JWT_PATTERN = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/gu;
+const SENSITIVE_QUERY_KEYS = new Set([
+  'accesstoken', 'apikey', 'auth', 'authorization', 'clientsecret', 'cookie',
+  'credential', 'idtoken', 'key', 'password', 'passwd', 'refreshtoken',
+  'relaytoken', 'secret', 'session', 'sessionid', 'sessiontoken', 'sig',
+  'signature', 'token', 'authtoken', 'xauthtoken', 'accesskey', 'secretkey',
+  'xapikey',
+]);
+
+function normalizeSensitiveKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/gu, '');
+}
+
+function decodePercentEncoding(value: string): string | null {
+  let decoded = value;
+  for (let pass = 0; pass < 3 && decoded.includes('%'); pass += 1) {
+    try {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) break;
+      decoded = next;
+    } catch {
+      return null;
+    }
+  }
+  return decoded;
+}
+
+function isAbsolutePathValue(value: string): boolean {
+  const decoded = decodePercentEncoding(value) ?? value;
+  return /^(?:[A-Z]:[\\/]+|\\{2}|\/{1,2}(?!\/)|file:\/{2,})/iu.test(decoded);
+}
+
+function redactCredentialText(value: string): string {
+  return value
+    .replace(AUTH_HEADER_PATTERN, `$1${REDACTED}`)
+    .replace(SENSITIVE_ASSIGNMENT_PATTERN, `$1${REDACTED}`)
+    .replace(SENSITIVE_FLAG_PATTERN, `$1${REDACTED}`)
+    .replace(AUTHORIZATION_VALUE_PATTERN, REDACTED)
+    .replace(COMMON_SECRET_PATTERN, REDACTED)
+    .replace(JWT_PATTERN, REDACTED);
+}
+
+function sanitizeDiagnosticUrl(value: string): string {
+  try {
+    const parsed = new URL(value);
+    if (parsed.username || parsed.password) {
+      parsed.username = REDACTED;
+      parsed.password = '';
+    }
+    for (const [key, entryValue] of [...parsed.searchParams.entries()]) {
+      if (SENSITIVE_QUERY_KEYS.has(normalizeSensitiveKey(key)) || isAbsolutePathValue(entryValue)) {
+        parsed.searchParams.set(key, REDACTED);
+      }
+    }
+    if (parsed.hash) parsed.hash = REDACTED;
+    return redactCredentialText(parsed.toString().replace(/%5Bredacted%5D/giu, REDACTED));
+  } catch {
+    return redactCredentialText(value);
+  }
+}
+
+function stripControlCharacters(value: string): string {
+  return [...value].map((character) => {
+    const code = character.charCodeAt(0);
+    return code === 9 || code === 10 || code >= 32 && code !== 127 ? character : ' ';
+  }).join('');
+}
+
+function sanitizeProcessOutputText(value: string): string {
+  const urls: string[] = [];
+  let placeholder = '__UCLAW_PACKAGED_URL_';
+  while (value.includes(placeholder)) placeholder += '_';
+  let sanitized = stripControlCharacters(value)
+    .replace(FILE_URL_PATTERN, `$1${REDACTED_PATH}`)
+    .replace(ABSOLUTE_URL_PATTERN, (url) => {
+      const index = urls.push(sanitizeDiagnosticUrl(url)) - 1;
+      return `${placeholder}${index}__`;
+    });
+  sanitized = redactCredentialText(sanitized)
+    .replace(QUOTED_ABSOLUTE_PATH_PATTERN, `$1${REDACTED_PATH}$1`)
+    .replace(UNQUOTED_ABSOLUTE_PATH_PATTERN, `$1${REDACTED_PATH}`);
+  for (const [index, url] of urls.entries()) {
+    sanitized = sanitized.replaceAll(`${placeholder}${index}__`, url);
+  }
+  return sanitized;
+}
+
+function formatProcessStreamTail(label: keyof ProcessOutput, chunks: string[]): string | null {
+  const lines = sanitizeProcessOutputText(chunks.join('').replace(/\r\n?/gu, '\n'))
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .slice(-PROCESS_TAIL_MAX_LINES)
+    .map((line) => {
+      const trimmed = line.trimEnd();
+      if (trimmed.length <= PROCESS_TAIL_MAX_LINE_CHARS) return trimmed;
+      const marker = '[line-truncated] ';
+      return marker + trimmed.slice(-(PROCESS_TAIL_MAX_LINE_CHARS - marker.length));
+    });
+  if (lines.length === 0) return null;
+  const body = lines.join('\n');
+  const bounded = body.length <= PROCESS_TAIL_MAX_STREAM_CHARS
+    ? body
+    : `[tail-truncated]\n${body.slice(-(PROCESS_TAIL_MAX_STREAM_CHARS - 17))}`;
+  return `[${label} tail]\n${bounded}`;
+}
+
+function formatProcessOutputTail(output: ProcessOutput): string {
+  const tails = ([
+    formatProcessStreamTail('stdout', output.stdout),
+    formatProcessStreamTail('stderr', output.stderr),
+  ]).filter((tail): tail is string => tail !== null);
+  return tails.length > 0 ? `\nSanitized process output tail:\n${tails.join('\n')}` : '';
+}
+
+async function allowExitedProcessOutputToDrain(child: ChildProcess): Promise<void> {
+  const streams = [child.stdout, child.stderr]
+    .filter((stream): stream is NonNullable<typeof stream> => stream != null);
+  if (streams.length === 0 || streams.every((stream) => stream.readableEnded)) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener('close', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, 100);
+    child.once('close', finish);
+  });
+}
+
 function isolatedChildEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const key of Object.keys(env)) {
@@ -118,12 +272,29 @@ export async function getStableWindow(context: BrowserContext): Promise<Page> {
   throw new Error('No stable packaged UClaw window became available.');
 }
 
-async function waitForCdp(origin: string, child: ChildProcess, timeoutMs = 120_000): Promise<void> {
+export async function waitForCdp(
+  origin: string,
+  child: ChildProcess,
+  output: ProcessOutput = { stdout: [], stderr: [] },
+  timeoutMs = 120_000,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError = '';
   while (Date.now() < deadline) {
-    if (child.exitCode !== null) {
-      throw new Error(`Packaged UClaw exited before CDP became ready (exit=${child.exitCode}).`);
+    const hasExited = (child.exitCode !== null && child.exitCode !== undefined)
+      || (child.signalCode !== null && child.signalCode !== undefined);
+    if (hasExited) {
+      await allowExitedProcessOutputToDrain(child);
+      const exit = child.exitCode === null || child.exitCode === undefined
+        ? 'null'
+        : String(child.exitCode);
+      const signal = child.signalCode === null || child.signalCode === undefined
+        ? 'none'
+        : child.signalCode;
+      throw new Error(
+        `Packaged UClaw exited before CDP became ready (exit=${exit}, signal=${signal}).`
+        + formatProcessOutputTail(output),
+      );
     }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 1_500);
@@ -209,12 +380,21 @@ export async function launchPackagedApp(options: LaunchOptions): Promise<Package
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const output: string[] = [];
-  child.stdout?.on('data', (chunk) => output.push(String(chunk)));
-  child.stderr?.on('data', (chunk) => output.push(String(chunk)));
+  const startupOutput: ProcessOutput = { stdout: [], stderr: [] };
+  child.stdout?.on('data', (chunk) => {
+    const text = String(chunk);
+    output.push(text);
+    startupOutput.stdout.push(text);
+  });
+  child.stderr?.on('data', (chunk) => {
+    const text = String(chunk);
+    output.push(text);
+    startupOutput.stderr.push(text);
+  });
   let browser: Browser | null = null;
   try {
     const cdpOrigin = `http://127.0.0.1:${cdpPort}`;
-    await waitForCdp(cdpOrigin, child);
+    await waitForCdp(cdpOrigin, child, startupOutput);
     browser = await chromium.connectOverCDP(cdpOrigin, { timeout: 120_000 });
     const browserContext = browser.contexts()[0];
     if (!browserContext) throw new Error('Packaged UClaw exposed no Chromium browser context.');

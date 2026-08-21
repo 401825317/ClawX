@@ -8,13 +8,7 @@ import { readdir, readFile, rename, rm } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 
 const PROVIDER_ID = 'uclaw-video';
-const TEXT_TO_VIDEO_MODEL = 'grok-image-video';
-const IMAGE_TO_VIDEO_MODEL = 'grok-video-1.5';
-const DEFAULT_MODEL = TEXT_TO_VIDEO_MODEL;
-const DEFAULT_ASPECT_RATIO = '16:9';
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
-const DEFAULT_RESOLUTION = '480P';
-const DEFAULT_DURATION_SECONDS = 6;
 const DEFAULT_POLL_INTERVAL_MS = 5000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15 * 1000;
 const DEFAULT_CONTENT_DOWNLOAD_ATTEMPT_TIMEOUT_MS = 60 * 1000;
@@ -23,41 +17,21 @@ const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024;
 const DEFAULT_MAX_INPUT_IMAGE_BYTES = 1024 * 1024;
 const DEFAULT_MIME_TYPE = 'video/mp4';
+const SUPPORTED_INLINE_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const MAX_PROVIDER_DIAGNOSTIC_CHARS = 400;
+const PROVIDER_REQUEST_ID_HEADERS = [
+  'x-request-id',
+  'request-id',
+  'x-correlation-id',
+  'x-trace-id',
+  'cf-ray',
+];
 const REFERENCE_IMAGE_COMPRESSION_ATTEMPTS = [
   { maxSide: 1600, quality: 76 },
   { maxSide: 1280, quality: 60 },
   { maxSide: 1024, quality: 48 },
   { maxSide: 768, quality: 40 },
   { maxSide: 512, quality: 32 },
-];
-const RESOLUTION_SIZES = {
-  '480P': '854x480',
-  '720P': '1280x720',
-};
-const SUPPORTED_ASPECT_RATIOS = new Set(['2:3', '3:2', '1:1', '9:16', '16:9']);
-const DEFAULT_MODELS = [
-  {
-    id: 'grok-image-video',
-    modes: ['text-to-video'],
-    aspectRatios: ['2:3', '3:2', '1:1', '9:16', '16:9'],
-    resolutions: ['480P', '720P'],
-    durations: [6, 10, 15],
-    defaultAspectRatio: DEFAULT_ASPECT_RATIO,
-    defaultResolution: '480P',
-    defaultDurationSeconds: 6,
-    requiresImage: false,
-  },
-  {
-    id: 'grok-video-1.5',
-    modes: ['image-to-video'],
-    aspectRatios: ['2:3', '3:2', '1:1', '9:16', '16:9'],
-    resolutions: ['480P', '720P'],
-    durations: [6, 10, 15],
-    defaultAspectRatio: DEFAULT_ASPECT_RATIO,
-    defaultResolution: '480P',
-    defaultDurationSeconds: 6,
-    requiresImage: true,
-  },
 ];
 const COMPLETE_STATUSES = new Set(['completed', 'succeeded', 'success', 'done']);
 const FAILED_STATUSES = new Set(['failed', 'cancelled', 'canceled', 'error']);
@@ -68,8 +42,8 @@ const TURN_PREFERENCE_FILE_RE = /^video-turn-([0-9a-f-]{36})\.json$/iu;
 const VIDEO_MODE_PROMPT_CONTEXT = [
   'The user selected video generation mode for this turn.',
   'When the request asks for a video, call video_generate instead of only describing a video.',
-  'Use the managed aspect ratio, resolution, and duration supplied to the tool call.',
-  'The runtime selects the video model and binds the current turn reference image automatically.',
+  'Use the managed model, exact pixel size, mode, and duration supplied to the tool call.',
+  'The runtime binds the current turn reference image automatically.',
   'Do not invent a reference-image file path.',
 ].join(' ');
 const turnPreferencesByRun = new Map();
@@ -80,7 +54,201 @@ function normalizeOptionalString(value) {
 
 function normalizePositiveInteger(value, fallback) {
   const numeric = Number(value);
-  return Number.isFinite(numeric) && numeric > 0 ? Math.round(numeric) : fallback;
+  return Number.isSafeInteger(numeric) && numeric > 0 ? numeric : fallback;
+}
+
+function normalizeStringArray(value, validator = () => true) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.flatMap((entry) => {
+    const normalized = normalizeOptionalString(entry);
+    return normalized && validator(normalized) ? [normalized] : [];
+  }))];
+}
+
+function greatestCommonDivisor(left, right) {
+  let a = Math.abs(left);
+  let b = Math.abs(right);
+  while (b !== 0) {
+    const remainder = a % b;
+    a = b;
+    b = remainder;
+  }
+  return a || 1;
+}
+
+function parseExactVideoSize(value) {
+  const size = normalizeOptionalString(value);
+  if (!size) return undefined;
+  const match = /^(\d{1,5})x(\d{1,5})$/u.exec(size);
+  if (!match) return undefined;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) {
+    return undefined;
+  }
+  const divisor = greatestCommonDivisor(width, height);
+  return {
+    size,
+    width,
+    height,
+    aspectRatio: `${width / divisor}:${height / divisor}`,
+    resolution: `${Math.min(width, height)}P`,
+  };
+}
+
+function isPixelSize(value) {
+  return Boolean(parseExactVideoSize(value));
+}
+
+function aspectRatioForExactSize(size) {
+  return parseExactVideoSize(size)?.aspectRatio;
+}
+
+function resolutionForExactSize(size) {
+  return parseExactVideoSize(size)?.resolution;
+}
+
+function numericResolutionMatchesSize(resolution, size) {
+  const normalized = normalizeOptionalString(resolution);
+  const exactSize = parseExactVideoSize(size);
+  if (!normalized || !exactSize) return false;
+  if (!/^\d+P$/iu.test(normalized)) return true;
+  return normalized.toUpperCase() === exactSize.resolution.toUpperCase();
+}
+
+function listVideoGenerationVariants(model) {
+  const declaredAspectRatios = new Set(normalizeStringArray(model?.aspectRatios));
+  const declaredResolutions = normalizeStringArray(model?.resolutions);
+  const seen = new Set();
+  const variants = [];
+  for (const rawSize of Array.isArray(model?.sizes) ? model.sizes : []) {
+    const exactSize = parseExactVideoSize(rawSize);
+    if (!exactSize || !declaredAspectRatios.has(exactSize.aspectRatio)) continue;
+    for (const resolution of declaredResolutions) {
+      if (!numericResolutionMatchesSize(resolution, exactSize.size)) continue;
+      const key = `${exactSize.size}\u0000${exactSize.aspectRatio}\u0000${resolution}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      variants.push({ ...exactSize, resolution });
+    }
+  }
+  return variants;
+}
+
+function normalizedDuration(value) {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+function validateVideoGenerationOptions(value, model) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { ok: false, issue: 'combination' };
+  }
+  const modelId = normalizeOptionalString(value.modelId);
+  if (!modelId || modelId !== model.id) return { ok: false, issue: 'model' };
+  const mode = normalizeOptionalString(value.mode);
+  if (!mode || !model.modes.includes(mode)) return { ok: false, issue: 'mode' };
+  const size = normalizeOptionalString(value.size);
+  if (!size || !model.sizes.includes(size) || !parseExactVideoSize(size)) {
+    return { ok: false, issue: 'size' };
+  }
+  const aspectRatio = normalizeOptionalString(value.aspectRatio);
+  if (!aspectRatio || !model.aspectRatios.includes(aspectRatio)) {
+    return { ok: false, issue: 'aspectRatio' };
+  }
+  const resolution = normalizeOptionalString(value.resolution);
+  if (!resolution || !model.resolutions.includes(resolution)) {
+    return { ok: false, issue: 'resolution' };
+  }
+  const variantSupported = listVideoGenerationVariants(model).some((variant) => (
+    variant.size === size
+    && variant.aspectRatio === aspectRatio
+    && variant.resolution === resolution
+  ));
+  if (!variantSupported) return { ok: false, issue: 'combination' };
+  const durationSeconds = normalizedDuration(value.durationSeconds);
+  if (!durationSeconds || !model.durations.includes(durationSeconds)) {
+    return { ok: false, issue: 'durationSeconds' };
+  }
+  return {
+    ok: true,
+    options: { modelId, size, mode, aspectRatio, resolution, durationSeconds },
+  };
+}
+
+function variantMatches(variant, preference) {
+  const size = normalizeOptionalString(preference?.size);
+  const aspectRatio = normalizeOptionalString(preference?.aspectRatio);
+  const resolution = normalizeOptionalString(preference?.resolution);
+  return (!size || variant.size === size)
+    && (!aspectRatio || variant.aspectRatio === aspectRatio)
+    && (!resolution || variant.resolution === resolution);
+}
+
+function hasVariantPreference(preference) {
+  return Boolean(
+    normalizeOptionalString(preference?.size)
+    || normalizeOptionalString(preference?.aspectRatio)
+    || normalizeOptionalString(preference?.resolution),
+  );
+}
+
+function pickVariant(variants, preferences) {
+  for (const preference of preferences) {
+    if (!hasVariantPreference(preference)) continue;
+    const match = variants.find((variant) => variantMatches(variant, preference));
+    if (match) return match;
+  }
+  return variants[0];
+}
+
+function pickDuration(model, preferred, defaults) {
+  for (const candidate of [preferred, model.defaultDurationSeconds, defaults?.defaultDurationSeconds]) {
+    const duration = normalizedDuration(candidate);
+    if (duration && model.durations.includes(duration)) return duration;
+  }
+  return model.durations.find((duration) => normalizedDuration(duration) !== undefined);
+}
+
+function resolveVideoGenerationOptions(model, mode, preferred, defaults = {}) {
+  if (!model.modes.includes(mode)) return undefined;
+  const variants = listVideoGenerationVariants(model);
+  if (variants.length === 0) return undefined;
+  const preferredSize = normalizeOptionalString(preferred?.size);
+  const preferredAspectRatio = normalizeOptionalString(preferred?.aspectRatio);
+  const preferredResolution = normalizeOptionalString(preferred?.resolution);
+  const variant = pickVariant(variants, [
+    { size: preferredSize, aspectRatio: preferredAspectRatio, resolution: preferredResolution },
+    { size: preferredSize, aspectRatio: preferredAspectRatio },
+    { size: preferredSize, resolution: preferredResolution },
+    { size: preferredSize },
+    { aspectRatio: preferredAspectRatio, resolution: preferredResolution },
+    { aspectRatio: preferredAspectRatio },
+    { resolution: preferredResolution },
+    {
+      size: model.defaultSize,
+      aspectRatio: model.defaultAspectRatio,
+      resolution: model.defaultResolution,
+    },
+    { size: model.defaultSize },
+    { aspectRatio: model.defaultAspectRatio, resolution: model.defaultResolution },
+    {
+      size: defaults.defaultSize,
+      aspectRatio: defaults.defaultAspectRatio,
+      resolution: defaults.defaultResolution,
+    },
+    { size: defaults.defaultSize },
+    { aspectRatio: defaults.defaultAspectRatio, resolution: defaults.defaultResolution },
+  ]);
+  const durationSeconds = pickDuration(model, preferred?.durationSeconds, defaults);
+  if (!durationSeconds) return undefined;
+  return {
+    modelId: model.id,
+    size: variant.size,
+    mode,
+    aspectRatio: variant.aspectRatio,
+    resolution: variant.resolution,
+    durationSeconds,
+  };
 }
 
 function trimTrailingSlash(value) {
@@ -95,37 +263,53 @@ function normalizeBaseUrl(value) {
 function normalizeModelConfig(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const id = normalizeOptionalString(value.id);
-  const aspectRatios = Array.isArray(value.aspectRatios)
-    ? [...new Set(value.aspectRatios.filter((entry) => SUPPORTED_ASPECT_RATIOS.has(entry)))]
-    : [];
-  const resolutions = Array.isArray(value.resolutions)
-    ? [...new Set(value.resolutions.filter((entry) => entry === '480P' || entry === '720P'))]
-    : [];
+  const modes = normalizeStringArray(value.modes);
+  const sizes = normalizeStringArray(value.sizes, isPixelSize);
   const durations = Array.isArray(value.durations)
     ? [...new Set(value.durations
       .map((entry) => Number(entry))
-      .filter((entry) => Number.isFinite(entry) && entry > 0)
-      .map((entry) => Math.round(entry)))]
+      .filter((entry) => Number.isSafeInteger(entry) && entry > 0))]
     : [];
-  if (!id || aspectRatios.length === 0 || resolutions.length === 0 || durations.length === 0) return undefined;
+  if (!id || modes.length === 0 || sizes.length === 0 || durations.length === 0) return undefined;
 
-  const modes = Array.isArray(value.modes)
-    ? [...new Set(value.modes.filter((entry) => entry === 'text-to-video' || entry === 'image-to-video'))]
-    : [];
-  const defaultAspectRatio = aspectRatios.includes(value.defaultAspectRatio)
-    ? value.defaultAspectRatio
-    : aspectRatios[0];
-  const defaultResolution = resolutions.includes(value.defaultResolution)
-    ? value.defaultResolution
-    : resolutions[0];
+  const configuredDefaultSize = normalizeOptionalString(value.defaultSize);
+  const defaultSize = configuredDefaultSize && sizes.includes(configuredDefaultSize)
+    ? configuredDefaultSize
+    : sizes[0];
+  const derivedAspectRatios = [...new Set(sizes.map(aspectRatioForExactSize).filter(Boolean))];
+  const configuredAspectRatios = normalizeStringArray(value.aspectRatios);
+  const aspectRatios = configuredAspectRatios.length > 0 ? configuredAspectRatios : derivedAspectRatios;
+  const derivedResolutions = [...new Set(sizes.map(resolutionForExactSize).filter(Boolean))];
+  const configuredResolutions = normalizeStringArray(value.resolutions);
+  const resolutions = configuredResolutions.length > 0 ? configuredResolutions : derivedResolutions;
+  const contractModel = { id, modes, sizes, aspectRatios, resolutions, durations };
+  if (listVideoGenerationVariants(contractModel).length === 0) return undefined;
+  const sizeAspectRatio = aspectRatioForExactSize(defaultSize);
+  const configuredDefaultAspectRatio = normalizeOptionalString(value.defaultAspectRatio);
+  const defaultAspectRatio = configuredDefaultAspectRatio && aspectRatios.includes(configuredDefaultAspectRatio)
+    ? configuredDefaultAspectRatio
+    : sizeAspectRatio && aspectRatios.includes(sizeAspectRatio)
+      ? sizeAspectRatio
+      : aspectRatios[0];
+  const sizeResolution = resolutionForExactSize(defaultSize);
+  const configuredDefaultResolution = normalizeOptionalString(value.defaultResolution);
+  const defaultResolution = configuredDefaultResolution
+    && resolutions.includes(configuredDefaultResolution)
+    && numericResolutionMatchesSize(configuredDefaultResolution, defaultSize)
+    ? configuredDefaultResolution
+    : sizeResolution && resolutions.includes(sizeResolution)
+      ? sizeResolution
+      : resolutions[0];
   const configuredDuration = normalizePositiveInteger(value.defaultDurationSeconds, durations[0]);
   const defaultDurationSeconds = durations.includes(configuredDuration) ? configuredDuration : durations[0];
   return {
     id,
     modes,
+    sizes,
     aspectRatios,
     resolutions,
     durations,
+    defaultSize,
     defaultAspectRatio,
     defaultResolution,
     defaultDurationSeconds,
@@ -133,25 +317,22 @@ function normalizeModelConfig(value) {
   };
 }
 
-/** Reads the managed plugin configuration while preserving standalone defaults. */
+/** A media provider exists only when a verified runtime catalog was explicitly installed. */
 function resolvePluginConfig(value) {
   const configuredModels = Array.isArray(value?.models)
     ? value.models.map(normalizeModelConfig).filter(Boolean)
     : [];
-  const models = configuredModels.length > 0 ? configuredModels : DEFAULT_MODELS;
+  if (value?.enabled !== true || configuredModels.length === 0) return undefined;
+  const models = configuredModels;
   const configuredDefaultModel = normalizeOptionalString(value?.defaultModel);
   const defaultModel = models.some((model) => model.id === configuredDefaultModel)
     ? configuredDefaultModel
-    : (models.find((model) => model.id === DEFAULT_MODEL)?.id ?? models[0].id);
+    : models[0].id;
   const defaultModelConfig = models.find((model) => model.id === defaultModel) ?? models[0];
-  const configuredDefaultAspectRatio = normalizeOptionalString(value?.defaultAspectRatio);
-  const defaultAspectRatio = defaultModelConfig.aspectRatios.includes(configuredDefaultAspectRatio)
-    ? configuredDefaultAspectRatio
-    : defaultModelConfig.defaultAspectRatio;
-  const configuredDefaultResolution = normalizeOptionalString(value?.defaultResolution);
-  const defaultResolution = defaultModelConfig.resolutions.includes(configuredDefaultResolution)
-    ? configuredDefaultResolution
-    : defaultModelConfig.defaultResolution;
+  const configuredDefaultSize = normalizeOptionalString(value?.defaultSize);
+  const defaultSize = configuredDefaultSize && defaultModelConfig.sizes.includes(configuredDefaultSize)
+    ? configuredDefaultSize
+    : defaultModelConfig.defaultSize;
   const configuredDefaultDuration = normalizePositiveInteger(
     value?.defaultDurationSeconds,
     defaultModelConfig.defaultDurationSeconds,
@@ -159,20 +340,11 @@ function resolvePluginConfig(value) {
   const defaultDurationSeconds = defaultModelConfig.durations.includes(configuredDefaultDuration)
     ? configuredDefaultDuration
     : defaultModelConfig.defaultDurationSeconds;
-  const resolutionSizes = {
-    ...RESOLUTION_SIZES,
-    ...(value?.resolutionSizes && typeof value.resolutionSizes === 'object'
-      ? value.resolutionSizes
-      : {}),
-  };
-
   return {
     models,
     defaultModel,
-    defaultAspectRatio,
-    defaultResolution,
+    defaultSize,
     defaultDurationSeconds,
-    resolutionSizes,
     pollIntervalMs: normalizePositiveInteger(value?.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS),
     requestTimeoutMs: normalizePositiveInteger(value?.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS),
     contentDownloadAttemptTimeoutMs: normalizePositiveInteger(
@@ -311,15 +483,97 @@ function readResponseError(payload, fallback) {
   return fallback;
 }
 
+function sanitizeDiagnosticText(value, maxChars = MAX_PROVIDER_DIAGNOSTIC_CHARS) {
+  const text = String(value || '')
+    .replace(/(authorization["'\s:=]+)(?:bearer\s+)?[^"',\s}]+/giu, '$1[REDACTED]')
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/giu, 'Bearer [REDACTED]')
+    .replace(/sk-[A-Za-z0-9_-]{8,}/giu, 'sk-[REDACTED]')
+    .replace(
+      /((?:api[_-]?key|access[_-]?token|password|secret|token|signature)["'\s:=]+)([^"',\s}]+)/giu,
+      '$1[REDACTED]',
+    )
+    .replace(/data:image\/[^;,]+;base64,[A-Za-z0-9+/=_-]+/giu, 'data:image/[REDACTED];base64,[REDACTED]')
+    .replace(/https?:\/\/[^\s"']*(?:access_token|api_key|token|signature|x-amz-signature)[^\s"']*/giu, '[REDACTED_URL]')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}...[truncated ${text.length - maxChars} chars]`;
+}
+
+function sanitizeProviderRequestId(value) {
+  const requestId = normalizeOptionalString(value);
+  if (!requestId) return undefined;
+  return requestId.replace(/[^A-Za-z0-9._:/-]/gu, '_').slice(0, 160) || undefined;
+}
+
+function extractProviderRequestId(response, payload) {
+  for (const header of PROVIDER_REQUEST_ID_HEADERS) {
+    const requestId = sanitizeProviderRequestId(response.headers.get(header));
+    if (requestId) return requestId;
+  }
+  for (const record of nestedPayloadRecords(payload)) {
+    for (const key of ['request_id', 'requestId', 'trace_id', 'traceId']) {
+      const requestId = sanitizeProviderRequestId(record[key]);
+      if (requestId) return requestId;
+    }
+  }
+  return undefined;
+}
+
+function summarizeProviderResponse(response, payload, rawText) {
+  const contentType = normalizeOptionalString(response.headers.get('content-type'))?.split(';', 1)[0];
+  const keys = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? Object.keys(payload)
+      .slice(0, 12)
+      .map((key) => sanitizeDiagnosticText(key, 48))
+      .filter(Boolean)
+      .sort()
+    : [];
+  const records = nestedPayloadRecords(payload);
+  const errorRecord = records
+    .map((record) => (record.error && typeof record.error === 'object' && !Array.isArray(record.error)
+      ? record.error
+      : record))
+    .find((record) => record && typeof record === 'object');
+  const errorCode = sanitizeDiagnosticText(errorRecord?.code, 80);
+  const errorType = sanitizeDiagnosticText(errorRecord?.type, 80);
+  const message = sanitizeDiagnosticText(readResponseError(payload, ''), 220);
+  const invalidJsonSample = payload && typeof payload === 'object'
+    ? ''
+    : sanitizeDiagnosticText(rawText, 160);
+  return [
+    contentType ? `contentType=${contentType}` : undefined,
+    keys.length > 0 ? `keys=${keys.join(',')}` : undefined,
+    errorCode ? `code=${errorCode}` : undefined,
+    errorType ? `type=${errorType}` : undefined,
+    message ? `message=${message}` : undefined,
+    invalidJsonSample ? `body=${invalidJsonSample}` : undefined,
+  ].filter(Boolean).join(' ');
+}
+
+function isReferenceUploadNotFound(status, summary) {
+  if (status === 404) return true;
+  const normalized = String(summary || '').toLowerCase();
+  return /(?:apimart|reference|image).{0,100}(?:upload|上传).{0,100}(?:404|not found)/iu.test(normalized)
+    || /(?:404|not found).{0,100}(?:apimart|reference|image).{0,100}(?:upload|上传)/iu.test(normalized);
+}
+
 function remainingTimeout(deadline) {
   return Math.max(1, deadline - Date.now());
 }
 
 class HttpResponseError extends Error {
-  constructor(message, status) {
-    super(message);
+  constructor(message, status, details = {}) {
+    const diagnostics = [
+      details.requestId ? `providerRequestId=${details.requestId}` : undefined,
+      details.responseSummary ? `response={${details.responseSummary}}` : undefined,
+    ].filter(Boolean).join(' ');
+    super(diagnostics ? `${message}; ${diagnostics}` : message);
     this.name = 'HttpResponseError';
     this.status = status;
+    this.providerRequestId = details.requestId;
+    this.responseSummary = details.responseSummary;
+    this.retryable = details.retryable;
   }
 }
 
@@ -483,7 +737,11 @@ function errorCode(error) {
 }
 
 function isRetryableNetworkError(error) {
-  if (error instanceof HttpResponseError) return isTransientHttpStatus(error.status);
+  if (error instanceof HttpResponseError) {
+    return typeof error.retryable === 'boolean'
+      ? error.retryable
+      : isTransientHttpStatus(error.status);
+  }
   if (error instanceof IncompleteVideoContentError) return true;
   const code = errorCode(error);
   if (code && new Set([
@@ -509,18 +767,39 @@ async function fetchJson(url, init, deadline, timeoutMs, label) {
     const response = await fetch(url, { ...init, signal: controller.signal });
     const text = await response.text();
     let payload = {};
+    let invalidJson = false;
     try {
       payload = text ? JSON.parse(text) : {};
     } catch {
-      if (response.ok) throw new Error(`${label} returned invalid JSON`);
+      invalidJson = true;
+      payload = null;
+    }
+    const requestId = extractProviderRequestId(response, payload);
+    const responseSummary = summarizeProviderResponse(response, payload, text);
+    if (invalidJson && response.ok) {
+      throw new HttpResponseError(`${label} returned invalid JSON`, response.status, {
+        requestId,
+        responseSummary,
+        retryable: false,
+      });
     }
     if (!response.ok) {
-      throw new HttpResponseError(
+      const message = sanitizeDiagnosticText(
         readResponseError(payload, `${label} failed with HTTP ${response.status}`),
+        240,
+      );
+      const terminalReferenceUploadFailure = isReferenceUploadNotFound(response.status, responseSummary);
+      throw new HttpResponseError(
+        message || `${label} failed with HTTP ${response.status}`,
         response.status,
+        {
+          requestId,
+          responseSummary,
+          retryable: !terminalReferenceUploadFailure && isTransientHttpStatus(response.status),
+        },
       );
     }
-    return payload;
+    return { payload, requestId, responseSummary };
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
       throw new Error(`${label} timed out`, { cause: error });
@@ -540,8 +819,9 @@ async function pollVideoTask({ baseUrl, apiKey, taskId, deadline, pollIntervalMs
   let lastStatus;
   while (Date.now() < deadline) {
     let payload;
+    let diagnostics;
     try {
-      payload = await fetchJson(
+      const response = await fetchJson(
         `${baseUrl}/videos/${encodeURIComponent(taskId)}`,
         {
           method: 'GET',
@@ -551,6 +831,8 @@ async function pollVideoTask({ baseUrl, apiKey, taskId, deadline, pollIntervalMs
         requestTimeoutMs,
         'Video status request',
       );
+      payload = response.payload;
+      diagnostics = response;
     } catch (error) {
       if (!isRetryableNetworkError(error)) throw error;
       logger?.warn?.('Video status request failed temporarily; polling will continue', {
@@ -561,7 +843,13 @@ async function pollVideoTask({ baseUrl, apiKey, taskId, deadline, pollIntervalMs
       continue;
     }
     const failureMessage = extractFailureMessage(payload);
-    if (failureMessage) throw new Error(failureMessage);
+    if (failureMessage) {
+      throw new HttpResponseError(sanitizeDiagnosticText(failureMessage, 240), 200, {
+        requestId: diagnostics?.requestId,
+        responseSummary: diagnostics?.responseSummary,
+        retryable: false,
+      });
+    }
     if (isComplete(payload)) return payload;
     lastStatus = extractStatus(payload);
     await sleep(Math.min(pollIntervalMs, remainingTimeout(deadline)));
@@ -585,8 +873,25 @@ function parseContentRange(value) {
 }
 
 function responseValidator(response) {
-  return normalizeOptionalString(response.headers.get('etag'))
-    ?? normalizeOptionalString(response.headers.get('last-modified'));
+  const etag = normalizeOptionalString(response.headers.get('etag'));
+  const lastModified = normalizeOptionalString(response.headers.get('last-modified'));
+  if (!etag && !lastModified) return undefined;
+  return {
+    header: etag ? 'etag' : 'last-modified',
+    value: etag ?? lastModified,
+    ...(etag ? { etag } : {}),
+    ...(lastModified ? { lastModified } : {}),
+  };
+}
+
+function responseValidatorChanged(response, validator) {
+  if (!validator) return false;
+  const currentEtag = normalizeOptionalString(response.headers.get('etag'));
+  const currentLastModified = normalizeOptionalString(response.headers.get('last-modified'));
+  return Boolean((validator.etag && currentEtag && currentEtag !== validator.etag)
+    || (validator.lastModified
+      && currentLastModified
+      && currentLastModified !== validator.lastModified));
 }
 
 /** Performs one authenticated download and accepts only a structurally complete MP4. */
@@ -607,9 +912,10 @@ async function downloadVideoContentAttempt({
       'Accept-Encoding': 'identity',
       Authorization: `Bearer ${apiKey}`,
     };
-    if (resumeState && resumeState.receivedBytes < resumeState.totalBytes) {
+    const hasResumeState = resumeState && resumeState.receivedBytes < resumeState.totalBytes;
+    if (hasResumeState) {
       headers.Range = `bytes=${resumeState.receivedBytes}-`;
-      if (resumeState.validator) headers['If-Range'] = resumeState.validator;
+      if (resumeState.validator) headers['If-Range'] = resumeState.validator.value;
     }
     const response = await fetch(`${baseUrl}/videos/${encodeURIComponent(taskId)}/content`, {
       method: 'GET',
@@ -623,16 +929,32 @@ async function downloadVideoContentAttempt({
     const contentRange = response.status === 206
       ? parseContentRange(response.headers.get('content-range'))
       : undefined;
-    let acceptedResumeState = resumeState;
-    if (resumeState) {
-      const validRange = response.status === 206
-        && contentRange?.start === resumeState.receivedBytes
-        && contentRange.total === resumeState.totalBytes;
-      if (!validRange) acceptedResumeState = undefined;
-    }
     if (response.status === 206 && !contentRange) {
       await response.body?.cancel().catch(() => undefined);
       throw new IncompleteVideoContentError('Video content response has an invalid Content-Range header');
+    }
+    let acceptedResumeState;
+    if (hasResumeState && response.status === 206) {
+      const validRange = contentRange.start === resumeState.receivedBytes
+        && contentRange.total === resumeState.totalBytes;
+      if (!validRange) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new IncompleteVideoContentError(
+          'Video content response does not match the requested byte range; restarting from byte zero',
+        );
+      }
+      if (responseValidatorChanged(response, resumeState.validator)) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new IncompleteVideoContentError(
+          'Video content validator changed during range resume; restarting from byte zero',
+        );
+      }
+      acceptedResumeState = resumeState;
+    } else if (response.status === 206 && contentRange.start !== 0) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new IncompleteVideoContentError(
+        'Video content response started after byte zero without resumable state',
+      );
     }
     const contentLengthHeader = normalizeOptionalString(response.headers.get('content-length'));
     const contentLength = contentLengthHeader && /^\d+$/u.test(contentLengthHeader)
@@ -656,8 +978,7 @@ async function downloadVideoContentAttempt({
     assertCompleteMp4(buffer);
     return {
       buffer,
-      mimeType: normalizeOptionalString(response.headers.get('content-type'))?.split(';', 1)[0]
-        ?? DEFAULT_MIME_TYPE,
+      mimeType: DEFAULT_MIME_TYPE,
       fileName: `${taskId}.mp4`,
     };
   } catch (error) {
@@ -714,37 +1035,13 @@ async function downloadVideoContent({
 }
 
 function inputImageValue(asset) {
+  if (asset?.buffer) {
+    const mimeType = normalizeOptionalString(asset.mimeType) ?? 'image/png';
+    return `data:${mimeType};base64,${Buffer.from(asset.buffer).toString('base64')}`;
+  }
   const url = normalizeOptionalString(asset?.url);
-  if (url) return url;
-  if (!asset?.buffer) return undefined;
-  const mimeType = normalizeOptionalString(asset.mimeType) ?? 'image/png';
-  return `data:${mimeType};base64,${Buffer.from(asset.buffer).toString('base64')}`;
-}
-
-/** Derive the OpenAI-compatible size fallback without contradicting the selected ratio. */
-function sizeForAspectRatio(resolution, aspectRatio, resolutionSizes) {
-  const fallback = resolutionSizes[resolution] ?? RESOLUTION_SIZES[resolution];
-  const [fallbackWidth, fallbackHeight] = String(fallback).split('x').map(Number);
-  const base = Math.min(fallbackWidth, fallbackHeight);
-  const [widthRatio, heightRatio] = aspectRatio.split(':').map(Number);
-  if (!Number.isFinite(base) || !Number.isFinite(widthRatio) || !Number.isFinite(heightRatio)) {
-    return fallback;
-  }
-  if (widthRatio >= heightRatio) {
-    return `${Math.ceil((base * widthRatio) / heightRatio)}x${base}`;
-  }
-  return `${base}x${Math.ceil((base * heightRatio) / widthRatio)}`;
-}
-
-function aspectRatioForSize(size, resolutionSizes) {
-  const [width, height] = String(size ?? '').split('x').map(Number);
-  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return undefined;
-  for (const resolution of Object.keys(resolutionSizes)) {
-    for (const aspectRatio of SUPPORTED_ASPECT_RATIOS) {
-      if (sizeForAspectRatio(resolution, aspectRatio, resolutionSizes) === `${width}x${height}`) {
-        return { aspectRatio, resolution };
-      }
-    }
+  if (url && (/^https?:\/\//iu.test(url) || /^data:image\/(?:jpeg|png|webp);base64,/iu.test(url))) {
+    return url;
   }
   return undefined;
 }
@@ -765,46 +1062,112 @@ function normalizeToolReferenceImages(params) {
   return inputs;
 }
 
-/** Routes strictly from the normalized reference-image count, never from a user-facing model setting. */
-function automaticModelForInputImages(config, inputImageCount) {
+function normalizeToolReferenceInputs(params, singularKey, pluralKey) {
+  const inputs = [];
+  const add = (value) => {
+    if (typeof value !== 'string' || !value.trim()) return;
+    const input = value.trim();
+    if (!inputs.includes(input)) inputs.push(input);
+  };
+  add(params?.[singularKey]);
+  if (Array.isArray(params?.[pluralKey])) {
+    for (const value of params[pluralKey]) add(value);
+  }
+  return inputs;
+}
+
+function assertSupportedToolReferences(params) {
+  const images = normalizeToolReferenceImages(params);
+  const videos = normalizeToolReferenceInputs(params, 'video', 'videos');
+  const audios = normalizeToolReferenceInputs(params, 'audioRef', 'audioRefs');
+  if (images.length > 0 && videos.length > 0) {
+    throw new Error('UClaw video generation does not support combined image/video reference inputs');
+  }
+  if (videos.length > 0) {
+    throw new Error('UClaw video generation does not support video reference inputs');
+  }
+  if (audios.length > 0) {
+    throw new Error('UClaw video generation does not support audio reference inputs');
+  }
+}
+
+function assertSupportedOutputOptions(params) {
+  if (params?.audio !== undefined && params.audio !== false) {
+    throw new Error('UClaw video generation does not support generated audio');
+  }
+  if (params?.watermark !== undefined && params.watermark !== false) {
+    throw new Error('UClaw video generation does not support watermarks');
+  }
+}
+
+function modelIdFromReference(value) {
+  const normalized = normalizeOptionalString(value);
+  if (!normalized) return undefined;
+  const slash = normalized.indexOf('/');
+  if (slash < 0) return normalized;
+  return normalized.slice(0, slash) === PROVIDER_ID
+    ? normalizeOptionalString(normalized.slice(slash + 1))
+    : undefined;
+}
+
+/** Select a configured model that explicitly supports the input-derived mode. */
+function modelForInputImages(config, inputImageCount, requestedModelId) {
   if (inputImageCount > 1) {
     throw new Error('UClaw video generation supports at most one reference image');
   }
   const requiredMode = inputImageCount === 1 ? 'image-to-video' : 'text-to-video';
-  const requiredModelId = inputImageCount === 1 ? IMAGE_TO_VIDEO_MODEL : TEXT_TO_VIDEO_MODEL;
-  const model = config.models.find((entry) => (
-    entry.id === requiredModelId && entry.modes.includes(requiredMode)
-  ));
+  const requested = modelIdFromReference(requestedModelId);
+  const model = requested
+    ? config.models.find((entry) => entry.id === requested && entry.modes.includes(requiredMode))
+    : config.models.find((entry) => entry.id === config.defaultModel && entry.modes.includes(requiredMode))
+      ?? config.models.find((entry) => entry.modes.includes(requiredMode));
   if (!model) {
-    throw new Error(`Managed video policy is missing ${requiredModelId} for ${requiredMode}`);
+    const detail = requested ? `model ${requested}` : 'a default model';
+    throw new Error(`Managed video policy does not provide ${detail} for ${requiredMode}`);
   }
-  return model;
+  return { model, mode: requiredMode };
 }
 
 function applyOptionsForModel(videoOptions, model) {
   if (!videoOptions) return undefined;
-  return {
-    aspectRatio: model.aspectRatios.includes(videoOptions.aspectRatio)
-      ? videoOptions.aspectRatio
-      : model.defaultAspectRatio,
-    resolution: model.resolutions.includes(videoOptions.resolution)
-      ? videoOptions.resolution
-      : model.defaultResolution,
-    durationSeconds: model.durations.includes(videoOptions.durationSeconds)
-      ? videoOptions.durationSeconds
-      : model.defaultDurationSeconds,
-  };
+  const mode = model.modes.includes(videoOptions.mode) ? videoOptions.mode : model.modes[0];
+  return resolveVideoGenerationOptions(model, mode, videoOptions, {
+    defaultSize: model.defaultSize,
+    defaultAspectRatio: model.defaultAspectRatio,
+    defaultResolution: model.defaultResolution,
+    defaultDurationSeconds: model.defaultDurationSeconds,
+  });
 }
 
 function referenceImageLimitLabel(maxBytes) {
   return `${maxBytes} ${maxBytes === 1 ? 'byte' : 'bytes'}`;
 }
 
-/** Compresses every buffered reference image at the provider boundary, including reused generated media. */
+function detectedInlineImageMimeType(buffer) {
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+    return 'image/png';
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  if (
+    buffer.length >= 12
+    && buffer.subarray(0, 4).toString('ascii') === 'RIFF'
+    && buffer.subarray(8, 12).toString('ascii') === 'WEBP'
+  ) {
+    return 'image/webp';
+  }
+  return undefined;
+}
+
+/** Normalizes buffered references to the inline formats accepted by the managed video relay. */
 async function prepareInputImage(asset, maxBytes) {
   if (!asset?.buffer) return asset;
   const input = Buffer.from(asset.buffer);
-  if (input.byteLength <= maxBytes) return asset;
+  const detectedMimeType = detectedInlineImageMimeType(input);
+  if (input.byteLength <= maxBytes && SUPPORTED_INLINE_IMAGE_MIME_TYPES.has(detectedMimeType)) {
+    return { ...asset, buffer: input, mimeType: detectedMimeType };
+  }
 
   try {
     for (const attempt of REFERENCE_IMAGE_COMPRESSION_ATTEMPTS) {
@@ -819,7 +1182,11 @@ async function prepareInputImage(asset, maxBytes) {
       }
     }
   } catch {
-    // The stable limit error below is safe to surface when image processing is unavailable.
+    // A stable validation error below is safe to surface when image processing is unavailable.
+  }
+
+  if (!detectedMimeType) {
+    throw new Error('Reference image must be a valid PNG, JPEG, or WebP image');
   }
 
   throw new Error(
@@ -829,33 +1196,66 @@ async function prepareInputImage(asset, maxBytes) {
 
 async function resolveModelRequest(req, config) {
   const inputImages = Array.isArray(req.inputImages) ? req.inputImages : [];
-  const model = automaticModelForInputImages(config, inputImages.length);
+  const inputVideos = Array.isArray(req.inputVideos) ? req.inputVideos : [];
+  const inputAudios = Array.isArray(req.inputAudios) ? req.inputAudios : [];
+  if (inputImages.length > 0 && inputVideos.length > 0) {
+    throw new Error('UClaw video generation does not support combined image/video reference inputs');
+  }
+  if (inputVideos.length > 0) {
+    throw new Error('UClaw video generation does not support video reference inputs');
+  }
+  if (inputAudios.length > 0) {
+    throw new Error('UClaw video generation does not support audio reference inputs');
+  }
+  assertSupportedOutputOptions(req);
+  const { model, mode } = modelForInputImages(config, inputImages.length, req.model);
+
+  const requested = {
+    modelId: model.id,
+    size: normalizeOptionalString(req.size) ?? model.defaultSize ?? config.defaultSize,
+    mode,
+    aspectRatio: normalizeOptionalString(req.aspectRatio)
+      ?? aspectRatioForExactSize(req.size ?? model.defaultSize ?? config.defaultSize),
+    resolution: normalizeOptionalString(req.resolution)
+      ?? resolutionForExactSize(req.size ?? model.defaultSize ?? config.defaultSize),
+    durationSeconds: normalizePositiveInteger(
+      req.durationSeconds,
+      model.defaultDurationSeconds ?? config.defaultDurationSeconds,
+    ),
+  };
+  const validation = validateVideoGenerationOptions(requested, model);
+  if (!validation.ok) {
+    if (validation.issue === 'size') {
+      throw new Error(`${model.id} does not support ${requested.size} size`);
+    }
+    if (validation.issue === 'aspectRatio') {
+      throw new Error(`${model.id} does not support ${requested.aspectRatio} aspect ratio`);
+    }
+    if (validation.issue === 'resolution') {
+      throw new Error(`${model.id} does not support ${requested.resolution} resolution`);
+    }
+    if (validation.issue === 'durationSeconds') {
+      throw new Error(
+        `${model.id} does not support ${requested.durationSeconds} second videos; supported durations: ${model.durations.join(', ')}`,
+      );
+    }
+    const exactResolution = resolutionForExactSize(requested.size);
+    throw new Error(
+      exactResolution && requested.resolution !== exactResolution
+        ? `${model.id} requires ${exactResolution} resolution for ${requested.size} size`
+        : `${model.id} does not support ${requested.size}/${requested.aspectRatio}/${requested.resolution}`,
+    );
+  }
+  const requestedDuration = validation.options.durationSeconds;
+  if (!model.durations.includes(requestedDuration)) {
+    throw new Error(
+      `${model.id} does not support ${requestedDuration} second videos; supported durations: ${model.durations.join(', ')}`,
+    );
+  }
+
   const inputImage = inputImages.length === 1
     ? await prepareInputImage(inputImages[0], config.maxInputImageBytes)
     : undefined;
-
-  const requestedSize = aspectRatioForSize(req.size, config.resolutionSizes);
-  const requestedAspectRatio = normalizeOptionalString(req.aspectRatio)
-    ?? requestedSize?.aspectRatio
-    ?? model.defaultAspectRatio
-    ?? config.defaultAspectRatio;
-  if (!model.aspectRatios.includes(requestedAspectRatio)) {
-    throw new Error(`${model.id} does not support ${requestedAspectRatio} aspect ratio`);
-  }
-  const requestedResolution = normalizeOptionalString(req.resolution)
-    ?? requestedSize?.resolution
-    ?? model.defaultResolution
-    ?? config.defaultResolution;
-  if (!model.resolutions.includes(requestedResolution)) {
-    throw new Error(`${model.id} does not support ${requestedResolution} resolution`);
-  }
-  const requestedDuration = normalizePositiveInteger(
-    req.durationSeconds,
-    model.defaultDurationSeconds ?? config.defaultDurationSeconds,
-  );
-  if (!model.durations.includes(requestedDuration)) {
-    throw new Error(`${model.id} does not support ${requestedDuration} second videos`);
-  }
 
   const image = inputImages.length === 1 ? inputImageValue(inputImage) : undefined;
   if (inputImages.length === 1 && !image) {
@@ -863,27 +1263,29 @@ async function resolveModelRequest(req, config) {
   }
   return {
     model,
-    aspectRatio: requestedAspectRatio,
-    resolution: requestedResolution,
-    size: sizeForAspectRatio(requestedResolution, requestedAspectRatio, config.resolutionSizes),
+    mode,
+    aspectRatio: validation.options.aspectRatio,
+    resolution: validation.options.resolution,
+    size: validation.options.size,
     durationSeconds: requestedDuration,
     image,
   };
 }
 
-function modeCapabilities(model, config) {
+function modeCapabilities(model) {
   const shared = {
     maxVideos: 1,
+    maxInputAudios: 0,
     maxDurationSeconds: Math.max(...model.durations),
     supportedDurationSeconds: model.durations,
     supportsSize: true,
-    sizes: model.resolutions.flatMap((resolution) => (
-      model.aspectRatios.map((aspectRatio) => sizeForAspectRatio(resolution, aspectRatio, config.resolutionSizes))
-    )),
+    sizes: model.sizes,
     supportsAspectRatio: true,
     aspectRatios: model.aspectRatios,
     supportsResolution: true,
     resolutions: model.resolutions,
+    supportsAudio: false,
+    supportsWatermark: false,
   };
   return {
     ...(model.modes.includes('text-to-video') ? { generate: shared } : {}),
@@ -897,7 +1299,7 @@ function modeCapabilities(model, config) {
 function providerCapabilities(config) {
   return config.models.reduce((capabilities, model) => ({
     ...capabilities,
-    ...modeCapabilities(model, config),
+    ...modeCapabilities(model),
   }), {});
 }
 
@@ -914,7 +1316,7 @@ function buildProvider(config, logger) {
     isConfigured,
     resolveModelCapabilities({ model }) {
       const configuredModel = config.models.find((entry) => entry.id === model);
-      return configuredModel ? modeCapabilities(configuredModel, config) : undefined;
+      return configuredModel ? modeCapabilities(configuredModel) : undefined;
     },
     async generateVideo(req) {
       const providerConfig = resolveProviderConfig(req);
@@ -930,10 +1332,15 @@ function buildProvider(config, logger) {
         seconds: String(request.durationSeconds),
         size: request.size,
         aspect_ratio: request.aspectRatio,
-        resolution: request.resolution.toLowerCase(),
-        ...(request.image ? { image: request.image } : {}),
+        ...(request.resolution
+          ? {
+            quality: request.resolution.toLowerCase(),
+            resolution: request.resolution.toLowerCase(),
+          }
+          : {}),
+        ...(request.image ? { input_reference: request.image } : {}),
       };
-      const submitted = await fetchJson(
+      const submissionResponse = await fetchJson(
         `${baseUrl}/videos`,
         {
           method: 'POST',
@@ -948,10 +1355,44 @@ function buildProvider(config, logger) {
         config.requestTimeoutMs,
         'Video generation request',
       );
+      const submitted = submissionResponse.payload;
       const failureMessage = extractFailureMessage(submitted);
-      if (failureMessage) throw new Error(failureMessage);
+      if (failureMessage) {
+        throw new HttpResponseError(sanitizeDiagnosticText(failureMessage, 240), 200, {
+          requestId: submissionResponse.requestId,
+          responseSummary: submissionResponse.responseSummary,
+          retryable: false,
+        });
+      }
       const taskId = extractTaskId(submitted);
-      if (!taskId) throw new Error('Video generation response missing task id');
+      if (!taskId) {
+        const submittedUrl = isComplete(submitted) ? extractVideoUrl(submitted) : undefined;
+        if (submittedUrl) {
+          const metadata = {
+            status: extractStatus(submitted),
+            mode: request.mode,
+            aspectRatio: request.aspectRatio,
+            ...(request.resolution ? { resolution: request.resolution } : {}),
+            size: request.size,
+            durationSeconds: request.durationSeconds,
+          };
+          return {
+            videos: [{
+              url: submittedUrl,
+              mimeType: DEFAULT_MIME_TYPE,
+              fileName: 'generated-video.mp4',
+              metadata,
+            }],
+            model: request.model.id,
+            metadata,
+          };
+        }
+        throw new HttpResponseError('Video generation response missing task id', 200, {
+          requestId: submissionResponse.requestId,
+          responseSummary: submissionResponse.responseSummary,
+          retryable: false,
+        });
+      }
       logger?.info?.('Video generation task submitted', { taskId, model: request.model.id });
       const completed = isComplete(submitted)
         ? submitted
@@ -968,8 +1409,9 @@ function buildProvider(config, logger) {
       const metadata = {
         taskId,
         status: extractStatus(completed),
+        mode: request.mode,
         aspectRatio: request.aspectRatio,
-        resolution: request.resolution,
+        ...(request.resolution ? { resolution: request.resolution } : {}),
         size: request.size,
         durationSeconds: request.durationSeconds,
       };
@@ -993,7 +1435,7 @@ function buildProvider(config, logger) {
           metadata,
         };
       } catch (error) {
-        if (!resultUrl) throw error;
+        if (error instanceof GeneratedVideoTooLargeError || !resultUrl) throw error;
         const downloadError = error instanceof Error ? error.message : String(error);
         logger?.warn?.('Video content download failed; delivering provider result URL', {
           taskId,
@@ -1047,19 +1489,11 @@ function matchesStoredPrompt(prompt, record) {
 
 function normalizeTurnOptions(value, config) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const supported = config.models.some((model) => (
-    model.aspectRatios.includes(value.aspectRatio)
-    && model.resolutions.includes(value.resolution)
-    && model.durations.includes(value.durationSeconds)
-  ));
-  if (!supported) {
-    return undefined;
-  }
-  return {
-    aspectRatio: value.aspectRatio,
-    resolution: value.resolution,
-    durationSeconds: value.durationSeconds,
-  };
+  const modelId = modelIdFromReference(value.modelId);
+  const model = config.models.find((entry) => entry.id === modelId);
+  if (!model) return undefined;
+  const validation = validateVideoGenerationOptions({ ...value, modelId }, model);
+  return validation.ok ? validation.options : undefined;
 }
 
 function turnCacheKey(event, ctx) {
@@ -1220,8 +1654,19 @@ function registerTurnPreferenceHooks(api, config) {
         return { ...rest, image: preference.referenceImage.filePath };
       })()
       : params;
-    const model = automaticModelForInputImages(config, normalizeToolReferenceImages(effectiveParams).length);
-    const options = applyOptionsForModel(preference?.videoOptions, model);
+    assertSupportedToolReferences(effectiveParams);
+    assertSupportedOutputOptions(effectiveParams);
+    const inputImageCount = normalizeToolReferenceImages(effectiveParams).length;
+    const requestedModelId = preference?.videoOptions?.modelId ?? effectiveParams.model;
+    const { model, mode } = modelForInputImages(config, inputImageCount, requestedModelId);
+    const options = applyOptionsForModel(preference?.videoOptions ?? {
+      modelId: model.id,
+      size: effectiveParams.size,
+      mode,
+      aspectRatio: effectiveParams.aspectRatio,
+      resolution: effectiveParams.resolution,
+      durationSeconds: effectiveParams.durationSeconds,
+    }, model);
     return {
       params: {
         ...effectiveParams,
@@ -1229,7 +1674,8 @@ function registerTurnPreferenceHooks(api, config) {
         ...(options
           ? {
             ...options,
-            size: sizeForAspectRatio(options.resolution, options.aspectRatio, config.resolutionSizes),
+            mode,
+            size: options.size,
           }
           : {}),
         timeoutMs: config.timeoutMs,
@@ -1257,9 +1703,19 @@ export const pluginEntry = definePluginEntry({
   description: 'OpenAI-compatible video generation provider managed by UClaw.',
   register(api) {
     const config = resolvePluginConfig(api.pluginConfig);
+    if (!config) {
+      api.logger?.warn?.('UClaw video provider disabled: no verified runtime model policy');
+      return;
+    }
     api.registerVideoGenerationProvider(buildProvider(config, api.logger));
     registerTurnPreferenceHooks(api, config);
   },
+});
+
+export const videoGenerationContractForTesting = Object.freeze({
+  listVideoGenerationVariants,
+  resolveVideoGenerationOptions,
+  validateVideoGenerationOptions,
 });
 
 export default pluginEntry;

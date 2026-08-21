@@ -1,0 +1,16 @@
+{
+  "name": "uclaw-artifact-orchestrator-plugin",
+  "version": "0.1.0",
+  "description": "Deterministic UClaw artifact runtime policy enforcement",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "openclaw": {
+    "extensions": [
+      "./index.mjs"
+    ]
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  }
+}

@@ -21,7 +21,18 @@ import { useChatStore } from '@/stores/chat';
 import { useManagedClientConfigStore } from '@/stores/managed-client-config';
 import { useArtifactPanel } from '@/stores/artifact-panel';
 import { buildPreviewTarget } from '@/components/file-preview/build-preview-target';
-import { buildManagedTextModelOptions, formatModelRefLabel, resolveConfiguredModelRef } from '@/lib/model-options';
+import {
+  aspectRatioForMediaSize,
+  buildManagedTextModelOptions,
+  formatModelRefLabel,
+  resolveConfiguredModelRef,
+  resolveImageComposerState,
+  resolveVideoComposerState,
+} from '@/lib/model-options';
+import type {
+  ImageComposerOptions,
+  VideoComposerOptions,
+} from '@/lib/model-options';
 import { toManagedClientTextModelRef } from '@shared/managed-client-config';
 import type { AgentSummary } from '@/types/agent';
 import type { QuickAccessSkill } from '@/types/skill';
@@ -75,15 +86,6 @@ interface ChatInputProps {
 // ── Helpers ──────────────────────────────────────────────────────
 
 const DIRECTORY_MIME_TYPE = 'application/x-directory';
-const DEFAULT_IMAGE_OPTIONS: AcpImageGenerationOptions = {
-  size: '1024x1024',
-  quality: 'medium',
-};
-const DEFAULT_VIDEO_OPTIONS: AcpVideoGenerationOptions = {
-  aspectRatio: '16:9',
-  resolution: '480P',
-  durationSeconds: 6,
-};
 const ASPECT_RATIO_OPTIONS = [
   { ratio: '2:3', labelKey: 'composer.imageAspectTall', previewClassName: 'h-5 w-[13px]' },
   { ratio: '3:2', labelKey: 'composer.imageAspectWide', previewClassName: 'h-[13px] w-5' },
@@ -91,25 +93,27 @@ const ASPECT_RATIO_OPTIONS = [
   { ratio: '9:16', labelKey: 'composer.imageAspectVertical', previewClassName: 'h-5 w-[11px]' },
   { ratio: '16:9', labelKey: 'composer.imageAspectWidescreen', previewClassName: 'h-[11px] w-5' },
 ] as const;
-const IMAGE_ASPECT_OPTIONS: ReadonlyArray<{
-  ratio: string;
-  size: AcpImageGenerationOptions['size'];
-  labelKey: string;
-  previewClassName: string;
-  testId: string;
-}> = [
-  { ...ASPECT_RATIO_OPTIONS[0], size: '1024x1536', testId: 'chat-image-aspect-2-3' },
-  { ...ASPECT_RATIO_OPTIONS[1], size: '1536x1024', testId: 'chat-image-aspect-3-2' },
-  { ...ASPECT_RATIO_OPTIONS[2], size: '1024x1024', testId: 'chat-image-aspect-1-1' },
-  { ...ASPECT_RATIO_OPTIONS[3], size: '2160x3840', testId: 'chat-image-aspect-9-16' },
-  { ...ASPECT_RATIO_OPTIONS[4], size: '3840x2160', testId: 'chat-image-aspect-16-9' },
-];
-const IMAGE_QUALITY_OPTIONS: AcpImageGenerationOptions['quality'][] = ['low', 'medium', 'high'];
+const IMAGE_PRESET_STANDARD = 'standard';
 const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
 const INHERIT_THINKING_VALUE = '__inherit__';
 
-function isVideoDurationSeconds(value: number): value is AcpVideoGenerationOptions['durationSeconds'] {
-  return value === 6 || value === 10 || value === 15;
+type ThinkingChoice = { id: string; label?: string };
+
+function normalizeThinkingOptions(value: unknown): ThinkingChoice[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  return value.flatMap((entry) => {
+    const record = entry && typeof entry === 'object' && !Array.isArray(entry)
+      ? entry as Record<string, unknown>
+      : null;
+    const rawId = typeof entry === 'string' ? entry : record?.id;
+    const id = typeof rawId === 'string' ? rawId.trim() : '';
+    if (!id || seen.has(id)) return [];
+    seen.add(id);
+    const rawLabel = record?.label;
+    const label = typeof rawLabel === 'string' ? rawLabel.trim() : '';
+    return [label ? { id, label } : { id }];
+  });
 }
 
 function formatFileSize(bytes: number): string {
@@ -119,10 +123,19 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-function formatImageQualityLabel(value: AcpImageGenerationOptions['quality'], t: ReturnType<typeof useTranslation>['t']): string {
+function formatImageQualityLabel(value: string, t: ReturnType<typeof useTranslation>['t']): string {
   if (value === 'low') return t('composer.imageQualityLow');
+  if (value === 'medium') return t('composer.imageQualityMedium');
   if (value === 'high') return t('composer.imageQualityHigh');
-  return t('composer.imageQualityMedium');
+  return value;
+}
+
+function generationOptionTestId(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/gu, '-').replace(/^-|-$/gu, '');
+}
+
+function aspectPresentation(ratio: string) {
+  return ASPECT_RATIO_OPTIONS.find((option) => option.ratio === ratio) ?? null;
 }
 
 type ComposerChoiceOption = {
@@ -435,9 +448,9 @@ export function ChatInput({
   const [selectedSkill, setSelectedSkill] = useState<QuickAccessSkill | null>(null);
   const [optimisticModelRef, setOptimisticModelRef] = useState<string | null>(null);
   const [sessionImageModes, setSessionImageModes] = useState<Record<string, boolean>>({});
-  const [sessionImageOptions, setSessionImageOptions] = useState<Record<string, AcpImageGenerationOptions>>({});
+  const [sessionImageOptions, setSessionImageOptions] = useState<Record<string, ImageComposerOptions>>({});
   const [sessionVideoModes, setSessionVideoModes] = useState<Record<string, boolean>>({});
-  const [sessionVideoOptions, setSessionVideoOptions] = useState<Record<string, AcpVideoGenerationOptions>>({});
+  const [sessionVideoOptions, setSessionVideoOptions] = useState<Record<string, Partial<VideoComposerOptions>>>({});
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
   const skillPickerRef = useRef<HTMLDivElement>(null);
@@ -467,8 +480,12 @@ export function ChatInput({
   const defaultModelRef = useAgentsStore((s) => s.defaultModelRef);
   const textModelPolicy = useManagedClientConfigStore((s) => s.textModelPolicy);
   const loadManagedTextModels = useManagedClientConfigStore((s) => s.loadTextModels);
+  const imageModelPolicy = useManagedClientConfigStore((s) => s.imageModelPolicy);
+  const loadManagedImageModels = useManagedClientConfigStore((s) => s.loadImageModels);
   const videoModelPolicy = useManagedClientConfigStore((s) => s.videoModelPolicy);
   const loadManagedVideoModels = useManagedClientConfigStore((s) => s.loadVideoModels);
+  const runtimeConfig = useManagedClientConfigStore((s) => s.runtimeConfig);
+  const loadManagedRuntimeConfig = useManagedClientConfigStore((s) => s.loadRuntimeConfig);
   const currentAgentId = useChatStore((s) => s.currentAgentId);
   const currentSessionKey = useChatStore((s) => s.currentSessionKey);
   const currentSessionKeyRef = useRef(currentSessionKey);
@@ -499,10 +516,14 @@ export function ChatInput({
     () => (sessions ?? []).find((session) => session.key === currentSessionKey) ?? null,
     [currentSessionKey, sessions],
   );
-  const selectedThinkingLevel = (currentSession?.thinkingLevel ?? thinkingLevel ?? '').trim();
+  const selectedThinkingLevel = (
+    typeof currentSession?.thinkingLevel === 'string'
+      ? currentSession.thinkingLevel
+      : typeof thinkingLevel === 'string' ? thinkingLevel : ''
+  ).trim();
   const thinkingOptions = useMemo(() => {
-    const configured = currentSession?.thinkingLevels ?? [];
-    const options: Array<{ id: string; label?: string }> = configured.length > 0
+    const configured = normalizeThinkingOptions(currentSession?.thinkingLevels);
+    const options: ThinkingChoice[] = configured.length > 0
       ? configured
       : THINKING_LEVELS.map((id) => ({ id }));
     if (selectedThinkingLevel && !options.some((option) => option.id === selectedThinkingLevel)) {
@@ -527,60 +548,31 @@ export function ChatInput({
       thinkingOptions.find((option) => option.id === selectedThinkingLevel)?.label,
     );
   }, [inheritedThinkingLabel, selectedThinkingLevel, thinkingLevelLabel, thinkingOptions]);
-  const imageModeActive = sessionImageModes[currentSessionKey] === true;
-  const videoModeActive = sessionVideoModes[currentSessionKey] === true;
-  const imageOptions = useMemo<AcpImageGenerationOptions>(
-    () => ({
-      ...DEFAULT_IMAGE_OPTIONS,
-      ...sessionImageOptions[currentSessionKey],
-    }),
-    [currentSessionKey, sessionImageOptions],
+  const requestedImageMode = sessionImageModes[currentSessionKey] === true;
+  const requestedVideoMode = sessionVideoModes[currentSessionKey] === true;
+  const imageComposerState = useMemo(
+    () => resolveImageComposerState(imageModelPolicy, sessionImageOptions[currentSessionKey]),
+    [currentSessionKey, imageModelPolicy, sessionImageOptions],
   );
+  const imageModeActive = requestedImageMode && imageComposerState !== null;
+  const imageOptions = imageComposerState?.options ?? null;
+  const ecommercePresetAvailable = runtimeConfig.features.ecommerceMainImage.enabled;
   const readyImageAttachmentCount = useMemo(
     () => attachments.filter((attachment) => (
       attachment.status === 'ready' && attachment.mimeType.startsWith('image/')
     )).length,
     [attachments],
   );
-  const activeVideoModel = useMemo(() => {
+  const videoComposerState = useMemo(() => {
     const requiredMode = readyImageAttachmentCount === 1 ? 'image-to-video' : 'text-to-video';
-    const preferredModelId = readyImageAttachmentCount === 1 ? 'grok-video-1.5' : 'grok-image-video';
-    return videoModelPolicy.models.find((model) => (
-      model.id === preferredModelId && model.modes.includes(requiredMode)
-    ))
-      ?? videoModelPolicy.models.find((model) => (
-        model.id === videoModelPolicy.defaultModel && model.modes.includes(requiredMode)
-      ))
-      ?? videoModelPolicy.models.find((model) => model.modes.includes(requiredMode))
-      ?? null;
-  }, [readyImageAttachmentCount, videoModelPolicy.defaultModel, videoModelPolicy.models]);
-  const videoOptions = useMemo<AcpVideoGenerationOptions>(() => {
-    const saved = sessionVideoOptions[currentSessionKey];
-    if (!activeVideoModel) return DEFAULT_VIDEO_OPTIONS;
-
-    const aspectRatio = saved?.aspectRatio && activeVideoModel.aspectRatios.includes(saved.aspectRatio)
-      ? saved.aspectRatio
-      : (activeVideoModel.aspectRatios.includes(videoModelPolicy.defaultAspectRatio)
-        ? videoModelPolicy.defaultAspectRatio
-        : activeVideoModel.defaultAspectRatio);
-    const resolution = saved?.resolution && activeVideoModel.resolutions.includes(saved.resolution)
-      ? saved.resolution
-      : (activeVideoModel.resolutions.includes(videoModelPolicy.defaultResolution)
-        ? videoModelPolicy.defaultResolution
-        : activeVideoModel.defaultResolution);
-    const durationSeconds = saved?.durationSeconds && activeVideoModel.durations.includes(saved.durationSeconds)
-      ? saved.durationSeconds
-      : (activeVideoModel.durations.includes(videoModelPolicy.defaultDurationSeconds)
-        ? videoModelPolicy.defaultDurationSeconds
-        : activeVideoModel.defaultDurationSeconds);
-    return {
-      aspectRatio,
-      resolution,
-      durationSeconds: isVideoDurationSeconds(durationSeconds)
-        ? durationSeconds
-        : DEFAULT_VIDEO_OPTIONS.durationSeconds,
-    };
-  }, [activeVideoModel, currentSessionKey, sessionVideoOptions, videoModelPolicy]);
+    return resolveVideoComposerState(
+      videoModelPolicy,
+      requiredMode,
+      sessionVideoOptions[currentSessionKey],
+    );
+  }, [currentSessionKey, readyImageAttachmentCount, sessionVideoOptions, videoModelPolicy]);
+  const videoModeActive = requestedVideoMode && videoComposerState !== null;
+  const videoOptions = videoComposerState?.options ?? null;
   const currentAgentName = useMemo(
     () => currentAgent?.name ?? currentAgentId,
     [currentAgent, currentAgentId],
@@ -629,7 +621,20 @@ export function ChatInput({
   const showModelPicker = modelOptions.length > 0;
   const settingsAreDefault = effectiveModelRef === managedDefaultModelRef && !selectedThinkingLevel;
   const chatComposerStatusComponents = rendererExtensionRegistry.getChatComposerStatusComponents();
-  const isGatewayUsable = gatewayStatus.state === 'running' && gatewayStatus.gatewayReady === true;
+  const isGatewayUsable = gatewayStatus.state === 'running' && gatewayStatus.gatewayReady !== false;
+  const retryAttempt = gatewayStatus.connectionAttempt != null && gatewayStatus.connectionAttempt > 1
+    ? gatewayStatus.connectionAttempt
+    : gatewayStatus.state === 'reconnecting' ? gatewayStatus.reconnectAttempts : undefined;
+  const retryMaxAttempts = gatewayStatus.connectionAttempt != null && gatewayStatus.connectionAttempt > 1
+    ? gatewayStatus.connectionMaxAttempts
+    : gatewayStatus.state === 'reconnecting' ? gatewayStatus.reconnectMaxAttempts : undefined;
+  const gatewayStateLabel = retryAttempt != null && retryMaxAttempts != null
+    ? t('composer.gatewayRetrying', { attempt: retryAttempt, maxAttempts: retryMaxAttempts })
+    : isGatewayUsable
+      ? t('composer.gatewayConnected')
+      : gatewayStatus.state === 'running'
+        ? t('composer.gatewayStarting')
+        : gatewayStatus.state;
   const inputDisabled = disabled || !isGatewayUsable;
   const workspaceSelectorDisabled = workspaceReadOnly || inputDisabled || sending || !onSelectWorkspace;
   const skillTokenRanges = useMemo(() => findSkillTokenRanges(input), [input]);
@@ -639,8 +644,16 @@ export function ChatInput({
   }, [loadManagedTextModels]);
 
   useEffect(() => {
+    void Promise.resolve(loadManagedImageModels(true)).catch(() => undefined);
+  }, [loadManagedImageModels]);
+
+  useEffect(() => {
     void loadManagedVideoModels(true).catch(() => undefined);
   }, [loadManagedVideoModels]);
+
+  useEffect(() => {
+    void loadManagedRuntimeConfig(true).catch(() => undefined);
+  }, [loadManagedRuntimeConfig]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -906,16 +919,32 @@ export function ChatInput({
     textareaRef.current?.focus();
   }, [closeSettingsPicker, currentSessionKey]);
 
-  const updateImageOptions = useCallback((next: Partial<AcpImageGenerationOptions>) => {
+  const updateImageOptions = useCallback((next: Partial<ImageComposerOptions>) => {
     setSessionImageOptions((current) => ({
       ...current,
       [currentSessionKey]: {
-        ...DEFAULT_IMAGE_OPTIONS,
         ...current[currentSessionKey],
         ...next,
-      },
+      } as ImageComposerOptions,
     }));
   }, [currentSessionKey]);
+
+  useEffect(() => {
+    if (ecommercePresetAvailable || imageOptions?.preset !== 'ecommerce-main-image') return;
+    updateImageOptions({ preset: undefined });
+  }, [ecommercePresetAvailable, imageOptions?.preset, updateImageOptions]);
+
+  useEffect(() => {
+    if (!requestedImageMode || imageComposerState) return;
+    setSessionImageModes((current) => ({ ...current, [currentSessionKey]: false }));
+    setImageOptionsPickerOpen(false);
+  }, [currentSessionKey, imageComposerState, requestedImageMode]);
+
+  useEffect(() => {
+    if (!requestedVideoMode || videoComposerState) return;
+    setSessionVideoModes((current) => ({ ...current, [currentSessionKey]: false }));
+    setVideoOptionsPickerOpen(false);
+  }, [currentSessionKey, requestedVideoMode, videoComposerState]);
 
   const toggleVideoMode = useCallback(() => {
     setPickerOpen(false);
@@ -935,11 +964,10 @@ export function ChatInput({
     textareaRef.current?.focus();
   }, [closeSettingsPicker, currentSessionKey]);
 
-  const updateVideoOptions = useCallback((next: Partial<AcpVideoGenerationOptions>) => {
+  const updateVideoOptions = useCallback((next: Partial<VideoComposerOptions>) => {
     setSessionVideoOptions((current) => ({
       ...current,
       [currentSessionKey]: {
-        ...DEFAULT_VIDEO_OPTIONS,
         ...current[currentSessionKey],
         ...next,
       },
@@ -1189,7 +1217,7 @@ export function ChatInput({
       if (!isCurrentSendContext()) return;
       // Capture values before clearing — clear input immediately for snappy UX,
       // but keep attachments available for the async send
-      console.log(`[handleSend] text="${textToSend.substring(0, 50)}", attachments=${attachments.length}, ready=${readyAttachments.length}, sending=${!!attachmentsToSend}`);
+      console.log(`[handleSend] textLength=${textToSend.length}, attachments=${attachments.length}, ready=${readyAttachments.length}, sending=${!!attachmentsToSend}`);
       if (attachmentsToSend) {
         console.log('[handleSend] Attachment details:', attachmentsToSend.map(a => ({
           id: a.id, fileName: a.fileName, mimeType: a.mimeType, fileSize: a.fileSize,
@@ -1203,10 +1231,21 @@ export function ChatInput({
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto';
       }
-      if (videoModeActive) {
-        onSend(textToSend, attachmentsToSend, targetAgentId, undefined, { ...videoOptions });
+      if (videoModeActive && videoOptions) {
+        onSend(
+          textToSend,
+          attachmentsToSend,
+          targetAgentId,
+          undefined,
+          { ...videoOptions },
+        );
       } else if (imageModeActive) {
-        onSend(textToSend, attachmentsToSend, targetAgentId, { ...imageOptions });
+        onSend(
+          textToSend,
+          attachmentsToSend,
+          targetAgentId,
+          { ...imageOptions } as unknown as AcpImageGenerationOptions,
+        );
       } else {
         onSend(textToSend, attachmentsToSend, targetAgentId);
       }
@@ -1818,7 +1857,7 @@ export function ChatInput({
                     imageModeActive && 'bg-black/10 text-foreground hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/10',
                   )}
                   onClick={toggleImageMode}
-                  disabled={inputDisabled || sending}
+                  disabled={inputDisabled || sending || imageComposerState === null}
                 >
                   <ImageIcon className="h-4 w-4" />
                 </Button>
@@ -1839,7 +1878,7 @@ export function ChatInput({
                     videoModeActive && 'bg-black/10 text-foreground hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/10',
                   )}
                   onClick={toggleVideoMode}
-                  disabled={inputDisabled || sending}
+                  disabled={inputDisabled || sending || videoComposerState === null}
                 >
                   <Film className="h-4 w-4" />
                 </Button>
@@ -1847,29 +1886,57 @@ export function ChatInput({
               <TooltipContent>{t('composer.videoMode')}</TooltipContent>
             </Tooltip>
 
-            {imageModeActive && (
+            {imageModeActive && imageOptions && imageComposerState && (
               <div className="flex shrink-0 items-center" data-testid="chat-image-options">
                 <ComposerGenerationOptionsMenu
-                  triggerLabel={`${IMAGE_ASPECT_OPTIONS.find((option) => option.size === imageOptions.size)?.ratio ?? '1:1'} · ${formatImageQualityLabel(imageOptions.quality, t)}`}
+                  triggerLabel={`${imageOptions.preset === 'ecommerce-main-image' ? `${t('composer.ecommerceMainImage')} · ` : ''}${aspectRatioForMediaSize(imageOptions.size)} · ${formatImageQualityLabel(imageOptions.quality, t)}`}
                   triggerTestId="chat-image-options-trigger"
                   menuTestId="chat-image-options-menu"
                   ariaLabel={`${t('composer.imageSizeLabel')}, ${t('composer.imageQualityLabel')}`}
                   disabled={inputDisabled || sending}
                   groups={[
+                    ...(ecommercePresetAvailable ? [{
+                      label: t('composer.imagePresetLabel'),
+                      value: imageOptions.preset ?? IMAGE_PRESET_STANDARD,
+                      options: [
+                        {
+                          value: IMAGE_PRESET_STANDARD,
+                          label: t('composer.imagePresetStandard'),
+                          testId: 'chat-image-preset-standard',
+                        },
+                        {
+                          value: 'ecommerce-main-image',
+                          label: t('composer.ecommerceMainImage'),
+                          testId: 'chat-image-preset-ecommerce-main-image',
+                        },
+                      ],
+                      onValueChange: (preset: string) => {
+                        updateImageOptions({
+                          preset: preset === 'ecommerce-main-image' ? 'ecommerce-main-image' : undefined,
+                        });
+                        requestAnimationFrame(() => textareaRef.current?.focus());
+                      },
+                      rowTestId: 'chat-image-preset-row',
+                      menuTestId: 'chat-image-preset-menu',
+                    }] : []),
                     {
                       label: t('composer.imageSizeLabel'),
                       value: imageOptions.size,
-                      options: IMAGE_ASPECT_OPTIONS.map((option) => ({
-                        value: option.size,
-                        label: option.ratio,
-                        description: t(option.labelKey),
-                        descriptionTestId: `${option.testId}-description`,
-                        previewClassName: option.previewClassName,
-                        testId: option.testId,
-                      })),
+                      options: imageComposerState.sizes.map((size) => {
+                        const ratio = aspectRatioForMediaSize(size);
+                        const presentation = aspectPresentation(ratio);
+                        const testId = `chat-image-size-${generationOptionTestId(size)}`;
+                        return {
+                          value: size,
+                          label: ratio,
+                          description: presentation ? t(presentation.labelKey) : size,
+                          descriptionTestId: `${testId}-description`,
+                          previewClassName: presentation?.previewClassName,
+                          testId,
+                        };
+                      }),
                       onValueChange: (size) => {
-                        const option = IMAGE_ASPECT_OPTIONS.find((entry) => entry.size === size);
-                        if (option) updateImageOptions({ size: option.size });
+                        if (imageComposerState.sizes.includes(size)) updateImageOptions({ size });
                         requestAnimationFrame(() => textareaRef.current?.focus());
                       },
                       rowTestId: 'chat-image-aspect-row',
@@ -1878,14 +1945,13 @@ export function ChatInput({
                     {
                       label: t('composer.imageQualityLabel'),
                       value: imageOptions.quality,
-                      options: IMAGE_QUALITY_OPTIONS.map((quality) => ({
+                      options: imageComposerState.qualities.map((quality) => ({
                         value: quality,
                         label: formatImageQualityLabel(quality, t),
-                        testId: `chat-image-quality-option-${quality}`,
+                        testId: `chat-image-quality-option-${generationOptionTestId(quality)}`,
                       })),
                       onValueChange: (quality) => {
-                        const nextQuality = quality as AcpImageGenerationOptions['quality'];
-                        if (IMAGE_QUALITY_OPTIONS.includes(nextQuality)) updateImageOptions({ quality: nextQuality });
+                        if (imageComposerState.qualities.includes(quality)) updateImageOptions({ quality });
                         requestAnimationFrame(() => textareaRef.current?.focus());
                       },
                       rowTestId: 'chat-image-quality-row',
@@ -1899,7 +1965,7 @@ export function ChatInput({
               </div>
             )}
 
-            {videoModeActive && (
+            {videoModeActive && videoOptions && videoComposerState && (
               <div className="flex min-w-0 shrink-0 items-center" data-testid="chat-video-options">
                 <ComposerGenerationOptionsMenu
                   triggerLabel={`${videoOptions.aspectRatio} · ${videoOptions.resolution} · ${videoOptions.durationSeconds}s`}
@@ -1911,23 +1977,23 @@ export function ChatInput({
                     {
                       label: t('composer.videoAspectRatioLabel'),
                       value: videoOptions.aspectRatio,
-                      options: ASPECT_RATIO_OPTIONS.filter((option) => (
-                        activeVideoModel?.aspectRatios.includes(option.ratio) ?? false
-                      )).map((option) => {
-                        const testId = `chat-video-aspect-${option.ratio.replace(':', '-')}`;
+                      options: videoComposerState.aspectRatios.map((ratio) => {
+                        const presentation = aspectPresentation(ratio);
+                        const testId = `chat-video-aspect-${generationOptionTestId(ratio)}`;
                         return {
-                          value: option.ratio,
-                          label: option.ratio,
-                          description: t(option.labelKey),
+                          value: ratio,
+                          label: ratio,
+                          ...(presentation ? {
+                            description: t(presentation.labelKey),
+                            previewClassName: presentation.previewClassName,
+                          } : {}),
                           descriptionTestId: `${testId}-description`,
-                          previewClassName: option.previewClassName,
                           testId,
                         };
                       }),
                       onValueChange: (aspectRatio) => {
-                        const nextAspectRatio = aspectRatio as AcpVideoGenerationOptions['aspectRatio'];
-                        if (activeVideoModel?.aspectRatios.includes(nextAspectRatio)) {
-                          updateVideoOptions({ aspectRatio: nextAspectRatio });
+                        if (videoComposerState.aspectRatios.includes(aspectRatio)) {
+                          updateVideoOptions({ aspectRatio, size: undefined });
                         }
                         requestAnimationFrame(() => textareaRef.current?.focus());
                       },
@@ -1937,15 +2003,14 @@ export function ChatInput({
                     {
                       label: t('composer.videoResolutionLabel'),
                       value: videoOptions.resolution,
-                      options: (activeVideoModel?.resolutions ?? []).map((resolution) => ({
+                      options: videoComposerState.resolutions.map((resolution) => ({
                         value: resolution,
                         label: resolution,
-                        testId: `chat-video-resolution-option-${resolution.toLowerCase()}`,
+                        testId: `chat-video-resolution-option-${generationOptionTestId(resolution)}`,
                       })),
                       onValueChange: (resolution) => {
-                        const nextResolution = resolution as AcpVideoGenerationOptions['resolution'];
-                        if (activeVideoModel?.resolutions.includes(nextResolution)) {
-                          updateVideoOptions({ resolution: nextResolution });
+                        if (videoComposerState.resolutions.includes(resolution)) {
+                          updateVideoOptions({ resolution, size: undefined });
                         }
                         requestAnimationFrame(() => textareaRef.current?.focus());
                       },
@@ -1955,7 +2020,7 @@ export function ChatInput({
                     {
                       label: t('composer.videoDurationLabel'),
                       value: String(videoOptions.durationSeconds),
-                      options: (activeVideoModel?.durations ?? []).map((durationSeconds) => ({
+                      options: videoComposerState.durations.map((durationSeconds) => ({
                         value: String(durationSeconds),
                         label: `${durationSeconds}s`,
                         testId: `chat-video-duration-option-${durationSeconds}`,
@@ -1963,8 +2028,8 @@ export function ChatInput({
                       onValueChange: (duration) => {
                         const durationSeconds = Number(duration);
                         if (
-                          isVideoDurationSeconds(durationSeconds)
-                          && activeVideoModel?.durations.includes(durationSeconds)
+                          Number.isInteger(durationSeconds)
+                          && videoComposerState.durations.includes(durationSeconds)
                         ) {
                           updateVideoOptions({ durationSeconds });
                         }
@@ -2099,11 +2164,7 @@ export function ChatInput({
               )} />
               <span className="min-w-0 truncate">
                 {t('composer.gatewayStatus', {
-                  state: isGatewayUsable
-                    ? t('composer.gatewayConnected')
-                    : gatewayStatus.state === 'running'
-                      ? t('composer.gatewayStarting')
-                      : gatewayStatus.state,
+                  state: gatewayStateLabel,
                   port: gatewayStatus.port,
                   pid: gatewayStatus.pid ?? '',
                 })}

@@ -69,7 +69,9 @@ function readManifestSync(layout: PortableClawXStateLayout): CoreStateManifest |
 }
 
 function syncFile(filePath: string): void {
-  const descriptor = openSync(filePath, 'r');
+  // Windows rejects FlushFileBuffers for a read-only descriptor. Open the completed
+  // temporary file read/write so fsync is durable before it is published by rename.
+  const descriptor = openSync(filePath, 'r+');
   try {
     fsyncSync(descriptor);
   } finally {

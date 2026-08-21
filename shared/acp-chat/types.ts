@@ -27,15 +27,21 @@ export type AcpPromptMediaItem = {
 
 /** Per-turn image constraints selected in the composer. */
 export type AcpImageGenerationOptions = {
-  size: '1024x1536' | '1536x1024' | '1024x1024' | '2160x3840' | '3840x2160';
-  quality: 'low' | 'medium' | 'high';
+  modelId: string;
+  size: string;
+  quality: string;
+  preset?: 'ecommerce-main-image';
 };
 
 /** Per-turn video constraints selected in the composer. */
 export type AcpVideoGenerationOptions = {
-  aspectRatio: '2:3' | '3:2' | '1:1' | '9:16' | '16:9';
-  resolution: '480P' | '720P';
-  durationSeconds: 6 | 10 | 15;
+  modelId: string;
+  /** Exact upstream dimensions; display resolution must never replace this value. */
+  size: string;
+  mode: string;
+  aspectRatio: string;
+  resolution?: string;
+  durationSeconds: number;
 };
 
 export type AcpChatPromptPayload = AcpSessionKeyPayload & {
@@ -90,3 +96,14 @@ export type AcpPermissionRequestEnvelope = {
 };
 
 export type AcpPromptContentBlock = ContentBlock;
+
+/** Terminal failure update emitted when ACP rejects a prompt without recording one. */
+export type AcpTurnFailureUpdate = {
+  sessionUpdate: 'uclaw_turn_failure';
+  userMessageId: string;
+  errorMessage: string;
+  errorCode?: AcpChatErrorCode;
+  retryable?: boolean;
+  httpStatus?: number;
+  upstreamCode?: string;
+};

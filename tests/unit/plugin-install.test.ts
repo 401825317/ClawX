@@ -1,440 +1,514 @@
+// @vitest-environment node
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const {
-  mockExistsSync,
-  mockCpSync,
-  mockCopyFileSync,
-  mockStatSync,
-  mockMkdirSync,
-  mockRmSync,
-  mockReadFileSync,
-  mockWriteFileSync,
-  mockReaddirSync,
-  mockRealpathSync,
-  mockRenameSync,
-  mockLoggerWarn,
-  mockLoggerInfo,
-  mockLoggerError,
-  mockHomedir,
+  fsMocks,
   mockApp,
+  mockDelay,
+  mockLoggerError,
+  mockLoggerInfo,
+  mockLoggerWarn,
+  mockUpsertPluginInstallRecordsIntoSqlite,
+  paths,
 } = vi.hoisted(() => ({
-  mockExistsSync: vi.fn(),
-  mockCpSync: vi.fn(),
-  mockCopyFileSync: vi.fn(),
-  mockStatSync: vi.fn(() => ({ isDirectory: () => false })),
-  mockMkdirSync: vi.fn(),
-  mockRmSync: vi.fn(),
-  mockReadFileSync: vi.fn(),
-  mockWriteFileSync: vi.fn(),
-  mockReaddirSync: vi.fn(),
-  mockRealpathSync: vi.fn(),
-  mockRenameSync: vi.fn(),
-  mockLoggerWarn: vi.fn(),
-  mockLoggerInfo: vi.fn(),
-  mockLoggerError: vi.fn(),
-  mockHomedir: vi.fn(() => '/home/test'),
+  fsMocks: {
+    copyFile: vi.fn(),
+    copyFailureCode: null as string | null,
+  },
   mockApp: {
     isPackaged: true,
-    getAppPath: vi.fn(() => '/mock/app'),
+    getAppPath: vi.fn(() => process.cwd()),
+  },
+  mockDelay: vi.fn(async () => undefined),
+  mockLoggerError: vi.fn(),
+  mockLoggerInfo: vi.fn(),
+  mockLoggerWarn: vi.fn(),
+  mockUpsertPluginInstallRecordsIntoSqlite: vi.fn(() => true),
+  paths: {
+    configPath: '',
+    stateDir: '',
   },
 }));
-
-const ORIGINAL_PLATFORM_DESCRIPTOR = Object.getOwnPropertyDescriptor(process, 'platform');
-
-vi.mock('node:fs', async () => {
-  const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
-  const mocked = {
-    ...actual,
-    existsSync: mockExistsSync,
-    cpSync: mockCpSync,
-    copyFileSync: mockCopyFileSync,
-    statSync: mockStatSync,
-    mkdirSync: mockMkdirSync,
-    rmSync: mockRmSync,
-    readFileSync: mockReadFileSync,
-    writeFileSync: mockWriteFileSync,
-    readdirSync: mockReaddirSync,
-    realpathSync: mockRealpathSync,
-    renameSync: mockRenameSync,
-  };
-  return {
-    ...mocked,
-    default: mocked,
-  };
-});
 
 vi.mock('node:fs/promises', async () => {
   const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
   return {
     ...actual,
-    readdir: vi.fn(),
-    stat: vi.fn(),
-    copyFile: vi.fn(),
-    mkdir: vi.fn(),
+    copyFile: fsMocks.copyFile,
   };
 });
 
-vi.mock('node:os', () => ({
-  homedir: () => mockHomedir(),
-  default: {
-    homedir: () => mockHomedir(),
-  },
-}));
+vi.mock('node:timers/promises', async () => {
+  const actual = await vi.importActual<typeof import('node:timers/promises')>('node:timers/promises');
+  return {
+    ...actual,
+    setTimeout: mockDelay,
+  };
+});
 
-vi.mock('electron', () => ({
-  app: mockApp,
+vi.mock('electron', () => ({ app: mockApp }));
+
+vi.mock('@electron/utils/config-mutex', () => ({
+  withConfigLock: async <T>(operation: () => Promise<T>): Promise<T> => operation(),
 }));
 
 vi.mock('@electron/utils/logger', () => ({
   logger: {
-    warn: mockLoggerWarn,
-    info: mockLoggerInfo,
     error: mockLoggerError,
+    info: mockLoggerInfo,
+    warn: mockLoggerWarn,
   },
 }));
 
 vi.mock('@electron/utils/plugin-install-index', () => ({
-  upsertPluginInstallRecordsIntoSqlite: vi.fn(() => true),
-  ensureOpenClawStateDirExists: vi.fn(),
+  upsertPluginInstallRecordsIntoSqlite: mockUpsertPluginInstallRecordsIntoSqlite,
 }));
 
 vi.mock('@electron/utils/paths', () => ({
-  resolveOpenClawConfigPath: () => `${mockHomedir()}/.openclaw/openclaw.json`,
-  resolveOpenClawStateDir: () => `${mockHomedir()}/.openclaw`,
+  resolveOpenClawConfigPath: () => paths.configPath,
+  resolveOpenClawStateDir: () => paths.stateDir,
 }));
 
-function setPlatform(platform: NodeJS.Platform): void {
-  Object.defineProperty(process, 'platform', {
-    value: platform,
-    configurable: true,
-  });
+type FsPromises = typeof import('node:fs/promises');
+
+let actualFs: FsPromises;
+let testRoot: string;
+
+type PluginFixtureOptions = {
+  dependencies?: Record<string, string>;
+  entry?: string;
+  id: string;
+  includeEntry?: boolean;
+  name: string;
+  version?: string;
+};
+
+function errno(code: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(`synthetic ${code}`), { code });
+}
+
+async function createPluginFixture(
+  directory: string,
+  {
+    dependencies = {},
+    entry = 'index.mjs',
+    id,
+    includeEntry = true,
+    name,
+    version = '1.2.3',
+  }: PluginFixtureOptions,
+): Promise<void> {
+  await actualFs.mkdir(directory, { recursive: true });
+  await Promise.all([
+    actualFs.writeFile(
+      join(directory, 'openclaw.plugin.json'),
+      `${JSON.stringify({ entry, id, version }, null, 2)}\n`,
+      'utf8',
+    ),
+    actualFs.writeFile(
+      join(directory, 'package.json'),
+      `${JSON.stringify({ dependencies, main: entry, name, version }, null, 2)}\n`,
+      'utf8',
+    ),
+  ]);
+  if (includeEntry) {
+    await actualFs.writeFile(join(directory, entry), 'export default {};\n', 'utf8');
+  }
+}
+
+async function writeManagedPluginMarker(directory: string, pluginId: string): Promise<void> {
+  await actualFs.writeFile(
+    join(directory, '.uclaw-managed-plugin.json'),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      managedBy: 'uclaw',
+      pluginId,
+      contentFingerprint: '0'.repeat(64),
+      installedAt: '2026-08-19T00:00:00.000Z',
+    }, null, 2)}\n`,
+    'utf8',
+  );
+}
+
+async function readConfig(): Promise<Record<string, unknown>> {
+  return JSON.parse(await actualFs.readFile(paths.configPath, 'utf8')) as Record<string, unknown>;
 }
 
 describe('plugin installer diagnostics', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
-    mockApp.isPackaged = true;
-    mockHomedir.mockReturnValue('/home/test');
-    setPlatform('linux');
+    actualFs = await vi.importActual<FsPromises>('node:fs/promises');
+    testRoot = await actualFs.mkdtemp(join(tmpdir(), 'uclaw-plugin-install-'));
+    paths.stateDir = join(testRoot, 'openclaw-state');
+    paths.configPath = join(paths.stateDir, 'openclaw.json');
+    await actualFs.mkdir(paths.stateDir, { recursive: true });
 
-    mockExistsSync.mockReturnValue(false);
-    mockCpSync.mockImplementation(() => undefined);
-    mockMkdirSync.mockImplementation(() => undefined);
-    mockRmSync.mockImplementation(() => undefined);
-    mockReadFileSync.mockReturnValue('{}');
-    mockWriteFileSync.mockImplementation(() => undefined);
-    mockReaddirSync.mockReturnValue([]);
-    mockRealpathSync.mockImplementation((input: string) => input);
-    mockRenameSync.mockImplementation(() => undefined);
+    mockApp.isPackaged = true;
+    fsMocks.copyFailureCode = null;
+    fsMocks.copyFile.mockImplementation(async (...args: Parameters<FsPromises['copyFile']>) => {
+      if (fsMocks.copyFailureCode) throw errno(fsMocks.copyFailureCode);
+      return Reflect.apply(actualFs.copyFile, actualFs, args) as Promise<void>;
+    });
+    mockDelay.mockResolvedValue(undefined);
+    mockUpsertPluginInstallRecordsIntoSqlite.mockReturnValue(true);
   });
 
-  afterEach(() => {
-    if (ORIGINAL_PLATFORM_DESCRIPTOR) {
-      Object.defineProperty(process, 'platform', ORIGINAL_PLATFORM_DESCRIPTOR);
-    }
+  afterEach(async () => {
+    await actualFs.rm(testRoot, { recursive: true, force: true });
   });
 
   it('returns source-missing warning when bundled mirror cannot be found', async () => {
     const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
-    const result = ensurePluginInstalled('wecom', ['/bundle/wecom'], 'WeCom');
+
+    const result = await ensurePluginInstalled('wecom', [join(testRoot, 'missing')], 'WeCom');
 
     expect(result.installed).toBe(false);
     expect(result.warning).toContain('Bundled WeCom plugin mirror not found');
     expect(mockLoggerWarn).not.toHaveBeenCalled();
   });
 
-  it('repairs a same-version plugin when its local runtime dependency is missing', async () => {
-    mockApp.isPackaged = false;
-    const sourceDir = '/mock/app/resources/openclaw-plugins/clawx-openai-image';
-    const targetDir = '/home/test/.openclaw/extensions/clawx-openai-image';
-    const dependencySource = '/mock/app/node_modules/undici';
-    const manifest = JSON.stringify({ id: 'clawx-openai-image', version: '0.1.11', entry: 'index.mjs' });
-    const packageJson = JSON.stringify({
+  it('repairs a same-version plugin when its installed runtime dependency is missing', async () => {
+    const sourceDir = join(testRoot, 'bundle', 'clawx-openai-image');
+    const targetDir = join(paths.stateDir, 'extensions', 'clawx-openai-image');
+    const fixture = {
+      dependencies: { undici: '8.1.0' },
+      id: 'clawx-openai-image',
       name: 'clawx-openai-image-plugin',
       version: '0.1.11',
-      main: 'index.mjs',
-      dependencies: { undici: '8.1.0' },
-    });
-    let dependencyCopied = false;
-
-    mockExistsSync.mockImplementation((input: string) => {
-      const value = String(input);
-      if (value.endsWith('/openclaw.plugin.json') || value.endsWith('/package.json') || value.endsWith('/index.mjs')) {
-        if (value.includes('/node_modules/undici/package.json')) {
-          return value === `${dependencySource}/package.json` || dependencyCopied;
-        }
-        return value.startsWith(sourceDir)
-          || value.startsWith(targetDir)
-          || value.includes('/.uclaw-plugin-install/clawx-openai-image.staging-');
-      }
-      if (value === `${dependencySource}/package.json`) return true;
-      if (value === targetDir) return true;
-      return false;
-    });
-    mockReadFileSync.mockImplementation((input: string) => {
-      const value = String(input);
-      if (value.endsWith('/package.json') && !value.includes('/node_modules/undici/')) return packageJson;
-      if (value.endsWith('/openclaw.plugin.json')) return manifest;
-      if (value.endsWith('/index.mjs')) return 'export default {}';
-      if (value === `${dependencySource}/package.json`) return JSON.stringify({ name: 'undici', version: '8.1.0' });
-      return '{}';
-    });
-    mockCpSync.mockImplementation((source: string, destination: string) => {
-      if (source === dependencySource && destination.includes('/node_modules/undici')) {
-        dependencyCopied = true;
-      }
-    });
+    };
+    await createPluginFixture(sourceDir, fixture);
+    await createPluginFixture(targetDir, fixture);
+    await actualFs.mkdir(join(sourceDir, 'node_modules', 'undici'), { recursive: true });
+    await actualFs.writeFile(
+      join(sourceDir, 'node_modules', 'undici', 'package.json'),
+      '{"name":"undici","version":"8.1.0"}\n',
+      'utf8',
+    );
 
     const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
-    const result = ensurePluginInstalled('clawx-openai-image', [sourceDir], 'UClaw OpenAI Image');
+    const result = await ensurePluginInstalled('clawx-openai-image', [sourceDir], 'UClaw OpenAI Image');
 
     expect(result).toEqual({ installed: true });
-    expect(mockCpSync).toHaveBeenCalledWith(
-      sourceDir,
-      expect.stringContaining('/.uclaw-plugin-install/clawx-openai-image.staging-'),
-      { recursive: true, dereference: true },
-    );
-    expect(mockCpSync).toHaveBeenCalledWith(
-      dependencySource,
-      expect.stringMatching(/\.uclaw-plugin-install\/clawx-openai-image\.staging-.+\/node_modules\/undici$/u),
-      { recursive: true, dereference: true },
-    );
-    expect(mockRenameSync).toHaveBeenCalledWith(
-      expect.stringContaining('/.uclaw-plugin-install/clawx-openai-image.staging-'),
-      targetDir,
-    );
+    await expect(actualFs.access(
+      join(targetDir, 'node_modules', 'undici', 'package.json'),
+    )).resolves.toBeUndefined();
     expect(mockLoggerInfo).toHaveBeenCalledWith(
       '[plugin] Refreshing UClaw OpenAI Image plugin: runtime dependencies missing (undici)',
     );
   });
 
-  it('keeps the installed plugin and reports a missing runtime dependency when repair input is unavailable', async () => {
-    mockApp.isPackaged = false;
-    const sourceDir = '/mock/app/resources/openclaw-plugins/clawx-openai-image';
-    const targetDir = '/home/test/.openclaw/extensions/clawx-openai-image';
-    const manifest = JSON.stringify({ id: 'clawx-openai-image', version: '0.1.11', entry: 'index.mjs' });
-    const packageJson = JSON.stringify({
+  it('keeps an incomplete installed plugin when no bundled repair source exists', async () => {
+    const targetDir = join(paths.stateDir, 'extensions', 'clawx-openai-image');
+    await createPluginFixture(targetDir, {
+      dependencies: { undici: '8.1.0' },
+      id: 'clawx-openai-image',
       name: 'clawx-openai-image-plugin',
       version: '0.1.11',
-      main: 'index.mjs',
-      dependencies: { undici: '8.1.0' },
     });
-
-    mockExistsSync.mockImplementation((input: string) => {
-      const value = String(input);
-      if (value.includes('/node_modules/undici/package.json')) return false;
-      if (value.endsWith('/openclaw.plugin.json') || value.endsWith('/package.json') || value.endsWith('/index.mjs')) {
-        return value.startsWith(sourceDir)
-          || value.startsWith(targetDir)
-          || value.includes('/.uclaw-plugin-install/clawx-openai-image.staging-');
-      }
-      return value === targetDir;
-    });
-    mockReadFileSync.mockImplementation((input: string) => {
-      const value = String(input);
-      if (value.endsWith('/package.json')) return packageJson;
-      if (value.endsWith('/openclaw.plugin.json')) return manifest;
-      if (value.endsWith('/index.mjs')) return 'export default {}';
-      return '{}';
-    });
+    await writeManagedPluginMarker(targetDir, 'clawx-openai-image');
 
     const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
-    const result = ensurePluginInstalled('clawx-openai-image', [sourceDir], 'UClaw OpenAI Image');
+    const result = await ensurePluginInstalled(
+      'clawx-openai-image',
+      [join(testRoot, 'missing-source')],
+      'UClaw OpenAI Image',
+    );
 
     expect(result).toEqual({
       installed: false,
-      warning: 'Failed to install bundled UClaw OpenAI Image plugin mirror',
+      warning: expect.stringContaining('no bundled repair source is available: undici'),
     });
-    expect(mockRenameSync).not.toHaveBeenCalled();
-    expect(mockLoggerWarn).toHaveBeenCalledWith(
-      '[plugin] Failed to hydrate runtime dependencies',
-      expect.objectContaining({ missingDeps: ['undici'] }),
-    );
+    await expect(actualFs.access(join(targetDir, 'openclaw.plugin.json'))).resolves.toBeUndefined();
   });
 
-  it('retries once on Windows and logs diagnostic details when bundled copy fails', async () => {
-    setPlatform('win32');
-    mockHomedir.mockReturnValue('C:\\Users\\test');
-
-    const sourceDir = 'C:\\Program Files\\ClawX\\resources\\openclaw-plugins\\wecom';
-    const sourceManifestSuffix = 'Program Files\\ClawX\\resources\\openclaw-plugins\\wecom\\openclaw.plugin.json';
-
-    mockExistsSync.mockImplementation((input: string) => String(input).includes(sourceManifestSuffix));
-    // On win32, cpSyncSafe uses _copyDirSyncRecursive (readdirSync) instead of cpSync.
-    // Simulate copy failure by making readdirSync throw during directory traversal.
-    mockReaddirSync.mockImplementation((_path: string, opts?: unknown) => {
-      if (opts && typeof opts === 'object' && 'withFileTypes' in (opts as Record<string, unknown>)) {
-        const error = new Error('path too long') as NodeJS.ErrnoException;
-        error.code = 'ENAMETOOLONG';
-        throw error;
-      }
-      return [];
+  it('classifies a malformed staged package as a validation failure', async () => {
+    const sourceDir = join(testRoot, 'bundle', 'wecom');
+    await createPluginFixture(sourceDir, {
+      id: 'wecom',
+      includeEntry: false,
+      name: '@wecom/wecom-openclaw-plugin',
     });
 
     const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
-    const result = ensurePluginInstalled('wecom', [sourceDir], 'WeCom');
+    const result = await ensurePluginInstalled('wecom', [sourceDir], 'WeCom');
 
     expect(result).toEqual({
       installed: false,
       warning: 'Failed to install bundled WeCom plugin mirror',
     });
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      '[plugin] Bundled mirror install failed for WeCom',
+      expect.objectContaining({
+        attempts: expect.arrayContaining([
+          expect.objectContaining({ attempt: 1, phase: 'validation' }),
+        ]),
+      }),
+    );
+  });
 
-    // On win32, cpSyncSafe walks the directory via readdirSync (with withFileTypes)
-    const copyAttempts = mockReaddirSync.mock.calls.filter(
-      (call: unknown[]) => {
-        const opts = call[1];
-        return opts && typeof opts === 'object' && 'withFileTypes' in (opts as Record<string, unknown>);
+  it('keeps the root errno and staging phase in failed-copy diagnostics', async () => {
+    const sourceDir = join(testRoot, 'bundle', 'wecom');
+    await createPluginFixture(sourceDir, {
+      id: 'wecom',
+      name: '@wecom/wecom-openclaw-plugin',
+    });
+    fsMocks.copyFailureCode = 'EPERM';
+
+    const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
+    const result = await ensurePluginInstalled('wecom', [sourceDir], 'WeCom');
+
+    expect(result).toEqual({
+      installed: false,
+      warning: 'Failed to install bundled WeCom plugin mirror',
+    });
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      '[plugin] Bundled mirror install failed for WeCom',
+      expect.objectContaining({
+        attempts: expect.arrayContaining([
+          expect.objectContaining({ code: 'EPERM', phase: 'staging-copy' }),
+        ]),
+      }),
+    );
+    expect(mockDelay).toHaveBeenCalledWith(150);
+  });
+
+  it('preserves a same-name user plugin instead of overwriting it', async () => {
+    const pluginId = 'clawx-openai-image';
+    const sourceDir = join(testRoot, 'bundle', pluginId);
+    const targetDir = join(paths.stateDir, 'extensions', pluginId);
+    await createPluginFixture(sourceDir, {
+      id: pluginId,
+      name: 'clawx-openai-image-plugin',
+      version: '2.0.0',
+    });
+    await createPluginFixture(targetDir, {
+      id: pluginId,
+      name: 'user-owned-image-plugin',
+      version: '9.9.9',
+    });
+    await actualFs.writeFile(join(targetDir, 'index.mjs'), 'export default { owner: "user" };\n', 'utf8');
+    const before = await actualFs.readFile(join(targetDir, 'index.mjs'), 'utf8');
+
+    const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
+    const result = await ensurePluginInstalled(pluginId, [sourceDir], 'UClaw OpenAI Image');
+
+    expect(result).toMatchObject({
+      installed: false,
+      code: 'managed-plugin-ownership-conflict',
+      action: 'preserved',
+      ownership: {
+        status: 'user-owned-or-unknown',
+        code: 'ownership_not_proven',
       },
-    );
-    expect(copyAttempts).toHaveLength(2); // initial + 1 retry
-    const firstSrcPath = String(copyAttempts[0][0]);
-    expect(firstSrcPath.startsWith('\\\\?\\')).toBe(true);
-
+    });
+    await expect(actualFs.readFile(join(targetDir, 'index.mjs'), 'utf8')).resolves.toBe(before);
+    await expect(actualFs.access(join(targetDir, '.uclaw-managed-plugin.json'))).rejects.toMatchObject({ code: 'ENOENT' });
     expect(mockLoggerWarn).toHaveBeenCalledWith(
-      '[plugin] Bundled mirror install failed for WeCom',
+      '[plugin] Preserved same-name plugin because UClaw ownership was not proven',
+      expect.objectContaining({ pluginId, outcome: 'preserved' }),
+    );
+  });
+
+  it('upgrades a stale plugin carrying a valid UClaw managed marker', async () => {
+    const pluginId = 'uclaw-local-artifacts';
+    const sourceDir = join(testRoot, 'bundle', pluginId);
+    const targetDir = join(paths.stateDir, 'extensions', pluginId);
+    await createPluginFixture(sourceDir, {
+      id: pluginId,
+      name: 'uclaw-local-artifacts-plugin',
+      version: '2.0.0',
+    });
+    await createPluginFixture(targetDir, {
+      id: pluginId,
+      name: 'uclaw-local-artifacts-plugin',
+      version: '1.0.0',
+    });
+    await writeManagedPluginMarker(targetDir, pluginId);
+
+    const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
+    const installResult = await ensurePluginInstalled(pluginId, [sourceDir], 'UClaw Local Artifacts');
+    expect(installResult).toEqual({ installed: true });
+
+    const installedPackage = JSON.parse(
+      await actualFs.readFile(join(targetDir, 'package.json'), 'utf8'),
+    ) as { version: string };
+    const marker = JSON.parse(
+      await actualFs.readFile(join(targetDir, '.uclaw-managed-plugin.json'), 'utf8'),
+    ) as { managedBy: string; pluginId: string; contentFingerprint: string };
+    expect(installedPackage.version).toBe('2.0.0');
+    expect(marker).toMatchObject({ managedBy: 'uclaw', pluginId });
+    expect(marker.contentFingerprint).toMatch(/^[a-f0-9]{64}$/u);
+  });
+
+  it('uses an integrity-bound trusted install record when the marker is missing', async () => {
+    const pluginId = 'whatsapp';
+    const sourceDir = join(testRoot, 'bundle', pluginId);
+    const targetDir = join(paths.stateDir, 'extensions', pluginId);
+    await actualFs.writeFile(paths.configPath, '{"plugins":{"enabled":true}}\n', 'utf8');
+    await createPluginFixture(sourceDir, {
+      id: pluginId,
+      name: '@openclaw/whatsapp',
+      version: '1.0.0',
+    });
+
+    const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
+    await expect(ensurePluginInstalled(pluginId, [sourceDir], 'WhatsApp'))
+      .resolves.toEqual({ installed: true });
+    await actualFs.rm(join(targetDir, '.uclaw-managed-plugin.json'));
+    await createPluginFixture(sourceDir, {
+      id: pluginId,
+      name: '@openclaw/whatsapp',
+      version: '2.0.0',
+    });
+
+    await expect(ensurePluginInstalled(pluginId, [sourceDir], 'WhatsApp'))
+      .resolves.toEqual({ installed: true });
+    const installedPackage = JSON.parse(
+      await actualFs.readFile(join(targetDir, 'package.json'), 'utf8'),
+    ) as { version: string };
+    expect(installedPackage.version).toBe('2.0.0');
+  });
+
+  it('fails safe when a managed marker is malformed', async () => {
+    const pluginId = 'uclaw-video';
+    const sourceDir = join(testRoot, 'bundle', pluginId);
+    const targetDir = join(paths.stateDir, 'extensions', pluginId);
+    await createPluginFixture(sourceDir, {
+      id: pluginId,
+      name: 'uclaw-video-plugin',
+      version: '2.0.0',
+    });
+    await createPluginFixture(targetDir, {
+      id: pluginId,
+      name: 'uclaw-video-plugin',
+      version: '1.0.0',
+    });
+    await actualFs.writeFile(join(targetDir, '.uclaw-managed-plugin.json'), '{broken', 'utf8');
+    const before = await actualFs.readFile(join(targetDir, 'package.json'), 'utf8');
+
+    const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
+    const result = await ensurePluginInstalled(pluginId, [sourceDir], 'UClaw Video');
+
+    expect(result).toMatchObject({
+      installed: false,
+      code: 'managed-plugin-ownership-conflict',
+      action: 'preserved',
+      ownership: {
+        status: 'indeterminate',
+        evidence: 'invalid-marker',
+        code: 'managed_marker_invalid',
+      },
+    });
+    await expect(actualFs.readFile(join(targetDir, 'package.json'), 'utf8')).resolves.toBe(before);
+  });
+
+  it('refuses cleanup of an unowned same-name plugin and removes a marked managed one', async () => {
+    const pluginId = 'parallel';
+    const sourceDir = join(testRoot, 'bundle', pluginId);
+    const targetDir = join(paths.stateDir, 'extensions', pluginId);
+    await createPluginFixture(sourceDir, {
+      id: pluginId,
+      name: '@openclaw/parallel-plugin',
+      version: '2.0.0',
+    });
+    await createPluginFixture(targetDir, {
+      id: pluginId,
+      name: 'user-parallel-plugin',
+      version: '1.0.0',
+    });
+
+    const { removeManagedPluginInstall } = await import('@electron/utils/plugin-install');
+    await expect(removeManagedPluginInstall(pluginId, {
+      candidateSources: [sourceDir],
+      operation: 'test-cleanup',
+    })).resolves.toMatchObject({
+      removed: false,
+      preserved: true,
+      code: 'ownership-conflict',
+    });
+    await expect(actualFs.access(targetDir)).resolves.toBeUndefined();
+
+    await writeManagedPluginMarker(targetDir, pluginId);
+    await expect(removeManagedPluginInstall(pluginId, {
+      candidateSources: [sourceDir],
+      operation: 'test-cleanup',
+    })).resolves.toMatchObject({
+      removed: true,
+      preserved: false,
+      code: 'removed',
+    });
+    await expect(actualFs.access(targetDir)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it.each([
+    ['whatsapp', '@openclaw/whatsapp'],
+    ['parallel', '@openclaw/parallel-plugin'],
+  ] as const)('writes trusted install metadata for mirrored official %s plugin', async (pluginId, npmName) => {
+    const sourceDir = join(testRoot, 'bundle', pluginId);
+    await createPluginFixture(sourceDir, {
+      id: pluginId,
+      name: npmName,
+      version: '2026.6.10',
+    });
+    await actualFs.writeFile(
+      paths.configPath,
+      '{"plugins":{"allow":[],"enabled":true}}\n',
+      'utf8',
+    );
+
+    const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
+    const result = await ensurePluginInstalled(pluginId, [sourceDir], pluginId);
+    const config = await readConfig() as {
+      plugins?: { installs?: Record<string, Record<string, unknown>> };
+    };
+
+    expect(result).toEqual({ installed: true });
+    expect(config.plugins?.installs?.[pluginId]).toMatchObject({
+      resolvedName: npmName,
+      source: 'npm',
+      version: '2026.6.10',
+    });
+  });
+
+  it('repairs all trusted plugin records in one SQLite batch', async () => {
+    await actualFs.writeFile(paths.configPath, '{"plugins":{"enabled":true}}\n', 'utf8');
+    for (const [pluginId, npmName] of [
+      ['whatsapp', '@openclaw/whatsapp'],
+      ['discord', '@openclaw/discord'],
+      ['qqbot', '@openclaw/qqbot'],
+      ['parallel', '@openclaw/parallel-plugin'],
+    ] as const) {
+      await createPluginFixture(join(paths.stateDir, 'extensions', pluginId), {
+        id: pluginId,
+        name: npmName,
+      });
+      await writeManagedPluginMarker(join(paths.stateDir, 'extensions', pluginId), pluginId);
+    }
+
+    const { repairTrustedOfficialPluginInstallRecords } = await import('@electron/utils/plugin-install');
+    await repairTrustedOfficialPluginInstallRecords();
+
+    const config = await readConfig() as {
+      plugins?: { installs?: Record<string, unknown> };
+    };
+    expect(Object.keys(config.plugins?.installs ?? {}).sort()).toEqual([
+      'discord',
+      'parallel',
+      'qqbot',
+      'whatsapp',
+    ]);
+    expect(mockUpsertPluginInstallRecordsIntoSqlite).toHaveBeenCalledTimes(1);
+    expect(mockUpsertPluginInstallRecordsIntoSqlite).toHaveBeenCalledWith(
       expect.objectContaining({
-        pluginDirName: 'wecom',
-        pluginLabel: 'WeCom',
-        sourceDir,
-        platform: 'win32',
-        attempts: [
-          expect.objectContaining({ attempt: 1, code: 'ENAMETOOLONG' }),
-          expect.objectContaining({ attempt: 2, code: 'ENAMETOOLONG' }),
-        ],
+        discord: expect.any(Object),
+        parallel: expect.any(Object),
+        qqbot: expect.any(Object),
+        whatsapp: expect.any(Object),
       }),
-    );
-  });
-
-  it('logs EPERM diagnostics with source and target paths', async () => {
-    setPlatform('win32');
-    mockHomedir.mockReturnValue('C:\\Users\\test');
-
-    const sourceDir = 'C:\\Program Files\\ClawX\\resources\\openclaw-plugins\\wecom';
-    const sourceManifestSuffix = 'Program Files\\ClawX\\resources\\openclaw-plugins\\wecom\\openclaw.plugin.json';
-
-    mockExistsSync.mockImplementation((input: string) => String(input).includes(sourceManifestSuffix));
-    // On win32, cpSyncSafe uses _copyDirSyncRecursive (readdirSync) instead of cpSync.
-    mockReaddirSync.mockImplementation((_path: string, opts?: unknown) => {
-      if (opts && typeof opts === 'object' && 'withFileTypes' in (opts as Record<string, unknown>)) {
-        const error = new Error('access denied') as NodeJS.ErrnoException;
-        error.code = 'EPERM';
-        throw error;
-      }
-      return [];
-    });
-
-    const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
-    const result = ensurePluginInstalled('wecom', [sourceDir], 'WeCom');
-
-    expect(result.installed).toBe(false);
-    expect(result.warning).toBe('Failed to install bundled WeCom plugin mirror');
-
-    expect(mockLoggerWarn).toHaveBeenCalledWith(
-      '[plugin] Bundled mirror install failed for WeCom',
-      expect.objectContaining({
-        sourceDir,
-        targetDir: expect.stringContaining('.openclaw/extensions/wecom'),
-        platform: 'win32',
-        attempts: [
-          expect.objectContaining({ attempt: 1, code: 'EPERM' }),
-          expect.objectContaining({ attempt: 2, code: 'EPERM' }),
-        ],
-      }),
-    );
-  });
-
-  it('writes trusted install metadata for mirrored official whatsapp plugin', async () => {
-    const configPath = '/home/test/.openclaw/openclaw.json';
-    const targetDir = '/home/test/.openclaw/extensions/whatsapp';
-    const sourceDir = '/bundle/whatsapp';
-
-    mockExistsSync.mockImplementation((input: string) => {
-      const value = String(input);
-      return value.includes('openclaw.plugin.json')
-        || value.endsWith('/index.js')
-        || value === configPath
-        || value.includes('/bundle/whatsapp/package.json')
-        || value.includes(`${targetDir}/package.json`);
-    });
-    mockReadFileSync.mockImplementation((input: string) => {
-      if (String(input) === configPath) {
-        return JSON.stringify({
-          plugins: {
-            allow: ['whatsapp'],
-            enabled: true,
-          },
-        });
-      }
-      if (String(input).endsWith('package.json')) {
-        return JSON.stringify({ name: '@openclaw/whatsapp', version: '2026.6.10', main: 'index.js' });
-      }
-      if (String(input).endsWith('openclaw.plugin.json')) return JSON.stringify({ id: 'whatsapp', entry: 'index.js' });
-      if (String(input).endsWith('index.js')) return 'export default {}';
-      return '{}';
-    });
-    mockRealpathSync.mockImplementation((input: string) => input);
-
-    const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
-    const result = ensurePluginInstalled('whatsapp', [sourceDir], 'WhatsApp');
-
-    expect(result.installed).toBe(true);
-    expect(mockWriteFileSync).toHaveBeenCalledWith(
-      configPath,
-      expect.stringContaining(`"installPath": "${targetDir}"`),
-      'utf-8',
-    );
-    expect(mockWriteFileSync).toHaveBeenCalledWith(
-      configPath,
-      expect.stringContaining('"resolvedName": "@openclaw/whatsapp"'),
-      'utf-8',
-    );
-  });
-
-  it('writes trusted install metadata for the mirrored official Parallel plugin', async () => {
-    const configPath = '/home/test/.openclaw/openclaw.json';
-    const targetDir = '/home/test/.openclaw/extensions/parallel';
-    const sourceDir = '/bundle/parallel';
-
-    mockExistsSync.mockImplementation((input: string) => {
-      const value = String(input);
-      return value.includes('openclaw.plugin.json')
-        || value.endsWith('/dist/index.js')
-        || value === configPath
-        || value.includes('/bundle/parallel/package.json')
-        || value.includes(`${targetDir}/package.json`);
-    });
-    mockReadFileSync.mockImplementation((input: string) => {
-      if (String(input) === configPath) {
-        return JSON.stringify({
-          plugins: {
-            allow: ['parallel'],
-            enabled: true,
-          },
-        });
-      }
-      if (String(input).endsWith('package.json')) {
-        return JSON.stringify({
-          name: '@openclaw/parallel-plugin',
-          version: '2026.6.10',
-          type: 'module',
-          openclaw: { runtimeExtensions: ['./dist/index.js'] },
-        });
-      }
-      if (String(input).endsWith('openclaw.plugin.json')) return JSON.stringify({ id: 'parallel' });
-      if (String(input).endsWith('dist/index.js')) return 'export default {}';
-      return '{}';
-    });
-    mockRealpathSync.mockImplementation((input: string) => input);
-
-    const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
-    const result = ensurePluginInstalled('parallel', [sourceDir], 'Parallel Search');
-
-    expect(result.installed).toBe(true);
-    expect(mockWriteFileSync).toHaveBeenCalledWith(
-      configPath,
-      expect.stringContaining('"resolvedName": "@openclaw/parallel-plugin"'),
-      'utf-8',
     );
   });
 });
