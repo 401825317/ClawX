@@ -788,6 +788,7 @@ async function quiesceGatewayForManagedMutation(
 /** Restore the prior active state with a provably new credential environment. */
 async function resumeGatewayAfterManagedMutation(
   quiescence: GatewayQuiescence,
+  options: { startWhenStopped?: boolean } = {},
 ): Promise<Pick<ManagedAuthStatus, 'gatewayReloaded' | 'gatewayReloadError'>> {
   const { gatewayManager } = quiescence;
   try {
@@ -804,7 +805,7 @@ async function resumeGatewayAfterManagedMutation(
     };
   }
 
-  if (!gatewayManager || !quiescence.wasActive) {
+  if (!gatewayManager || (!quiescence.wasActive && options.startWhenStopped !== true)) {
     releaseManagedMutationLease(quiescence);
     return { gatewayReloaded: false };
   }
@@ -1661,7 +1662,10 @@ async function commitAuthenticatedSession(
     throw error;
   }
 
-  const gateway = await resumeGatewayAfterManagedMutation(quiescence);
+  // A login/register can be the first successful managed authentication after
+  // startup was correctly deferred. In that case there is no prior running
+  // Gateway to "resume", but the authenticated runtime should start now.
+  const gateway = await resumeGatewayAfterManagedMutation(quiescence, { startWhenStopped: true });
   return { ...committedStatus, ...gateway };
 }
 

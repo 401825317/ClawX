@@ -10,6 +10,7 @@ import type {
   HostApiResult,
 } from '@shared/host-api/contract';
 import type { HostResponse } from '@shared/host-api/types';
+import { UCLAW_PRODUCTION_ORIGIN } from '@shared/junfeiai-endpoints';
 
 export type RawHostInvokeResponse<T> = HostResponse<T>;
 
@@ -248,6 +249,74 @@ export async function seedGatewaySettings(portableRoot: string, gatewayPort: num
     gatewayPort,
     autoCheckUpdates: false,
     proxyEnabled: false,
+  }, null, 2)}\n`, 'utf8');
+}
+
+/** Seed a verified server-owned media policy for deterministic offline UI checks. */
+export async function seedManagedMediaPolicyCache(portableRoot: string): Promise<void> {
+  await ensurePortableRoot(portableRoot);
+  const userDataDir = path.join(portableRoot, 'UClawData', 'clawx');
+  const cachePath = path.join(userDataDir, 'managed-client-config.json');
+  const existing = await readJsonObject(cachePath);
+  const verifiedAt = Date.now();
+  const origin = UCLAW_PRODUCTION_ORIGIN;
+  await writeFile(cachePath, `${JSON.stringify({
+    ...existing,
+    imageModelPolicy: {
+      version: 1,
+      policiesByOrigin: {
+        ...(existing.imageModelPolicy && typeof existing.imageModelPolicy === 'object'
+          ? (existing.imageModelPolicy as Record<string, unknown>).policiesByOrigin
+          : {}),
+        [origin]: {
+          verifiedAt,
+          policy: {
+            defaultModel: 'regression-image',
+            defaultSize: '1024x1024',
+            defaultQuality: 'standard',
+            models: [{
+              id: 'regression-image',
+              sizes: ['1024x1024', '1024x1536'],
+              qualities: ['standard', 'high'],
+              defaultSize: '1024x1024',
+              defaultQuality: 'standard',
+              supportsEditing: false,
+            }],
+          },
+        },
+      },
+    },
+    videoModelPolicy: {
+      version: 2,
+      policiesByOrigin: {
+        ...(existing.videoModelPolicy && typeof existing.videoModelPolicy === 'object'
+          ? (existing.videoModelPolicy as Record<string, unknown>).policiesByOrigin
+          : {}),
+        [origin]: {
+          verifiedAt,
+          policy: {
+            defaultModel: 'regression-video',
+            defaultSize: '1280x720',
+            defaultAspectRatio: '16:9',
+            defaultResolution: '720P',
+            defaultDurationSeconds: 6,
+            models: [{
+              id: 'regression-video',
+              modes: ['text-to-video'],
+              sizes: ['1280x720', '720x1280'],
+              aspectRatios: ['16:9', '9:16'],
+              resolutions: ['720P'],
+              durations: [6, 15],
+              defaultSize: '1280x720',
+              defaultAspectRatio: '16:9',
+              defaultResolution: '720P',
+              defaultDurationSeconds: 6,
+              requiresImage: false,
+            }],
+          },
+        },
+      },
+    },
   }, null, 2)}\n`, 'utf8');
 }
 

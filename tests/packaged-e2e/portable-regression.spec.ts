@@ -27,6 +27,7 @@ import {
   launchPackagedApp,
   rawHostInvoke,
   seedGatewaySettings,
+  seedManagedMediaPolicyCache,
   waitForGateway,
   waitForGatewayReady,
   type PackagedAppContext,
@@ -1113,6 +1114,7 @@ test('runs the packaged UClaw regression matrix', async () => {
     );
     await mkdir(path.dirname(toolTargetPath), { recursive: true });
     await seedGatewaySettings(appRoot, gatewayPort);
+    await seedManagedMediaPolicyCache(appRoot);
     if (profile === 'full') {
       provider = new DeterministicOpenAiServer(toolTargetPath, {
         name: 'primary',
@@ -1889,20 +1891,38 @@ test('runs the packaged UClaw regression matrix', async () => {
 
     await runner.run('media.controls', 'expose managed image and video controls', async () => {
       const page = contextOrThrow(context).page;
+      const imagePolicy = await hostInvokeJson(page, 'managedClientConfig', 'imageModels', { refresh: false });
+      const videoPolicy = await hostInvokeJson(page, 'managedClientConfig', 'videoModels', { refresh: false });
+      expect(imagePolicy?.models?.length ?? 0).toBeGreaterThan(0);
+      expect(videoPolicy?.models?.length ?? 0).toBeGreaterThan(0);
       await startNewChat(page);
-      await page.getByTestId('chat-composer-mode-image').click();
+      const imageModeButton = page.getByTestId('chat-composer-mode-image');
+      const videoModeButton = page.getByTestId('chat-composer-mode-video');
+      await expect(imageModeButton).toBeEnabled({ timeout: 60_000 });
+      await expect(videoModeButton).toBeEnabled({ timeout: 60_000 });
+      await imageModeButton.click();
       await expect(page.getByTestId('chat-image-options')).toBeVisible();
-      await page.getByTestId('chat-composer-mode-video').click();
-      await expect(page.getByTestId('chat-video-model')).toHaveCount(0);
+      await videoModeButton.click();
+      const selectedVideoModel = videoPolicy.models.find((model: Record<string, unknown>) => (
+        model.id === videoPolicy.defaultModel
+      )) ?? videoPolicy.models[0];
+      expect(selectedVideoModel).toBeTruthy();
+      await expect(page.getByTestId('chat-video-model')).toHaveCount(
+        videoPolicy.models.length > 1 ? 1 : 0,
+      );
       const optionsTrigger = page.getByTestId('chat-video-options-trigger');
-      await expect(optionsTrigger).toContainText('16:9');
-      await expect(optionsTrigger).toContainText('480P');
-      await expect(optionsTrigger).toContainText('6s');
+      await expect(optionsTrigger).toContainText(videoPolicy.defaultAspectRatio);
+      await expect(optionsTrigger).toContainText(videoPolicy.defaultResolution);
+      await expect(optionsTrigger).toContainText(`${videoPolicy.defaultDurationSeconds}s`);
       return {
         imageModeAvailable: true,
         videoModeEnabled: true,
-        videoModelSelectorAvailable: false,
-        defaults: ['16:9', '480P', '6s'],
+        videoModelSelectorAvailable: videoPolicy.models.length > 1,
+        defaults: [
+          videoPolicy.defaultAspectRatio,
+          videoPolicy.defaultResolution,
+          `${videoPolicy.defaultDurationSeconds}s`,
+        ],
       };
     });
 

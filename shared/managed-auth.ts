@@ -75,6 +75,17 @@ export type ManagedAuthStatus = {
   gatewayReloadError?: string;
 };
 
+/** Whether a managed account has enough verified local state to start Gateway. */
+export function isManagedRuntimeReady(
+  status: Pick<ManagedAuthStatus, 'managed' | 'authValid' | 'hasRelayToken' | 'activationRequired' | 'deviceActivated'> | null | undefined,
+): boolean {
+  if (!status) return false;
+  if (!status.managed) return true;
+  return status.authValid
+    && status.hasRelayToken
+    && (!status.activationRequired || status.deviceActivated);
+}
+
 export type ManagedAuthResult = {
   success: boolean;
   status?: ManagedAuthStatus;

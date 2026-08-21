@@ -54,6 +54,18 @@ describe('app runtime managed gate startup', () => {
     );
   });
 
+  it('defers managed Gateway startup until local auth, relay, and activation are ready', () => {
+    const source = readFileSync(join(process.cwd(), 'electron/main/app-runtime.ts'), 'utf8');
+    const startup = source.slice(source.indexOf('// Start Gateway automatically'), source.indexOf('// Merge ClawX context'));
+
+    expect(startup).toContain('getManagedAuthLocalStatus()');
+    expect(startup).toContain('isManagedRuntimeReady(managedAuthStatus)');
+    expect(startup).toContain("event: 'managed_gateway_start_deferred'");
+    expect(startup.indexOf('getManagedAuthLocalStatus()')).toBeLessThan(
+      startup.indexOf('syncAllProviderAuthToRuntime('),
+    );
+  });
+
   it('stops refresh, Main subscription, and telemetry through one memoized shutdown', () => {
     const source = readFileSync(join(process.cwd(), 'electron/main/app-runtime.ts'), 'utf8');
     const stopServices = source.slice(

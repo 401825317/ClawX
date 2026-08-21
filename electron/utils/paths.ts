@@ -179,7 +179,12 @@ export function getClawXConfigDir(): string {
  * Get ClawX logs directory
  */
 export function getLogsDir(): string {
-  return join(getElectronApp().getPath('userData'), 'logs');
+  const electronApp = getElectronApp();
+  try {
+    return electronApp.getPath('logs');
+  } catch {
+    return join(electronApp.getPath('userData'), 'logs');
+  }
 }
 
 /**

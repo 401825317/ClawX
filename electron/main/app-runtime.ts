@@ -79,11 +79,13 @@ import { deviceOAuthManager } from '../utils/device-oauth';
 import { browserOAuthManager } from '../utils/browser-oauth';
 import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { syncAllProviderAuthToRuntime } from '../services/providers/provider-runtime-sync';
+import { getManagedAuthLocalStatus } from '../services/managed-auth-service';
 import { ATTACHMENT_VIDEO_STREAM_SCHEME } from '../services/attachment-video-stream';
 import {
   startBlenderBridgeServer,
   stopBlenderBridgeServer,
 } from '../services/blender/bridge-server';
+import { isManagedRuntimeReady } from '../../shared/managed-auth';
 
 const WINDOWS_APP_USER_MODEL_ID = 'app.clawx.desktop';
 const isE2EMode = process.env.CLAWX_E2E === '1';
@@ -801,13 +803,24 @@ async function initialize(): Promise<void> {
       if (await hasManagedRuntimeMutationMarker()) {
         logger.warn('Gateway auto-start and Provider sync skipped until managed credentials are recovered');
       } else {
-        await syncAllProviderAuthToRuntime({
-          refreshManagedPolicy: true,
-          reconcileManagedRuntime: true,
-        });
-        logger.debug('Auto-starting Gateway...');
-        await gatewayManager.start();
-        logger.info('Gateway auto-start succeeded');
+        const managedAuthStatus = await getManagedAuthLocalStatus();
+        if (!isManagedRuntimeReady(managedAuthStatus)) {
+          logger.info('Gateway auto-start deferred until managed authentication is ready', {
+            event: 'managed_gateway_start_deferred',
+            authValid: managedAuthStatus.authValid,
+            hasRelayToken: managedAuthStatus.hasRelayToken,
+            activationRequired: managedAuthStatus.activationRequired,
+            deviceActivated: managedAuthStatus.deviceActivated,
+          });
+        } else {
+          await syncAllProviderAuthToRuntime({
+            refreshManagedPolicy: true,
+            reconcileManagedRuntime: true,
+          });
+          logger.debug('Auto-starting Gateway...');
+          await gatewayManager.start();
+          logger.info('Gateway auto-start succeeded');
+        }
       }
     } catch (error) {
       logger.error('Gateway auto-start failed:', error);

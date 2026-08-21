@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   appendFile: vi.fn(),
+  getPath: vi.fn(),
   readdir: vi.fn(),
   stat: vi.fn(),
   unlink: vi.fn(),
@@ -14,7 +15,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('electron', () => ({
   app: {
-    getPath: () => tmpdir(),
+    getPath: (...args: unknown[]) => mocks.getPath(...args),
     getVersion: () => 'test',
     isPackaged: false,
   },
@@ -33,6 +34,7 @@ import { __test, initLogger, logger } from '@electron/utils/logger';
 describe('logger flush reliability', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    mocks.getPath.mockReset().mockImplementation(() => tmpdir());
     mocks.appendFile.mockReset().mockResolvedValue(undefined);
     mocks.readdir.mockReset().mockResolvedValue([]);
     mocks.stat.mockReset().mockResolvedValue({ size: 0 });
@@ -60,6 +62,11 @@ describe('logger flush reliability', () => {
     expect(mocks.appendFile).toHaveBeenCalledTimes(2);
     expect(__test.getFlushState().bufferedLines).toEqual([]);
     expect(__test.getFlushState().retryCount).toBe(0);
+  });
+
+  it('uses Electron\'s dedicated logs path instead of nesting logs under userData', () => {
+    expect(mocks.getPath).toHaveBeenCalledWith('logs');
+    expect(logger.getLogDir()).toBe(tmpdir());
   });
 
   it('stops automatic retries after the bounded retry limit without dropping the batch', async () => {

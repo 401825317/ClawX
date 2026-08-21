@@ -560,7 +560,16 @@ export function initLogger(): void {
       currentLevel = LogLevel.INFO;
     }
 
-    logDir = join(app.getPath('userData'), 'logs');
+    // Electron exposes a dedicated logs path. Portable mode assigns it to the
+    // removable-media-independent Runtime directory before this initializer
+    // runs; using userData here would silently put logs back on the USB disk.
+    try {
+      logDir = app.getPath('logs');
+    } catch {
+      // Keep logger initialization usable in minimal test/early-bootstrap
+      // environments where Electron has not exposed the logs path yet.
+      logDir = join(app.getPath('userData'), 'logs');
+    }
 
     if (!existsSync(logDir)) {
       mkdirSync(logDir, { recursive: true });

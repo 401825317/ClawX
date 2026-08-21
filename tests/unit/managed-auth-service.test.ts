@@ -2045,7 +2045,7 @@ describe('managed auth service transaction and compatibility behavior', () => {
     expect(mocks.markManagedDeviceActivated).not.toHaveBeenCalled();
   });
 
-  it('does not reload or start a stopped Gateway', async () => {
+  it('starts a Gateway that was deferred while the account was logged out', async () => {
     const gateway = createGateway('stopped');
 
     const result = await loginManagedAuth(
@@ -2056,7 +2056,7 @@ describe('managed auth service transaction and compatibility behavior', () => {
     expect(result.success).toBe(true);
     expect(gateway.reload).not.toHaveBeenCalled();
     expect(gateway.stop).toHaveBeenCalledTimes(1);
-    expect(gateway.start).not.toHaveBeenCalled();
+    expect(gateway.start).toHaveBeenCalledWith(RUNTIME_MUTATION_LEASE);
   });
 
   it('clears current and legacy credentials on logout', async () => {
