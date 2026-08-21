@@ -450,9 +450,21 @@ export function resolveConfiguredModelRef(
   preferredModelRef: string | null | undefined,
   defaultModelRef: string | null | undefined,
   modelOptions: ConfiguredModelOption[],
+  knownModelRefs: readonly string[] = [],
 ): string | null {
   const preferred = (preferredModelRef || '').trim();
-  if (preferred && isConfiguredModelRefAvailable(preferred, modelOptions)) {
+  const knownRuntimeRefs = new Set(
+    knownModelRefs
+      .map((modelRef) => modelRef.trim())
+      .filter(Boolean),
+  );
+  if (
+    preferred
+    && (
+      isConfiguredModelRefAvailable(preferred, modelOptions)
+      || knownRuntimeRefs.has(preferred)
+    )
+  ) {
     return preferred;
   }
 

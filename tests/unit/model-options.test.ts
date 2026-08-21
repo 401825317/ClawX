@@ -271,4 +271,36 @@ describe('model option helpers', () => {
       .toBe('custom-alpha123/model-alpha');
     expect(isConfiguredModelRefAvailable('custom-deleted/gpt-5.5', options)).toBe(false);
   });
+
+  it('preserves a configured personal model that is valid but intentionally hidden from the picker', () => {
+    const options = buildManagedTextModelOptions({
+      defaultModel: 'smart-latest',
+      models: [{ id: 'smart-latest', label: 'Smart' }],
+    });
+
+    expect(resolveConfiguredModelRef(
+      'custom-alpha123/model-alpha',
+      'openai/smart-latest',
+      options,
+      ['custom-alpha123/model-alpha'],
+    )).toBe('custom-alpha123/model-alpha');
+  });
+
+  it('preserves a managed runtime model that is hidden from the picker', () => {
+    const options = buildManagedTextModelOptions({
+      defaultModel: 'smart-latest',
+      models: [
+        { id: 'smart-latest', label: 'Smart' },
+        { id: 'artifact-v1', label: 'Artifact', visible: false },
+      ],
+    });
+
+    expect(options.map((option) => option.modelRef)).toEqual(['openai/smart-latest']);
+    expect(resolveConfiguredModelRef(
+      'openai/artifact-v1',
+      'openai/smart-latest',
+      options,
+      ['openai/artifact-v1'],
+    )).toBe('openai/artifact-v1');
+  });
 });

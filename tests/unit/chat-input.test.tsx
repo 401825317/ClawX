@@ -1097,6 +1097,67 @@ describe('ChatInput agent targeting', () => {
     });
   });
 
+  it('does not replace a configured personal Provider model with the managed default', async () => {
+    configureAgentAndModelPickers();
+    chatState.sessions = [{
+      key: chatState.currentSessionKey,
+      model: 'custom-aaaaaaaa/gpt-a',
+    }];
+    const onSend = vi.fn();
+
+    renderChatInput(onSend);
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Use my Provider' } });
+    fireEvent.click(screen.getByTestId('chat-composer-send'));
+
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith('Use my Provider', undefined, null);
+    });
+    expect(chatState.updateSessionModel).not.toHaveBeenCalled();
+  });
+
+  it('does not replace a personal OpenAI model with the managed default', async () => {
+    const now = '2025-01-01T00:00:00.000Z';
+    chatState.sessions = [{
+      key: chatState.currentSessionKey,
+      model: 'openai/gpt-5.5',
+    }];
+    providersState.accounts = [{
+      id: 'openai-personal',
+      vendorId: 'openai',
+      label: 'Personal OpenAI',
+      authMode: 'api_key',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-5.5',
+      enabled: true,
+      isDefault: true,
+      createdAt: now,
+      updatedAt: now,
+    }];
+    providersState.statuses = [{
+      id: 'openai-personal',
+      name: 'Personal OpenAI',
+      type: 'openai',
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-5.5',
+      enabled: true,
+      hasKey: true,
+      keyMasked: 'sk-***',
+      createdAt: now,
+      updatedAt: now,
+    }];
+    providersState.defaultAccountId = 'openai-personal';
+    const onSend = vi.fn();
+
+    renderChatInput(onSend);
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Use personal OpenAI' } });
+    fireEvent.click(screen.getByTestId('chat-composer-send'));
+
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith('Use personal OpenAI', undefined, null);
+    });
+    expect(chatState.updateSessionModel).not.toHaveBeenCalled();
+  });
+
   it('does not duplicate a send while repairing a removed session model', async () => {
     const repair = createDeferred<void>();
     const onSend = vi.fn();

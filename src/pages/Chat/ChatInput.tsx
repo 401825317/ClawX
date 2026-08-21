@@ -18,11 +18,13 @@ import { cn } from '@/lib/utils';
 import { useGatewayStore } from '@/stores/gateway';
 import { useAgentsStore } from '@/stores/agents';
 import { useChatStore } from '@/stores/chat';
+import { useProviderStore } from '@/stores/providers';
 import { useManagedClientConfigStore } from '@/stores/managed-client-config';
 import { useArtifactPanel } from '@/stores/artifact-panel';
 import { buildPreviewTarget } from '@/components/file-preview/build-preview-target';
 import {
   aspectRatioForMediaSize,
+  buildConfiguredModelOptions,
   buildManagedTextModelOptions,
   formatModelRefLabel,
   resolveConfiguredModelRef,
@@ -478,6 +480,12 @@ export function ChatInput({
   const gatewayStatus = useGatewayStore((s) => s.status);
   const agents = useAgentsStore((s) => s.agents);
   const defaultModelRef = useAgentsStore((s) => s.defaultModelRef);
+  const providerAccounts = useProviderStore((s) => s.accounts);
+  const providerStatuses = useProviderStore((s) => s.statuses);
+  const providerVendors = useProviderStore((s) => s.vendors);
+  const providerDefaultAccountId = useProviderStore((s) => s.defaultAccountId);
+  const providerSnapshotLoading = useProviderStore((s) => s.loading);
+  const providerSnapshotError = useProviderStore((s) => s.error);
   const textModelPolicy = useManagedClientConfigStore((s) => s.textModelPolicy);
   const loadManagedTextModels = useManagedClientConfigStore((s) => s.loadTextModels);
   const imageModelPolicy = useManagedClientConfigStore((s) => s.imageModelPolicy);
@@ -581,19 +589,52 @@ export function ChatInput({
     () => buildManagedTextModelOptions(textModelPolicy),
     [textModelPolicy],
   );
+  const configuredProviderModelOptions = useMemo(
+    () => buildConfiguredModelOptions(
+      providerAccounts,
+      providerStatuses,
+      providerVendors,
+      providerDefaultAccountId,
+    ),
+    [providerAccounts, providerDefaultAccountId, providerStatuses, providerVendors],
+  );
   const managedDefaultModelRef = toManagedClientTextModelRef(textModelPolicy.defaultModel);
   const requestedModelRef = optimisticModelRef
     || currentSession?.model
     || currentAgent?.modelRef
     || defaultModelRef
     || null;
+  const knownRuntimeModelRefs = useMemo(() => {
+    const refs = new Set<string>();
+    for (const model of textModelPolicy.models) {
+      const modelId = model.id.trim();
+      if (modelId) refs.add(toManagedClientTextModelRef(modelId));
+    }
+    for (const option of configuredProviderModelOptions) {
+      refs.add(option.modelRef);
+    }
+    // Do not rewrite an explicit session model while the provider snapshot is
+    // still loading (or temporarily unavailable). The picker catalog is not a
+    // complete runtime model catalog.
+    if ((providerSnapshotLoading || providerSnapshotError) && requestedModelRef) {
+      refs.add(requestedModelRef);
+    }
+    return [...refs];
+  }, [
+    configuredProviderModelOptions,
+    providerSnapshotError,
+    providerSnapshotLoading,
+    requestedModelRef,
+    textModelPolicy.models,
+  ]);
   const configuredModelRef = useMemo(
     () => resolveConfiguredModelRef(
       requestedModelRef,
       defaultModelRef || managedDefaultModelRef,
       modelOptions,
+      knownRuntimeModelRefs,
     ),
-    [defaultModelRef, managedDefaultModelRef, modelOptions, requestedModelRef],
+    [defaultModelRef, knownRuntimeModelRefs, managedDefaultModelRef, modelOptions, requestedModelRef],
   );
   const effectiveModelRef = configuredModelRef;
   const currentModelLabel = useMemo(() => {

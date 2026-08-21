@@ -65,6 +65,7 @@ let regressionModelRef = '';
 let regressionAccountId = '';
 let fallbackAccountId = '';
 let regressionSessionKey = '';
+let regressionSessionSequence = 0;
 let portableId = '';
 
 type LiveLoginCredentials = {
@@ -424,44 +425,27 @@ async function startNewChat(page: Page): Promise<void> {
   regressionSessionKey = '';
   if (!regressionModelRef) return;
 
-  const activeSession = page.locator('[data-testid^="sidebar-session-"][aria-current="page"]').last();
-  await expect(activeSession).toBeVisible({ timeout: 30_000 });
-  const testId = await activeSession.getAttribute('data-testid') ?? '';
-  regressionSessionKey = testId.replace(/^sidebar-session-/u, '');
-  if (!regressionSessionKey) throw new Error('The active packaged regression session key is unavailable.');
-
-  const existing = (await listGatewaySessions(page)).some((session) => (
-    String(session.key ?? session.sessionKey ?? '') === regressionSessionKey
-  ));
-  if (existing) {
-    await gatewayRpc(page, 'sessions.patch', { key: regressionSessionKey, model: regressionModelRef });
-  } else {
-    await gatewayRpc(page, 'sessions.create', {
-      key: regressionSessionKey,
-      agentId: 'main',
-      model: regressionModelRef,
-    });
-  }
-}
-
-async function dispatchRegressionChat(
-  page: Page,
-  prompt: string,
-  timeoutMs: number,
-): Promise<{ runId?: string }> {
-  if (!regressionModelRef || !regressionSessionKey) {
-    throw new Error('The deterministic regression Provider session is unavailable.');
-  }
-  await gatewayRpc(page, 'sessions.patch', { key: regressionSessionKey, model: regressionModelRef });
-  await page.getByTestId('chat-composer-input').fill(prompt);
-  const result = await gatewayRpc<{ runId?: string }>(page, 'chat.send', {
-    sessionKey: regressionSessionKey,
-    message: prompt,
-    deliver: false,
-    idempotencyKey: `packaged-regression-${randomBytes(12).toString('hex')}`,
-  }, Math.min(timeoutMs, 120_000));
-  await page.getByTestId('chat-composer-input').fill('');
-  return result;
+  // New Chat intentionally keeps its renderer-local placeholder out of the
+  // sidebar until the first ACP prompt creates a backing session. Create a
+  // real Gateway session with a known deterministic model, then select that
+  // visible session so the Composer can exercise the real ACP send path.
+  regressionSessionSequence += 1;
+  regressionSessionKey = `agent:main:session-${Date.now()}-${regressionSessionSequence}`;
+  await gatewayRpc(page, 'sessions.create', {
+    key: regressionSessionKey,
+    agentId: 'main',
+    model: regressionModelRef,
+  });
+  await expect.poll(async () => (
+    (await listGatewaySessions(page)).some((session) => (
+      String(session.key ?? session.sessionKey ?? '') === regressionSessionKey
+    ))
+  ), { timeout: 30_000 }).toBe(true);
+  const sessionRow = page.getByTestId(`sidebar-session-${regressionSessionKey}`);
+  await expect(sessionRow).toBeVisible({ timeout: 30_000 });
+  await sessionRow.click();
+  await expect(sessionRow).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByTestId('chat-composer-input')).toBeEnabled({ timeout: 120_000 });
 }
 
 async function addCustomProvider(
@@ -493,41 +477,24 @@ async function sendChat(page: Page, prompt: string, expectedText: string, timeou
   const messageCountBeforeSend = await chatMessages.count();
   const sendButton = page.getByTestId('chat-composer-send');
   await expect(page.getByTestId('chat-composer-input')).toBeEnabled({ timeout: 120_000 });
-  const directRegressionRun = Boolean(regressionModelRef && regressionSessionKey);
-  if (directRegressionRun) {
-    await dispatchRegressionChat(page, prompt, timeoutMs);
-  } else {
-    await page.getByTestId('chat-composer-input').fill(prompt);
-    await sendButton.click();
-  }
+  await page.getByTestId('chat-composer-input').fill(prompt);
+  await sendButton.click();
   const expected = page.getByText(expectedText, { exact: false }).last();
   const error = page.getByTestId('acp-error-banner');
   const transcriptFailure = page.getByText(/Agent failed before reply:/iu).last();
   const deadline = Date.now() + timeoutMs;
   let observedBusy = false;
-  let historyReloaded = false;
   while (Date.now() < deadline) {
     if (await expected.isVisible()) break;
     if (await error.isVisible()) throw new Error(`Chat failed before expected output: ${await error.innerText()}`);
     if (await transcriptFailure.isVisible()) {
       throw new Error(`Chat failed before expected output: ${await transcriptFailure.innerText()}`);
     }
-    if (directRegressionRun && !historyReloaded) {
-      const history = await gatewayRpc<Record<string, unknown>>(page, 'chat.history', {
-        sessionKey: regressionSessionKey,
-        limit: 200,
-        maxChars: 500_000,
-      }, 15_000).catch(() => null);
-      if (history && JSON.stringify(history).includes(expectedText)) {
-        historyReloaded = true;
-        await page.getByTestId(`sidebar-session-${regressionSessionKey}`).click();
-      }
-    }
     const sendTitle = await sendButton.getAttribute('title') ?? '';
     const isIdle = /Send|发送/iu.test(sendTitle);
     if (!isIdle) observedBusy = true;
     const messageCount = await chatMessages.count();
-    if (!directRegressionRun && isIdle && (observedBusy || messageCount >= messageCountBeforeSend + 2)) {
+    if (isIdle && (observedBusy || messageCount >= messageCountBeforeSend + 2)) {
       await page.waitForTimeout(500);
       if (await expected.isVisible()) break;
       const finalMessage = messageCount > 0
@@ -617,7 +584,6 @@ async function waitForChatFailure(page: Page, expectedText?: string, timeoutMs =
     /Agent failed before reply:|The agent run failed before producing a reply\.?|LLM request failed\.?/iu,
   ).last();
   const deadline = Date.now() + timeoutMs;
-  let nextHistoryReloadAt = 0;
   while (Date.now() < deadline) {
     const candidate = await runError.isVisible()
       ? await runError.innerText()
@@ -630,10 +596,6 @@ async function waitForChatFailure(page: Page, expectedText?: string, timeoutMs =
       }
       await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', /Send|发送/iu, { timeout: 60_000 });
       return candidate;
-    }
-    if (regressionSessionKey && Date.now() >= nextHistoryReloadAt) {
-      nextHistoryReloadAt = Date.now() + 1_000;
-      await page.getByTestId(`sidebar-session-${regressionSessionKey}`).click().catch(() => undefined);
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
@@ -1439,8 +1401,19 @@ test('runs the packaged UClaw regression matrix', async () => {
       'complete a simple real Gateway/OpenClaw/model turn',
       async () => {
         const page = contextOrThrow(context).page;
+        const providerBefore = provider?.requests.length ?? 0;
         await startNewChat(page);
-        return { latencyMs: await sendChat(page, '[REGRESSION:SIMPLE] reply with the regression token', 'UCLAW_REGRESSION_SIMPLE_OK') };
+        const latencyMs = await sendChat(
+          page,
+          '[REGRESSION:SIMPLE] reply with the regression token',
+          'UCLAW_REGRESSION_SIMPLE_OK',
+        );
+        const requests = provider?.requests
+          .slice(providerBefore)
+          .filter((request) => request.scenario === 'SIMPLE') ?? [];
+        expect(requests.length).toBeGreaterThan(0);
+        expect(requests.at(-1)?.model).toBe(REGRESSION_MODEL);
+        return { latencyMs, providerModel: requests.at(-1)?.model };
       },
       { skip: profile !== 'full' ? 'Requires the deterministic local Provider.' : undefined },
     );
@@ -1549,7 +1522,8 @@ test('runs the packaged UClaw regression matrix', async () => {
         const page = contextOrThrow(context).page;
         const beforeAttempts = providerRequestCount(provider, 'QUOTA');
         await startNewChat(page);
-        await dispatchRegressionChat(page, '[REGRESSION:QUOTA] reject this chargeable operation', 120_000);
+        await page.getByTestId('chat-composer-input').fill('[REGRESSION:QUOTA] reject this chargeable operation');
+        await page.getByTestId('chat-composer-send').click();
         await waitForChatFailure(page);
         const callout = page.getByTestId('acp-error-banner');
         await expect(callout).toBeVisible({ timeout: 120_000 });
@@ -1570,7 +1544,8 @@ test('runs the packaged UClaw regression matrix', async () => {
         const page = contextOrThrow(context).page;
         const beforeAttempts = provider?.requests.filter((request) => request.scenario === 'MALFORMED_STREAM').length ?? 0;
         await startNewChat(page);
-        await dispatchRegressionChat(page, '[REGRESSION:MALFORMED_STREAM] inject invalid SSE', 120_000);
+        await page.getByTestId('chat-composer-input').fill('[REGRESSION:MALFORMED_STREAM] inject invalid SSE');
+        await page.getByTestId('chat-composer-send').click();
         const failure = await waitForChatFailure(page);
         const attempts = (provider?.requests.filter((request) => request.scenario === 'MALFORMED_STREAM').length ?? 0) - beforeAttempts;
         expect(attempts).toBeGreaterThanOrEqual(1);
@@ -1586,11 +1561,11 @@ test('runs the packaged UClaw regression matrix', async () => {
         const page = contextOrThrow(context).page;
         const beforeAttempts = providerRequestCount(provider, 'SLOW');
         await startNewChat(page);
-        const run = await dispatchRegressionChat(page, '[REGRESSION:SLOW] hold the response until cancelled', 120_000);
+        await page.getByTestId('chat-composer-input').fill('[REGRESSION:SLOW] hold the response until cancelled');
+        await page.getByTestId('chat-composer-send').click();
         const attempts = await waitForProviderRequestCount(provider, 'SLOW', beforeAttempts + 1) - beforeAttempts;
-        await gatewayRpc(page, 'chat.abort', run.runId
-          ? { runId: run.runId }
-          : { sessionKey: regressionSessionKey });
+        await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', /Stop|停止/iu, { timeout: 30_000 });
+        await page.getByTestId('chat-composer-send').click();
         await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', /Send|发送/iu, { timeout: 120_000 });
         expect(attempts).toBeGreaterThanOrEqual(1);
         return { attempts };
@@ -1725,7 +1700,8 @@ test('runs the packaged UClaw regression matrix', async () => {
         const page = contextOrThrow(context).page;
         const beforeAttempts = provider?.requests.filter((request) => request.scenario === 'HTTP_401').length ?? 0;
         await startNewChat(page);
-        await dispatchRegressionChat(page, '[REGRESSION:HTTP_401] inject provider authentication failure', 120_000);
+        await page.getByTestId('chat-composer-input').fill('[REGRESSION:HTTP_401] inject provider authentication failure');
+        await page.getByTestId('chat-composer-send').click();
         const failure = await waitForChatFailure(page, 'UCLAW_REGRESSION_HTTP_401');
         const attempts = (provider?.requests.filter((request) => request.scenario === 'HTTP_401').length ?? 0) - beforeAttempts;
         expect(attempts).toBeGreaterThanOrEqual(1);
