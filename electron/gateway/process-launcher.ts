@@ -344,6 +344,8 @@ export async function launchGatewayProcess(options: {
   getShouldReconnect: () => boolean;
   onStderrLine: (line: string) => void;
   onSpawn: (pid: number | undefined) => void;
+  /** Called synchronously from the spawn event before the launch promise resolves. */
+  onSpawnChild?: (child: Electron.UtilityProcess) => void;
   onExit: (child: Electron.UtilityProcess, code: number | null) => void;
   onError: (child: Electron.UtilityProcess, error: Error) => void;
   allowOlderBinaryDestructiveActions?: boolean;
@@ -604,8 +606,14 @@ export async function launchGatewayProcess(options: {
     child.stderr?.once('close', finalizeStderr);
     child.stderr?.once('error', finalizeStderr);
 
+    // UtilityProcess pipes must always be consumed. Gateway writes routine
+    // diagnostics to stdout; leaving this pipe unread eventually blocks the
+    // child and looks like a transport or heartbeat failure.
+    child.stdout?.on('data', () => undefined);
+
     child.on('spawn', () => {
       logger.info(`Gateway process started (pid=${child.pid})`);
+      options.onSpawnChild?.(child);
       options.onSpawn(child.pid);
       resolveOnce();
       // Ownership metadata improves crash recovery but is not a launch gate.

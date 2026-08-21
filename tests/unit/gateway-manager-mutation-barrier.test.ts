@@ -1071,4 +1071,39 @@ describe('GatewayManager managed runtime mutation barrier', () => {
       manager.releaseManagedRuntimeMutationLease(lease);
     }
   });
+
+  it('defers a recent-connect reload and applies it after the startup guard', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-15T00:00:00.000Z'));
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+    const lease = manager.acquireManagedRuntimeMutationLease();
+    (manager as unknown as {
+      process: Electron.UtilityProcess;
+      status: { state: 'running'; port: number; connectedAt: number };
+    }).process = fakeChild(7171);
+    (manager as unknown as {
+      status: { state: 'running'; port: number; connectedAt: number };
+    }).status = {
+      state: 'running',
+      port: 18789,
+      connectedAt: Date.now() - 1_000,
+    };
+    const restartSpy = vi.spyOn(manager, 'restart').mockResolvedValue();
+
+    try {
+      await manager.reload(lease);
+      expect(restartSpy).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(7_000);
+
+      expect(restartSpy).toHaveBeenCalledTimes(1);
+      expect(restartSpy).toHaveBeenCalledWith(lease);
+    } finally {
+      manager.releaseManagedRuntimeMutationLease(lease);
+      vi.useRealTimers();
+    }
+  });
 });

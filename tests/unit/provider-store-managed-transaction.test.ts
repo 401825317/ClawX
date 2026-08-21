@@ -41,6 +41,7 @@ vi.mock('@electron/services/providers/store-instance', () => ({
 
 import {
   buildManagedProviderAccounts,
+  deleteProviderAccount,
   getManagedOpenAiTargetAccountIds,
   installManagedOpenAiProviderAccount,
   restoreManagedProviderStore,
@@ -350,5 +351,28 @@ describe('managed Provider store transaction', () => {
     mocks.replaceState(before);
     await restoreManagedProviderStore(snapshot);
     expect(mocks.storeWrite).not.toHaveBeenCalled();
+  });
+
+  it('removes deleted accounts from every reverse fallback reference', async () => {
+    mocks.replaceState({
+      providerAccounts: {
+        removed: account('removed', 'openai'),
+        keeper: account('keeper', 'deepseek', {
+          fallbackAccountIds: ['removed', 'other'],
+        }),
+        untouched: account('untouched', 'moonshot', {
+          fallbackAccountIds: ['other'],
+        }),
+      },
+    });
+
+    await deleteProviderAccount('removed');
+
+    const providerWrite = mocks.store.set.mock.calls.find(([key]) => key === 'providerAccounts');
+    expect(providerWrite?.[1]).toEqual({
+      keeper: expect.objectContaining({ fallbackAccountIds: ['other'] }),
+      untouched: expect.objectContaining({ fallbackAccountIds: ['other'] }),
+    });
+    expect(providerWrite?.[1]).not.toHaveProperty('removed');
   });
 });

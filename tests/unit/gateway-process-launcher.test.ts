@@ -94,9 +94,14 @@ function createGatewayFetchContext(fetch: ReturnType<typeof vi.fn>) {
 describe('Gateway process wrapper', () => {
   it('writes an opaque ownership record after spawn and clears only that record on exit', async () => {
     const { launchGatewayProcess } = await import('@electron/gateway/process-launcher');
-    const child = new EventEmitter() as EventEmitter & { pid: number; stderr: EventEmitter };
+    const child = new EventEmitter() as EventEmitter & {
+      pid: number;
+      stderr: EventEmitter;
+      stdout: EventEmitter;
+    };
     child.pid = 34567;
     child.stderr = new EventEmitter();
+    child.stdout = new EventEmitter();
     vi.mocked(utilityProcess.fork).mockReturnValueOnce(child as never);
     mockInspectWindowsGatewayProcess.mockResolvedValue({
       processId: 34567,
@@ -140,6 +145,7 @@ describe('Gateway process wrapper', () => {
     });
     child.emit('spawn');
     await launch;
+    expect(child.stdout.listenerCount('data')).toBeGreaterThan(0);
 
     await vi.waitFor(() => {
       expect(mockCreateGatewayOwnershipRecord).toHaveBeenCalledWith(expect.objectContaining({
@@ -176,6 +182,7 @@ describe('Gateway process wrapper', () => {
       await new Promise<null>((resolve) => { finishInspection = resolve; })
     ));
     const onSpawn = vi.fn();
+    const onSpawnChild = vi.fn();
     const onExit = vi.fn();
 
     const launch = launchGatewayProcess({
@@ -197,6 +204,7 @@ describe('Gateway process wrapper', () => {
       getShouldReconnect: () => true,
       onStderrLine: vi.fn(),
       onSpawn,
+      onSpawnChild,
       onExit,
       onError: vi.fn(),
     });
@@ -204,6 +212,7 @@ describe('Gateway process wrapper', () => {
     child.emit('spawn');
     await expect(launch).resolves.toMatchObject({ child });
     expect(onSpawn).toHaveBeenCalledWith(45678);
+    expect(onSpawnChild).toHaveBeenCalledWith(child);
 
     child.emit('exit', 1);
     child.stderr.emit('end');

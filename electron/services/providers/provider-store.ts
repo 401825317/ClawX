@@ -279,6 +279,20 @@ export async function deleteProviderAccount(accountId: string): Promise<void> {
   const store = await getClawXProviderStore();
   const accounts = (store.get('providerAccounts') ?? {}) as Record<string, ProviderAccount>;
   delete accounts[accountId];
+
+  // Remove reverse references in the same store write. Otherwise the next
+  // runtime projection keeps an unresolved fallback account id forever.
+  for (const [id, account] of Object.entries(accounts)) {
+    const fallbackAccountIds = account.fallbackAccountIds;
+    if (!Array.isArray(fallbackAccountIds) || !fallbackAccountIds.includes(accountId)) {
+      continue;
+    }
+    accounts[id] = {
+      ...account,
+      fallbackAccountIds: fallbackAccountIds.filter((fallbackId) => fallbackId !== accountId),
+    };
+  }
+
   store.set('providerAccounts', accounts);
 
   if (store.get('defaultProviderAccountId') === accountId) {

@@ -299,6 +299,8 @@ export class GatewayManager extends EventEmitter {
   private reconnectAttemptsTotal = 0;
   private reconnectSuccessTotal = 0;
   private static readonly RELOAD_POLICY_REFRESH_MS = 15_000;
+  /** Keep a config refresh alive until a freshly connected Gateway is stable. */
+  private static readonly RECENT_CONNECT_RELOAD_GUARD_MS = 8_000;
   private static readonly HEARTBEAT_INTERVAL_MS = 60_000;
   private static readonly HEARTBEAT_TIMEOUT_MS = 30_000;
   private static readonly HEARTBEAT_MAX_MISSES = 4;
@@ -320,6 +322,7 @@ export class GatewayManager extends EventEmitter {
   private runAdmissionGeneration = 0;
   private processTerminationInFlight: { child: Electron.UtilityProcess; promise: Promise<void> } | null = null;
   private stopInFlight: Promise<void> | null = null;
+  private stopRequestGeneration = 0;
   private restartAfterDrainTimer: NodeJS.Timeout | null = null;
   private restartAfterDrainOperation: GatewayRestartDrainOperation | null = null;
   private static readonly RESTART_DRAIN_TIMEOUT_MS = 90_000;
@@ -472,6 +475,12 @@ export class GatewayManager extends EventEmitter {
   async start(lease?: ManagedRuntimeMutationLease): Promise<void> {
     if (this.processIsolationError) throw this.processIsolationError;
     await assertManagedRuntimeStartAllowed(lease);
+    // Never overlap a new launch with an in-flight stop. The stop path owns
+    // the port-release and process-ownership barrier until it settles.
+    const stopInFlight = this.stopInFlight;
+    if (stopInFlight) {
+      await stopInFlight;
+    }
     if (this.startInFlight) {
       await this.startInFlight;
       return;
@@ -525,6 +534,7 @@ export class GatewayManager extends EventEmitter {
     this.isAutoReconnectStart = false; // consume the flag
     this.setStatus({
       state: 'starting',
+      error: undefined,
       reconnectAttempts: this.reconnectAttempts,
       reconnectMaxAttempts: this.reconnectConfig.maxAttempts,
       connectionAttempt: undefined,
@@ -859,6 +869,12 @@ export class GatewayManager extends EventEmitter {
    * Stop Gateway process
    */
   async stop(): Promise<void> {
+    this.stopRequestGeneration = this.nextGeneration(this.stopRequestGeneration);
+    await this.runStopOperation();
+  }
+
+  /** Join or start the shared stop operation without recording a user stop request. */
+  private async runStopOperation(): Promise<void> {
     if (this.stopInFlight) return this.stopInFlight;
     const stopPromise = this.stopInternal();
     this.stopInFlight = stopPromise;
@@ -1294,11 +1310,28 @@ export class GatewayManager extends EventEmitter {
 
     const pidBefore = this.status.pid;
     let managedRuntimeBlocked = false;
+    this.lastRestartAt = Date.now();
     logger.info(`[gateway-refresh] mode=restart requested pidBefore=${pidBefore ?? 'n/a'}`);
     this.logRestartDrain('executing', 'pending', drainContext.forcedReason);
     this.restartInFlightDrainContext = drainContext;
     this.restartInFlight = (async () => {
+      const stopGenerationBefore = this.stopRequestGeneration;
       await this.stop();
+      const expectedStopGeneration = this.nextGeneration(stopGenerationBefore);
+      // The real stop() call advances the generation once. A mocked stop in
+      // unit/integration adapters may not, so accept the unchanged value too;
+      // any additional public stop request during the await is still visible
+      // as a third value and cancels the restart.
+      if (
+        this.stopRequestGeneration !== stopGenerationBefore
+        && this.stopRequestGeneration !== expectedStopGeneration
+      ) {
+        // A user stop joined or superseded the restart's stop phase. Do not
+        // undo that explicit request by starting a new Gateway afterward.
+        this.shouldReconnect = false;
+        logger.info('Gateway restart cancelled by an external stop request');
+        return;
+      }
       try {
         await this.start(lease);
       } catch (err) {
@@ -1432,12 +1465,19 @@ export class GatewayManager extends EventEmitter {
       ? Date.now() - this.status.connectedAt
       : Number.POSITIVE_INFINITY;
 
-    // Avoid signaling a process that just came up; it will already read latest config.
-    if (connectedForMs < 8000) {
-      logger.info(
-        `[gateway-refresh] mode=reload result=skipped_recent_connect connectedForMs=${connectedForMs} pid=${this.process.pid}`,
+    // Do not discard a config refresh just because the process connected a
+    // moment ago. Provider mutations can race with Gateway startup; on
+    // Windows this used to leave the old model registry active indefinitely.
+    if (connectedForMs < GatewayManager.RECENT_CONNECT_RELOAD_GUARD_MS) {
+      const delayMs = Math.max(
+        250,
+        GatewayManager.RECENT_CONNECT_RELOAD_GUARD_MS - Math.max(0, connectedForMs),
       );
-      logger.info(`Gateway connected ${connectedForMs}ms ago, skipping reload signal`);
+      logger.info(
+        `[gateway-refresh] mode=reload result=deferred_recent_connect delayMs=${delayMs} `
+          + `connectedForMs=${connectedForMs} pid=${this.process.pid}`,
+      );
+      this.deferReloadUntilGatewayStable(delayMs, lease);
       return;
     }
 
@@ -1510,6 +1550,23 @@ export class GatewayManager extends EventEmitter {
         logger.warn('Debounced Gateway reload failed:', err);
       });
     }, effectiveDelay);
+  }
+
+  /** Retry a refresh after the connection has passed the startup guard. */
+  private deferReloadUntilGatewayStable(
+    delayMs: number,
+    lease?: ManagedRuntimeMutationLease,
+  ): void {
+    if (this.reloadDebounceTimer) {
+      clearTimeout(this.reloadDebounceTimer);
+    }
+
+    this.reloadDebounceTimer = setTimeout(() => {
+      this.reloadDebounceTimer = null;
+      void this.reload(lease).catch((err) => {
+        logger.warn('Deferred Gateway reload failed:', err);
+      });
+    }, Math.max(250, delayMs));
   }
 
   private async refreshReloadPolicy(force = false): Promise<void> {
@@ -1724,6 +1781,7 @@ export class GatewayManager extends EventEmitter {
     logger.info(`[gateway-ready] source=${source}; Gateway subsystems ready`);
     this.setStatus({
       state: 'running',
+      error: undefined,
       gatewayReady: true,
       reconnectAttempts: 0,
       reconnectMaxAttempts: undefined,
@@ -1850,6 +1908,7 @@ export class GatewayManager extends EventEmitter {
     this.externalShutdownSupported = null;
     const processGeneration = ++this.processGeneration;
     const startupStderrLines: string[] = [];
+    let childExitedDuringLaunch = false;
     this.recentStartupStderrLines = startupStderrLines;
     this.startupStderrCollectionActive = true;
     const { child, lastSpawnSummary } = await launchGatewayProcess({
@@ -1902,7 +1961,16 @@ export class GatewayManager extends EventEmitter {
       onSpawn: (pid) => {
         this.setStatus({ pid });
       },
+      onSpawnChild: (spawnedChild) => {
+        if (processGeneration !== this.processGeneration) return;
+        // Register the object before launchGatewayProcess resolves. A very
+        // fast child exit must be handled by this generation, not discarded as
+        // a stale event before Manager owns the process.
+        this.process = spawnedChild;
+        this.ownsProcess = true;
+      },
       onExit: (exitedChild, code) => {
+        childExitedDuringLaunch = true;
         if (processGeneration !== this.processGeneration || this.process !== exitedChild) {
           logger.debug(
             `Ignoring stale Gateway process exit (generation=${processGeneration}, current=${this.processGeneration}, pid=${exitedChild.pid ?? 'unknown'})`,
@@ -1955,6 +2023,7 @@ export class GatewayManager extends EventEmitter {
         this.scheduleReconnect();
       },
       onError: (failedChild, spawnError) => {
+        childExitedDuringLaunch = true;
         const isCurrentFailedChild = this.processGeneration === processGeneration
           && (this.process === null || this.process === failedChild);
         if (isCurrentFailedChild) {
@@ -1972,6 +2041,11 @@ export class GatewayManager extends EventEmitter {
       allowOlderBinaryDestructiveActions: this.openClawDowngradeTransaction !== null,
     });
 
+    if (childExitedDuringLaunch) {
+      throw new Error(`Gateway process exited before Manager completed registration (pid=${child.pid ?? 'unknown'})`);
+    }
+    // Mocks and non-Electron launch adapters may not provide onSpawnChild;
+    // retain the post-await assignment as a compatibility fallback.
     this.process = child;
     this.ownsProcess = true;
     logger.debug(`Gateway manager now owns process pid=${child.pid ?? 'unknown'}`);
@@ -2033,6 +2107,7 @@ export class GatewayManager extends EventEmitter {
           state: 'starting',
           port,
           connectedAt: Date.now(),
+          error: undefined,
           gatewayReady: false,
         });
         this.startPing();
