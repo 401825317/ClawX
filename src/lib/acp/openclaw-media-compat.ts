@@ -1,5 +1,6 @@
 import { stripAcpWorkingDirectoryPrefix } from '@shared/chat/session-title';
 import type { RawMessage } from '@shared/chat/types';
+import { parseOfficeArtifactToolResult } from './artifact-tool-result';
 import type { AcpTimelineSnapshot, MessageSegmentItem } from './timeline-types';
 
 const MAX_MEDIA_REFERENCE_LENGTH = 4096;
@@ -192,7 +193,28 @@ export function extractOpenClawMediaTurns(
       turns.push(current);
       continue;
     }
-    if (role !== 'assistant' || !current) continue;
+    if (!current) continue;
+
+    if (role === 'toolresult') {
+      const artifact = message.isError === true ? null : parseOfficeArtifactToolResult(message);
+      if (!artifact || input.suppressedUris.has(artifact.filePath)) continue;
+      if (current.candidates.some((candidate) => candidate.uri === artifact.filePath)) continue;
+      const messageIdentity = message.id
+        ? `id:${message.id}`
+        : message.toolCallId
+          ? `tool:${message.toolCallId}`
+          : message.timestamp != null
+            ? `timestamp:${message.timestamp}`
+            : `artifact:${stableHash(JSON.stringify([artifact.kind, artifact.filePath]))}`;
+      current.candidates.push({
+        evidenceSeed: `${messageIdentity}:${artifact.filePath}`,
+        ...(message.id ? { transcriptMessageId: message.id } : {}),
+        uri: artifact.filePath,
+        order: current.candidates.length,
+      });
+      continue;
+    }
+    if (role !== 'assistant') continue;
 
     const text = textFromContent(message.content);
     const references = mediaReferences(text).flatMap((reference) => {
@@ -211,6 +233,7 @@ export function extractOpenClawMediaTurns(
     }
     for (const reference of references) {
       if (input.suppressedUris.has(reference.uri)) continue;
+      if (current.candidates.some((candidate) => candidate.uri === reference.uri)) continue;
       const order = current.candidates.length;
       const messageIdentity = message.id
         ? `id:${message.id}`

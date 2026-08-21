@@ -1858,6 +1858,7 @@ describe('ACP chat timeline components', () => {
     const part = availableAttachment({ name, mimeType, size: 20 * 1024 * 1024 });
     render(<AcpAttachmentPart part={part} />);
 
+    expect(screen.getByTestId('chat-attached-file')).toHaveTextContent(name);
     fireEvent.click(screen.getByRole('button', { name: `Preview ${name}` }));
 
     expect(useArtifactPanel.getState().focusedFile).toMatchObject({

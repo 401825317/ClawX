@@ -206,6 +206,131 @@ describe('OpenClaw MEDIA transcript extraction', () => {
     expect(turn?.finalAssistant).toBeUndefined();
   });
 
+  it('extracts structured DOCX, XLSX, and PPTX tool results without assistant MEDIA text', () => {
+    const artifacts = [
+      {
+        kind: 'document',
+        filePath: 'C:\\Users\\Tester\\workspace\\report.docx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      },
+      {
+        kind: 'spreadsheet',
+        filePath: 'C:\\Users\\Tester\\workspace\\budget.xlsx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      },
+      {
+        kind: 'presentation',
+        filePath: 'C:\\Users\\Tester\\workspace\\slides.pptx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      },
+    ].map((artifact, index) => ({
+      ok: true,
+      sizeBytes: 1024 + index,
+      media: `MEDIA:${artifact.filePath}`,
+      ...artifact,
+    }));
+    const [turn] = extract(transcript(
+      { role: 'user', content: 'Create the Office files' },
+      {
+        role: 'toolresult',
+        toolCallId: 'docx-tool',
+        content: [{ type: 'text', text: JSON.stringify(artifacts[0]) }],
+      },
+      {
+        role: 'toolresult',
+        toolCallId: 'xlsx-tool',
+        content: [{ type: 'text', text: JSON.stringify(artifacts[1]) }],
+        details: artifacts[1],
+      },
+      {
+        role: 'toolresult',
+        id: 'pptx-result',
+        toolCallId: 'pptx-tool',
+        content: [{ type: 'text', text: JSON.stringify(artifacts[2]) }],
+        details: artifacts[2],
+      },
+      { role: 'assistant', content: 'All Office files were created.' },
+    ));
+
+    expect(turn?.candidates).toMatchObject([
+      { uri: artifacts[0]!.filePath, order: 0 },
+      { uri: artifacts[1]!.filePath, order: 1 },
+      { uri: artifacts[2]!.filePath, order: 2, transcriptMessageId: 'pptx-result' },
+    ]);
+    expect(turn?.finalAssistant).toBeUndefined();
+  });
+
+  it('deduplicates a structured Office tool result and its assistant MEDIA mirror', () => {
+    const filePath = 'C:\\Users\\Tester\\workspace\\report.docx';
+    const payload = {
+      ok: true,
+      kind: 'document',
+      filePath,
+      sizeBytes: 1024,
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      media: `MEDIA:${filePath}`,
+    };
+    const [turn] = extract(transcript(
+      { role: 'user', content: 'Create the report' },
+      { role: 'toolresult', toolCallId: 'docx-tool', content: JSON.stringify(payload), details: payload },
+      { role: 'assistant', id: 'assistant-report', content: `Report ready\nMEDIA:${filePath}` },
+    ));
+
+    expect(turn?.candidates).toHaveLength(1);
+    expect(turn?.candidates[0]).toMatchObject({ uri: filePath, order: 0 });
+    expect(turn?.finalAssistant).toEqual({ text: 'Report ready', transcriptMessageId: 'assistant-report' });
+  });
+
+  it.each([
+    ['failed payload', { ok: false }],
+    ['relative path', { filePath: 'exports/report.docx', media: 'MEDIA:exports/report.docx' }],
+    ['mismatched MEDIA path', { media: 'MEDIA:C:\\Users\\Tester\\workspace\\other.docx' }],
+    ['mismatched MIME type', { mimeType: 'application/pdf' }],
+    ['mismatched extension', { filePath: 'C:\\Users\\Tester\\workspace\\report.xlsx', media: 'MEDIA:C:\\Users\\Tester\\workspace\\report.xlsx' }],
+    ['Windows device path', { filePath: '\\\\?\\C:\\Users\\Tester\\workspace\\report.docx', media: 'MEDIA:\\\\?\\C:\\Users\\Tester\\workspace\\report.docx' }],
+  ])('rejects unsafe structured toolResult media: %s', (_label, overrides) => {
+    const filePath = 'C:\\Users\\Tester\\workspace\\report.docx';
+    const payload = {
+      ok: true,
+      kind: 'document',
+      filePath,
+      sizeBytes: 1024,
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      media: `MEDIA:${filePath}`,
+      ...overrides,
+    };
+    const [turn] = extract(transcript(
+      { role: 'user', content: 'Create the report' },
+      { role: 'toolresult', toolCallId: 'unsafe-docx-tool', content: JSON.stringify(payload), details: payload },
+    ));
+
+    expect(turn?.candidates).toEqual([]);
+  });
+
+  it('rejects an errored structured toolResult and does not trust a conflicting JSON body', () => {
+    const filePath = 'C:\\Users\\Tester\\workspace\\report.docx';
+    const successfulPayload = {
+      ok: true,
+      kind: 'document',
+      filePath,
+      sizeBytes: 1024,
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      media: `MEDIA:${filePath}`,
+    };
+    const [turn] = extract(transcript(
+      { role: 'user', content: 'Create the report' },
+      {
+        role: 'toolresult',
+        toolCallId: 'errored-docx-tool',
+        content: JSON.stringify(successfulPayload),
+        details: { ...successfulPayload, ok: false },
+        isError: true,
+      },
+    ));
+
+    expect(turn?.candidates).toEqual([]);
+  });
+
   it('rejects fenced, wrapped, inline, unknown-scheme, malformed, and overlong references', () => {
     const tooLong = `/tmp/${'x'.repeat(4092)}`;
     const [turn] = extract(transcript(

@@ -578,21 +578,31 @@ async function waitForGeneratedMedia(
   throw new Error(`${kind} generation did not render an artifact within ${timeoutMs}ms.`);
 }
 
-async function waitForChatFailure(page: Page, expectedText?: string, timeoutMs = 120_000): Promise<string> {
-  const runError = page.getByTestId('acp-error-banner');
+async function waitForChatFailure(page: Page, expectedErrorCode?: string, timeoutMs = 120_000): Promise<string> {
+  const turnFailure = page.getByTestId('acp-turn-failure').last();
+  const runError = page.getByTestId('acp-error-banner').last();
   const transcriptFailure = page.getByText(
     /Agent failed before reply:|The agent run failed before producing a reply\.?|LLM request failed\.?/iu,
   ).last();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const candidate = await runError.isVisible()
-      ? await runError.innerText()
-      : await transcriptFailure.isVisible()
-        ? await transcriptFailure.innerText()
-        : '';
+    const turnFailureVisible = await turnFailure.isVisible().catch(() => false);
+    const candidate = turnFailureVisible
+      ? await turnFailure.innerText()
+      : await runError.isVisible().catch(() => false)
+        ? await runError.innerText()
+        : await transcriptFailure.isVisible().catch(() => false)
+          ? await transcriptFailure.innerText()
+          : '';
     if (candidate) {
-      if (expectedText && !candidate.includes(expectedText)) {
-        throw new Error(`Chat failed with an unexpected error: ${candidate}`);
+      if (expectedErrorCode) {
+        const actualErrorCode = turnFailureVisible
+          ? await turnFailure.getAttribute('data-error-code')
+          : null;
+        expect(
+          actualErrorCode,
+          `Expected terminal chat failure ${expectedErrorCode}, but rendered: ${candidate}`,
+        ).toBe(expectedErrorCode);
       }
       await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', /Send|发送/iu, { timeout: 60_000 });
       return candidate;
@@ -1524,10 +1534,11 @@ test('runs the packaged UClaw regression matrix', async () => {
         await startNewChat(page);
         await page.getByTestId('chat-composer-input').fill('[REGRESSION:QUOTA] reject this chargeable operation');
         await page.getByTestId('chat-composer-send').click();
-        await waitForChatFailure(page);
-        const callout = page.getByTestId('acp-error-banner');
+        await waitForChatFailure(page, 'INSUFFICIENT_QUOTA');
+        const callout = page.getByTestId('acp-turn-failure').last();
         await expect(callout).toBeVisible({ timeout: 120_000 });
         await expect(callout).toContainText(/Insufficient balance|余额不足|残高不足|Недостаточно средств/iu);
+        await expect(page.getByTestId('acp-turn-failure-recharge').last()).toBeVisible();
         await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', /Send|发送/iu, { timeout: 120_000 });
         const attempts = providerRequestCount(provider, 'QUOTA') - beforeAttempts;
         expect(attempts, 'A chargeable insufficient-quota operation must not be retried automatically.').toBe(1);
@@ -1546,7 +1557,7 @@ test('runs the packaged UClaw regression matrix', async () => {
         await startNewChat(page);
         await page.getByTestId('chat-composer-input').fill('[REGRESSION:MALFORMED_STREAM] inject invalid SSE');
         await page.getByTestId('chat-composer-send').click();
-        const failure = await waitForChatFailure(page);
+        const failure = await waitForChatFailure(page, 'UNKNOWN');
         const attempts = (provider?.requests.filter((request) => request.scenario === 'MALFORMED_STREAM').length ?? 0) - beforeAttempts;
         expect(attempts).toBeGreaterThanOrEqual(1);
         return { attempts, failure };
@@ -1702,7 +1713,7 @@ test('runs the packaged UClaw regression matrix', async () => {
         await startNewChat(page);
         await page.getByTestId('chat-composer-input').fill('[REGRESSION:HTTP_401] inject provider authentication failure');
         await page.getByTestId('chat-composer-send').click();
-        const failure = await waitForChatFailure(page, 'UCLAW_REGRESSION_HTTP_401');
+        const failure = await waitForChatFailure(page, 'AUTH_INVALID');
         const attempts = (provider?.requests.filter((request) => request.scenario === 'HTTP_401').length ?? 0) - beforeAttempts;
         expect(attempts).toBeGreaterThanOrEqual(1);
         return { attempts, failure };

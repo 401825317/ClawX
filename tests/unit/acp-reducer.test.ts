@@ -722,6 +722,193 @@ describe('ACP timeline reducer', () => {
     });
   });
 
+  it.each([
+    [
+      'DOCX',
+      'document',
+      'C:\\Users\\Tester\\workspace\\uclaw-regression.docx',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    ],
+    [
+      'XLSX',
+      'spreadsheet',
+      'C:\\Users\\Tester\\workspace\\uclaw-regression.xlsx',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ],
+    [
+      'PPTX',
+      'presentation',
+      'C:\\Users\\Tester\\workspace\\uclaw-regression.pptx',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    ],
+  ])('projects a completed structured %s tool result as a pending attachment', (_label, kind, filePath, mimeType) => {
+    const payload = {
+      ok: true,
+      kind,
+      filePath,
+      fileSize: 4096,
+      sizeBytes: 4096,
+      mimeType,
+      media: `MEDIA:${filePath}`,
+    };
+    const toolCallId = `create-${kind}`;
+    const state = applyAcpSessionUpdate(createEmptyAcpTimeline('agent:pi:s1', 1), {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId,
+        title: `Create ${kind}`,
+        status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: JSON.stringify(payload) } }],
+        rawOutput: {
+          content: [{ type: 'text', text: JSON.stringify(payload) }],
+          details: payload,
+        },
+      },
+    } as never);
+
+    expect(state.itemsById[`tool:${toolCallId}`]).toMatchObject({
+      kind: 'tool-call',
+      status: 'completed',
+      outputParts: [
+        { kind: 'markdown', text: JSON.stringify(payload) },
+        {
+          kind: 'attachment',
+          attachmentId: `attachment:tool-artifact:${toolCallId}:0:0`,
+          reference: {
+            uri: filePath,
+            name: filePath.split('\\').at(-1),
+            mimeType,
+            size: 4096,
+          },
+          source: 'acp-resource',
+          evidenceId: `uclaw-office-artifact:${toolCallId}`,
+          access: { status: 'pending' },
+        },
+      ],
+    });
+  });
+
+  it('keeps one resolved Office attachment when the completed tool result is replayed', () => {
+    const filePath = 'C:\\Users\\Tester\\workspace\\report.docx';
+    const mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    const payload = {
+      ok: true,
+      kind: 'document',
+      filePath,
+      sizeBytes: 1024,
+      mimeType,
+      media: `MEDIA:${filePath}`,
+    };
+    const notification = {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'create-docx',
+        status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: JSON.stringify(payload) } }],
+        rawOutput: { details: payload },
+      },
+    } as never;
+    let state = applyAcpSessionUpdate(createEmptyAcpTimeline('agent:pi:s1', 1), notification);
+    const pending = state.itemsById['tool:create-docx'];
+    const attachment = pending?.kind === 'tool-call'
+      ? pending.outputParts.find((part) => part.kind === 'attachment')
+      : undefined;
+    if (!attachment || attachment.kind !== 'attachment') throw new Error('missing Office attachment');
+    state = applyAttachmentResolution(state, {
+      attachmentId: attachment.attachmentId,
+      expectedFingerprint: attachmentRequestFingerprint(attachment),
+      result: {
+        ok: true,
+        identity: 'office-report',
+        displayName: 'report.docx',
+        mimeType,
+        size: 1024,
+        target: {
+          kind: 'local',
+          scope: 'workspace',
+          ref: { sessionKey: 'agent:pi:s1', generation: 1, uri: filePath },
+        },
+      },
+    });
+    state = applyAcpSessionUpdate(state, notification);
+
+    const replayed = state.itemsById['tool:create-docx'];
+    const attachments = replayed?.kind === 'tool-call'
+      ? replayed.outputParts.filter((part) => part.kind === 'attachment')
+      : [];
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0]).toMatchObject({ access: { status: 'available', identity: 'office-report' } });
+  });
+
+  it.each([
+    ['failed status', 'failed', { ok: true }],
+    ['failed payload', 'completed', { ok: false }],
+    ['relative path', 'completed', { filePath: 'exports/report.docx' }],
+    ['mismatched MEDIA path', 'completed', { media: 'MEDIA:C:\\Users\\Tester\\workspace\\other.docx' }],
+    ['mismatched MIME type', 'completed', { mimeType: 'application/pdf' }],
+    ['mismatched extension', 'completed', { filePath: 'C:\\Users\\Tester\\workspace\\report.xlsx' }],
+    ['Windows device path', 'completed', { filePath: '\\\\?\\C:\\Users\\Tester\\workspace\\report.docx' }],
+  ])('rejects unsafe Office tool result: %s', (_label, status, overrides) => {
+    const filePath = 'C:\\Users\\Tester\\workspace\\report.docx';
+    const payload = {
+      ok: true,
+      kind: 'document',
+      filePath,
+      sizeBytes: 1024,
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      media: `MEDIA:${filePath}`,
+      ...overrides,
+    };
+    const state = applyAcpSessionUpdate(createEmptyAcpTimeline('agent:pi:s1', 1), {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'unsafe-office-result',
+        status,
+        rawOutput: { details: payload },
+      },
+    } as never);
+
+    const item = state.itemsById['tool:unsafe-office-result'];
+    expect(item?.kind === 'tool-call' ? item.outputParts : []).toEqual([]);
+  });
+
+  it('does not duplicate a native resource link with the same Office artifact result', () => {
+    const filePath = 'C:\\Users\\Tester\\workspace\\report.xlsx';
+    const mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    const payload = {
+      ok: true,
+      kind: 'spreadsheet',
+      filePath,
+      sizeBytes: 2048,
+      mimeType,
+      media: `MEDIA:${filePath}`,
+    };
+    const state = applyAcpSessionUpdate(createEmptyAcpTimeline('agent:pi:s1', 1), {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'native-office-resource',
+        status: 'completed',
+        content: [{
+          type: 'content',
+          content: { type: 'resource_link', uri: filePath, name: 'report.xlsx', mimeType, size: 2048 },
+        }],
+        rawOutput: { details: payload },
+      },
+    } as never);
+
+    const item = state.itemsById['tool:native-office-resource'];
+    const attachments = item?.kind === 'tool-call'
+      ? item.outputParts.filter((part) => part.kind === 'attachment')
+      : [];
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0]).toMatchObject({ reference: { uri: filePath } });
+    expect(attachments[0]).not.toHaveProperty('evidenceId');
+  });
+
   it('appends marked synthetic assistant messages without faking ACP updates', () => {
     let state = createEmptyAcpTimeline('agent:pi:s1', 1);
     state = applyAcpSessionUpdate(state, {

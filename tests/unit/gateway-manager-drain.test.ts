@@ -299,6 +299,41 @@ describe('GatewayManager restart drain', () => {
     );
   });
 
+  it('drains a pending restart when OpenClaw emits lifecycle phase=end', async () => {
+    const { manager, internals } = await createRunningManager();
+    const { dispatchProtocolEvent } = await import('@electron/gateway/event-dispatch');
+    const stop = vi.spyOn(manager, 'stop').mockResolvedValue();
+    const start = vi.spyOn(manager, 'start').mockResolvedValue();
+
+    dispatchProtocolEvent(manager, 'agent', {
+      runId: 'run-openclaw-end',
+      sessionKey: 'agent:main:quota',
+      stream: 'lifecycle',
+      data: { phase: 'start', startedAt: 1 },
+    });
+    const restart = manager.restart();
+    await vi.waitFor(() => expect(internals.restartAfterDrainOperation).not.toBeNull());
+
+    dispatchProtocolEvent(manager, 'agent', {
+      runId: 'run-openclaw-end',
+      sessionKey: 'agent:main:quota',
+      stream: 'lifecycle',
+      data: { phase: 'end', endedAt: 2, stopReason: 'end_turn' },
+    });
+    await restart;
+
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(internals.activeRunIds.size).toBe(0);
+    expect(restartDrainEvents()).toEqual([
+      expect.objectContaining({ state: 'waiting', result: 'pending', forcedReason: 'none' }),
+      expect.objectContaining({ state: 'drained', result: 'pending', forcedReason: 'none' }),
+      expect.objectContaining({ state: 'executing', result: 'pending', forcedReason: 'none' }),
+      expect.objectContaining({ state: 'terminal', result: 'succeeded', forcedReason: 'none' }),
+    ]);
+    expect(restartDrainEvents()).not.toContainEqual(expect.objectContaining({ state: 'forced' }));
+  });
+
   it('closes new chat run admission while restart is draining', async () => {
     const { manager } = await createRunningManager();
     const stop = vi.spyOn(manager, 'stop').mockResolvedValue();

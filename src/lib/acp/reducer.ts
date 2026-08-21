@@ -9,7 +9,8 @@ import type {
   ToolKind,
 } from '@agentclientprotocol/sdk';
 import { contentBlockToRenderPart, contentBlocksToRenderParts, toolContentToRenderPart, toolContentToRenderParts } from './content-blocks';
-import { dedupeTimelineAttachments, mergeMonotonicAttachment } from './attachments';
+import { createPendingAttachment, dedupeTimelineAttachments, mergeMonotonicAttachment } from './attachments';
+import { parseOfficeArtifactToolResult } from './artifact-tool-result';
 import { openClawPromptTextBlocks } from './openclaw-prompt-compat';
 import { normalizeAcpChatError } from '@shared/acp-chat/errors';
 import type { AcpTimelineSnapshot, AttachmentRenderPart, MessageSegmentItem, RenderPart, TimelineItem, ToolCallItem } from './timeline-types';
@@ -501,6 +502,42 @@ function existingToolCall(state: AcpTimelineSnapshot, id: string): ToolCallItem 
   return existing?.kind === 'tool-call' ? existing : undefined;
 }
 
+function projectOfficeArtifactResult(
+  toolCallId: string,
+  status: ToolCallItem['status'],
+  rawOutput: unknown,
+  outputParts: RenderPart[],
+  previousParts: RenderPart[],
+): RenderPart[] {
+  if (status !== 'completed') return outputParts;
+  const artifact = parseOfficeArtifactToolResult(rawOutput);
+  if (!artifact) return outputParts;
+
+  const evidenceId = `uclaw-office-artifact:${toolCallId}`;
+  const previous = previousParts.find((part): part is AttachmentRenderPart => (
+    part.kind === 'attachment' && part.evidenceId === evidenceId
+  ));
+  const baseParts = outputParts.filter((part) => (
+    part.kind !== 'attachment' || part.evidenceId !== evidenceId
+  ));
+  if (baseParts.some((part) => part.kind === 'attachment' && part.reference.uri === artifact.filePath)) {
+    return baseParts;
+  }
+
+  const pending = createPendingAttachment({
+    messageId: `tool-artifact:${toolCallId}`,
+    segmentIndex: 0,
+    blockIndex: 0,
+    uri: artifact.filePath,
+    name: artifact.fileName,
+    mimeType: artifact.mimeType,
+    ...(artifact.size !== undefined ? { size: artifact.size } : {}),
+    source: 'acp-resource',
+    evidenceId,
+  });
+  return [...baseParts, mergeMonotonicAttachment(previous, pending)];
+}
+
 function upsertToolCall(
   state: AcpTimelineSnapshot,
   update: UpdateRecord,
@@ -519,6 +556,20 @@ function upsertToolCall(
   const rawStatus = update.status as ToolCallStatus | null | undefined;
   const rawTitle = stringValue(update.title);
   const rawError = stringValue(update.error);
+  const status = propertyExists(update, 'status') ? normalizeToolStatus(rawStatus) : prev?.status ?? 'pending';
+  const output = hasRawOutput ? update.rawOutput : prev?.output;
+  const contentParts = hasContent
+    ? toolContentToRenderParts(toolContentArray(update.content), {
+        role: 'assistant', messageId: `tool:${toolCallId}`, segmentIndex: 0,
+      })
+    : prev?.outputParts ?? [];
+  const outputParts = projectOfficeArtifactResult(
+    toolCallId,
+    status,
+    output,
+    contentParts,
+    prev?.outputParts ?? [],
+  );
 
   return appendItem(closeAllMessageSegments(state), {
     kind: 'tool-call',
@@ -526,14 +577,10 @@ function upsertToolCall(
     toolCallId,
     title: rawTitle ?? prev?.title ?? toolCallId,
     toolKind: hasKind ? toolKindValue(update.kind) : prev?.toolKind,
-    status: propertyExists(update, 'status') ? normalizeToolStatus(rawStatus) : prev?.status ?? 'pending',
+    status,
     input: hasRawInput ? update.rawInput : prev?.input,
-    output: hasRawOutput ? update.rawOutput : prev?.output,
-    outputParts: hasContent
-      ? toolContentToRenderParts(toolContentArray(update.content), {
-          role: 'assistant', messageId: `tool:${toolCallId}`, segmentIndex: 0,
-        })
-      : prev?.outputParts ?? [],
+    output,
+    outputParts,
     locations: hasLocations ? toolLocations(update.locations) : prev?.locations ?? [],
     error: rawError ?? prev?.error,
     historical: !!prev?.historical || !!options.historical,

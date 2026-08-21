@@ -224,6 +224,7 @@ export function AcpAttachmentPart({
     <AcpFileCard
       variant="standalone"
       primaryAriaLabel={ariaLabel}
+      primaryTestId={tone === 'assistant' ? 'chat-attached-file' : undefined}
       primaryDisabled={disabled}
       onPrimary={() => void activate()}
       openWith={openWithFileRef

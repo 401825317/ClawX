@@ -48,7 +48,7 @@ describe('dispatchProtocolEvent', () => {
     expect(emitter.emit).toHaveBeenCalledWith('chat:message', { message: { text: 'hello' } });
   });
 
-  it('does not normalize non-terminal lifecycle phase=end as run.ended', () => {
+  it('normalizes OpenClaw lifecycle phase=end as run.ended', () => {
     const emitter = createMockEmitter();
     const payload = {
       runId: 'run-1',
@@ -64,10 +64,18 @@ describe('dispatchProtocolEvent', () => {
 
     dispatchProtocolEvent(emitter, 'agent', payload);
 
-    expect(emitter.emit).not.toHaveBeenCalledWith('chat:runtime-event', expect.objectContaining({
+    expect(emitter.emit).toHaveBeenCalledWith('chat:runtime-event', {
       type: 'run.ended',
       runId: 'run-1',
-    }));
+      sessionKey: 'agent:main:main',
+      seq: 4,
+      ts: 10,
+      status: 'completed',
+      endedAt: 11,
+      livenessState: undefined,
+      replayInvalid: undefined,
+      stopReason: undefined,
+    });
     expect(emitter.emit).toHaveBeenCalledWith('notification', {
       method: 'agent',
       params: payload,

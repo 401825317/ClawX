@@ -40,6 +40,7 @@ touchedAreas:
   - src/App.tsx
   - src/components/settings/LongTermRulesSettings.tsx
   - src/lib/host-api.ts
+  - src/lib/acp/**
   - src/lib/acp/html-auto-open.ts
   - src/lib/model-options.ts
   - src/lib/observability.ts
@@ -60,6 +61,9 @@ expectedUserBehavior:
   - Explicit requests for refined design or asset search use the refined route and allow at most two targeted repairs.
   - A new artifact request in an empty conversation stays in place, while one made after unrelated history creates and selects a visible isolated artifact session; revisions remain in that artifact session.
   - Successful live HTML tool output inside the current workspace opens or refreshes the built-in Web Browser within two seconds and history replay never opens it.
+  - A personal or custom Provider selected for a session keeps its configured model; managed defaults apply only when the managed Provider owns that runtime selection.
+  - Insufficient-quota responses are never retried, always leave the composer idle, and remain visible as a recharge failure even when a managed Gateway restart is pending.
+  - Successful structured artifact tool results surface safe DOCX, XLSX, and PPTX paths as downloadable chat attachments in both live and restored timelines.
   - Explicit remember-forever wording stores a global or per-Agent long-term rule, projects it into an owned AGENTS.md block without touching user content, and offers undo plus Settings CRUD.
   - Ecommerce main-image requests use a versioned built-in skill that preserves product structure, packaging, logos, and text while model, quality, and dimensions remain server managed.
   - A disconnected stdout sink cannot crash UClaw, repeat fatal handling, or stop the Gateway more than once; file logs keep working with bounded rotation.
@@ -99,6 +103,9 @@ acceptance:
   - The hidden uclaw-artifact-v1 model is available to runtime resolution with visible false and never appears in the normal model picker.
   - Fast and refined execution budgets are enforced by runtime hooks rather than prompt compliance alone.
   - HTML auto-open accepts only a newly completed webpage artifact whose canonical path is within the active workspace; the last successful HTML wins and same-path writes refresh.
+  - Session model resolution preserves the model selected for personal and custom Providers and cannot silently replace it with the managed `openai/smart-latest` default.
+  - A terminal `insufficient_user_quota` response produces one Provider attempt, an `INSUFFICIENT_QUOTA` recharge failure card, and an idle composer without being lost across a queued Gateway restart.
+  - Structured successful tool results with safe artifact paths are de-duplicated into file attachments; failed, malformed, or unsafe tool output never creates an attachment.
   - Long-term rules use an atomic local store and an independently owned AGENTS.md block with global and per-Agent scopes, versioning, timestamps, startup repair, and bounded undo.
   - Ecommerce main-image classification and the versioned skill are covered without hard-coded model, quality, or size policy in the client.
   - Console EPIPE permanently opens only that sink's circuit breaker, bounded file logs continue, fatal handling is single-entry, emergency logging bypasses Logger, and Gateway cleanup is idempotent.
