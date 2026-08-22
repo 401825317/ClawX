@@ -11,6 +11,7 @@ import type {
 import {
   createDefaultManagedClientTextModelPolicy,
   createDefaultManagedClientRuntimeConfig,
+  UCLAW_DEFAULT_FALLBACK_MODEL,
 } from '../../shared/managed-client-config';
 import {
   UCLAW_COMPATIBILITY_PROVIDER_ID,
@@ -478,6 +479,9 @@ function normalizeTextModelOptions(value: unknown): ManagedClientTextModelPolicy
       return true;
     });
   if (models.length === 0) return null;
+  if (!models.some((model) => model.id === UCLAW_DEFAULT_FALLBACK_MODEL)) {
+    models.push({ id: UCLAW_DEFAULT_FALLBACK_MODEL, label: 'DeepSeek V4 Flash' });
+  }
   const configuredDefault = managedModelId(value.defaultModel);
   const defaultModel = models.some((model) => model.id === configuredDefault)
     ? configuredDefault
@@ -499,6 +503,13 @@ function normalizeTextModelOptions(value: unknown): ManagedClientTextModelPolicy
         return [modelId];
       })
     : [];
+  if (
+    defaultModel !== UCLAW_DEFAULT_FALLBACK_MODEL
+    && availableModelIds.has(UCLAW_DEFAULT_FALLBACK_MODEL)
+    && !fallbackModels.includes(UCLAW_DEFAULT_FALLBACK_MODEL)
+  ) {
+    fallbackModels.push(UCLAW_DEFAULT_FALLBACK_MODEL);
+  }
   return {
     defaultModel,
     fallbackModels,

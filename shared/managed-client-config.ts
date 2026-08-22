@@ -24,6 +24,9 @@ export type ManagedClientTextModelPolicy = {
   models: ManagedClientTextModel[];
 };
 
+/** Local resilience fallback kept on the same managed Provider as the primary model. */
+export const UCLAW_DEFAULT_FALLBACK_MODEL = 'deepseek-v4-flash';
+
 export type ManagedClientTextModelRequest = {
   refresh?: boolean;
 };
@@ -128,9 +131,12 @@ export type ManagedClientRuntimeConfigRequest = {
 export function createDefaultManagedClientTextModelPolicy(): ManagedClientTextModelPolicy {
   return {
     defaultModel: UCLAW_DEFAULT_MODEL,
-    fallbackModels: [],
+    fallbackModels: [UCLAW_DEFAULT_FALLBACK_MODEL],
     defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
-    models: [{ id: UCLAW_DEFAULT_MODEL }],
+    models: [
+      { id: UCLAW_DEFAULT_MODEL },
+      { id: UCLAW_DEFAULT_FALLBACK_MODEL, label: 'DeepSeek V4 Flash' },
+    ],
   };
 }
 
