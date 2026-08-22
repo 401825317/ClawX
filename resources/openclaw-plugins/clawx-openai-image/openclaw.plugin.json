@@ -23,6 +23,35 @@
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "properties": {}
+    "properties": {
+      "defaultModel": { "type": "string", "minLength": 1 },
+      "defaultSize": { "type": "string", "pattern": "^[1-9][0-9]*x[1-9][0-9]*$" },
+      "defaultQuality": { "type": "string", "minLength": 1 },
+      "models": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "enabled": { "type": "boolean" },
+            "label": { "type": "string" },
+            "description": { "type": "string" },
+            "sizes": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^[1-9][0-9]*x[1-9][0-9]*$" }
+            },
+            "qualities": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "defaultSize": { "type": "string", "pattern": "^[1-9][0-9]*x[1-9][0-9]*$" },
+            "defaultQuality": { "type": "string", "minLength": 1 },
+            "supportsEditing": { "type": "boolean" }
+          },
+          "required": ["id", "enabled", "sizes", "qualities"]
+        }
+      }
+    }
   }
 }

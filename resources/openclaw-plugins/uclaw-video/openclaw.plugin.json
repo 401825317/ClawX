@@ -23,7 +23,9 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
+      "enabled": { "type": "boolean" },
       "defaultModel": { "type": "string" },
+      "defaultSize": { "type": "string" },
       "defaultAspectRatio": {
         "type": "string",
         "enum": ["2:3", "3:2", "1:1", "9:16", "16:9"]
