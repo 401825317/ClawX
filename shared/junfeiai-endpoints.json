@@ -9,6 +9,7 @@
     "managedRuntimeContractVersion": 5,
     "legacyAuthAccountIds": ["lingzhiwuxian-auth"],
     "defaultModel": "smart-latest",
+    "defaultFallbackModel": "deepseek-v4-flash",
     "defaultModelContextWindow": 258000,
     "defaultApiProtocol": "openai-responses",
     "defaultThinkingLevel": "medium",

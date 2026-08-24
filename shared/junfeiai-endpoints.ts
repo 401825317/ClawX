@@ -36,6 +36,7 @@ export type UclawEndpointsConfig = {
     managedRuntimeContractVersion: number;
     legacyAuthAccountIds: string[];
     defaultModel: string;
+    defaultFallbackModel: string;
     defaultModelContextWindow: number;
     defaultApiProtocol: UclawApiProtocol;
     defaultThinkingLevel: UclawThinkingLevel;
@@ -415,6 +416,10 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
       ),
       legacyAuthAccountIds: readNonEmptyStringArray(provider.legacyAuthAccountIds, 'provider.legacyAuthAccountIds'),
       defaultModel: readNonEmptyString(provider.defaultModel, 'provider.defaultModel'),
+      defaultFallbackModel: readNonEmptyString(
+        provider.defaultFallbackModel,
+        'provider.defaultFallbackModel',
+      ),
       defaultModelContextWindow: readPositiveInteger(
         provider.defaultModelContextWindow,
         'provider.defaultModelContextWindow',
@@ -625,6 +630,7 @@ export const UCLAW_MANAGED_AUTH_ACCOUNT_ID = UCLAW_ENDPOINTS_CONFIG.provider.aut
 export const UCLAW_RUNTIME_CONTRACT_VERSION = UCLAW_ENDPOINTS_CONFIG.provider.managedRuntimeContractVersion;
 export const UCLAW_LEGACY_AUTH_ACCOUNT_IDS = UCLAW_ENDPOINTS_CONFIG.provider.legacyAuthAccountIds;
 export const UCLAW_DEFAULT_MODEL = UCLAW_ENDPOINTS_CONFIG.provider.defaultModel;
+export const UCLAW_DEFAULT_FALLBACK_MODEL = UCLAW_ENDPOINTS_CONFIG.provider.defaultFallbackModel;
 export const UCLAW_DEFAULT_API_PROTOCOL = UCLAW_ENDPOINTS_CONFIG.provider.defaultApiProtocol;
 export const UCLAW_DEFAULT_MODEL_CONTEXT_WINDOW = UCLAW_ENDPOINTS_CONFIG.provider.defaultModelContextWindow;
 export const UCLAW_DEFAULT_THINKING_LEVEL = UCLAW_ENDPOINTS_CONFIG.provider.defaultThinkingLevel;

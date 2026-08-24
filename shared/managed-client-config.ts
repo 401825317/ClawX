@@ -1,5 +1,6 @@
 import {
   UCLAW_DEFAULT_THINKING_LEVEL,
+  UCLAW_DEFAULT_FALLBACK_MODEL,
   UCLAW_DEFAULT_MODEL,
   UCLAW_MANAGED_PROVIDER_ID,
 } from './junfeiai-endpoints';
@@ -24,8 +25,8 @@ export type ManagedClientTextModelPolicy = {
   models: ManagedClientTextModel[];
 };
 
-/** Local resilience fallback kept on the same managed Provider as the primary model. */
-export const UCLAW_DEFAULT_FALLBACK_MODEL = 'deepseek-v4-flash';
+/** Preserve the existing shared export while sourcing the value from endpoint configuration. */
+export { UCLAW_DEFAULT_FALLBACK_MODEL };
 
 export type ManagedClientTextModelRequest = {
   refresh?: boolean;

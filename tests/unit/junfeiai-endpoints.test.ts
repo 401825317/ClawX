@@ -11,6 +11,7 @@ import {
   UCLAW_COMPACTION_RESERVE_TOKENS_FLOOR,
   UCLAW_COMPATIBILITY_PROVIDER_ID,
   UCLAW_DEFAULT_API_PROTOCOL,
+  UCLAW_DEFAULT_FALLBACK_MODEL,
   UCLAW_DEFAULT_MODEL,
   UCLAW_EXEC_ASK,
   UCLAW_EXEC_SECURITY,
@@ -41,6 +42,7 @@ type MutableTestConfig = {
     productionOrigin: string;
     providerName: string;
     compatibilityProviderId: string;
+    defaultFallbackModel?: string;
     defaultApiProtocol: string;
     managedRuntimeContractVersion: number;
   };
@@ -79,6 +81,7 @@ describe('UClaw managed endpoint configuration', () => {
     expect(UCLAW_MANAGED_ACCOUNT_ID).toBe('openai');
     expect(UCLAW_AUTH_ACCOUNT_ID).toBe('uclaw-auth');
     expect(UCLAW_DEFAULT_MODEL).toBe('smart-latest');
+    expect(UCLAW_DEFAULT_FALLBACK_MODEL).toBe(rawConfig.provider.defaultFallbackModel);
     expect(UCLAW_DEFAULT_API_PROTOCOL).toBe('openai-responses');
     expect(UCLAW_RUNTIME_CONTRACT_VERSION).toBe(rawConfig.provider.managedRuntimeContractVersion);
     expect(UCLAW_PRODUCTION_ORIGIN).toBe(configuredOrigin);
@@ -132,6 +135,7 @@ describe('UClaw managed endpoint configuration', () => {
     ['unsupported production origin protocol', (config: MutableTestConfig) => { config.provider.productionOrigin = 'ftp://example.com'; }],
     ['non-UClaw visible provider name', (config: MutableTestConfig) => { config.provider.providerName = 'Legacy Brand'; }],
     ['unsupported compatibility provider id', (config: MutableTestConfig) => { config.provider.compatibilityProviderId = 'legacy-provider'; }],
+    ['missing default fallback model', (config: MutableTestConfig) => { delete config.provider.defaultFallbackModel; }],
     ['unsupported API protocol', (config: MutableTestConfig) => { config.provider.defaultApiProtocol = 'anthropic-messages'; }],
     ['non-positive runtime contract version', (config: MutableTestConfig) => { config.provider.managedRuntimeContractVersion = 0; }],
     ['non-positive auth timeout', (config: MutableTestConfig) => { config.auth.requestTimeoutMs = 0; }],
