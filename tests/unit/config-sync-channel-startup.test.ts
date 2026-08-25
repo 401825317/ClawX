@@ -157,6 +157,29 @@ describe('Gateway channel startup config sync', () => {
     expect(result.channelStartupSummary).toBe('enabled(wecom)');
   });
 
+  it('upgrades the configured image plugin without legacy ownership options', async () => {
+    mocks.captureChannelStartupSnapshot.mockResolvedValue({
+      config: {
+        agents: {
+          defaults: {
+            imageGenerationModel: { primary: 'clawx-openai-image/gpt-image-2' },
+          },
+        },
+      },
+      configuredChannels: [],
+      cleanedDanglingWeChatState: false,
+    });
+
+    await syncGatewayConfigBeforeLaunch(appSettings, '/tmp/openclaw-runtime');
+
+    expect(mocks.ensurePluginInstalled).toHaveBeenCalledWith(
+      'clawx-openai-image',
+      ['/bundled/clawx-openai-image'],
+      'UClaw OpenAI Image',
+      { deferTrustedRecordSync: true },
+    );
+  });
+
   it('preserves plugins and keeps channel loading enabled when snapshot parsing fails', async () => {
     mocks.captureChannelStartupSnapshot.mockRejectedValue(new SyntaxError('malformed openclaw.json'));
 

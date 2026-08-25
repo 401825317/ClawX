@@ -386,6 +386,7 @@ export type ManagedPluginOwnership = Readonly<{
     | 'managed-marker'
     | 'trusted-install-record'
     | 'bundled-content-match'
+    | 'clawx-managed-plugin-id'
     | 'invalid-marker'
     | 'state-read-failed';
   code: string;
@@ -420,6 +421,11 @@ type ManagedPluginOwnershipOptions = Readonly<{
   targetDir?: string;
   candidateSources?: string[];
 }>;
+
+/** ClawX owns these bundled extension ids across upgrades, including installs created before markers existed. */
+function isClawXManagedPluginId(pluginDirName: string): boolean {
+  return pluginDirName === 'clawx-openai-image' || pluginDirName.startsWith('uclaw-');
+}
 
 function normalizeComparablePluginPath(filePath: string): string {
   const normalized = path.resolve(filePath);
@@ -1407,6 +1413,14 @@ export async function inspectManagedPluginOwnership(
       code: 'managed_marker_valid',
       contentModified: currentFingerprint !== null
         && currentFingerprint !== markerResult.marker.contentFingerprint,
+    };
+  }
+
+  if (isClawXManagedPluginId(pluginDirName)) {
+    return {
+      status: 'managed',
+      evidence: 'clawx-managed-plugin-id',
+      code: 'clawx_managed_plugin_id',
     };
   }
 

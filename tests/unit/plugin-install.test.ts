@@ -276,25 +276,25 @@ describe('plugin installer diagnostics', () => {
     expect(mockDelay).toHaveBeenCalledWith(150);
   });
 
-  it('preserves a same-name user plugin instead of overwriting it', async () => {
-    const pluginId = 'clawx-openai-image';
+  it('preserves a same-name third-party user plugin instead of overwriting it', async () => {
+    const pluginId = 'parallel';
     const sourceDir = join(testRoot, 'bundle', pluginId);
     const targetDir = join(paths.stateDir, 'extensions', pluginId);
     await createPluginFixture(sourceDir, {
       id: pluginId,
-      name: 'clawx-openai-image-plugin',
+      name: '@openclaw/parallel-plugin',
       version: '2.0.0',
     });
     await createPluginFixture(targetDir, {
       id: pluginId,
-      name: 'user-owned-image-plugin',
+      name: 'user-owned-parallel-plugin',
       version: '9.9.9',
     });
     await actualFs.writeFile(join(targetDir, 'index.mjs'), 'export default { owner: "user" };\n', 'utf8');
     const before = await actualFs.readFile(join(targetDir, 'index.mjs'), 'utf8');
 
     const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
-    const result = await ensurePluginInstalled(pluginId, [sourceDir], 'UClaw OpenAI Image');
+    const result = await ensurePluginInstalled(pluginId, [sourceDir], 'Parallel');
 
     expect(result).toMatchObject({
       installed: false,
@@ -342,6 +342,34 @@ describe('plugin installer diagnostics', () => {
     expect(installedPackage.version).toBe('2.0.0');
     expect(marker).toMatchObject({ managedBy: 'uclaw', pluginId });
     expect(marker.contentFingerprint).toMatch(/^[a-f0-9]{64}$/u);
+  });
+
+  it.each([
+    ['clawx-openai-image', 'clawx-openai-image-plugin', 'UClaw OpenAI Image'],
+    ['uclaw-video', 'uclaw-video-plugin', 'UClaw Video'],
+  ] as const)('upgrades a markerless bundled ClawX plugin by id: %s', async (pluginId, packageName, label) => {
+    const sourceDir = join(testRoot, 'bundle', pluginId);
+    const targetDir = join(paths.stateDir, 'extensions', pluginId);
+    await createPluginFixture(sourceDir, {
+      id: pluginId,
+      name: packageName,
+      version: '2.0.0',
+    });
+    await createPluginFixture(targetDir, {
+      id: pluginId,
+      name: packageName,
+      version: '1.0.0',
+    });
+
+    const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
+    await expect(ensurePluginInstalled(pluginId, [sourceDir], label))
+      .resolves.toEqual({ installed: true });
+
+    const installedPackage = JSON.parse(
+      await actualFs.readFile(join(targetDir, 'package.json'), 'utf8'),
+    ) as { version: string };
+    expect(installedPackage.version).toBe('2.0.0');
+    await expect(actualFs.access(join(targetDir, '.uclaw-managed-plugin.json'))).resolves.toBeUndefined();
   });
 
   it('uses an integrity-bound trusted install record when the marker is missing', async () => {

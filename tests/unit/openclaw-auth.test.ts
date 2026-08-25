@@ -486,6 +486,32 @@ describe('managed auth profiles transaction', () => {
     );
   });
 
+  it('installs the managed relay credential for the ClawX image provider', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    const {
+      installManagedAgentOpenAiApiKey,
+      snapshotManagedAgentAuthProfiles,
+    } = await import('@electron/utils/openclaw-auth');
+    const { readAuthProfilesFromSqlite } = await import('@electron/utils/openclaw-auth-sqlite');
+    const snapshot = await snapshotManagedAgentAuthProfiles();
+
+    await installManagedAgentOpenAiApiKey(
+      snapshot,
+      'managed-image-key',
+      new Set(['clawx-openai-image']),
+    );
+
+    const jsonStore = await readAuthProfiles('main');
+    expect(jsonStore.profiles['clawx-openai-image:default']).toEqual({
+      type: 'api_key',
+      provider: 'clawx-openai-image',
+      key: 'managed-image-key',
+    });
+    expect(jsonStore.order?.['clawx-openai-image']).toEqual(['clawx-openai-image:default']);
+    expect(jsonStore.lastGood?.['clawx-openai-image']).toBe('clawx-openai-image:default');
+    expect(readAuthProfilesFromSqlite('main')).toEqual(jsonStore);
+  });
+
   it('removes every dynamic managed relay profile from JSON and SQLite while preserving ordinary custom providers', async () => {
     await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
     const jsonStore = {

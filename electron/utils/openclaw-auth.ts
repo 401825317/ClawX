@@ -796,6 +796,7 @@ function buildStrictManagedProviderStore(
   const primaryProfileId = `${UCLAW_MANAGED_PROVIDER_ID}:default`;
   const compatibilityProfileId = `${UCLAW_COMPATIBILITY_PROVIDER_ID}:default`;
   const videoProfileId = `${UCLAW_VIDEO_PROVIDER_ID}:default`;
+  const imageProfileId = `${CLAWX_OPENAI_IMAGE_PROVIDER_KEY}:default`;
   store.profiles[primaryProfileId] = {
     type: 'api_key',
     provider: UCLAW_MANAGED_PROVIDER_ID,
@@ -811,6 +812,13 @@ function buildStrictManagedProviderStore(
     provider: UCLAW_VIDEO_PROVIDER_ID,
     key: apiKey,
   };
+  if (managedProviderIds.has(CLAWX_OPENAI_IMAGE_PROVIDER_KEY)) {
+    store.profiles[imageProfileId] = {
+      type: 'api_key',
+      provider: CLAWX_OPENAI_IMAGE_PROVIDER_KEY,
+      key: apiKey,
+    };
+  }
   if (!store.order) store.order = {};
   if (!store.lastGood) store.lastGood = {};
   store.order[UCLAW_MANAGED_PROVIDER_ID] = [primaryProfileId];
@@ -819,6 +827,10 @@ function buildStrictManagedProviderStore(
   store.lastGood[UCLAW_MANAGED_PROVIDER_ID] = primaryProfileId;
   store.lastGood[UCLAW_COMPATIBILITY_PROVIDER_ID] = compatibilityProfileId;
   store.lastGood[UCLAW_VIDEO_PROVIDER_ID] = videoProfileId;
+  if (managedProviderIds.has(CLAWX_OPENAI_IMAGE_PROVIDER_KEY)) {
+    store.order[CLAWX_OPENAI_IMAGE_PROVIDER_KEY] = [imageProfileId];
+    store.lastGood[CLAWX_OPENAI_IMAGE_PROVIDER_KEY] = imageProfileId;
+  }
   return store;
 }
 
