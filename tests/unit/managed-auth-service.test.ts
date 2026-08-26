@@ -2807,7 +2807,7 @@ describe('managed auth service transaction and compatibility behavior', () => {
     expect(gateway.reload).not.toHaveBeenCalled();
   });
 
-  it('keeps newly committed credentials and stops Gateway when start fails', async () => {
+  it('retries Gateway startup after committing credentials when the first start fails', async () => {
     const previousAccount: ProviderAccount = {
       id: 'openai',
       vendorId: 'openai',
@@ -2847,17 +2847,46 @@ describe('managed auth service transaction and compatibility behavior', () => {
 
     expect(result).toEqual(expect.objectContaining({
       success: true,
-      status: expect.objectContaining({
-        gatewayReloaded: false,
-        gatewayReloadError: 'Gateway start failed',
-      }),
+      status: expect.objectContaining({ gatewayReloaded: true }),
     }));
     expect(secrets.get('uclaw-auth')).toEqual(expect.objectContaining({ accessToken: 'access-secret' }));
     expect(secrets.get('openai')).toEqual(expect.objectContaining({ apiKey: 'relay-secret' }));
     expect(mocks.installManagedAgentOpenAiApiKey).toHaveBeenCalledTimes(1);
     expect(mocks.restoreManagedAgentAuthProfiles).not.toHaveBeenCalled();
+    expect(gateway.start).toHaveBeenCalledTimes(2);
     expect(gateway.stop).toHaveBeenCalledTimes(1);
-    expect(gateway.getStatus().state).toBe('stopped');
+    expect(gateway.getStatus().state).toBe('running');
+  });
+
+  it('keeps a newly started Gateway alive while it waits for gateway.ready', async () => {
+    let gatewayState: ReturnType<GatewayManager['getStatus']>['state'] = 'running';
+    let gatewayPid: number | undefined = 100;
+    const gateway = {
+      getStatus: vi.fn(() => ({ state: gatewayState, port: 18_789, pid: gatewayPid })),
+      acquireManagedRuntimeMutationLease: vi.fn(() => mocks.acquireManagedRuntimeMutationLease()),
+      releaseManagedRuntimeMutationLease: vi.fn((lease) => mocks.releaseManagedRuntimeMutationLease(lease)),
+      start: vi.fn().mockImplementation(async () => {
+        gatewayState = 'starting';
+        gatewayPid = 101;
+      }),
+      stop: vi.fn().mockImplementation(async () => {
+        gatewayState = 'stopped';
+        gatewayPid = undefined;
+      }),
+    } as unknown as GatewayManager;
+
+    const result = await loginManagedAuth(
+      { account: 'test@example.com', password: 'password' },
+      gateway,
+    );
+
+    expect(result).toEqual(expect.objectContaining({
+      success: true,
+      status: expect.objectContaining({ gatewayReloaded: true }),
+    }));
+    expect(gateway.start).toHaveBeenCalledTimes(1);
+    expect(gateway.stop).toHaveBeenCalledTimes(1);
+    expect(gateway.getStatus()).toEqual(expect.objectContaining({ state: 'starting', pid: 101 }));
   });
 
   it('restores provider storage and OpenClaw credentials after managed key installation fails', async () => {

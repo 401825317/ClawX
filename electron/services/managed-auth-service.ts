@@ -815,7 +815,12 @@ async function resumeGatewayAfterManagedMutation(
     const started = gatewayManager.getStatus();
     const hasNewProcess = started.pid !== undefined
       && (quiescence.previousPid === undefined || started.pid !== quiescence.previousPid);
-    if (started.state !== 'running' || !hasNewProcess) {
+    // GatewayManager.start() resolves after the process and WebSocket are ready,
+    // while gateway.ready may arrive later. Keep that new process alive instead
+    // of treating the normal starting window as a failed credential handoff.
+    const launchAccepted = hasNewProcess
+      && (started.state === 'starting' || started.state === 'running');
+    if (!launchAccepted) {
       await stopGatewayForAuthSafety(gatewayManager, 'managed credential start returned an unhealthy Gateway');
       return { gatewayReloaded: false, gatewayReloadError: 'Gateway start did not remain healthy' };
     }
@@ -826,6 +831,31 @@ async function resumeGatewayAfterManagedMutation(
   } finally {
     releaseManagedMutationLease(quiescence);
   }
+}
+
+/** Retry a committed login after the credential transaction has released runtime ownership. */
+async function recoverGatewayAfterAuthenticatedSession(
+  gatewayManager: GatewayManager | undefined,
+  gateway: Pick<ManagedAuthStatus, 'gatewayReloaded' | 'gatewayReloadError'>,
+): Promise<Pick<ManagedAuthStatus, 'gatewayReloaded' | 'gatewayReloadError'>> {
+  if (!gatewayManager || gateway.gatewayReloaded) return gateway;
+
+  try {
+    // Starting outside the mutation lease re-enables GatewayManager's normal
+    // reconnect schedule if this immediate recovery attempt also fails.
+    await gatewayManager.start();
+    const recovered = gatewayManager.getStatus();
+    if (
+      recovered.pid !== undefined
+      && (recovered.state === 'starting' || recovered.state === 'running')
+    ) {
+      return { gatewayReloaded: true };
+    }
+  } catch (error) {
+    logger.warn('[uclaw-auth] Gateway recovery after account switch failed; automatic reconnect remains active', error);
+  }
+
+  return gateway;
 }
 
 async function invalidateManagedSession(
@@ -1665,7 +1695,8 @@ async function commitAuthenticatedSession(
   // A login/register can be the first successful managed authentication after
   // startup was correctly deferred. In that case there is no prior running
   // Gateway to "resume", but the authenticated runtime should start now.
-  const gateway = await resumeGatewayAfterManagedMutation(quiescence, { startWhenStopped: true });
+  const resumedGateway = await resumeGatewayAfterManagedMutation(quiescence, { startWhenStopped: true });
+  const gateway = await recoverGatewayAfterAuthenticatedSession(gatewayManager, resumedGateway);
   return { ...committedStatus, ...gateway };
 }
 

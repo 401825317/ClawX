@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { toast } from 'sonner';
 import type { ManagedAuthStatus } from '@shared/managed-auth';
@@ -63,6 +63,26 @@ describe('ManagedAuthGate', () => {
     vi.spyOn(hostApi.managedAuth, 'status').mockImplementation(async () => (
       useManagedAuthStore.getState().status ?? status()
     ));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('verifies managed auth once without periodic polling', async () => {
+    vi.useFakeTimers();
+    useManagedAuthStore.setState({ status: status({ authValid: true, hasRelayToken: true }) });
+
+    renderGate();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(hostApi.managedAuth.status).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+    });
+    expect(hostApi.managedAuth.status).toHaveBeenCalledTimes(1);
   });
 
   it('renders nothing for unmanaged builds', () => {

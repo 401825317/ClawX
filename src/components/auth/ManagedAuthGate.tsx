@@ -11,8 +11,6 @@ interface ManagedAuthGateProps {
   enabled: boolean;
 }
 
-const REMOTE_VERIFY_INTERVAL_MS = 5 * 60 * 1000;
-
 export function ManagedAuthGate({ enabled }: ManagedAuthGateProps) {
   const { t } = useTranslation('setup');
   const location = useLocation();
@@ -43,14 +41,10 @@ export function ManagedAuthGate({ enabled }: ManagedAuthGateProps) {
     };
 
     initialTimer = window.setTimeout(() => void verify(), 0);
-    const interval = window.setInterval(() => {
-      if (document.visibilityState !== 'hidden') void refreshStatus().catch(() => undefined);
-    }, REMOTE_VERIFY_INTERVAL_MS);
 
     return () => {
       cancelled = true;
       window.clearTimeout(initialTimer);
-      window.clearInterval(interval);
     };
   }, [loadLocalStatus, refreshStatus, shouldCheck]);
 

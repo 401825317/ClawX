@@ -156,7 +156,7 @@ CAD 请求使用版本化 `cad-editor` 契约和本地 `create_dxf_file` 工具�
 
 ### 🔐 安全的供应商集成
 连接多个 AI 供应商（OpenAI、Anthropic、Z.AI / GLM 等），凭证安全存储在系统原生密钥链中。OpenAI 同时支持 API Key 与浏览器 OAuth（Codex 订阅）登录。
-UClaw 托管分发会在首次设置中提供账号登录、注册、验证码和设备授权。凭证只保存在 Electron Main 与受保护的 Secret Store 中。登录成功及每次启动时，UClaw 会对账并修复主 Provider `openai` 与兼容 Provider `lingzhiwuxian`，使两者使用同一 Relay Key 和 new-api 客户端配置下发的同一文本模型集合；默认路由为 `openai/<服务端默认模型>`。聊天模型选择器只展示该服务端下发列表。既有普通第三方及图片/视频 Provider 配置仍保留在本地，但在托管的 Provider 与模型界面中隐藏。社区分发继续使用原有 Provider 设置流程。
+UClaw 托管分发会在首次设置中提供账号登录、注册、验证码和设备授权。凭证只保存在 Electron Main 与受保护的 Secret Store 中。登录或切换账号成功后，UClaw 会使用已提交的新凭证自动重启 Gateway；Gateway 就绪信号确认前会保持启动中。登录成功及每次启动时，UClaw 会对账并修复主 Provider `openai` 与兼容 Provider `lingzhiwuxian`，使两者使用同一 Relay Key 和 new-api 客户端配置下发的同一文本模型集合；默认路由为 `openai/<服务端默认模型>`。聊天模型选择器只展示该服务端下发列表。既有普通第三方及图片/视频 Provider 配置仍保留在本地，但在托管的 Provider 与模型界面中隐藏。社区分发继续使用原有 Provider 设置流程。
 已登录的 UClaw 用户可以从侧栏进入虾粮商店，查看虾粮余额、创建充值订单、通过二维码或安全的浏览器链接完成支付，并分页查看历史订单。系统会自动检查支付状态，并在支付成功后刷新余额。
 当 UClaw 发布已启用的客服配置时，侧栏还会显示“帮助与客服”，可查看一个或多个官方客服二维码、工作时间、备注，并可复制微信号。该公共配置不要求登录，也不会影响 Chat 或 Gateway 状态。
 在开发者模式下，独立的“图像生成”页面支持配置 OpenAI 兼容生图端点（Base URL、API Key 和模型名，例如 `gpt-image-2`），生图请求会走专用的 `/v1/images/generations` 服务，聊天仍继续使用正常的 OpenAI Provider。
