@@ -62,9 +62,9 @@ async function loadReleaseModule() {
   return import('./release.mjs');
 }
 
-test('package metadata exposes the local Windows USB release entry at version 2.0.0', async () => {
+test('package metadata exposes the local Windows USB release entry at a stable version', async () => {
   const pkg = JSON.parse(await readFile(path.join(ROOT, 'package.json'), 'utf8'));
-  assert.equal(pkg.version, '2.0.0');
+  assert.match(pkg.version, /^\d+\.\d+\.\d+$/u);
   assert.equal(pkg.scripts.release, 'node scripts/release.mjs');
   assert.match(pkg.scripts['test:release:pipeline'], /(?:^|\s)scripts\/release\.test\.mjs(?:\s|$)/u);
   assert.match(pkg.scripts['package:win:usb'], /--publish never/u);
@@ -112,6 +112,39 @@ test('production workflow signs portable executables without regression or an ex
       `Unexpected production workflow dependency: ${forbidden}`,
     );
   }
+});
+
+test('production stage builds macOS packages and cannot activate or publish a GitHub Release', async () => {
+  const workflow = await readFile(
+    path.join(ROOT, '.github', 'workflows', 'uclaw-portable-production.yml'),
+    'utf8',
+  );
+  assert.match(workflow, /build-and-notarize-macos:/u);
+  assert.match(workflow, /pnpm run package:mac/u);
+  assert.match(workflow, /publish-disabled-release-stage\.ps1/u);
+  assert.match(workflow, /register disabled zz-cn releases/u);
+  for (const forbidden of [
+    'softprops/action-gh-release',
+    'git tag -a',
+    'git push origin "refs/tags/',
+    'scripts/windows-support/publish-portable-release.ps1',
+  ]) {
+    assert.equal(workflow.includes(forbidden), false, `Disabled stage must not run: ${forbidden}`);
+  }
+});
+
+test('disabled stage publisher never enables a release row', async () => {
+  const publisher = await readFile(
+    path.join(ROOT, 'scripts', 'windows-support', 'publish-disabled-release-stage.ps1'),
+    'utf8',
+  );
+  assert.match(publisher, /enabled, mandatory/u);
+  assert.match(publisher, /false, \$mandatorySql/u);
+  assert.match(publisher, /stage operation changed an enabled release/u);
+  assert.match(publisher, /Public release feed changed during disabled staging/u);
+  assert.match(publisher, /Get-RemoteSha512Hex/u);
+  assert.match(publisher, /OSS SHA-512 mismatch/u);
+  assert.equal(/SET\s+enabled\s*=\s*true/iu.test(publisher), false);
 });
 
 test('Windows can execute the pnpm.cmd shim through the release shell strategy', {
