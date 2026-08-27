@@ -136,7 +136,7 @@ export function createDefaultManagedClientTextModelPolicy(): ManagedClientTextMo
     defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
     models: [
       { id: UCLAW_DEFAULT_MODEL },
-      { id: UCLAW_DEFAULT_FALLBACK_MODEL, label: 'DeepSeek V4 Flash' },
+      { id: UCLAW_DEFAULT_FALLBACK_MODEL, label: 'DeepSeek V4 Flash', visible: false },
     ],
   };
 }

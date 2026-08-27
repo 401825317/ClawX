@@ -75,6 +75,14 @@ describe('managed client-config Renderer store', () => {
     });
   });
 
+  it('keeps the default fallback model hidden from the picker', () => {
+    expect(createDefaultManagedClientTextModelPolicy().models).toContainEqual({
+      id: 'deepseek-v4-flash',
+      label: 'DeepSeek V4 Flash',
+      visible: false,
+    });
+  });
+
   it('fills fields omitted by an older text-model policy response', async () => {
     mocks.textModels.mockResolvedValueOnce({
       defaultModel: 'smart-latest',

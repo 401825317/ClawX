@@ -185,6 +185,7 @@ describe('managed runtime config transaction', () => {
         { id: 'smart-latest', label: 'Smart' },
         { id: 'standard-chat', label: 'Standard Chat' },
         { id: 'reasoning-pro', label: 'Reasoning Pro' },
+        { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', visible: false },
       ],
     };
     const providerEntry = createManagedRuntimeProviderEntry(policy, diagnosticHeaders);
@@ -201,6 +202,7 @@ describe('managed runtime config transaction', () => {
       'smart-latest',
       'standard-chat',
       'reasoning-pro',
+      'deepseek-v4-flash',
     ]);
     expect(providerEntry.models[0]).toEqual(expect.objectContaining({
       reasoning: true,

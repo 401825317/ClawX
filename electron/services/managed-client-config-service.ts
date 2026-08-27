@@ -479,8 +479,11 @@ function normalizeTextModelOptions(value: unknown): ManagedClientTextModelPolicy
       return true;
     });
   if (models.length === 0) return null;
-  if (!models.some((model) => model.id === UCLAW_DEFAULT_FALLBACK_MODEL)) {
-    models.push({ id: UCLAW_DEFAULT_FALLBACK_MODEL, label: 'DeepSeek V4 Flash' });
+  const defaultFallbackModel = models.find((model) => model.id === UCLAW_DEFAULT_FALLBACK_MODEL);
+  if (defaultFallbackModel) {
+    defaultFallbackModel.visible = false;
+  } else {
+    models.push({ id: UCLAW_DEFAULT_FALLBACK_MODEL, label: 'DeepSeek V4 Flash', visible: false });
   }
   const configuredDefault = managedModelId(value.defaultModel);
   const defaultModel = models.some((model) => model.id === configuredDefault)

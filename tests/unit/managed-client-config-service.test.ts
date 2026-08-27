@@ -2,11 +2,19 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  UCLAW_DEFAULT_FALLBACK_MODEL,
   UCLAW_DEFAULT_MODEL,
   UCLAW_DEFAULT_THINKING_LEVEL,
   UCLAW_SUPPORT_REFRESH_INTERVAL_MS,
   UCLAW_SUPPORT_ROUTES,
 } from '@shared/junfeiai-endpoints';
+
+const defaultFallbackModels = [UCLAW_DEFAULT_FALLBACK_MODEL];
+const hiddenDefaultFallbackModel = {
+  id: UCLAW_DEFAULT_FALLBACK_MODEL,
+  label: 'DeepSeek V4 Flash',
+  visible: false,
+};
 
 const mocks = vi.hoisted(() => ({
   fetch: vi.fn(),
@@ -116,12 +124,13 @@ describe('managed client-config service', () => {
 
     await expect(getManagedClientTextModelPolicy({ refresh: true })).resolves.toEqual({
       defaultModel: 'smart-latest',
-      fallbackModels: ['deepseek-v4-pro', 'standard-chat'],
+      fallbackModels: ['deepseek-v4-pro', 'standard-chat', 'deepseek-v4-flash'],
       defaultThinkingLevel: 'high',
       models: [
         { id: 'smart-latest', label: 'Smart' },
         { id: 'deepseek-v4-pro', description: 'Reasoning' },
         { id: 'standard-chat', label: 'Standard Chat' },
+        { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', visible: false },
       ],
     });
     expect(mocks.store.get('textModelPolicy')).toEqual({
@@ -129,7 +138,7 @@ describe('managed client-config service', () => {
       policiesByOrigin: {
         'https://uclaw.example.test': expect.objectContaining({
           defaultModel: 'smart-latest',
-          fallbackModels: ['deepseek-v4-pro', 'standard-chat'],
+          fallbackModels: ['deepseek-v4-pro', 'standard-chat', 'deepseek-v4-flash'],
           defaultThinkingLevel: 'high',
         }),
       },
@@ -139,9 +148,33 @@ describe('managed client-config service', () => {
       expect.objectContaining({
         event: 'managed_text_fallback_policy',
         result: 'accepted',
-        fallbackModels: ['deepseek-v4-pro', 'standard-chat'],
+        fallbackModels: ['deepseek-v4-pro', 'standard-chat', 'deepseek-v4-flash'],
       }),
     );
+  });
+
+  it('hides an existing default fallback model from the picker', async () => {
+    mocks.fetch.mockResolvedValueOnce(jsonResponse({
+      data: {
+        modelOptions: {
+          text: {
+            defaultModel: 'smart-latest',
+            models: [
+              { id: 'smart-latest', label: 'Smart' },
+              { id: UCLAW_DEFAULT_FALLBACK_MODEL, label: 'DeepSeek V4 Flash' },
+            ],
+          },
+        },
+      },
+    }));
+    const { getManagedClientTextModelPolicy } = await loadService();
+
+    await expect(getManagedClientTextModelPolicy({ refresh: true })).resolves.toEqual({
+      defaultModel: 'smart-latest',
+      fallbackModels: defaultFallbackModels,
+      defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
+      models: [{ id: 'smart-latest', label: 'Smart' }, hiddenDefaultFallbackModel],
+    });
   });
 
   it('applies artifact and ecommerce rollout before exposing runtime features', async () => {
@@ -845,9 +878,9 @@ describe('managed client-config service', () => {
 
     await expect(getManagedClientTextModelPolicy({ refresh: true })).resolves.toEqual({
       defaultModel: 'smart-latest',
-      fallbackModels: [],
+      fallbackModels: defaultFallbackModels,
       defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
-      models: [{ id: 'smart-latest', label: 'Smart' }],
+      models: [{ id: 'smart-latest', label: 'Smart' }, hiddenDefaultFallbackModel],
     });
   });
 
@@ -861,9 +894,9 @@ describe('managed client-config service', () => {
 
     await expect(getManagedClientTextModelPolicy({ refresh: true })).resolves.toEqual({
       defaultModel: UCLAW_DEFAULT_MODEL,
-      fallbackModels: [],
+      fallbackModels: defaultFallbackModels,
       defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
-      models: [{ id: UCLAW_DEFAULT_MODEL }],
+      models: [{ id: UCLAW_DEFAULT_MODEL }, hiddenDefaultFallbackModel],
     });
     expect(mocks.fetch).toHaveBeenCalledTimes(1);
   });
@@ -888,11 +921,12 @@ describe('managed client-config service', () => {
 
     await expect(getManagedClientTextModelPolicy({ refresh: true })).resolves.toEqual({
       defaultModel: 'reasoning-pro',
-      fallbackModels: [],
+      fallbackModels: defaultFallbackModels,
       defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
       models: [
         { id: 'smart-latest', label: 'Smart' },
         { id: 'reasoning-pro', label: 'Reasoning' },
+        hiddenDefaultFallbackModel,
       ],
     });
   });
@@ -916,9 +950,9 @@ describe('managed client-config service', () => {
 
     await expect(getManagedClientTextModelPolicy({ refresh: true })).resolves.toEqual({
       defaultModel: 'deepseek-v4-pro',
-      fallbackModels: [],
+      fallbackModels: defaultFallbackModels,
       defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
-      models: [{ id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' }],
+      models: [{ id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' }, hiddenDefaultFallbackModel],
     });
     expect(mocks.fetch).toHaveBeenNthCalledWith(
       2,
@@ -942,9 +976,9 @@ describe('managed client-config service', () => {
 
     await expect(getManagedClientTextModelPolicy({ refresh: true })).resolves.toEqual({
       defaultModel: 'cached-model',
-      fallbackModels: [],
+      fallbackModels: defaultFallbackModels,
       defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
-      models: [{ id: 'cached-model', label: 'Cached' }],
+      models: [{ id: 'cached-model', label: 'Cached' }, hiddenDefaultFallbackModel],
     });
   });
 
@@ -954,9 +988,9 @@ describe('managed client-config service', () => {
 
     await expect(getManagedClientTextModelPolicy({ refresh: true })).resolves.toEqual({
       defaultModel: UCLAW_DEFAULT_MODEL,
-      fallbackModels: [],
+      fallbackModels: defaultFallbackModels,
       defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
-      models: [{ id: UCLAW_DEFAULT_MODEL }],
+      models: [{ id: UCLAW_DEFAULT_MODEL }, hiddenDefaultFallbackModel],
     });
   });
 
@@ -976,9 +1010,9 @@ describe('managed client-config service', () => {
 
     expect(policy).toEqual({
       defaultModel: 'smart-latest',
-      fallbackModels: [],
+      fallbackModels: defaultFallbackModels,
       defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
-      models: [{ id: 'smart-latest', label: 'Smart' }],
+      models: [{ id: 'smart-latest', label: 'Smart' }, hiddenDefaultFallbackModel],
     });
     expect(JSON.stringify([...mocks.store.values()])).not.toContain('secret-access-token');
   });
@@ -1000,9 +1034,9 @@ describe('managed client-config service', () => {
       accessToken: 'secret-access-token',
     })).resolves.toEqual({
       defaultModel: 'login-current-model',
-      fallbackModels: [],
+      fallbackModels: defaultFallbackModels,
       defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
-      models: [{ id: 'login-current-model', label: 'Current' }],
+      models: [{ id: 'login-current-model', label: 'Current' }, hiddenDefaultFallbackModel],
     });
     expect(mocks.fetch).toHaveBeenCalledWith(
       `https://uclaw.example.test${UCLAW_SUPPORT_ROUTES.clientConfig}`,
@@ -1026,26 +1060,26 @@ describe('managed client-config service', () => {
     const { getManagedClientTextModelPolicy } = await loadService();
     await expect(getManagedClientTextModelPolicy({ refresh: true })).resolves.toEqual({
       defaultModel: 'first-model',
-      fallbackModels: [],
+      fallbackModels: defaultFallbackModels,
       defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
-      models: [{ id: 'first-model' }],
+      models: [{ id: 'first-model' }, hiddenDefaultFallbackModel],
     });
 
     mocks.origin = 'https://second.example.test';
     mocks.fetch.mockRejectedValueOnce(new Error('second origin offline'));
     await expect(getManagedClientTextModelPolicy({ refresh: true })).resolves.toEqual({
       defaultModel: UCLAW_DEFAULT_MODEL,
-      fallbackModels: [],
+      fallbackModels: defaultFallbackModels,
       defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
-      models: [{ id: UCLAW_DEFAULT_MODEL }],
+      models: [{ id: UCLAW_DEFAULT_MODEL }, hiddenDefaultFallbackModel],
     });
 
     mocks.origin = 'https://first.example.test';
     await expect(getManagedClientTextModelPolicy()).resolves.toEqual({
       defaultModel: 'first-model',
-      fallbackModels: [],
+      fallbackModels: defaultFallbackModels,
       defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
-      models: [{ id: 'first-model' }],
+      models: [{ id: 'first-model' }, hiddenDefaultFallbackModel],
     });
   });
 
@@ -1072,9 +1106,9 @@ describe('managed client-config service', () => {
       },
     })).resolves.toEqual({
       defaultModel: 'embedded-new',
-      fallbackModels: [],
+      fallbackModels: defaultFallbackModels,
       defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
-      models: [{ id: 'embedded-new', label: 'Embedded New' }],
+      models: [{ id: 'embedded-new', label: 'Embedded New' }, hiddenDefaultFallbackModel],
     });
 
     resolveRefresh(jsonResponse({
@@ -1090,15 +1124,15 @@ describe('managed client-config service', () => {
 
     await expect(refresh).resolves.toEqual({
       defaultModel: 'embedded-new',
-      fallbackModels: [],
+      fallbackModels: defaultFallbackModels,
       defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
-      models: [{ id: 'embedded-new', label: 'Embedded New' }],
+      models: [{ id: 'embedded-new', label: 'Embedded New' }, hiddenDefaultFallbackModel],
     });
     await expect(getManagedClientTextModelPolicy()).resolves.toEqual({
       defaultModel: 'embedded-new',
-      fallbackModels: [],
+      fallbackModels: defaultFallbackModels,
       defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
-      models: [{ id: 'embedded-new', label: 'Embedded New' }],
+      models: [{ id: 'embedded-new', label: 'Embedded New' }, hiddenDefaultFallbackModel],
     });
   });
 
@@ -1130,9 +1164,9 @@ describe('managed client-config service', () => {
     releaseStoreLoad();
     await expect(embedded).resolves.toEqual({
       defaultModel: 'embedded-new',
-      fallbackModels: [],
+      fallbackModels: defaultFallbackModels,
       defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
-      models: [{ id: 'embedded-new', label: 'Embedded New' }],
+      models: [{ id: 'embedded-new', label: 'Embedded New' }, hiddenDefaultFallbackModel],
     });
     await vi.waitFor(() => expect(mocks.fetch).toHaveBeenCalledOnce());
 
@@ -1149,15 +1183,15 @@ describe('managed client-config service', () => {
 
     await expect(refresh).resolves.toEqual({
       defaultModel: 'embedded-new',
-      fallbackModels: [],
+      fallbackModels: defaultFallbackModels,
       defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
-      models: [{ id: 'embedded-new', label: 'Embedded New' }],
+      models: [{ id: 'embedded-new', label: 'Embedded New' }, hiddenDefaultFallbackModel],
     });
     await expect(getManagedClientTextModelPolicy()).resolves.toEqual({
       defaultModel: 'embedded-new',
-      fallbackModels: [],
+      fallbackModels: defaultFallbackModels,
       defaultThinkingLevel: UCLAW_DEFAULT_THINKING_LEVEL,
-      models: [{ id: 'embedded-new', label: 'Embedded New' }],
+      models: [{ id: 'embedded-new', label: 'Embedded New' }, hiddenDefaultFallbackModel],
     });
   });
 });
