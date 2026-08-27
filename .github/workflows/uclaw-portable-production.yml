@@ -1,4 +1,4 @@
-name: UClaw Windows Portable Production
+name: UClaw Windows USB and macOS Production Stage
 
 on:
   workflow_dispatch:
@@ -20,10 +20,10 @@ on:
 
 permissions:
   actions: read
-  contents: write
+  contents: read
 
 concurrency:
-  group: uclaw-windows-portable-production
+  group: uclaw-windows-macos-production-stage
   cancel-in-progress: false
 
 env:
@@ -135,6 +135,24 @@ jobs:
             throw 'Repository secret SIGNPATH_API_TOKEN is required for a formal signed release.'
           }
 
+      - name: Parse protected Windows release scripts
+        shell: pwsh
+        run: |
+          $scripts = @('scripts/windows-support/publish-disabled-release-stage.ps1')
+          foreach ($script in $scripts) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path -LiteralPath $script),
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              $messages = $errors | ForEach-Object { $_.Message }
+              throw "PowerShell parser rejected ${script}: $($messages -join '; ')"
+            }
+          }
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
@@ -244,11 +262,109 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  build-and-notarize-macos:
+    name: Build, sign, notarize, and stage macOS packages
+    needs: preflight
+    runs-on: macos-latest
+    timeout-minutes: 150
+    env:
+      CI: 'true'
+      RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+      RELEASE_COMMIT: ${{ needs.preflight.outputs.commit }}
+    steps:
+      - name: Checkout locked commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+          fetch-depth: 0
+
+      - name: Require macOS signing and notarization credentials
+        env:
+          MAC_CERTS_PRESENT: ${{ secrets.MAC_CERTS }}
+          MAC_CERTS_PASSWORD_PRESENT: ${{ secrets.MAC_CERTS_PASSWORD }}
+          APPLE_ID_PRESENT: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD_PRESENT: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID_PRESENT: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for name in MAC_CERTS_PRESENT MAC_CERTS_PASSWORD_PRESENT APPLE_ID_PRESENT APPLE_PASSWORD_PRESENT APPLE_TEAM_ID_PRESENT; do
+            if [[ -z "${!name}" ]]; then
+              echo "Required macOS production credential is missing: ${name%_PRESENT}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.UCLAW_NODE_VERSION }}
+          cache: pnpm
+
+      - name: Prefer HTTPS for public GitHub dependencies
+        run: |
+          git config --global "url.https://github.com/.insteadOf" "git@github.com:"
+          git config --global --add "url.https://github.com/.insteadOf" "ssh://git@github.com/"
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download macOS runtime binaries
+        run: |
+          pnpm run uv:download:mac
+          pnpm run agent-browser:download:mac
+
+      - name: Build signed and notarized macOS packages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ secrets.MAC_CERTS }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTS_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          ulimit -n 65536 || true
+          pnpm run package:mac
+
+      - name: Verify signatures, notarization tickets, and exact artifacts
+        run: |
+          set -euo pipefail
+          for app in release/mac/UClaw.app release/mac-arm64/UClaw.app; do
+            test -d "$app"
+            codesign --verify --deep --strict --verbose=2 "$app"
+            spctl --assess --type execute --verbose=2 "$app"
+            xcrun stapler validate "$app"
+          done
+          for arch in x64 arm64; do
+            dmg="release/UClaw-${RELEASE_VERSION}-mac-${arch}.dmg"
+            zip="release/UClaw-${RELEASE_VERSION}-mac-${arch}.zip"
+            test -s "$dmg"
+            test -s "$zip"
+            test -s "${zip}.blockmap"
+          done
+
+      - name: Stage immutable macOS production candidate
+        run: |
+          node scripts/macos-support/stage-production-release-candidate.mjs \
+            --version "$RELEASE_VERSION" \
+            --commit "$RELEASE_COMMIT"
+
+      - name: Upload immutable macOS production candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: uclaw-macos-production-candidate-${{ needs.preflight.outputs.version }}-${{ needs.preflight.outputs.short_commit }}
+          path: release/macos-production-candidate/*
+          if-no-files-found: error
+          retention-days: 14
+
   publish:
-    name: Publish OSS, feed, tag, and GitHub Release
+    name: Upload OSS and register disabled zz-cn releases
     needs:
       - preflight
       - build-and-sign
+      - build-and-notarize-macos
     runs-on:
       - self-hosted
       - Windows
@@ -262,10 +378,10 @@ jobs:
       CI: 'true'
       RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
       RELEASE_COMMIT: ${{ needs.preflight.outputs.commit }}
-      RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
       RELEASE_MANDATORY: ${{ inputs.mandatory }}
       RELEASE_NOTES: ${{ inputs.release_notes }}
-      CANDIDATE_DIRECTORY: release/production-candidate
+      WINDOWS_CANDIDATE_DIRECTORY: release/production-candidate
+      MACOS_CANDIDATE_DIRECTORY: release/macos-production-candidate
     steps:
       - name: Checkout locked commit
         uses: actions/checkout@v6
@@ -274,11 +390,17 @@ jobs:
           fetch-depth: 0
           clean: true
 
-      - name: Download exact production candidate
+      - name: Download exact Windows production candidate
         uses: actions/download-artifact@v4
         with:
           name: uclaw-production-candidate-${{ needs.preflight.outputs.version }}-${{ needs.preflight.outputs.short_commit }}
-          path: ${{ env.CANDIDATE_DIRECTORY }}
+          path: ${{ env.WINDOWS_CANDIDATE_DIRECTORY }}
+
+      - name: Download exact macOS production candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: uclaw-macos-production-candidate-${{ needs.preflight.outputs.version }}-${{ needs.preflight.outputs.short_commit }}
+          path: ${{ env.MACOS_CANDIDATE_DIRECTORY }}
 
       - name: Verify protected release runner prerequisites
         shell: pwsh
@@ -297,73 +419,40 @@ jobs:
       - name: Validate publication inputs without production writes
         shell: pwsh
         run: |
-          & scripts/windows-support/publish-portable-release.ps1 `
-            -CandidateDirectory $env:CANDIDATE_DIRECTORY `
+          & scripts/windows-support/publish-disabled-release-stage.ps1 `
+            -WindowsCandidateDirectory $env:WINDOWS_CANDIDATE_DIRECTORY `
+            -MacosCandidateDirectory $env:MACOS_CANDIDATE_DIRECTORY `
             -Version $env:RELEASE_VERSION `
             -Commit $env:RELEASE_COMMIT `
             -ValidateOnly
 
-      - name: Publish immutable OSS objects and production feed
+      - name: Upload immutable OSS objects and register disabled releases
         shell: pwsh
         run: |
           $mandatory = [bool]::Parse($env:RELEASE_MANDATORY)
-          & scripts/windows-support/publish-portable-release.ps1 `
-            -CandidateDirectory $env:CANDIDATE_DIRECTORY `
+          & scripts/windows-support/publish-disabled-release-stage.ps1 `
+            -WindowsCandidateDirectory $env:WINDOWS_CANDIDATE_DIRECTORY `
+            -MacosCandidateDirectory $env:MACOS_CANDIDATE_DIRECTORY `
             -Version $env:RELEASE_VERSION `
             -Commit $env:RELEASE_COMMIT `
             -ReleaseNotes $env:RELEASE_NOTES `
             -Mandatory $mandatory
 
-      - name: Create or verify annotated version tag
+      - name: Write disabled stage summary
         shell: pwsh
         run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git fetch origin --tags
-          if (git rev-parse -q --verify "refs/tags/$env:RELEASE_TAG") {
-            $tagType = git cat-file -t "refs/tags/$env:RELEASE_TAG"
-            if ($tagType -ne 'tag') {
-              throw "Existing tag $env:RELEASE_TAG is not annotated."
-            }
-            $tagCommit = git rev-list -n 1 $env:RELEASE_TAG
-            if ($tagCommit -ne $env:RELEASE_COMMIT) {
-              throw "Tag $env:RELEASE_TAG points to $tagCommit, not $env:RELEASE_COMMIT."
-            }
-          } else {
-            git tag -a $env:RELEASE_TAG -m "UClaw $env:RELEASE_VERSION" $env:RELEASE_COMMIT
-            git push origin "refs/tags/$env:RELEASE_TAG"
-          }
-
-      - name: Create or update GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.preflight.outputs.tag }}
-          target_commitish: ${{ needs.preflight.outputs.commit }}
-          name: UClaw ${{ needs.preflight.outputs.version }}
-          body: ${{ inputs.release_notes }}
-          generate_release_notes: true
-          draft: false
-          prerelease: false
-          make_latest: true
-          files: |
-            ${{ env.CANDIDATE_DIRECTORY }}/UClaw-${{ needs.preflight.outputs.version }}-win-x64-usb.zip
-            ${{ env.CANDIDATE_DIRECTORY }}/UClaw-${{ needs.preflight.outputs.version }}-win-x64-usb.json
-            ${{ env.CANDIDATE_DIRECTORY }}/publication.json
-
-      - name: Write release summary
-        shell: pwsh
-        run: |
-          $candidate = Get-Content -Raw -LiteralPath (Join-Path $env:CANDIDATE_DIRECTORY 'candidate.json') | ConvertFrom-Json
-          $publication = Get-Content -Raw -LiteralPath (Join-Path $env:CANDIDATE_DIRECTORY 'publication.json') | ConvertFrom-Json
+          $candidate = Get-Content -Raw -LiteralPath (Join-Path $env:WINDOWS_CANDIDATE_DIRECTORY 'candidate.json') | ConvertFrom-Json
+          $publication = Get-Content -Raw -LiteralPath (Join-Path $env:WINDOWS_CANDIDATE_DIRECTORY 'stage-publication.json') | ConvertFrom-Json
           @"
-          ## UClaw $($candidate.version) published
+          ## UClaw $($candidate.version) staged disabled
 
           - Commit: ``$($candidate.commit)``
           - Build ID: ``$($candidate.buildId)``
-          - Size: ``$($candidate.size)``
-          - SHA-512: ``$($candidate.sha512)``
+          - Windows USB and macOS x64/arm64 uploaded to OSS
+          - zz-cn records: ``$($publication.databaseRows.Count)``
+          - Enabled: ``$($publication.enabled)``
           - Mandatory: ``$($publication.mandatory)``
-          - Download: $($publication.url)
+          - Existing public feeds were verified unchanged
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
       - name: Upload final production evidence
@@ -372,6 +461,8 @@ jobs:
         with:
           name: uclaw-production-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ env.CANDIDATE_DIRECTORY }}/*
+            ${{ env.WINDOWS_CANDIDATE_DIRECTORY }}/*
+            ${{ env.MACOS_CANDIDATE_DIRECTORY }}/candidate.json
+            ${{ env.MACOS_CANDIDATE_DIRECTORY }}/latest-mac.yml
           if-no-files-found: warn
           retention-days: 30
