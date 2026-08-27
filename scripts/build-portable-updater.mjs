@@ -12,6 +12,7 @@ const OUTPUT_ROOT = path.join(ROOT, 'resources', 'updater');
 
 const TARGETS = {
   'win32-x64': { goos: 'windows', goarch: 'amd64', fileName: 'uclaw-portable-updater.exe' },
+  'darwin-x64': { goos: 'darwin', goarch: 'amd64', fileName: 'uclaw-portable-updater' },
   'darwin-arm64': { goos: 'darwin', goarch: 'arm64', fileName: 'uclaw-portable-updater' },
 };
 

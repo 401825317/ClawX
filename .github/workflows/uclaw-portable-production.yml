@@ -110,8 +110,8 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "release_branch=$SELECTED_BRANCH" >> "$GITHUB_OUTPUT"
 
-  build-and-sign:
-    name: Build, sign, and stage exact package
+  build-windows-usb:
+    name: Build and stage Windows USB package
     needs: preflight
     runs-on: windows-latest
     timeout-minutes: 150
@@ -125,15 +125,6 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.commit }}
           fetch-depth: 0
-
-      - name: Require SignPath credential
-        shell: pwsh
-        env:
-          SIGNPATH_TOKEN_PRESENT: ${{ secrets.SIGNPATH_API_TOKEN }}
-        run: |
-          if (-not $env:SIGNPATH_TOKEN_PRESENT) {
-            throw 'Repository secret SIGNPATH_API_TOKEN is required for a formal signed release.'
-          }
 
       - name: Parse protected Windows release scripts
         shell: pwsh
@@ -178,68 +169,11 @@ jobs:
         shell: pwsh
         run: pnpm install --frozen-lockfile
 
-      - name: Build unsigned Windows USB candidate
+      - name: Build Windows USB candidate
         shell: pwsh
         run: pnpm run package:win:usb
 
-      - name: Prepare Windows USB executables for SignPath
-        shell: pwsh
-        run: |
-          $inputDirectory = 'release\signpath-input'
-          Remove-Item -LiteralPath $inputDirectory -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path $inputDirectory -Force | Out-Null
-          $executables = @(
-            'release\win-unpacked\UClaw.exe',
-            'release\win-unpacked\resources\resources\updater\win32-x64\uclaw-portable-updater.exe'
-          )
-          foreach ($executable in $executables) {
-            if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
-              throw "USB package is missing executable: $executable"
-            }
-            Copy-Item -LiteralPath $executable -Destination $inputDirectory -Force
-          }
-
-      - name: Upload unsigned USB executables for SignPath
-        id: upload-sign-input
-        uses: actions/upload-artifact@v4
-        with:
-          name: unsigned-uclaw-usb-executables-${{ github.run_id }}-${{ github.run_attempt }}
-          path: release/signpath-input/*.exe
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Sign Windows USB executables
-        uses: signpath/github-action-submit-signing-request@v2
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: 78e37079-23df-4800-b41c-33312ad7c1e3
-          project-slug: ValueCell
-          signing-policy-slug: ValueCell-sign
-          github-artifact-id: ${{ steps.upload-sign-input.outputs.artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: release/signed-executables
-
-      - name: Replace signed executables and rebuild USB ZIP
-        shell: pwsh
-        run: |
-          $targets = @{
-            'UClaw.exe' = 'release\win-unpacked\UClaw.exe'
-            'uclaw-portable-updater.exe' = 'release\win-unpacked\resources\resources\updater\win32-x64\uclaw-portable-updater.exe'
-          }
-          foreach ($name in $targets.Keys) {
-            $matches = @(Get-ChildItem -Path 'release\signed-executables' -Filter $name -File -Recurse)
-            if ($matches.Count -ne 1) {
-              throw "Expected one signed $name; found $($matches.Count)."
-            }
-            $signature = Get-AuthenticodeSignature -LiteralPath $matches[0].FullName
-            if ($signature.Status -ne 'Valid') {
-              throw "Invalid Authenticode signature for $name: $($signature.Status)."
-            }
-            Copy-Item -LiteralPath $matches[0].FullName -Destination $targets[$name] -Force
-          }
-          node scripts/build-usb-release.mjs --win --arch=x64
-
-      - name: Refresh integrity metadata from signed ZIP
+      - name: Refresh integrity metadata from final ZIP
         shell: pwsh
         run: |
           node scripts/windows-support/refresh-portable-release-metadata.mjs `
@@ -262,8 +196,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  build-and-notarize-macos:
-    name: Build, sign, notarize, and stage macOS packages
+  build-macos-usb:
+    name: Build and stage macOS USB packages
     needs: preflight
     runs-on: macos-latest
     timeout-minutes: 150
@@ -277,22 +211,6 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.commit }}
           fetch-depth: 0
-
-      - name: Require macOS signing and notarization credentials
-        env:
-          MAC_CERTS_PRESENT: ${{ secrets.MAC_CERTS }}
-          MAC_CERTS_PASSWORD_PRESENT: ${{ secrets.MAC_CERTS_PASSWORD }}
-          APPLE_ID_PRESENT: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD_PRESENT: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID_PRESENT: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          for name in MAC_CERTS_PRESENT MAC_CERTS_PASSWORD_PRESENT APPLE_ID_PRESENT APPLE_PASSWORD_PRESENT APPLE_TEAM_ID_PRESENT; do
-            if [[ -z "${!name}" ]]; then
-              echo "Required macOS production credential is missing: ${name%_PRESENT}" >&2
-              exit 1
-            fi
-          done
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -316,33 +234,20 @@ jobs:
           pnpm run uv:download:mac
           pnpm run agent-browser:download:mac
 
-      - name: Build signed and notarized macOS packages
+      - name: Build macOS x64 and arm64 USB packages
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_LINK: ${{ secrets.MAC_CERTS }}
-          CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTS_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: |
           ulimit -n 65536 || true
-          pnpm run package:mac
+          pnpm run package:mac:usb
 
-      - name: Verify signatures, notarization tickets, and exact artifacts
+      - name: Verify exact macOS USB artifacts
         run: |
           set -euo pipefail
-          for app in release/mac/UClaw.app release/mac-arm64/UClaw.app; do
-            test -d "$app"
-            codesign --verify --deep --strict --verbose=2 "$app"
-            spctl --assess --type execute --verbose=2 "$app"
-            xcrun stapler validate "$app"
-          done
           for arch in x64 arm64; do
-            dmg="release/UClaw-${RELEASE_VERSION}-mac-${arch}.dmg"
-            zip="release/UClaw-${RELEASE_VERSION}-mac-${arch}.zip"
-            test -s "$dmg"
+            zip="release/UClaw-${RELEASE_VERSION}-mac-${arch}-usb.zip"
             test -s "$zip"
-            test -s "${zip}.blockmap"
+            test -s "${zip%.zip}.json"
           done
 
       - name: Stage immutable macOS production candidate
@@ -363,8 +268,8 @@ jobs:
     name: Upload OSS and register disabled zz-cn releases
     needs:
       - preflight
-      - build-and-sign
-      - build-and-notarize-macos
+      - build-windows-usb
+      - build-macos-usb
     runs-on:
       - self-hosted
       - Windows
@@ -448,7 +353,7 @@ jobs:
 
           - Commit: ``$($candidate.commit)``
           - Build ID: ``$($candidate.buildId)``
-          - Windows USB and macOS x64/arm64 uploaded to OSS
+          - Windows x64 and macOS x64/arm64 USB ZIPs uploaded to OSS
           - zz-cn records: ``$($publication.databaseRows.Count)``
           - Enabled: ``$($publication.enabled)``
           - Mandatory: ``$($publication.mandatory)``
@@ -463,6 +368,6 @@ jobs:
           path: |
             ${{ env.WINDOWS_CANDIDATE_DIRECTORY }}/*
             ${{ env.MACOS_CANDIDATE_DIRECTORY }}/candidate.json
-            ${{ env.MACOS_CANDIDATE_DIRECTORY }}/latest-mac.yml
+            ${{ env.MACOS_CANDIDATE_DIRECTORY }}/*.json
           if-no-files-found: warn
           retention-days: 30

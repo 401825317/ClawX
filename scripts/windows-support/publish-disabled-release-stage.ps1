@@ -64,14 +64,6 @@ function Test-PathInside {
   return $childPath.StartsWith($parentPath, [StringComparison]::OrdinalIgnoreCase)
 }
 
-function Get-Sha512Base64 {
-  param([string]$Path)
-  $stream = [IO.File]::OpenRead($Path)
-  $algorithm = [Security.Cryptography.SHA512]::Create()
-  try { return [Convert]::ToBase64String($algorithm.ComputeHash($stream)) }
-  finally { $algorithm.Dispose(); $stream.Dispose() }
-}
-
 function Get-Sha512Hex {
   param([string]$Path)
   return (Get-FileHash -Algorithm SHA512 -LiteralPath $Path).Hash.ToLowerInvariant()
@@ -294,23 +286,14 @@ foreach ($artifact in @($macosCandidate.artifacts)) {
   $arch = [string]$artifact.arch
   if (@('x64', 'arm64') -notcontains $arch -or $seenMacArchitectures.ContainsKey($arch)) { throw 'macOS candidate architectures are invalid or duplicated.' }
   $seenMacArchitectures[$arch] = $true
-  $zipName = "UClaw-$Version-mac-$arch.zip"
-  $blockmapName = "$zipName.blockmap"
-  $dmgName = "UClaw-$Version-mac-$arch.dmg"
-  if ([string]$artifact.updateFileName -ne $zipName -or [string]$artifact.updateBlockmapFileName -ne $blockmapName -or [string]$artifact.downloadFileName -ne $dmgName) { throw "macOS $arch filename mismatch." }
+  $zipName = "UClaw-$Version-mac-$arch-usb.zip"
+  if ([string]$artifact.packageType -ne 'portable_zip' -or [string]$artifact.fileName -ne $zipName) { throw "macOS $arch portable filename or package type mismatch." }
   $zipPath = Join-Path $macosDir $zipName
-  $blockmapPath = Join-Path $macosDir $blockmapName
-  $dmgPath = Join-Path $macosDir $dmgName
   $zip = Get-Item -LiteralPath $zipPath
-  $blockmap = Get-Item -LiteralPath $blockmapPath
-  $dmg = Get-Item -LiteralPath $dmgPath
-  if ([int64]$artifact.updateSize -ne $zip.Length -or [string]$artifact.updateSha512 -cne (Get-Sha512Base64 $zipPath)) { throw "macOS $arch ZIP integrity mismatch." }
-  if ([int64]$artifact.updateBlockmapSize -ne $blockmap.Length -or [string]$artifact.updateBlockmapSha512 -cne (Get-Sha512Base64 $blockmapPath)) { throw "macOS $arch blockmap integrity mismatch." }
-  if ([int64]$artifact.downloadSize -ne $dmg.Length -or [string]$artifact.downloadSha512 -cne (Get-Sha512Base64 $dmgPath)) { throw "macOS $arch DMG integrity mismatch." }
+  $zipSha = Get-Sha512Hex $zipPath
+  if ([int64]$artifact.size -ne $zip.Length -or [string]$artifact.sha512 -cne $zipSha) { throw "macOS $arch USB ZIP integrity mismatch." }
   $objects += [pscustomobject]@{ LocalPath = $zipPath; FileName = $zipName; Size = [int64]$zip.Length; Sha512Hex = (Get-Sha512Hex $zipPath) }
-  $objects += [pscustomobject]@{ LocalPath = $blockmapPath; FileName = $blockmapName; Size = [int64]$blockmap.Length; Sha512Hex = (Get-Sha512Hex $blockmapPath) }
-  $objects += [pscustomobject]@{ LocalPath = $dmgPath; FileName = $dmgName; Size = [int64]$dmg.Length; Sha512Hex = (Get-Sha512Hex $dmgPath) }
-  $releaseRows += [pscustomobject]@{ Platform = 'mac'; Arch = $arch; PackageType = 'installer'; FileName = $zipName; Sha512 = [string]$artifact.updateSha512; Size = [int64]$artifact.updateSize; ReleaseDate = [string]$macosCandidate.releaseDate }
+  $releaseRows += [pscustomobject]@{ Platform = 'mac'; Arch = $arch; PackageType = 'portable_zip'; FileName = $zipName; Sha512 = $zipSha; Size = [int64]$zip.Length; ReleaseDate = [string]$macosCandidate.releaseDate }
 }
 if ($seenMacArchitectures.Count -ne 2) { throw 'macOS candidate must contain x64 and arm64 exactly once.' }
 
@@ -337,8 +320,8 @@ if ([int]$script:SshMetadata.schemaVersion -ne 1 -or -not $script:SshMetadata.pa
 
 $feedBefore = @(
   Get-PublicFeedIdentity -Platform 'win' -Arch 'x64' -PackageType 'portable_zip'
-  Get-PublicFeedIdentity -Platform 'mac' -Arch 'x64' -PackageType 'installer'
-  Get-PublicFeedIdentity -Platform 'mac' -Arch 'arm64' -PackageType 'installer'
+  Get-PublicFeedIdentity -Platform 'mac' -Arch 'x64' -PackageType 'portable_zip'
+  Get-PublicFeedIdentity -Platform 'mac' -Arch 'arm64' -PackageType 'portable_zip'
 ) | ConvertTo-Json -Depth 5 -Compress
 $temporaryConfig = Join-Path $env:TEMP ('uclaw-oss-' + [guid]::NewGuid().ToString('N') + '.ini')
 $askpassDirectory = Join-Path $env:TEMP ('uclaw-ssh-askpass-' + [guid]::NewGuid().ToString('N'))
@@ -446,14 +429,14 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'stage operation changed an enabled release';
   END IF;
-  IF (SELECT count(*) FROM claw_x_releases WHERE channel='latest' AND version=$(ConvertTo-SqlLiteral $Version) AND enabled=false AND ((platform='win' AND arch='x64' AND package_type='portable_zip') OR (platform='mac' AND arch IN ('x64','arm64') AND package_type='installer'))) <> 3 THEN
+  IF (SELECT count(*) FROM claw_x_releases WHERE channel='latest' AND version=$(ConvertTo-SqlLiteral $Version) AND enabled=false AND package_type='portable_zip' AND ((platform='win' AND arch='x64') OR (platform='mac' AND arch IN ('x64','arm64')))) <> 3 THEN
     RAISE EXCEPTION 'expected exactly three disabled stage rows for version %', $(ConvertTo-SqlLiteral $Version);
   END IF;
 END;
 `$uclaw`$;
 COMMIT;
 SELECT coalesce(json_agg(json_build_object('id',id,'platform',platform,'arch',arch,'package_type',package_type,'version',version,'enabled',enabled,'file_url',file_url,'sha512',sha512,'size',size) ORDER BY platform,arch), '[]'::json)::text
-FROM claw_x_releases WHERE channel='latest' AND version=$(ConvertTo-SqlLiteral $Version) AND ((platform='win' AND arch='x64' AND package_type='portable_zip') OR (platform='mac' AND arch IN ('x64','arm64') AND package_type='installer'));
+FROM claw_x_releases WHERE channel='latest' AND version=$(ConvertTo-SqlLiteral $Version) AND package_type='portable_zip' AND ((platform='win' AND arch='x64') OR (platform='mac' AND arch IN ('x64','arm64')));
 "@
   $databaseResult = Invoke-ProductionPsql -Container $postgres -Sql $sql
   $rowsLine = @($databaseResult.Stdout -split "`r?`n" | Where-Object { $_.Trim().StartsWith('[') })[-1]
@@ -462,8 +445,8 @@ FROM claw_x_releases WHERE channel='latest' AND version=$(ConvertTo-SqlLiteral $
 
   $feedAfter = @(
     Get-PublicFeedIdentity -Platform 'win' -Arch 'x64' -PackageType 'portable_zip'
-    Get-PublicFeedIdentity -Platform 'mac' -Arch 'x64' -PackageType 'installer'
-    Get-PublicFeedIdentity -Platform 'mac' -Arch 'arm64' -PackageType 'installer'
+    Get-PublicFeedIdentity -Platform 'mac' -Arch 'x64' -PackageType 'portable_zip'
+    Get-PublicFeedIdentity -Platform 'mac' -Arch 'arm64' -PackageType 'portable_zip'
   ) | ConvertTo-Json -Depth 5 -Compress
   if ($feedAfter -cne $feedBefore -or $feedAfter -match ('"version":"' + [regex]::Escape($Version) + '"')) {
     throw 'Public release feed changed during disabled staging.'

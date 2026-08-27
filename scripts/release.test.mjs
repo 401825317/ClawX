@@ -92,15 +92,16 @@ test('package metadata exposes the local Windows USB release entry at a stable v
   }
 });
 
-test('production workflow signs portable executables without regression or an external configuration slug', async () => {
+test('production workflow builds the Windows USB ZIP without signing credentials or regression', async () => {
   const workflow = await readFile(
     path.join(ROOT, '.github', 'workflows', 'uclaw-portable-production.yml'),
     'utf8',
   );
-  assert.match(workflow, /signpath\/github-action-submit-signing-request@v2/u);
-  assert.match(workflow, /Repository secret SIGNPATH_API_TOKEN is required/u);
-  assert.match(workflow, /node scripts\/build-usb-release\.mjs --win --arch=x64/u);
+  assert.match(workflow, /pnpm run package:win:usb/u);
+  assert.match(workflow, /Refresh integrity metadata from final ZIP/u);
   for (const forbidden of [
+    'SIGNPATH_API_TOKEN',
+    'signpath/github-action-submit-signing-request',
     'SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG',
     'run-packaged-regression',
     'pnpm run test:e2e',
@@ -114,16 +115,23 @@ test('production workflow signs portable executables without regression or an ex
   }
 });
 
-test('production stage builds macOS packages and cannot activate or publish a GitHub Release', async () => {
+test('production stage builds only macOS USB ZIPs and cannot activate or publish a GitHub Release', async () => {
   const workflow = await readFile(
     path.join(ROOT, '.github', 'workflows', 'uclaw-portable-production.yml'),
     'utf8',
   );
-  assert.match(workflow, /build-and-notarize-macos:/u);
-  assert.match(workflow, /pnpm run package:mac/u);
+  assert.match(workflow, /build-macos-usb:/u);
+  assert.match(workflow, /pnpm run package:mac:usb/u);
+  assert.match(workflow, /UClaw-\$\{RELEASE_VERSION\}-mac-\$\{arch\}-usb\.zip/u);
   assert.match(workflow, /publish-disabled-release-stage\.ps1/u);
   assert.match(workflow, /register disabled zz-cn releases/u);
   for (const forbidden of [
+    'MAC_CERTS',
+    'APPLE_APP_SPECIFIC_PASSWORD',
+    'xcrun stapler',
+    'spctl --assess',
+    '.dmg',
+    '.blockmap',
     'softprops/action-gh-release',
     'git tag -a',
     'git push origin "refs/tags/',
@@ -144,6 +152,9 @@ test('disabled stage publisher never enables a release row', async () => {
   assert.match(publisher, /Public release feed changed during disabled staging/u);
   assert.match(publisher, /Get-RemoteSha512Hex/u);
   assert.match(publisher, /OSS SHA-512 mismatch/u);
+  assert.match(publisher, /Platform = 'mac'; Arch = \$arch; PackageType = 'portable_zip'/u);
+  assert.equal(publisher.includes("PackageType = 'installer'"), false);
+  assert.equal(/\.dmg|\.blockmap/iu.test(publisher), false);
   assert.equal(/SET\s+enabled\s*=\s*true/iu.test(publisher), false);
 });
 

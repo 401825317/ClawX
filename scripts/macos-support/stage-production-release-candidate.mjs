@@ -1,17 +1,19 @@
 #!/usr/bin/env node
 
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { cp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readFile, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import YAML from 'yaml';
 import {
   assertFormalVersion,
   assertGitCommit,
   writeJsonAtomic,
 } from '../windows-support/portable-release-utils.mjs';
 
+const execFileAsync = promisify(execFile);
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(SCRIPT_DIR, '..', '..');
 const ARCHITECTURES = ['x64', 'arm64'];
@@ -47,7 +49,7 @@ function parseArgs(argv) {
 async function inspectFile(filePath) {
   const details = await stat(filePath);
   if (!details.isFile() || details.size <= 0) {
-    throw new Error(`macOS release artifact is missing or empty: ${path.basename(filePath)}`);
+    throw new Error(`macOS USB artifact is missing or empty: ${path.basename(filePath)}`);
   }
   const hash = createHash('sha512');
   await new Promise((resolve, reject) => {
@@ -56,22 +58,29 @@ async function inspectFile(filePath) {
     stream.on('error', reject);
     stream.on('end', resolve);
   });
-  return {
-    size: details.size,
-    sha512: hash.digest('base64'),
-  };
+  return { size: details.size, sha512: hash.digest('hex') };
 }
 
-function requireUniqueFeedEntry(feed, fileName) {
-  const matches = feed.files.filter((entry) => entry?.url === fileName);
-  if (matches.length === 0) {
-    throw new Error(`latest-mac.yml is missing ${fileName}.`);
+async function defaultListArchiveEntries(filePath) {
+  const { stdout } = await execFileAsync('/usr/bin/unzip', ['-Z1', filePath], {
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  return stdout.split(/\r?\n/u).filter(Boolean);
+}
+
+function assertPortableArchiveEntries(entries, arch) {
+  const required = [
+    'portable.flag',
+    'UClawData/',
+    'UClawData/updates/',
+    'UClaw.app/Contents/Resources/uclaw-build.json',
+    'UClaw.app/Contents/Resources/openclaw-plugins/clawx-openai-image/index.mjs',
+    'UClaw.app/Contents/Resources/openclaw-plugins/clawx-openai-image/node_modules/undici/package.json',
+    `UClaw.app/Contents/Resources/resources/updater/darwin-${arch}/uclaw-portable-updater`,
+  ];
+  for (const entry of required) {
+    if (!entries.includes(entry)) throw new Error(`macOS ${arch} USB ZIP is missing ${entry}.`);
   }
-  const [first] = matches;
-  if (matches.some((entry) => entry.sha512 !== first.sha512 || Number(entry.size) !== Number(first.size))) {
-    throw new Error(`latest-mac.yml contains conflicting ${fileName} entries.`);
-  }
-  return first;
 }
 
 export async function stageMacosProductionReleaseCandidate(options) {
@@ -79,31 +88,16 @@ export async function stageMacosProductionReleaseCandidate(options) {
   assertGitCommit(options.commit);
   const releaseDir = path.resolve(options.releaseDir);
   const outputDir = path.resolve(options.output);
-  const feedPath = path.join(releaseDir, 'latest-mac.yml');
-  const feed = YAML.parse(await readFile(feedPath, 'utf8'));
-  if (String(feed?.version ?? '') !== options.version || !Array.isArray(feed?.files)) {
-    throw new Error('latest-mac.yml does not match the requested stable version.');
-  }
-  const normalizedEntries = [];
-  const entriesByUrl = new Map();
-  for (const entry of feed.files) {
-    if (!entry?.url) throw new Error('latest-mac.yml contains an artifact without a URL.');
-    const existing = entriesByUrl.get(entry.url);
-    if (existing && (existing.sha512 !== entry.sha512 || Number(existing.size) !== Number(entry.size))) {
-      throw new Error(`latest-mac.yml contains conflicting ${entry.url} entries.`);
-    }
-    if (!existing) {
-      entriesByUrl.set(entry.url, entry);
-      normalizedEntries.push(entry);
-    }
-  }
-  feed.files = normalizedEntries;
-
+  const listArchiveEntries = options.listArchiveEntries ?? defaultListArchiveEntries;
   const artifacts = [];
+  let releaseDate = '';
+
   for (const arch of ARCHITECTURES) {
-    const updateFileName = `UClaw-${options.version}-mac-${arch}.zip`;
-    const updateBlockmapFileName = `${updateFileName}.blockmap`;
-    const downloadFileName = `UClaw-${options.version}-mac-${arch}.dmg`;
+    const fileName = `UClaw-${options.version}-mac-${arch}-usb.zip`;
+    const metadataFileName = fileName.replace(/\.zip$/u, '.json');
+    const filePath = path.join(releaseDir, fileName);
+    const metadataPath = path.join(releaseDir, metadataFileName);
+    const metadata = JSON.parse(await readFile(metadataPath, 'utf8'));
     const appDirectory = arch === 'x64' ? 'mac' : 'mac-arm64';
     const identityPath = path.join(
       releaseDir,
@@ -119,48 +113,45 @@ export async function stageMacosProductionReleaseCandidate(options) {
       || identity.arch !== arch || !String(identity.buildId ?? '').trim()) {
       throw new Error(`macOS ${arch} packaged build identity does not match the locked release.`);
     }
-    const update = await inspectFile(path.join(releaseDir, updateFileName));
-    const updateBlockmap = await inspectFile(path.join(releaseDir, updateBlockmapFileName));
-    const download = await inspectFile(path.join(releaseDir, downloadFileName));
-    const feedEntry = requireUniqueFeedEntry(feed, updateFileName);
-    if (Number(feedEntry.size) !== update.size || String(feedEntry.sha512 ?? '') !== update.sha512) {
-      throw new Error(`latest-mac.yml integrity does not match ${updateFileName}.`);
+    if (metadata.package_type !== 'portable_zip' || metadata.platform !== 'mac'
+      || metadata.arch !== arch || metadata.version !== options.version
+      || metadata.gitCommit !== options.commit || metadata.buildId !== identity.buildId
+      || metadata.file_name !== fileName) {
+      throw new Error(`macOS ${arch} USB metadata does not match the locked release.`);
     }
+    const file = await inspectFile(filePath);
+    if (Number(metadata.size) !== file.size || String(metadata.sha512 ?? '') !== file.sha512) {
+      throw new Error(`macOS ${arch} USB ZIP integrity mismatch.`);
+    }
+    assertPortableArchiveEntries(await listArchiveEntries(filePath), arch);
+    releaseDate = releaseDate || String(metadata.releaseDate ?? '');
     artifacts.push({
       platform: 'mac',
       arch,
-      packageType: 'installer',
+      packageType: 'portable_zip',
       buildId: identity.buildId,
-      updateFileName,
-      updateSize: update.size,
-      updateSha512: update.sha512,
-      updateBlockmapFileName,
-      updateBlockmapSize: updateBlockmap.size,
-      updateBlockmapSha512: updateBlockmap.sha512,
-      downloadFileName,
-      downloadSize: download.size,
-      downloadSha512: download.sha512,
+      fileName,
+      size: file.size,
+      sha512: file.sha512,
+      metadataFileName,
     });
   }
 
   await rm(outputDir, { recursive: true, force: true });
   await mkdir(outputDir, { recursive: true });
   for (const artifact of artifacts) {
-    await cp(path.join(releaseDir, artifact.updateFileName), path.join(outputDir, artifact.updateFileName));
+    await cp(path.join(releaseDir, artifact.fileName), path.join(outputDir, artifact.fileName));
     await cp(
-      path.join(releaseDir, artifact.updateBlockmapFileName),
-      path.join(outputDir, artifact.updateBlockmapFileName),
+      path.join(releaseDir, artifact.metadataFileName),
+      path.join(outputDir, artifact.metadataFileName),
     );
-    await cp(path.join(releaseDir, artifact.downloadFileName), path.join(outputDir, artifact.downloadFileName));
   }
-  await writeFile(path.join(outputDir, 'latest-mac.yml'), YAML.stringify(feed), 'utf8');
-
   const candidate = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     stagedAt: new Date().toISOString(),
     version: options.version,
     commit: options.commit,
-    releaseDate: String(feed.releaseDate ?? new Date().toISOString()),
+    releaseDate: releaseDate || new Date().toISOString(),
     artifacts,
   };
   await writeJsonAtomic(path.join(outputDir, 'candidate.json'), candidate);
@@ -173,7 +164,7 @@ async function main() {
   console.log(`[macos-production-candidate] Version: ${result.candidate.version}`);
   console.log(`[macos-production-candidate] Commit: ${result.candidate.commit}`);
   for (const artifact of result.candidate.artifacts) {
-    console.log(`[macos-production-candidate] ${artifact.arch}: ${artifact.updateFileName}`);
+    console.log(`[macos-production-candidate] ${artifact.arch}: ${artifact.fileName}`);
   }
 }
 

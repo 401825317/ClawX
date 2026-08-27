@@ -1,35 +1,40 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import YAML from 'yaml';
 import { stageMacosProductionReleaseCandidate } from './stage-production-release-candidate.mjs';
 
 const VERSION = '2.0.3';
 const COMMIT = 'a'.repeat(40);
 
 function sha512(bytes) {
-  return createHash('sha512').update(bytes).digest('base64');
+  return createHash('sha512').update(bytes).digest('hex');
 }
 
-async function createFixture({ duplicate = false, conflictingDuplicate = false, badHash = false } = {}) {
+function portableEntries(arch) {
+  return [
+    'portable.flag',
+    'UClawData/',
+    'UClawData/updates/',
+    'UClaw.app/Contents/Resources/uclaw-build.json',
+    'UClaw.app/Contents/Resources/openclaw-plugins/clawx-openai-image/index.mjs',
+    'UClaw.app/Contents/Resources/openclaw-plugins/clawx-openai-image/node_modules/undici/package.json',
+    `UClaw.app/Contents/Resources/resources/updater/darwin-${arch}/uclaw-portable-updater`,
+  ];
+}
+
+async function createFixture({ badHash = false, missingPortableFlag = false } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'uclaw-macos-candidate-'));
   const releaseDir = path.join(root, 'release');
   const output = path.join(root, 'candidate');
+  const entries = new Map();
   await mkdir(releaseDir, { recursive: true });
-  const files = [];
   for (const arch of ['x64', 'arm64']) {
-    const zipName = `UClaw-${VERSION}-mac-${arch}.zip`;
-    const blockmapName = `${zipName}.blockmap`;
-    const dmgName = `UClaw-${VERSION}-mac-${arch}.dmg`;
-    const zip = Buffer.from(`zip-${arch}`);
-    const blockmap = Buffer.from(`blockmap-${arch}`);
-    const dmg = Buffer.from(`dmg-${arch}`);
-    await writeFile(path.join(releaseDir, zipName), zip);
-    await writeFile(path.join(releaseDir, blockmapName), blockmap);
-    await writeFile(path.join(releaseDir, dmgName), dmg);
+    const fileName = `UClaw-${VERSION}-mac-${arch}-usb.zip`;
+    const zip = Buffer.from(`portable-zip-${arch}`);
+    await writeFile(path.join(releaseDir, fileName), zip);
     const appDirectory = arch === 'x64' ? 'mac' : 'mac-arm64';
     const identityDirectory = path.join(
       releaseDir,
@@ -47,34 +52,51 @@ async function createFixture({ duplicate = false, conflictingDuplicate = false, 
       arch,
       buildId: `${arch}-build`,
     }));
-    files.push({ url: zipName, sha512: badHash && arch === 'x64' ? 'bad' : sha512(zip), size: zip.length });
-    files.push({ url: dmgName, sha512: sha512(dmg), size: dmg.length });
+    await writeFile(path.join(releaseDir, fileName.replace(/\.zip$/u, '.json')), JSON.stringify({
+      schemaVersion: 1,
+      package_type: 'portable_zip',
+      platform: 'mac',
+      arch,
+      version: VERSION,
+      gitCommit: COMMIT,
+      buildId: `${arch}-build`,
+      file_name: fileName,
+      size: zip.length,
+      sha512: badHash && arch === 'x64' ? 'bad' : sha512(zip),
+      releaseDate: '2026-08-27T00:00:00.000Z',
+    }));
+    const archiveEntries = portableEntries(arch);
+    entries.set(
+      fileName,
+      missingPortableFlag && arch === 'x64'
+        ? archiveEntries.filter((entry) => entry !== 'portable.flag')
+        : archiveEntries,
+    );
   }
-  if (duplicate || conflictingDuplicate) {
-    files.push({ ...files[0], ...(conflictingDuplicate ? { sha512: 'conflict' } : {}) });
-  }
-  await writeFile(path.join(releaseDir, 'latest-mac.yml'), YAML.stringify({
+  return {
+    root,
+    releaseDir,
+    output,
     version: VERSION,
-    files,
-    path: `UClaw-${VERSION}-mac-x64.zip`,
-    sha512: files[0].sha512,
-    releaseDate: '2026-08-26T00:00:00.000Z',
-  }));
-  return { root, releaseDir, output, version: VERSION, commit: COMMIT };
+    commit: COMMIT,
+    listArchiveEntries: async (filePath) => entries.get(path.basename(filePath)),
+  };
 }
 
-test('stages exact x64 and arm64 macOS update and download artifacts', async () => {
+test('stages exact x64 and arm64 macOS USB ZIPs', async () => {
   const fixture = await createFixture();
   try {
     await stageMacosProductionReleaseCandidate(fixture);
     const candidate = JSON.parse(await readFile(path.join(fixture.output, 'candidate.json'), 'utf8'));
+    assert.equal(candidate.schemaVersion, 2);
     assert.equal(candidate.version, VERSION);
     assert.equal(candidate.commit, COMMIT);
     assert.deepEqual(candidate.artifacts.map(({ arch }) => arch), ['x64', 'arm64']);
-    assert.ok(candidate.artifacts.every(({ packageType }) => packageType === 'installer'));
-    assert.ok(candidate.artifacts.every(({ buildId }) => buildId.endsWith('-build')));
-    assert.ok(candidate.artifacts.every(({ updateBlockmapFileName }) => updateBlockmapFileName.endsWith('.zip.blockmap')));
-    assert.ok(candidate.artifacts.every(({ updateSha512 }) => /^[A-Za-z0-9+/]+={0,2}$/u.test(updateSha512)));
+    assert.ok(candidate.artifacts.every(({ packageType }) => packageType === 'portable_zip'));
+    assert.ok(candidate.artifacts.every(({ fileName }) => fileName.endsWith('-usb.zip')));
+    assert.ok(candidate.artifacts.every(({ sha512: digest }) => /^[a-f0-9]{128}$/u.test(digest)));
+    const staged = await readdir(fixture.output);
+    assert.equal(staged.some((name) => name.endsWith('.dmg') || name.endsWith('.blockmap')), false);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -100,30 +122,35 @@ test('rejects a packaged build identity from another commit', async () => {
   }
 });
 
-test('normalizes identical duplicate latest-mac.yml artifact entries', async () => {
-  const fixture = await createFixture({ duplicate: true });
-  try {
-    await stageMacosProductionReleaseCandidate(fixture);
-    const normalized = YAML.parse(await readFile(path.join(fixture.output, 'latest-mac.yml'), 'utf8'));
-    assert.equal(normalized.files.filter(({ url }) => url.endsWith('-mac-x64.zip')).length, 1);
-  } finally {
-    await rm(fixture.root, { recursive: true, force: true });
-  }
-});
-
-test('rejects conflicting duplicate latest-mac.yml artifact entries', async () => {
-  const fixture = await createFixture({ conflictingDuplicate: true });
-  try {
-    await assert.rejects(stageMacosProductionReleaseCandidate(fixture), /conflicting/u);
-  } finally {
-    await rm(fixture.root, { recursive: true, force: true });
-  }
-});
-
-test('rejects a latest-mac.yml hash that does not match the ZIP', async () => {
+test('rejects USB metadata whose SHA-512 does not match the ZIP', async () => {
   const fixture = await createFixture({ badHash: true });
   try {
-    await assert.rejects(stageMacosProductionReleaseCandidate(fixture), /integrity does not match/u);
+    await assert.rejects(stageMacosProductionReleaseCandidate(fixture), /integrity mismatch/u);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('rejects a macOS ZIP without the root portable marker', async () => {
+  const fixture = await createFixture({ missingPortableFlag: true });
+  try {
+    await assert.rejects(stageMacosProductionReleaseCandidate(fixture), /portable\.flag/u);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('rejects a macOS ZIP without the bundled OpenAI image plugin', async () => {
+  const fixture = await createFixture();
+  fixture.listArchiveEntries = async (filePath) => (
+    portableEntries(path.basename(filePath).includes('-arm64-') ? 'arm64' : 'x64')
+      .filter((entry) => !entry.includes('/clawx-openai-image/index.mjs'))
+  );
+  try {
+    await assert.rejects(
+      stageMacosProductionReleaseCandidate(fixture),
+      /clawx-openai-image\/index\.mjs/u,
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
