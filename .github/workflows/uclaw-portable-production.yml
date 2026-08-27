@@ -221,6 +221,12 @@ jobs:
           node-version: ${{ env.UCLAW_NODE_VERSION }}
           cache: pnpm
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.22.x
+          cache: false
+
       - name: Prefer HTTPS for public GitHub dependencies
         run: |
           git config --global "url.https://github.com/.insteadOf" "git@github.com:"

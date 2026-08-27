@@ -123,6 +123,10 @@ test('production stage builds only macOS USB ZIPs and cannot activate or publish
   assert.match(workflow, /build-macos-usb:/u);
   assert.match(workflow, /pnpm run package:mac:usb/u);
   assert.match(workflow, /UClaw-\$\{RELEASE_VERSION\}-mac-\$\{arch\}-usb\.zip/u);
+  assert.match(
+    workflow,
+    /build-macos-usb:[\s\S]*?actions\/setup-go@v5[\s\S]*?pnpm run package:mac:usb/u,
+  );
   assert.match(workflow, /publish-disabled-release-stage\.ps1/u);
   assert.match(workflow, /register disabled zz-cn releases/u);
   for (const forbidden of [
