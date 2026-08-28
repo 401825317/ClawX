@@ -18,6 +18,7 @@ concurrency:
 
 env:
   UCLAW_NODE_VERSION: '22.19.0'
+  UCLAW_RELEASE_BRANCH: feature/claw-0.5.1
 
 jobs:
   preflight:
@@ -30,9 +31,10 @@ jobs:
       tag: ${{ steps.identity.outputs.tag }}
       release_branch: ${{ steps.identity.outputs.release_branch }}
     steps:
-      - name: Checkout selected commit
+      - name: Checkout the UClaw release branch
         uses: actions/checkout@v6
         with:
+          ref: ${{ env.UCLAW_RELEASE_BRANCH }}
           fetch-depth: 0
 
       - name: Setup Node.js
@@ -45,26 +47,20 @@ jobs:
         shell: bash
         env:
           RELEASE_VERSION: ${{ inputs.version }}
-          SELECTED_REF: ${{ github.ref }}
-          SELECTED_SHA: ${{ github.sha }}
+          RELEASE_BRANCH: ${{ env.UCLAW_RELEASE_BRANCH }}
         run: |
           set -euo pipefail
-          if [[ "$SELECTED_REF" != refs/heads/* ]]; then
-            echo "Formal portable releases must be dispatched from a branch; selected ref: $SELECTED_REF" >&2
-            exit 1
-          fi
-          SELECTED_BRANCH="${SELECTED_REF#refs/heads/}"
           if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Version must be a stable semantic version: $RELEASE_VERSION" >&2
             exit 1
           fi
 
-          git fetch --no-tags origin "$SELECTED_BRANCH"
+          git fetch --no-tags origin "$RELEASE_BRANCH"
           LOCAL_COMMIT="$(git rev-parse HEAD)"
-          REMOTE_BRANCH_COMMIT="$(git rev-parse "origin/$SELECTED_BRANCH")"
-          if [[ "$LOCAL_COMMIT" != "$SELECTED_SHA" || "$LOCAL_COMMIT" != "$REMOTE_BRANCH_COMMIT" ]]; then
-            echo "Selected commit is not the latest origin/$SELECTED_BRANCH." >&2
-            echo "selected=$SELECTED_SHA local=$LOCAL_COMMIT remote=$REMOTE_BRANCH_COMMIT" >&2
+          REMOTE_BRANCH_COMMIT="$(git rev-parse "origin/$RELEASE_BRANCH")"
+          if [[ "$LOCAL_COMMIT" != "$REMOTE_BRANCH_COMMIT" ]]; then
+            echo "Checked-out commit is not the latest origin/$RELEASE_BRANCH." >&2
+            echo "local=$LOCAL_COMMIT remote=$REMOTE_BRANCH_COMMIT" >&2
             exit 1
           fi
           if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
@@ -98,7 +94,7 @@ jobs:
           echo "commit=$LOCAL_COMMIT" >> "$GITHUB_OUTPUT"
           echo "short_commit=${LOCAL_COMMIT:0:7}" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "release_branch=$SELECTED_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "release_branch=$RELEASE_BRANCH" >> "$GITHUB_OUTPUT"
 
   build-windows-usb:
     name: Build Windows USB candidate

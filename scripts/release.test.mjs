@@ -99,6 +99,8 @@ test('production workflow builds the Windows USB ZIP without signing credentials
   );
   assert.match(workflow, /pnpm run package:win:usb/u);
   assert.match(workflow, /Refresh integrity metadata from final ZIP/u);
+  assert.match(workflow, /UCLAW_RELEASE_BRANCH: feature\/claw-0\.5\.1/u);
+  assert.match(workflow, /ref: \$\{\{ env\.UCLAW_RELEASE_BRANCH \}\}/u);
   for (const forbidden of [
     'SIGNPATH_API_TOKEN',
     'signpath/github-action-submit-signing-request',

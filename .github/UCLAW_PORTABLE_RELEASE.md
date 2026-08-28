@@ -11,7 +11,7 @@ Actions 不持有生产凭证，不上传 OSS，不连接 zz-cn，不创建 Git 
 ## 发布顺序
 
 1. 确认待发布代码位于负责人批准的发布分支远端最新提交，`package.json` 使用新的稳定版本号。
-2. 从该分支手动运行 `UClaw Windows USB and macOS Production Candidates`，输入同一版本号。
+2. 手动运行 `UClaw Windows USB and macOS Production Candidates`，输入同一版本号；工作流会固定 checkout `feature/claw-0.5.1`，无需在 Actions 页面另选分支。
 3. 等待 Windows 与 macOS GitHub 托管 Runner 构建完成；最终 `Confirm immutable production candidates` 作业应为绿色。
 4. 在本地下载该 run 的两个精确候选制品。
 5. 先用 `-ValidateOnly` 校验候选身份，再运行本地发布脚本。
@@ -19,7 +19,7 @@ Actions 不持有生产凭证，不上传 OSS，不连接 zz-cn，不创建 Git 
 
 ## GitHub 配置
 
-该工作流只需要标准 GitHub 托管 Runner 和仓库读取权限，不需要 Actions Secrets、Environment 或自托管 Runner。`workflow_dispatch` 必须从包含该工作流文件的分支触发。
+该工作流只需要标准 GitHub 托管 Runner 和仓库读取权限，不需要 Actions Secrets、Environment 或自托管 Runner。默认分支只负责登记手动触发入口，实际源码始终锁定 `feature/claw-0.5.1` 的远端最新提交。
 
 工作流保留 14 天的两个 Actions 制品：
 
