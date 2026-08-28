@@ -34,13 +34,20 @@ async function createBootstrapExecutableFixture() {
 test('USB packaging runs the real main-process Bootstrap gate before writing the final ZIP', async () => {
   const source = await readFile(path.join(SCRIPT_DIR, 'build-usb-release.mjs'), 'utf8');
   const gateCall = source.indexOf('const bootstrapGate = await runPackagedBootstrapGate({ portableRoot });');
-  const zipCall = source.indexOf('const buffer = await writeZip(portableRoot);');
+  const zipCall = source.indexOf('const buffer = await writeZip(portableRoot, new Date(identity.finalizedAt));');
   assert.ok(gateCall >= 0, 'USB builder must invoke the Bootstrap gate');
   assert.ok(zipCall > gateCall, 'Bootstrap gate must run before the final ZIP is written');
   assert.match(source, /CLAWX_E2E:\s*'1'/u);
   assert.match(source, /--remote-debugging-port=/u);
   assert.match(source, /Captured startup output/u);
   assert.doesNotMatch(source, /run-packaged-regression|test:packaged:win|invoke-live-registration-gate/u);
+});
+
+test('USB archive timestamps use the candidate finalization time instead of a fixed calendar date', async () => {
+  const source = await readFile(path.join(SCRIPT_DIR, 'build-usb-release.mjs'), 'utf8');
+  assert.match(source, /writeZip\(portableRoot, new Date\(identity\.finalizedAt\)\)/u);
+  assert.match(source, /zip\.file\(zipPath, fs\.readFileSync\(sourcePath\), \{ date: archiveDate \}\)/u);
+  assert.doesNotMatch(source, /2026-01-01/u);
 });
 
 test('Bootstrap environment replaces real user state and strips inherited credentials', () => {

@@ -449,7 +449,7 @@ pnpm release              # 构建并校验本地 Windows USB 候选包，不执
 pnpm package:linux        # 为 Linux 打包
 ```
 
-Windows USB 构建会输出 `UClaw-<version>-win-x64-usb.zip` 及同名 JSON 元数据。持久数据保存在 `UClawData`，高频状态使用本机隔离运行目录；便携更新只有在 ZIP 格式、文件大小和 SHA-512 全部校验通过后才会安装。替换阶段会持续显示递归文件数和字节进度；Windows 同盘更新直接移动已校验文件，跨盘复制最多使用四个工作线程，`UClawData` 始终不参与替换和回滚。`pnpm release` 仅作为 Windows 本地候选包构建：它要求 Git 工作区干净，构建 USB 包，并校验精确的版本、提交、build ID、文件大小和 SHA-512，不执行功能回归；不会签名、上传、修改生产更新记录、创建 Git 标签或 GitHub Release。正式签名和发布通过 `.github/workflows/uclaw-portable-production.yml` 执行，该工作流同样不运行功能回归。
+Windows USB 构建会输出 `UClaw-<version>-win-x64-usb.zip` 及同名 JSON 元数据。持久数据保存在 `UClawData`，高频状态使用本机隔离运行目录；便携更新只有在 ZIP 格式、文件大小和 SHA-512 全部校验通过后才会安装。替换阶段会持续显示递归文件数和字节进度；Windows 同盘更新直接移动已校验文件，跨盘复制最多使用四个工作线程，`UClawData` 始终不参与替换和回滚。`pnpm release` 仅作为 Windows 本地候选包构建：它要求 Git 工作区干净，构建 USB 包，并校验精确的版本、提交、build ID、文件大小和 SHA-512，不执行功能回归；不会签名、上传、修改生产更新记录、创建 Git 标签或 GitHub Release。`.github/workflows/uclaw-portable-production.yml` 只在 GitHub 托管 Runner 上构建不可变的未签名 Windows/macOS USB 候选；生产 OSS 上传和 zz-cn 禁用态暂存由保存 DPAPI 凭证的授权 Windows 机器单独执行。
 
 在无头 Linux 环境下，Electron 测试需要显示服务；可使用 `xvfb-run -a pnpm run test:e2e`。
 

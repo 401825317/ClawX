@@ -69,6 +69,21 @@ function Get-Sha512Hex {
   return (Get-FileHash -Algorithm SHA512 -LiteralPath $Path).Hash.ToLowerInvariant()
 }
 
+function Get-SingleHttpHeaderValue {
+  param(
+    [Parameter(Mandatory = $true)]$Headers,
+    [Parameter(Mandatory = $true)][string]$Name,
+    [switch]$Required
+  )
+  $values = @(@($Headers[$Name]) | Where-Object { $null -ne $_ -and ([string]$_).Length -gt 0 })
+  if ($values.Count -eq 0) {
+    if ($Required) { throw "Required HTTP header is missing: $Name" }
+    return ''
+  }
+  if ($values.Count -ne 1) { throw "Expected exactly one HTTP header value for ${Name}, found $($values.Count)." }
+  return [string]$values[0]
+}
+
 function Get-RemoteSha512Hex {
   param([string]$Uri)
   Add-Type -AssemblyName System.Net.Http
@@ -93,12 +108,21 @@ function Get-HttpHead {
   param([string]$Uri)
   try {
     $response = Invoke-WebRequest -UseBasicParsing -Method Head -Uri $Uri -TimeoutSec 30
+    $contentLengthText = Get-SingleHttpHeaderValue -Headers $response.Headers -Name 'Content-Length'
+    $contentLength = $null
+    if ($contentLengthText) {
+      [int64]$parsedContentLength = 0
+      if (-not [int64]::TryParse($contentLengthText, [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$parsedContentLength)) {
+        throw "Invalid HTTP Content-Length value: $contentLengthText"
+      }
+      $contentLength = $parsedContentLength
+    }
     return [pscustomobject]@{
       Exists = $true
       Status = [int]$response.StatusCode
-      Length = [int64]$response.Headers['Content-Length']
-      ContentType = [string]$response.Headers['Content-Type']
-      AcceptRanges = [string]$response.Headers['Accept-Ranges']
+      Length = $contentLength
+      ContentType = Get-SingleHttpHeaderValue -Headers $response.Headers -Name 'Content-Type'
+      AcceptRanges = Get-SingleHttpHeaderValue -Headers $response.Headers -Name 'Accept-Ranges'
     }
   }
   catch {
@@ -161,6 +185,13 @@ function Get-PublicFeedIdentity {
 function Initialize-SshAskpass {
   param([string]$CredentialPath, [string]$Directory)
   if ($CredentialPath.Contains("'")) { throw 'SSH credential path cannot contain a single quote.' }
+  $powerShellExecutable = if ($PSVersionTable.PSEdition -eq 'Core') {
+    Join-Path $PSHOME 'pwsh.exe'
+  }
+  else {
+    Join-Path $PSHOME 'powershell.exe'
+  }
+  if (-not (Test-Path -LiteralPath $powerShellExecutable -PathType Leaf)) { throw "Current PowerShell executable not found: $powerShellExecutable" }
   New-Item -ItemType Directory -Force -Path $Directory | Out-Null
   $askpassPs1 = Join-Path $Directory 'askpass.ps1'
   $askpassCmd = Join-Path $Directory 'askpass.cmd'
@@ -179,7 +210,7 @@ try {
 "@ | Set-Content -LiteralPath $askpassPs1 -Encoding ASCII
   @"
 @echo off
-"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$askpassPs1"
+"$powerShellExecutable" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$askpassPs1"
 "@ | Set-Content -LiteralPath $askpassCmd -Encoding ASCII
   return $askpassCmd
 }
@@ -332,7 +363,7 @@ try {
   foreach ($object in $objects) {
     $uri = "https://uclaw-ver.oss-cn-beijing.aliyuncs.com/releases/latest/$($object.FileName)"
     $head = Get-HttpHead $uri
-    if ($head.Exists -and $head.Length -ne $object.Size) { throw "Immutable OSS object already exists with a different size: $($object.FileName)" }
+    if ($head.Exists -and $null -ne $head.Length -and $head.Length -ne $object.Size) { throw "Immutable OSS object already exists with a different size: $($object.FileName)" }
     if (-not $head.Exists) { $pending += $object }
   }
   if ($pending.Count -gt 0) {
@@ -353,7 +384,7 @@ region=$($ossCredential.region)
   foreach ($object in $objects) {
     $uri = "https://uclaw-ver.oss-cn-beijing.aliyuncs.com/releases/latest/$($object.FileName)"
     $head = Get-HttpHead $uri
-    if (-not $head.Exists -or $head.Status -ne 200 -or $head.Length -ne $object.Size) { throw "OSS verification failed for $($object.FileName)." }
+    if (-not $head.Exists -or $head.Status -ne 200 -or ($null -ne $head.Length -and $head.Length -ne $object.Size)) { throw "OSS verification failed for $($object.FileName)." }
     if ($object.FileName.EndsWith('.zip', [StringComparison]::OrdinalIgnoreCase)) { Assert-RemoteZip $uri $object.Size }
     $remoteSha512 = Get-RemoteSha512Hex $uri
     if ($remoteSha512 -cne $object.Sha512Hex) { throw "OSS SHA-512 mismatch for $($object.FileName)." }

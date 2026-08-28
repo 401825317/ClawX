@@ -448,7 +448,7 @@ pnpm release              # ローカルWindows USB候補を作成・検証（�
 pnpm package:linux        # Linux向けにパッケージ化
 ```
 
-Windows USB ビルドは `UClaw-<version>-win-x64-usb.zip` と対応する JSON メタデータを生成します。永続データは `UClawData` に保存し、頻繁に更新される状態は分離されたローカル実行プロファイルを使用します。ポータブル更新は ZIP、サイズ、SHA-512 の検証後にのみインストールされます。置換中は再帰的なファイル数とバイト数の進行状況を表示し、Windows の同一ボリュームでは検証済みファイルを直接移動し、別ボリュームへのコピーは最大 4 ワーカーに制限します。`UClawData` は置換とロールバックの対象外です。`pnpm release` は Windows 専用のローカル候補ビルドです。クリーンな Git ワークスペースを要求し、USB パッケージを作成して正確なバージョン、コミット、build ID、サイズ、SHA-512 を検証しますが、機能回帰は実行しません。署名、アップロード、本番更新フィードの変更、Git タグ、GitHub Release の作成は行いません。正式な署名と公開は `.github/workflows/uclaw-portable-production.yml` から実行し、このワークフローも機能回帰を実行しません。
+Windows USB ビルドは `UClaw-<version>-win-x64-usb.zip` と対応する JSON メタデータを生成します。永続データは `UClawData` に保存し、頻繁に更新される状態は分離されたローカル実行プロファイルを使用します。ポータブル更新は ZIP、サイズ、SHA-512 の検証後にのみインストールされます。置換中は再帰的なファイル数とバイト数の進行状況を表示し、Windows の同一ボリュームでは検証済みファイルを直接移動し、別ボリュームへのコピーは最大 4 ワーカーに制限します。`UClawData` は置換とロールバックの対象外です。`pnpm release` は Windows 専用のローカル候補ビルドです。クリーンな Git ワークスペースを要求し、USB パッケージを作成して正確なバージョン、コミット、build ID、サイズ、SHA-512 を検証しますが、機能回帰は実行しません。署名、アップロード、本番更新フィードの変更、Git タグ、GitHub Release の作成は行いません。`.github/workflows/uclaw-portable-production.yml` は GitHub ホステッド Runner で不変の未署名 Windows/macOS USB 候補のみを作成します。本番 OSS と無効状態の zz-cn ステージングは、DPAPI で保護された資格情報を持つ承認済み Windows マシンで別途実行します。
 
 ヘッドレス Linux では Electron テストに表示サーバーが必要です。`xvfb-run -a pnpm run test:e2e` を利用してください。
 

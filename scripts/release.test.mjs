@@ -115,7 +115,7 @@ test('production workflow builds the Windows USB ZIP without signing credentials
   }
 });
 
-test('production stage builds only macOS USB ZIPs and cannot activate or publish a GitHub Release', async () => {
+test('production candidate workflow builds only USB ZIPs and cannot perform production writes', async () => {
   const workflow = await readFile(
     path.join(ROOT, '.github', 'workflows', 'uclaw-portable-production.yml'),
     'utf8',
@@ -127,8 +127,8 @@ test('production stage builds only macOS USB ZIPs and cannot activate or publish
     workflow,
     /build-macos-usb:[\s\S]*?actions\/setup-go@v5[\s\S]*?pnpm run package:mac:usb/u,
   );
-  assert.match(workflow, /publish-disabled-release-stage\.ps1/u);
-  assert.match(workflow, /register disabled zz-cn releases/u);
+  assert.match(workflow, /candidates-ready:/u);
+  assert.match(workflow, /Production OSS and zz-cn staging must be run locally/u);
   for (const forbidden of [
     'MAC_CERTS',
     'APPLE_APP_SPECIFIC_PASSWORD',
@@ -140,8 +140,13 @@ test('production stage builds only macOS USB ZIPs and cannot activate or publish
     'git tag -a',
     'git push origin "refs/tags/',
     'scripts/windows-support/publish-portable-release.ps1',
+    'scripts/windows-support/publish-disabled-release-stage.ps1',
+    'self-hosted',
+    'uclaw-release',
+    'RELEASE_MANDATORY',
+    'RELEASE_NOTES',
   ]) {
-    assert.equal(workflow.includes(forbidden), false, `Disabled stage must not run: ${forbidden}`);
+    assert.equal(workflow.includes(forbidden), false, `Candidate workflow must not run: ${forbidden}`);
   }
 });
 
@@ -156,6 +161,16 @@ test('disabled stage publisher never enables a release row', async () => {
   assert.match(publisher, /Public release feed changed during disabled staging/u);
   assert.match(publisher, /Get-RemoteSha512Hex/u);
   assert.match(publisher, /OSS SHA-512 mismatch/u);
+  assert.match(publisher, /function Get-SingleHttpHeaderValue/u);
+  assert.match(publisher, /\[int64\]::TryParse\(\$contentLengthText/u);
+  assert.match(publisher, /\$null -ne \$head\.Length -and \$head\.Length -ne \$object\.Size/u);
+  assert.match(publisher, /\$PSVersionTable\.PSEdition -eq 'Core'/u);
+  assert.equal(publisher.includes('%SystemRoot%\\System32\\WindowsPowerShell'), false);
+  assert.equal(
+    /\[int64\]\$response\.Headers\['Content-Length'\]/u.test(publisher),
+    false,
+    'PowerShell 7 returns HTTP header values as String[]; normalize before parsing',
+  );
   assert.match(publisher, /Platform = 'mac'; Arch = \$arch; PackageType = 'portable_zip'/u);
   assert.equal(publisher.includes("PackageType = 'installer'"), false);
   assert.equal(/\.dmg|\.blockmap/iu.test(publisher), false);

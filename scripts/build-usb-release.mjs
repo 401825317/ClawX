@@ -740,7 +740,7 @@ function assertPortableContents(portableRoot) {
   validatePackagedPlugins(portableRoot);
 }
 
-function addDirectoryToZip(zip, sourceDir, prefix = '') {
+function addDirectoryToZip(zip, sourceDir, archiveDate, prefix = '') {
   const entries = fs.readdirSync(sourceDir, { withFileTypes: true })
     .sort((left, right) => left.name.localeCompare(right.name));
   for (const entry of entries) {
@@ -749,16 +749,19 @@ function addDirectoryToZip(zip, sourceDir, prefix = '') {
     if (zipPath.endsWith('.download')) continue;
     if (entry.isSymbolicLink()) throw new Error(`Refusing to package symbolic link: ${zipPath}`);
     if (entry.isDirectory()) {
-      addDirectoryToZip(zip, sourcePath, zipPath);
+      addDirectoryToZip(zip, sourcePath, archiveDate, zipPath);
     } else if (entry.isFile()) {
-      zip.file(zipPath, fs.readFileSync(sourcePath), { date: new Date('2026-01-01T00:00:00Z') });
+      zip.file(zipPath, fs.readFileSync(sourcePath), { date: archiveDate });
     }
   }
 }
 
-async function writeZip(portableRoot) {
+async function writeZip(portableRoot, archiveDate) {
+  if (!(archiveDate instanceof Date) || Number.isNaN(archiveDate.getTime())) {
+    throw new Error('Windows USB archive timestamp is invalid.');
+  }
   const zip = new JSZip();
-  addDirectoryToZip(zip, portableRoot);
+  addDirectoryToZip(zip, portableRoot, archiveDate);
   const buffer = await zip.generateAsync({
     type: 'nodebuffer',
     compression: 'DEFLATE',
@@ -824,7 +827,7 @@ if (DIRECT_INVOCATION) try {
   const bootstrapGate = await runPackagedBootstrapGate({ portableRoot });
   console.log(`[build-usb-release] Main-process Bootstrap integrity gate passed (${bootstrapGate.durationMs}ms).`);
   assertPortableDataClean(portableRoot);
-  const buffer = await writeZip(portableRoot);
+  const buffer = await writeZip(portableRoot, new Date(identity.finalizedAt));
   const metadata = writeMetadata(buffer, identity);
   console.log(`[build-usb-release] Created ${path.relative(ROOT, OUTPUT_PATH)} (${metadata.size} bytes).`);
   console.log(`[build-usb-release] Metadata: ${path.relative(ROOT, METADATA_PATH)}`);
