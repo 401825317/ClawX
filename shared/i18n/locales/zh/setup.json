@@ -46,6 +46,24 @@
             "activationVerified": "激活码已验证",
             "activationInvalid": "激活码无效"
         },
+        "progress": {
+            "title": {
+                "login": "正在登录 UClaw",
+                "register": "正在创建 UClaw 账号"
+            },
+            "phase": {
+                "account": "正在验证账号并同步运行配置...",
+                "gateway": "正在启动本地网关并加载运行服务...",
+                "finish": "正在完成设置并刷新提供商..."
+            },
+            "steps": {
+                "account": "账号与配置",
+                "gateway": "本地网关",
+                "finish": "准备完成"
+            },
+            "elapsed": "已等待 {{seconds}} 秒",
+            "slowHint": "本地运行环境和插件仍在准备中，首次初始化通常需要更长时间。"
+        },
         "fields": {
             "account": "用户名",
             "password": "密码",

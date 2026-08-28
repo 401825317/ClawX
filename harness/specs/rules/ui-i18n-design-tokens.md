@@ -15,6 +15,8 @@ Use the semantic tokens and substitutions documented in `src/styles/globals.css`
 
 Interactive rows use semantic controls, keyboard activation, accessible names, visible focus styling, and disabled semantics where applicable. Attachment cards may show the decoded local path or normalized remote URL represented by explicit ACP resource or approved `MEDIA:` evidence; paths truncate visually and remain available in the title. Unavailable attachments remain basename-only, and unrelated UI or diagnostics must not expose sensitive absolute host paths.
 
+Long-running managed authentication replaces the editable account form with a localized `role="status"` live region. Progress stages must follow existing account and Gateway state, expose elapsed time and a delayed first-start hint, and must not invent percentages or trigger Gateway lifecycle actions from the Renderer.
+
 ACP whole-turn timing uses localized unit formatting and localized running/completed labels in all four locales. It renders as persistent muted metadata in the assistant-turn footer; copy remains the hover-only action.
 
 Multi-view file previews keep their localized segmented view switcher in the trailing side of the file name/path header instead of allocating a separate content row. HTML preview retains the `Preview` then `Source` order and defaults to the rendered preview.

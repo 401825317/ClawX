@@ -10,6 +10,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { hostApi } from '@/lib/host-api';
 import { Settings } from '@/pages/Settings';
 import { Setup } from '@/pages/Setup';
+import { useGatewayStore } from '@/stores/gateway';
 import { useManagedAuthStore } from '@/stores/managed-auth';
 
 vi.mock('sonner', () => ({
@@ -63,6 +64,9 @@ describe('ManagedAuthGate', () => {
     vi.spyOn(hostApi.managedAuth, 'status').mockImplementation(async () => (
       useManagedAuthStore.getState().status ?? status()
     ));
+    useGatewayStore.setState((state) => ({
+      status: { ...state.status, state: 'stopped', gatewayReady: false },
+    }));
   });
 
   afterEach(() => {
@@ -152,6 +156,13 @@ describe('managed auth page integration', () => {
     vi.spyOn(hostApi.managedAuth, 'status').mockImplementation(async () => (
       useManagedAuthStore.getState().status ?? status()
     ));
+    useGatewayStore.setState((state) => ({
+      status: { ...state.status, state: 'stopped', gatewayReady: false },
+    }));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('removes the auth step from unmanaged setup', async () => {
@@ -212,6 +223,57 @@ describe('managed auth page integration', () => {
       expect(hostApi.managedAuth.status).toHaveBeenCalled();
     });
     expect(screen.queryByTestId('managed-auth-activation-input')).not.toBeInTheDocument();
+  });
+
+  it('shows elapsed, Gateway-aware progress while login is pending', async () => {
+    vi.useFakeTimers();
+    useManagedAuthStore.setState({ status: status() });
+    type LoginResult = Awaited<ReturnType<typeof hostApi.managedAuth.login>>;
+    let finishLogin: ((result: LoginResult) => void) | undefined;
+    vi.spyOn(hostApi.managedAuth, 'login').mockImplementation(() => new Promise((resolve) => {
+      finishLogin = resolve;
+    }));
+
+    render(<ManagedAccountAuthPanel defaultMode="login" />);
+    fireEvent.change(screen.getByTestId('managed-auth-account-input'), {
+      target: { value: 'user_01' },
+    });
+    fireEvent.change(screen.getByTestId('managed-auth-password-input'), {
+      target: { value: 'Password1' },
+    });
+    fireEvent.click(screen.getByTestId('managed-auth-submit'));
+
+    expect(screen.getByTestId('managed-auth-progress')).toBeInTheDocument();
+    expect(screen.getByTestId('managed-auth-progress-step-0')).toHaveAttribute('data-state', 'active');
+    expect(screen.queryByTestId('managed-auth-account-input')).not.toBeInTheDocument();
+
+    act(() => {
+      useGatewayStore.setState((state) => ({
+        status: { ...state.status, state: 'starting', gatewayReady: false },
+      }));
+    });
+    expect(screen.getByTestId('managed-auth-progress-step-0')).toHaveAttribute('data-state', 'complete');
+    expect(screen.getByTestId('managed-auth-progress-step-1')).toHaveAttribute('data-state', 'active');
+
+    act(() => {
+      vi.advanceTimersByTime(15_000);
+    });
+    expect(screen.getByText('15s elapsed')).toHaveAttribute('aria-hidden', 'true');
+    expect(screen.getByTestId('managed-auth-progress-slow-hint')).toBeInTheDocument();
+
+    act(() => {
+      useGatewayStore.setState((state) => ({
+        status: { ...state.status, state: 'running', gatewayReady: true },
+      }));
+    });
+    expect(screen.getByTestId('managed-auth-progress-step-1')).toHaveAttribute('data-state', 'complete');
+    expect(screen.getByTestId('managed-auth-progress-step-2')).toHaveAttribute('data-state', 'active');
+
+    await act(async () => {
+      finishLogin?.({ success: false, errorCode: 'NETWORK' });
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId('managed-auth-progress')).not.toBeInTheDocument();
   });
 
   it('does not show the UClaw account section before managed status is confirmed', () => {

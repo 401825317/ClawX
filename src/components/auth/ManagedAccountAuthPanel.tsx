@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Check, CheckCircle2, Key, Loader2, Mail, RefreshCw, UserPlus, XCircle } from 'lucide-react';
+import { Check, CheckCircle2, Circle, Key, Loader2, Mail, RefreshCw, UserPlus, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import type { ManagedAuthStatus } from '@shared/managed-auth';
@@ -15,6 +15,7 @@ import { isManagedActivationRequired, isManagedAuthReady } from '@/lib/managed-a
 import { isManagedUsernameValid } from '@/lib/managed-username';
 import { cn } from '@/lib/utils';
 import { useManagedAuthStore } from '@/stores/managed-auth';
+import { useGatewayStore } from '@/stores/gateway';
 import { useProviderStore } from '@/stores/providers';
 
 interface ManagedAccountAuthPanelProps {
@@ -28,6 +29,88 @@ interface ManagedAccountAuthPanelProps {
 
 const PASSWORD_MIN_LENGTH = 8;
 const PASSWORD_MAX_LENGTH = 20;
+const SLOW_AUTH_THRESHOLD_SECONDS = 15;
+
+type ManagedAuthOperation = 'auth' | 'logout' | null;
+
+interface ManagedAuthProgressProps {
+  elapsedSeconds: number;
+  mode: 'login' | 'register';
+  step: number;
+}
+
+function ManagedAuthProgress({ elapsedSeconds, mode, step }: ManagedAuthProgressProps) {
+  const { t } = useTranslation('setup');
+  const steps = [
+    t('auth.progress.steps.account'),
+    t('auth.progress.steps.gateway'),
+    t('auth.progress.steps.finish'),
+  ];
+  const phaseKey = step === 0 ? 'account' : step === 1 ? 'gateway' : 'finish';
+
+  return (
+    <div
+      data-testid="managed-auth-progress"
+      role="status"
+      aria-live="polite"
+      className="border-y border-black/10 py-5 dark:border-white/10"
+    >
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-base font-semibold text-foreground">
+            {t(`auth.progress.title.${mode}`)}
+          </p>
+          <p data-testid="managed-auth-progress-phase" className="mt-1 text-meta leading-5 text-muted-foreground">
+            {t(`auth.progress.phase.${phaseKey}`)}
+          </p>
+        </div>
+        <span aria-hidden="true" className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">
+          {t('auth.progress.elapsed', { seconds: elapsedSeconds })}
+        </span>
+      </div>
+
+      <ol className="mt-5 space-y-3">
+        {steps.map((label, index) => {
+          const completed = index < step;
+          const active = index === step;
+          return (
+            <li
+              key={label}
+              data-testid={`managed-auth-progress-step-${index}`}
+              data-state={completed ? 'complete' : active ? 'active' : 'pending'}
+              className={cn(
+                'flex min-h-7 items-center gap-3 text-sm',
+                completed || active ? 'text-foreground' : 'text-muted-foreground/60',
+              )}
+            >
+              <span className={cn(
+                'flex h-6 w-6 shrink-0 items-center justify-center rounded-full border',
+                completed && 'border-green-600 bg-green-600 text-white dark:border-green-500 dark:bg-green-500',
+                active && 'border-blue-600 text-blue-700 dark:border-blue-400 dark:text-blue-400',
+                !completed && !active && 'border-black/15 text-muted-foreground/50 dark:border-white/15',
+              )}>
+                {completed ? (
+                  <Check className="h-3.5 w-3.5" />
+                ) : active ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Circle className="h-2.5 w-2.5" />
+                )}
+              </span>
+              <span className={cn(active && 'font-medium')}>{label}</span>
+            </li>
+          );
+        })}
+      </ol>
+
+      {elapsedSeconds >= SLOW_AUTH_THRESHOLD_SECONDS && (
+        <p data-testid="managed-auth-progress-slow-hint" className="mt-4 text-xs leading-5 text-muted-foreground">
+          {t('auth.progress.slowHint')}
+        </p>
+      )}
+    </div>
+  );
+}
 
 export function ManagedAccountAuthPanel({
   className,
@@ -44,6 +127,7 @@ export function ManagedAccountAuthPanel({
   const refreshStatus = useManagedAuthStore((state) => state.refreshStatus);
   const logoutManagedAuth = useManagedAuthStore((state) => state.logout);
   const setStatus = useManagedAuthStore((state) => state.setStatus);
+  const gatewayState = useGatewayStore((state) => state.status.state);
   const refreshProviderSnapshot = useProviderStore((state) => state.refreshProviderSnapshot);
 
   const [mode, setMode] = useState<'login' | 'register'>(defaultMode);
@@ -56,7 +140,10 @@ export function ManagedAccountAuthPanel({
   const [checkingActivation, setCheckingActivation] = useState(false);
   const [sendingVerifyCode, setSendingVerifyCode] = useState(false);
   const [verifyCodeCountdown, setVerifyCodeCountdown] = useState(0);
-  const [submitting, setSubmitting] = useState(false);
+  const [operation, setOperation] = useState<ManagedAuthOperation>(null);
+  const [authProgressStep, setAuthProgressStep] = useState(0);
+  const [authElapsedSeconds, setAuthElapsedSeconds] = useState(0);
+  const submitting = operation !== null;
 
   const authConfig = status?.bootstrap.auth ?? {};
   const canRegister = allowRegister && authConfig.registrationEnabled !== false;
@@ -113,6 +200,26 @@ export function ManagedAccountAuthPanel({
     }, 1000);
     return () => window.clearTimeout(timer);
   }, [verifyCodeCountdown]);
+
+  useEffect(() => {
+    if (operation !== 'auth') return undefined;
+    const startedAt = Date.now();
+    const updateElapsed = () => {
+      setAuthElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+    };
+    updateElapsed();
+    const timer = window.setInterval(updateElapsed, 1000);
+    return () => window.clearInterval(timer);
+  }, [operation]);
+
+  useEffect(() => {
+    if (operation !== 'auth') return;
+    if (gatewayState === 'starting' || gatewayState === 'reconnecting') {
+      setAuthProgressStep((current) => Math.max(current, 1));
+    } else if (gatewayState === 'running') {
+      setAuthProgressStep((current) => (current >= 1 ? 2 : current));
+    }
+  }, [gatewayState, operation]);
 
   const checkActivation = async () => {
     const code = activationCode.trim();
@@ -189,7 +296,9 @@ export function ManagedAccountAuthPanel({
       return;
     }
 
-    setSubmitting(true);
+    setAuthElapsedSeconds(0);
+    setAuthProgressStep(0);
+    setOperation('auth');
     try {
       const common = {
         account: normalizedAccount,
@@ -210,6 +319,7 @@ export function ManagedAccountAuthPanel({
         return;
       }
 
+      setAuthProgressStep(2);
       const next = result.status ?? await refreshStatus(true);
       setStatus(next);
       await refreshProviderSnapshot();
@@ -221,12 +331,12 @@ export function ManagedAccountAuthPanel({
       }
       toast.error(t(`auth.toast.${mode}Failed`, { message: getManagedAuthErrorMessage(t, error) }));
     } finally {
-      setSubmitting(false);
+      setOperation(null);
     }
   };
 
   const logout = async () => {
-    setSubmitting(true);
+    setOperation('logout');
     try {
       await logoutManagedAuth();
       await refreshProviderSnapshot();
@@ -239,7 +349,7 @@ export function ManagedAccountAuthPanel({
     } catch (error) {
       toast.error(t('auth.toast.logoutFailed', { message: getManagedAuthErrorMessage(t, error) }));
     } finally {
-      setSubmitting(false);
+      setOperation(null);
     }
   };
 
@@ -250,6 +360,12 @@ export function ManagedAccountAuthPanel({
           <Loader2 className="h-4 w-4 animate-spin" />
           {t('auth.status.checking')}
         </div>
+      ) : operation === 'auth' ? (
+        <ManagedAuthProgress
+          elapsedSeconds={authElapsedSeconds}
+          mode={mode}
+          step={authProgressStep}
+        />
       ) : authReady && successVisible ? (
         <div className="flex items-center gap-2 rounded-lg bg-green-500/10 p-4 text-green-700 dark:text-green-400">
           <CheckCircle2 className="h-5 w-5" />

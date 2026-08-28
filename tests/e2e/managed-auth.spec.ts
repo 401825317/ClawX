@@ -84,6 +84,7 @@ const readyStatus = {
 async function installManagedAuthMock(
   app: ElectronApplication,
   initialState: ManagedAuthMockState,
+  options: { authDelayMs?: number } = {},
 ): Promise<void> {
   await app.evaluate(
     async ({ app: _app }, input) => {
@@ -142,6 +143,9 @@ async function installManagedAuthMock(
             return respond(request.id, { success: true, countdown: 60 });
           case 'register':
           case 'login':
+            if (input.authDelayMs) {
+              await new Promise((resolve) => setTimeout(resolve, input.authDelayMs));
+            }
             status = fixtures.ready;
             return respond(request.id, {
               success: true,
@@ -161,6 +165,7 @@ async function installManagedAuthMock(
     },
     {
       initialState,
+      authDelayMs: options.authDelayMs ?? 0,
       statuses: {
         unmanaged: unmanagedStatus,
         loggedOut: loggedOutStatus,
@@ -347,7 +352,7 @@ test.describe('UClaw managed account flows', () => {
     const app = await launchElectronApp({ managedProvider: true });
     try {
       const page = await getStableWindow(app);
-      await installManagedAuthMock(app, 'loggedOut');
+      await installManagedAuthMock(app, 'loggedOut', { authDelayMs: 1_200 });
       await page.reload();
 
       await expect(page.getByTestId('managed-auth-gate')).toBeVisible();
@@ -361,6 +366,9 @@ test.describe('UClaw managed account flows', () => {
       await page.getByTestId('managed-auth-password-input').fill('Password1');
       await page.getByTestId('managed-auth-submit').click();
 
+      await expect(page.getByTestId('managed-auth-progress')).toBeVisible();
+      await expect(page.getByText('Signing in to UClaw', { exact: true })).toBeVisible();
+      await expect(page.getByTestId('managed-auth-account-input')).toHaveCount(0);
       await expect(page.getByTestId('managed-auth-gate')).toHaveCount(0);
       await expect(page.getByTestId('main-layout')).toBeVisible();
       const invocations = await getRecordedHostInvocations(app);

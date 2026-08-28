@@ -46,6 +46,24 @@
             "activationVerified": "アクティベーションコードを確認しました",
             "activationInvalid": "アクティベーションコードが無効です"
         },
+        "progress": {
+            "title": {
+                "login": "UClaw にログインしています",
+                "register": "UClaw アカウントを作成しています"
+            },
+            "phase": {
+                "account": "アカウントを確認し、実行設定を同期しています...",
+                "gateway": "ローカルゲートウェイを起動し、実行サービスを読み込んでいます...",
+                "finish": "設定を完了し、プロバイダーを更新しています..."
+            },
+            "steps": {
+                "account": "アカウントと設定",
+                "gateway": "ローカルゲートウェイ",
+                "finish": "準備完了"
+            },
+            "elapsed": "{{seconds}}秒経過",
+            "slowHint": "ローカル実行環境とプラグインを準備しています。初回の初期化には時間がかかる場合があります。"
+        },
         "fields": {
             "account": "ユーザー名",
             "password": "パスワード",

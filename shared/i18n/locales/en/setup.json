@@ -46,6 +46,24 @@
             "activationVerified": "Activation code verified",
             "activationInvalid": "Activation code is invalid"
         },
+        "progress": {
+            "title": {
+                "login": "Signing in to UClaw",
+                "register": "Creating your UClaw account"
+            },
+            "phase": {
+                "account": "Verifying your account and synchronizing configuration...",
+                "gateway": "Starting the local Gateway and loading runtime services...",
+                "finish": "Finishing setup and refreshing your providers..."
+            },
+            "steps": {
+                "account": "Account and configuration",
+                "gateway": "Local Gateway",
+                "finish": "Ready to continue"
+            },
+            "elapsed": "{{seconds}}s elapsed",
+            "slowHint": "The local runtime and plugins are still being prepared. First-time initialization can take a little longer."
+        },
         "fields": {
             "account": "Username",
             "password": "Password",
