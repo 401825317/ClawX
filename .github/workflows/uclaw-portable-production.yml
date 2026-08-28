@@ -1,4 +1,4 @@
-name: UClaw Windows Portable Production
+name: UClaw Windows USB and macOS Production Candidates
 
 on:
   workflow_dispatch:
@@ -7,41 +7,34 @@ on:
         description: Stable version from package.json, for example 1.0.6
         required: true
         type: string
-      mandatory:
-        description: Make the portable update mandatory
-        required: true
-        default: false
-        type: boolean
-      release_notes:
-        description: Public release notes; leave empty to use the default summary
-        required: false
-        default: ''
-        type: string
 
 permissions:
   actions: read
-  contents: write
+  contents: read
 
 concurrency:
-  group: uclaw-windows-portable-production
+  group: uclaw-windows-macos-production-candidates
   cancel-in-progress: false
 
 env:
   UCLAW_NODE_VERSION: '22.19.0'
+  UCLAW_RELEASE_BRANCH: feature/claw-0.5.1
 
 jobs:
   preflight:
-    name: Lock master release identity
+    name: Lock release branch identity
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.identity.outputs.version }}
       commit: ${{ steps.identity.outputs.commit }}
       short_commit: ${{ steps.identity.outputs.short_commit }}
       tag: ${{ steps.identity.outputs.tag }}
+      release_branch: ${{ steps.identity.outputs.release_branch }}
     steps:
-      - name: Checkout selected commit
+      - name: Checkout the UClaw release branch
         uses: actions/checkout@v6
         with:
+          ref: ${{ env.UCLAW_RELEASE_BRANCH }}
           fetch-depth: 0
 
       - name: Setup Node.js
@@ -49,30 +42,25 @@ jobs:
         with:
           node-version: ${{ env.UCLAW_NODE_VERSION }}
 
-      - name: Require the latest clean master commit and matching version
+      - name: Require the latest clean release branch commit and matching version
         id: identity
         shell: bash
         env:
           RELEASE_VERSION: ${{ inputs.version }}
-          SELECTED_REF: ${{ github.ref }}
-          SELECTED_SHA: ${{ github.sha }}
+          RELEASE_BRANCH: ${{ env.UCLAW_RELEASE_BRANCH }}
         run: |
           set -euo pipefail
-          if [[ "$SELECTED_REF" != "refs/heads/master" ]]; then
-            echo "Formal portable releases must be dispatched from master; selected ref: $SELECTED_REF" >&2
-            exit 1
-          fi
           if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Version must be a stable semantic version: $RELEASE_VERSION" >&2
             exit 1
           fi
 
-          git fetch --no-tags origin master
+          git fetch --no-tags origin "$RELEASE_BRANCH"
           LOCAL_COMMIT="$(git rev-parse HEAD)"
-          REMOTE_MASTER="$(git rev-parse origin/master)"
-          if [[ "$LOCAL_COMMIT" != "$SELECTED_SHA" || "$LOCAL_COMMIT" != "$REMOTE_MASTER" ]]; then
-            echo "Selected commit is not the latest origin/master." >&2
-            echo "selected=$SELECTED_SHA local=$LOCAL_COMMIT remote=$REMOTE_MASTER" >&2
+          REMOTE_BRANCH_COMMIT="$(git rev-parse "origin/$RELEASE_BRANCH")"
+          if [[ "$LOCAL_COMMIT" != "$REMOTE_BRANCH_COMMIT" ]]; then
+            echo "Checked-out commit is not the latest origin/$RELEASE_BRANCH." >&2
+            echo "local=$LOCAL_COMMIT remote=$REMOTE_BRANCH_COMMIT" >&2
             exit 1
           fi
           if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
@@ -106,9 +94,10 @@ jobs:
           echo "commit=$LOCAL_COMMIT" >> "$GITHUB_OUTPUT"
           echo "short_commit=${LOCAL_COMMIT:0:7}" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "release_branch=$RELEASE_BRANCH" >> "$GITHUB_OUTPUT"
 
-  build-and-full:
-    name: Build, sign, and run exact-package Full
+  build-windows-usb:
+    name: Build Windows USB candidate
     needs: preflight
     runs-on: windows-latest
     timeout-minutes: 150
@@ -148,119 +137,17 @@ jobs:
         shell: pwsh
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck
-        shell: pwsh
-        run: pnpm run typecheck
-
-      - name: Source Electron E2E
-        shell: pwsh
-        run: pnpm run test:e2e
-
-      - name: Communication replay and comparison
-        shell: pwsh
-        run: |
-          pnpm run comms:replay
-          pnpm run comms:compare
-
-      - name: Harness CI parity
-        shell: pwsh
-        run: pnpm run harness:ci
-
-      - name: Build unsigned Windows USB candidate
+      - name: Build Windows USB candidate
         shell: pwsh
         run: pnpm run package:win:usb
 
-      - name: Require deep-signing configuration for a formal release
-        shell: pwsh
-        env:
-          USB_SIGNING_CONFIGURATION: ${{ vars.SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG }}
-        run: |
-          if (-not $env:USB_SIGNING_CONFIGURATION) {
-            throw 'Repository variable SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG is required.'
-          }
-
-      - name: Prepare Windows USB ZIP for SignPath
-        id: sign-input
-        shell: pwsh
-        run: |
-          $zip = Get-Item -LiteralPath "release\UClaw-$env:RELEASE_VERSION-win-x64-usb.zip"
-          $inputDirectory = 'release\signpath-input'
-          Remove-Item -LiteralPath $inputDirectory -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path $inputDirectory -Force | Out-Null
-          $inputName = "$([IO.Path]::GetFileNameWithoutExtension($zip.Name)).signpath-${{ github.run_id }}-${{ github.run_attempt }}.zip"
-          Copy-Item -LiteralPath $zip.FullName -Destination (Join-Path $inputDirectory $inputName) -Force
-          "input_name=$inputName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-      - name: Upload unsigned USB ZIP for SignPath
-        id: upload-sign-input
-        uses: actions/upload-artifact@v7
-        with:
-          name: unsigned-uclaw-usb-${{ github.run_id }}-${{ github.run_attempt }}
-          path: release/signpath-input/*.zip
-          archive: false
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Deep-sign Windows USB ZIP
-        uses: signpath/github-action-submit-signing-request@v2
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: 78e37079-23df-4800-b41c-33312ad7c1e3
-          project-slug: ValueCell
-          signing-policy-slug: ValueCell-sign
-          artifact-configuration-slug: ${{ vars.SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG }}
-          github-artifact-id: ${{ steps.upload-sign-input.outputs.artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: release/signed-usb
-          skip-decompress: true
-
-      - name: Replace and verify deep-signed USB ZIP
-        shell: pwsh
-        env:
-          SIGNED_INPUT_NAME: ${{ steps.sign-input.outputs.input_name }}
-        run: |
-          $signed = @(Get-ChildItem -Path 'release\signed-usb' -Filter '*.zip' -File -Recurse)
-          if ($signed.Count -ne 1 -or $signed[0].Name -ne $env:SIGNED_INPUT_NAME) {
-            throw "Expected one signed ZIP named $env:SIGNED_INPUT_NAME; found $($signed.Count)."
-          }
-          $target = "release\UClaw-$env:RELEASE_VERSION-win-x64-usb.zip"
-          Copy-Item -LiteralPath $signed[0].FullName -Destination $target -Force
-
-          $extractRoot = Join-Path $env:RUNNER_TEMP "uclaw-signed-usb-${{ github.run_id }}-${{ github.run_attempt }}"
-          Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
-          try {
-            Expand-Archive -LiteralPath $target -DestinationPath $extractRoot -Force
-            foreach ($relativePath in @(
-              'UClaw.exe',
-              'resources\resources\updater\win32-x64\uclaw-portable-updater.exe'
-            )) {
-              $executable = Join-Path $extractRoot $relativePath
-              if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
-                throw "Signed ZIP is missing $relativePath."
-              }
-              $signature = Get-AuthenticodeSignature -LiteralPath $executable
-              if ($signature.Status -ne 'Valid') {
-                throw "Invalid Authenticode signature for $relativePath: $($signature.Status)."
-              }
-            }
-          } finally {
-            Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
-          }
-
-      - name: Refresh integrity metadata from signed ZIP
+      - name: Refresh integrity metadata from final ZIP
         shell: pwsh
         run: |
           node scripts/windows-support/refresh-portable-release-metadata.mjs `
             --zip "release\UClaw-$env:RELEASE_VERSION-win-x64-usb.zip" `
             --version $env:RELEASE_VERSION `
             --commit $env:RELEASE_COMMIT
-
-      - name: Run Full regression against the exact signed ZIP
-        shell: pwsh
-        run: |
-          node scripts/windows-support/run-packaged-regression.mjs `
-            --zip "release\UClaw-$env:RELEASE_VERSION-win-x64-usb.zip" `
-            --profile full
 
       - name: Stage immutable production candidate
         shell: pwsh
@@ -277,49 +164,21 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload build and Full diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: uclaw-production-build-evidence-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            release/regression/**/*
-            test-results/**/*
-            playwright-report/**/*
-            artifacts/comms/**/*
-            artifacts/harness/**/*
-          if-no-files-found: warn
-          retention-days: 14
-
-  live-and-publish:
-    name: Fresh registration, Live, OSS, feed, and version
-    needs:
-      - preflight
-      - build-and-full
-    runs-on:
-      - self-hosted
-      - Windows
-      - X64
-      - uclaw-release
-    timeout-minutes: 120
-    environment:
-      name: uclaw-production
-      url: https://uclaw-ver.oss-cn-beijing.aliyuncs.com/releases/latest/UClaw-${{ needs.preflight.outputs.version }}-win-x64-usb.zip
+  build-macos-usb:
+    name: Build macOS USB candidates
+    needs: preflight
+    runs-on: macos-latest
+    timeout-minutes: 150
     env:
       CI: 'true'
       RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
       RELEASE_COMMIT: ${{ needs.preflight.outputs.commit }}
-      RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
-      RELEASE_MANDATORY: ${{ inputs.mandatory }}
-      RELEASE_NOTES: ${{ inputs.release_notes }}
-      CANDIDATE_DIRECTORY: release/production-candidate
     steps:
       - name: Checkout locked commit
         uses: actions/checkout@v6
         with:
           ref: ${{ needs.preflight.outputs.commit }}
           fetch-depth: 0
-          clean: true
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -330,155 +189,70 @@ jobs:
           node-version: ${{ env.UCLAW_NODE_VERSION }}
           cache: pnpm
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.22.x
+          cache: false
+
+      - name: Prefer HTTPS for public GitHub dependencies
+        run: |
+          git config --global "url.https://github.com/.insteadOf" "git@github.com:"
+          git config --global --add "url.https://github.com/.insteadOf" "ssh://git@github.com/"
+
       - name: Install locked dependencies
-        shell: pwsh
         run: pnpm install --frozen-lockfile
 
-      - name: Download exact production candidate
-        uses: actions/download-artifact@v4
-        with:
-          name: uclaw-production-candidate-${{ needs.preflight.outputs.version }}-${{ needs.preflight.outputs.short_commit }}
-          path: ${{ env.CANDIDATE_DIRECTORY }}
-
-      - name: Verify protected release runner prerequisites
-        shell: pwsh
+      - name: Download macOS runtime binaries
         run: |
-          if (-not [Environment]::UserInteractive) {
-            throw 'The uclaw-release runner must run in an interactive Windows session for Electron Live tests.'
-          }
-          $required = @(
-            (Join-Path $env:APPDATA 'UClaw\release-credentials\live-registration-admin.json'),
-            (Join-Path $env:APPDATA 'UClaw\release-credentials\oss-release.json'),
-            (Join-Path $env:APPDATA 'UClaw\release-credentials\production-ssh.json'),
-            (Join-Path $env:TEMP 'uclaw-ossutil\ossutil-2.3.0-windows-amd64\ossutil.exe')
-          )
-          foreach ($path in $required) {
-            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-              throw "Protected release runner prerequisite is missing: $path"
-            }
-          }
+          pnpm run uv:download:mac
+          pnpm run agent-browser:download:mac
 
-      - name: Register a fresh account and run managed Live
-        shell: pwsh
-        run: |
-          & scripts/windows-support/invoke-live-registration-gate.ps1 `
-            -ZipPath (Join-Path $env:CANDIDATE_DIRECTORY "UClaw-$env:RELEASE_VERSION-win-x64-usb.zip")
-
-      - name: Locate exact Live summary
-        id: live-summary
-        shell: pwsh
-        run: |
-          $candidate = Get-Content -Raw -LiteralPath (Join-Path $env:CANDIDATE_DIRECTORY 'candidate.json') | ConvertFrom-Json
-          $matches = @(
-            Get-ChildItem -Path 'release\regression' -Filter summary.json -File -Recurse | ForEach-Object {
-              $summary = Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json
-              if ($summary.profile -eq 'live' -and $summary.status -eq 'passed' -and
-                $summary.liveRegistrationViaAdminStdin -eq $true -and
-                $summary.package.version -eq $candidate.version -and
-                $summary.package.gitCommit -eq $candidate.commit -and
-                $summary.package.sha512 -ceq $candidate.sha512) {
-                [pscustomobject]@{ Path = $_.FullName; FinishedAt = [string]$summary.finishedAt }
-              }
-            }
-          ) | Sort-Object FinishedAt -Descending
-          if ($matches.Count -ne 1) {
-            throw "Expected exactly one passing fresh-registration Live summary for the candidate; found $($matches.Count)."
-          }
-          "path=$($matches[0].Path)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-      - name: Generate combined release report
-        shell: pwsh
+      - name: Build macOS x64 and arm64 USB packages
         env:
-          LIVE_SUMMARY: ${{ steps.live-summary.outputs.path }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: |
-          node scripts/windows-support/generate-regression-report.mjs `
-            --source (Join-Path $env:CANDIDATE_DIRECTORY 'source-results.json') `
-            --packaged (Join-Path $env:CANDIDATE_DIRECTORY 'full-summary.json') `
-            --live $env:LIVE_SUMMARY `
-            --output (Join-Path $env:CANDIDATE_DIRECTORY "UClaw-$env:RELEASE_VERSION-complete-regression-report.zh-CN.md") `
-            --results-output (Join-Path $env:CANDIDATE_DIRECTORY 'production-capability-results.json')
+          ulimit -n 65536 || true
+          pnpm run package:mac:usb
 
-      - name: Validate publication inputs without production writes
-        shell: pwsh
+      - name: Verify exact macOS USB artifacts
         run: |
-          & scripts/windows-support/publish-portable-release.ps1 `
-            -CandidateDirectory $env:CANDIDATE_DIRECTORY `
-            -Version $env:RELEASE_VERSION `
-            -Commit $env:RELEASE_COMMIT `
-            -ValidateOnly
+          set -euo pipefail
+          for arch in x64 arm64; do
+            zip="release/UClaw-${RELEASE_VERSION}-mac-${arch}-usb.zip"
+            test -s "$zip"
+            test -s "${zip%.zip}.json"
+          done
 
-      - name: Publish immutable OSS objects and production feed
-        shell: pwsh
+      - name: Stage immutable macOS production candidate
         run: |
-          $mandatory = [bool]::Parse($env:RELEASE_MANDATORY)
-          & scripts/windows-support/publish-portable-release.ps1 `
-            -CandidateDirectory $env:CANDIDATE_DIRECTORY `
-            -Version $env:RELEASE_VERSION `
-            -Commit $env:RELEASE_COMMIT `
-            -ReleaseNotes $env:RELEASE_NOTES `
-            -Mandatory $mandatory
+          node scripts/macos-support/stage-production-release-candidate.mjs \
+            --version "$RELEASE_VERSION" \
+            --commit "$RELEASE_COMMIT"
 
-      - name: Create or verify annotated version tag
-        shell: pwsh
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git fetch origin --tags
-          if (git rev-parse -q --verify "refs/tags/$env:RELEASE_TAG") {
-            $tagType = git cat-file -t "refs/tags/$env:RELEASE_TAG"
-            if ($tagType -ne 'tag') {
-              throw "Existing tag $env:RELEASE_TAG is not annotated."
-            }
-            $tagCommit = git rev-list -n 1 $env:RELEASE_TAG
-            if ($tagCommit -ne $env:RELEASE_COMMIT) {
-              throw "Tag $env:RELEASE_TAG points to $tagCommit, not $env:RELEASE_COMMIT."
-            }
-          } else {
-            git tag -a $env:RELEASE_TAG -m "UClaw $env:RELEASE_VERSION" $env:RELEASE_COMMIT
-            git push origin "refs/tags/$env:RELEASE_TAG"
-          }
-
-      - name: Create or update GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.preflight.outputs.tag }}
-          target_commitish: ${{ needs.preflight.outputs.commit }}
-          name: UClaw ${{ needs.preflight.outputs.version }}
-          body: ${{ inputs.release_notes }}
-          generate_release_notes: true
-          draft: false
-          prerelease: false
-          make_latest: true
-          files: |
-            ${{ env.CANDIDATE_DIRECTORY }}/UClaw-${{ needs.preflight.outputs.version }}-win-x64-usb.zip
-            ${{ env.CANDIDATE_DIRECTORY }}/UClaw-${{ needs.preflight.outputs.version }}-win-x64-usb.json
-            ${{ env.CANDIDATE_DIRECTORY }}/UClaw-${{ needs.preflight.outputs.version }}-complete-regression-report.zh-CN.md
-            ${{ env.CANDIDATE_DIRECTORY }}/production-capability-results.json
-            ${{ env.CANDIDATE_DIRECTORY }}/publication.json
-
-      - name: Write release summary
-        shell: pwsh
-        run: |
-          $candidate = Get-Content -Raw -LiteralPath (Join-Path $env:CANDIDATE_DIRECTORY 'candidate.json') | ConvertFrom-Json
-          $publication = Get-Content -Raw -LiteralPath (Join-Path $env:CANDIDATE_DIRECTORY 'publication.json') | ConvertFrom-Json
-          @"
-          ## UClaw $($candidate.version) published
-
-          - Commit: ``$($candidate.commit)``
-          - Build ID: ``$($candidate.buildId)``
-          - Size: ``$($candidate.size)``
-          - SHA-512: ``$($candidate.sha512)``
-          - Mandatory: ``$($publication.mandatory)``
-          - Download: $($publication.url)
-          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
-
-      - name: Upload final production evidence
-        if: always()
+      - name: Upload immutable macOS production candidate
         uses: actions/upload-artifact@v4
         with:
-          name: uclaw-production-evidence-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ env.CANDIDATE_DIRECTORY }}/*
-            release/regression/**/*
-          if-no-files-found: warn
-          retention-days: 30
+          name: uclaw-macos-production-candidate-${{ needs.preflight.outputs.version }}-${{ needs.preflight.outputs.short_commit }}
+          path: release/macos-production-candidate/*
+          if-no-files-found: error
+          retention-days: 14
+
+  candidates-ready:
+    name: Confirm immutable production candidates
+    needs:
+      - preflight
+      - build-windows-usb
+      - build-macos-usb
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write candidate summary
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## UClaw ${{ needs.preflight.outputs.version }} candidates ready
+
+          - Commit: `${{ needs.preflight.outputs.commit }}`
+          - Windows x64 and macOS x64/arm64 USB candidates are stored as immutable Actions artifacts
+          - Production OSS and zz-cn staging must be run locally with the DPAPI-protected publisher
+          - No production feed or GitHub Release was changed by this workflow
+          EOF
