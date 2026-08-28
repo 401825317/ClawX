@@ -93,7 +93,7 @@ describe('managed client-config Renderer store', () => {
 
     expect(policy).toMatchObject({
       defaultModel: 'smart-latest',
-      defaultThinkingLevel: 'medium',
+      defaultThinkingLevel: 'off',
       fallbackModels: ['deepseek-v4-flash'],
     });
     expect(useManagedClientConfigStore.getState().textModelPolicy).toEqual(policy);

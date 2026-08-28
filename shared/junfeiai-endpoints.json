@@ -12,7 +12,7 @@
     "defaultFallbackModel": "deepseek-v4-flash",
     "defaultModelContextWindow": 258000,
     "defaultApiProtocol": "openai-responses",
-    "defaultThinkingLevel": "medium",
+    "defaultThinkingLevel": "off",
     "requestTimeoutSeconds": 300
   },
   "auth": {
