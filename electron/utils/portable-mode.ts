@@ -130,7 +130,14 @@ function pathApi(platform: string = process.platform, pathHint?: string) {
   // Tests may classify a macOS layout using a temporary Windows path. In
   // production the platform and path style agree, but honoring an explicit
   // absolute Windows path keeps the classifier itself platform-independent.
-  return platform === 'win32' || (pathHint && win32.isAbsolute(pathHint)) ? win32 : posix;
+  // `path.win32.isAbsolute('/var/...')` is also true, though, so checking only
+  // the Windows helper misclassifies every POSIX absolute path on a real macOS
+  // runner as a Windows path (turning `/var/...` into `\\var\\...`).  Select
+  // win32 only when the hint is Windows-rooted *and not* POSIX-rooted.
+  return platform === 'win32'
+    || Boolean(pathHint && win32.isAbsolute(pathHint) && !posix.isAbsolute(pathHint))
+    ? win32
+    : posix;
 }
 
 /**

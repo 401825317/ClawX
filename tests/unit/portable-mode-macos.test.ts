@@ -149,6 +149,18 @@ describe('macOS update package selection', () => {
     expect(shouldUsePortableUpdatePackage('darwin')).toBe(true);
   });
 
+  it('keeps POSIX selectors POSIX when Darwin is emulated on Windows', () => {
+    // The CI macOS runner supplies real `/var/...` temporary roots, while the
+    // Windows unit suite emulates Darwin with synthetic selectors.  A
+    // `win32.isAbsolute('/var/...')` check incorrectly routes those real macOS
+    // paths through win32 path resolution and reports every root as missing.
+    setPlatform('darwin');
+    app.isPackaged = false;
+    process.env.CLAWX_PORTABLE_ROOT = '/tmp/uclaw-posix-selector';
+
+    expect(resolvePortableRootDir()).toBe('/tmp/uclaw-posix-selector');
+  });
+
   it('ignores a stale explicit portable root when a packaged app was copied elsewhere', async () => {
     const staleRoot = await mkdtemp(join(tmpdir(), 'uclaw-macos-stale-root-'));
     temporaryRoots.push(staleRoot);
