@@ -188,6 +188,10 @@ test('disabled stage publisher never enables a release row', async () => {
   assert.match(publisher, /companion metadata is missing/u);
   assert.match(publisher, /Assert-PortableMetadata -Metadata \$metadata/u);
   assert.match(publisher, /metadataFileName mismatch/u);
+  assert.match(publisher, /LocalPath = \$metadataPath/u);
+  assert.match(publisher, /FileName = \$metadataFileName/u);
+  assert.match(publisher, /Sha512Hex = Get-Sha512Hex \$metadataPath/u);
+  assert.match(publisher, /objects = \$objects\.Count/u);
   assert.match(publisher, /function Get-SingleHttpHeaderValue/u);
   assert.match(publisher, /\[int64\]::TryParse\(\$contentLengthText/u);
   assert.match(publisher, /\$null -ne \$head\.Length -and \$head\.Length -ne \$object\.Size/u);

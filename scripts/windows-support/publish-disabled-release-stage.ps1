@@ -381,6 +381,13 @@ foreach ($artifact in @($macosCandidate.artifacts)) {
   $metadata = Get-Content -Raw -LiteralPath $metadataPath | ConvertFrom-Json
   Assert-PortableMetadata -Metadata $metadata -Version $Version -Commit $Commit -Platform 'mac' -Arch $arch `
     -FileName $zipName -Size ([int64]$zip.Length) -Sha512 $zipSha -BuildId ([string]$artifact.buildId)
+  $metadataFile = Get-Item -LiteralPath $metadataPath
+  $objects += [pscustomobject]@{
+    LocalPath = $metadataPath
+    FileName = $metadataFileName
+    Size = [int64]$metadataFile.Length
+    Sha512Hex = Get-Sha512Hex $metadataPath
+  }
   $objects += [pscustomobject]@{ LocalPath = $zipPath; FileName = $zipName; Size = [int64]$zip.Length; Sha512Hex = (Get-Sha512Hex $zipPath) }
   $releaseRows += [pscustomobject]@{ Platform = 'mac'; Arch = $arch; PackageType = 'portable_zip'; FileName = $zipName; Sha512 = $zipSha; Size = [int64]$zip.Length; ReleaseDate = [string]$macosCandidate.releaseDate }
 }
