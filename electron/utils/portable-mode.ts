@@ -1,11 +1,12 @@
 import {
   accessSync,
+  closeSync,
   constants as fsConstants,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   unlinkSync,
-  writeFileSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -409,24 +410,46 @@ function isWritableDirectory(
     // removed immediately and never becomes part of the portable layout.
     const path = pathApi(platform, value!);
     const probePath = path.join(value!, `.uclaw-write-probe-${randomUUID()}`);
-    let created = false;
+    let probeFd: number | undefined;
+    let probeCreated = false;
+    let probeSucceeded = false;
+    let cleanupSucceeded = true;
     try {
-      writeFileSync(probePath, '', { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-      created = true;
+      // O_EXCL makes the directory-entry creation atomic. Once openSync
+      // returns, keep the descriptor so cleanup also runs if close reports a
+      // filesystem error.
+      probeFd = openSync(
+        probePath,
+        fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL,
+        0o600,
+      );
+      probeCreated = true;
+      closeSync(probeFd);
+      probeFd = undefined;
+      probeSucceeded = true;
     } catch {
-      return false;
+      // An O_EXCL failure does not create our probe. The outer catch below
+      // reports the directory as not writable.
     } finally {
-      if (created) {
+      if (probeFd !== undefined) {
+        try {
+          closeSync(probeFd);
+        } catch {
+          // Continue to remove the probe even when close reports an I/O error.
+        }
+      }
+      if (probeCreated) {
         try {
           unlinkSync(probePath);
         } catch {
-          // A directory that cannot remove its own temporary entry is not
-          // safe for the helper's rename/rollback sequence.
-          created = false;
+          // A missing probe is expected when O_EXCL failed. If creation
+          // succeeded, however, inability to remove it means the directory
+          // is not safe for the helper's rename/rollback sequence.
+          cleanupSucceeded = false;
         }
       }
     }
-    return created;
+    return probeSucceeded && cleanupSucceeded;
   } catch {
     return false;
   }
