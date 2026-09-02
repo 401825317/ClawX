@@ -842,6 +842,14 @@ export function applyPortableEnvironment(): PortableModeInfo {
     'openclaw.json',
   );
   process.env.OPENCLAW_CONFIG = process.env.OPENCLAW_CONFIG_PATH;
+  // Keep OpenClaw's implicit default workspace in the same machine-local
+  // state profile. Explicit config workspaces still take precedence, while
+  // launches without agents.defaults.workspace no longer fall back to the
+  // removable OPENCLAW_HOME tree.
+  process.env.OPENCLAW_WORKSPACE_DIR = pathApi().join(
+    info.runtimeOpenClawStateDir ?? info.openclawConfigDir,
+    'workspace',
+  );
   if (info.runtimeSnapshotDir) process.env.CLAWX_PORTABLE_RUNTIME_SNAPSHOT_DIR = info.runtimeSnapshotDir;
   if (info.portableId) process.env.CLAWX_PORTABLE_ID = info.portableId;
   process.env.CLAWX_PORTABLE_RUNTIME_STATE = 'local';

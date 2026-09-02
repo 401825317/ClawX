@@ -9,11 +9,12 @@ import { constants } from 'fs';
 import { join, resolve, sep } from 'path';
 import { logger } from './logger';
 import {
-  expandOpenClawPath,
+  resolveOpenClawWorkspacePath,
   getOpenClawConfigDir,
   getResourcesDir,
   resolveOpenClawConfigPath,
 } from './paths';
+import { DEFAULT_WORKSPACE_CWD } from '@shared/workspace';
 
 const CLAWX_BEGIN = '<!-- clawx:begin -->';
 const CLAWX_END = '<!-- clawx:end -->';
@@ -213,7 +214,6 @@ type WorkspaceDir = {
  * Collect all unique workspace directories from the openclaw config.
  */
 async function resolveAllWorkspaceDirs(): Promise<WorkspaceDir[]> {
-  const openclawDir = getOpenClawConfigDir();
   const dirs = new Map<string, WorkspaceDir>();
   const addDir = (dir: string, waitForGatewaySeed: boolean) => {
     const existing = dirs.get(dir);
@@ -231,7 +231,7 @@ async function resolveAllWorkspaceDirs(): Promise<WorkspaceDir[]> {
       const defaultWs = config?.agents?.defaults?.workspace;
       let hasDefaultWorkspace = false;
       if (typeof defaultWs === 'string' && defaultWs.trim()) {
-        addDir(expandOpenClawPath(defaultWs), true);
+        addDir(resolveOpenClawWorkspacePath(defaultWs), true);
         hasDefaultWorkspace = true;
       }
 
@@ -242,7 +242,7 @@ async function resolveAllWorkspaceDirs(): Promise<WorkspaceDir[]> {
           if (typeof ws === 'string' && ws.trim()) {
             const isMainDefault =
               agent?.default === true || (agent?.id === 'main' && !hasDefaultWorkspace);
-            addDir(expandOpenClawPath(ws), isMainDefault);
+            addDir(resolveOpenClawWorkspacePath(ws), isMainDefault);
           }
         }
       }
@@ -258,7 +258,8 @@ async function resolveAllWorkspaceDirs(): Promise<WorkspaceDir[]> {
   // explicitly declared in openclaw.json should be seeded.
 
   if (dirs.size === 0) {
-    addDir(join(openclawDir, 'workspace'), true);
+    const envWorkspace = process.env.OPENCLAW_WORKSPACE_DIR?.trim();
+    addDir(resolveOpenClawWorkspacePath(envWorkspace || DEFAULT_WORKSPACE_CWD), true);
   }
 
   return [...dirs.values()];

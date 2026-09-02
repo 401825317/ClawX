@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { AgentProfile, AgentProfileDraft } from '@shared/types/agent';
-import { expandOpenClawPath, getOpenClawConfigDir } from './paths';
+import { getOpenClawConfigDir, resolveOpenClawWorkspacePath } from './paths';
 import * as logger from './logger';
 
 const PROFILE_FILE_NAME = 'uclaw-agent-profiles.json';
@@ -183,7 +183,9 @@ export async function writeAgentProfileWorkspaceFiles(
   agent: { id: string; workspace?: string },
   profile: AgentProfile,
 ): Promise<void> {
-  const workspace = expandOpenClawPath(agent.workspace || `~/.openclaw/workspace-${agent.id}`);
+  const workspace = resolveOpenClawWorkspacePath(
+    agent.workspace?.trim() || `~/.openclaw/workspace-${agent.id}`,
+  );
   await mkdir(workspace, { recursive: true });
   await writeFile(join(workspace, WORKSPACE_PROFILE_FILE), renderProfileMarkdown(profile), 'utf8');
 

@@ -6,7 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const pathState = vi.hoisted(() => ({ root: '' }));
 
 vi.mock('@electron/utils/paths', () => ({
-  expandOpenClawPath: (value: string) => value,
+  resolveOpenClawWorkspacePath: (value: string) => value.startsWith('~/.openclaw/')
+    ? join(pathState.root, value.slice('~/.openclaw/'.length))
+    : value,
   getOpenClawConfigDir: () => pathState.root,
   resolveOpenClawStateDir: () => pathState.root,
 }));
@@ -77,6 +79,28 @@ describe('agent profile persistence', () => {
     expect(agentsMd.match(/UCLAW_AGENT_PROFILE_START/g)).toHaveLength(1);
     expect(agentsMd).toContain('UCLAW_AGENT_PROFILE.md');
     expect(profileMd).toContain('Own planning and delivery');
+  });
+
+  it('resolves the default secondary workspace through the shared workspace resolver', async () => {
+    const { writeAgentProfileWorkspaceFiles } = await import('@electron/utils/agent-profile');
+    const profile = {
+      agentId: 'planner',
+      roleName: 'Product Lead',
+      personaName: 'Lin',
+      responsibility: 'Own planning',
+      capabilities: [],
+      boundaries: [],
+      workspaceInstructions: 'Keep work traceable.',
+      welcomeMessage: '',
+      avatarId: 'strategist',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    await writeAgentProfileWorkspaceFiles({ id: 'planner' }, profile);
+
+    await expect(readFile(join(pathState.root, 'workspace-planner', 'UCLAW_AGENT_PROFILE.md'), 'utf8'))
+      .resolves.toContain('Lin');
   });
 
   it('writes an OpenClaw v3 assistant welcome transcript and session record', async () => {

@@ -248,6 +248,158 @@ function isDirectoryEffectivelyEmpty(dir: string): boolean {
   }
 }
 
+const DEFAULT_WORKSPACE_BOOTSTRAP_FILES = new Set([
+  'AGENTS.md',
+  'BOOTSTRAP.md',
+  'HEARTBEAT.md',
+  'IDENTITY.md',
+  'SOUL.md',
+  'TOOLS.md',
+  'USER.md',
+]);
+
+function isDirectorySync(candidate: string): boolean {
+  try {
+    return lstatSync(candidate).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function isWorkspaceEffectivelyEmpty(dir: string): boolean {
+  if (!isDirectorySync(dir)) return true;
+  try {
+    return readdirSync(dir, { withFileTypes: true }).every((entry) => (
+      entry.name === '.DS_Store'
+      || entry.name === RUNTIME_MARKER_FILE
+      || entry.name.endsWith('.tmp')
+    ));
+  } catch {
+    return true;
+  }
+}
+
+function hasDefaultWorkspaceBootstrapEvidence(dir: string): boolean {
+  if (!isDirectorySync(dir)) return false;
+  try {
+    return readdirSync(dir, { withFileTypes: true }).some((entry) => (
+      DEFAULT_WORKSPACE_BOOTSTRAP_FILES.has(entry.name)
+      || (entry.name === 'memory' && entry.isDirectory())
+    ));
+  } catch {
+    return false;
+  }
+}
+
+/** Copy only files absent from a partially restored workspace. */
+function copyMissingTreeSync(source: string, target: string): number {
+  let entries;
+  try {
+    entries = readdirSync(source, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+
+  let copied = 0;
+  mkdirSync(target, { recursive: true });
+  for (const entry of entries) {
+    if (entry.name === RUNTIME_MARKER_FILE || entry.name.endsWith('.lock') || entry.name.endsWith('.tmp')) continue;
+    const sourcePath = path.join(source, entry.name);
+    const targetPath = path.join(target, entry.name);
+    let sourceStat;
+    try {
+      sourceStat = lstatSync(sourcePath);
+    } catch {
+      continue;
+    }
+    if (sourceStat.isSymbolicLink()) continue;
+    if (sourceStat.isDirectory()) {
+      let targetStat;
+      try {
+        targetStat = lstatSync(targetPath);
+      } catch {
+        targetStat = undefined;
+      }
+      if (targetStat?.isSymbolicLink() || (targetStat && !targetStat.isDirectory())) continue;
+      if (!targetStat) {
+        copyTreeSync(sourcePath, targetPath, entry.name);
+        copied += 1;
+      } else {
+        copied += copyMissingTreeSync(sourcePath, targetPath);
+      }
+    } else if (sourceStat.isFile() && !existsSync(targetPath)) {
+      mkdirSync(path.dirname(targetPath), { recursive: true });
+      copyFileSync(sourcePath, targetPath);
+      copied += 1;
+    }
+  }
+  return copied;
+}
+
+function mergeWorkspaceSourceSync(source: string, target: string): boolean {
+  if (!isDirectorySync(source)) return false;
+
+  let targetStat;
+  try {
+    targetStat = lstatSync(target);
+  } catch {
+    targetStat = undefined;
+  }
+  if (targetStat?.isSymbolicLink() || (targetStat && !targetStat.isDirectory())) return false;
+
+  if (!targetStat || isWorkspaceEffectivelyEmpty(target)) {
+    if (targetStat) rmSync(target, { recursive: true, force: true });
+    copyTreeSync(source, target, 'workspace');
+    return true;
+  }
+
+  return copyMissingTreeSync(source, target) > 0;
+}
+
+/**
+ * Recover the default workspace subtree without replacing a non-empty local
+ * profile.  This covers interrupted/manual USB upgrades where openclaw.json
+ * survived but the workspace files did not.
+ */
+function recoverDefaultWorkspaceSync(layout: PortableRuntimeLayout): boolean {
+  const target = path.join(layout.stateDir, 'workspace');
+  if (hasDefaultWorkspaceBootstrapEvidence(target)) return false;
+
+  const recoveryRoot = path.join(
+    layout.profileDir,
+    `.workspace-recovery-${process.pid}-${randomUUID()}`,
+  );
+  try {
+    const restored = restorePortableRuntimeSnapshotV2WithResultSync({
+      stateDir: layout.stateDir,
+      snapshotDir: layout.snapshotV2Dir,
+      portableId: layout.portableId,
+    }, recoveryRoot);
+    if (restored && mergeWorkspaceSourceSync(path.join(recoveryRoot, 'workspace'), target)) {
+      return true;
+    }
+  } catch {
+    // A removable volume can disappear or be read-only during startup. Keep
+    // the local profile intact and try the older, cheaper recovery sources.
+  } finally {
+    try {
+      rmSync(recoveryRoot, { recursive: true, force: true });
+    } catch {
+      // Best-effort cleanup; a later launch can remove the staging directory.
+    }
+  }
+
+  const latestSnapshot = findLatestSnapshotSync(layout);
+  try {
+    if (latestSnapshot && mergeWorkspaceSourceSync(path.join(latestSnapshot, 'state', 'workspace'), target)) {
+      return true;
+    }
+    return mergeWorkspaceSourceSync(path.join(layout.legacyStateDir, 'workspace'), target);
+  } catch {
+    return false;
+  }
+}
+
 function copyTreeSync(source: string, target: string, relativeRoot = ''): void {
   if (!existsSync(source)) return;
   mkdirSync(target, { recursive: true });
@@ -376,6 +528,12 @@ export function preparePortableRuntimeState(layout: PortableRuntimeLayout): void
       copyTreeSync(layout.legacyStateDir, layout.stateDir);
     }
   }
+
+  // A profile can contain a surviving openclaw.json while its workspace tree
+  // was lost during a manual/in-place USB overwrite.  Directory non-emptiness
+  // alone is not proof that the runtime is complete; repair only the missing
+  // default workspace subtree from a verified snapshot or legacy state.
+  recoverDefaultWorkspaceSync(layout);
 
   writeRuntimeMarkerSync(layout, {
     schema: RUNTIME_MARKER_SCHEMA,

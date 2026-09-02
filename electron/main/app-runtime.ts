@@ -47,6 +47,7 @@ import {
   PortableRuntimeHealthMonitor,
   setActivePortableRuntimeHealthMonitor,
 } from '../utils/portable-runtime-health';
+import { migratePortableDefaultWorkspaceConfig } from '../utils/portable-workspace-migration';
 import {
   isConfiguredPortableOpenClawRuntimePrepared,
   prepareConfiguredPortableOpenClawRuntime,
@@ -527,6 +528,19 @@ function createMainWindow(): BrowserWindow {
 async function initialize(): Promise<void> {
   // Initialize logger first
   logger.init();
+
+  // The portable bootstrap has already published OPENCLAW_HOME,
+  // OPENCLAW_STATE_DIR, and OPENCLAW_WORKSPACE_DIR by the time this function
+  // runs.  Migrate the config before health/snapshot services, workspace
+  // provisioning, or Gateway prelaunch consumers can read the old USB path.
+  const workspaceMigration = await migratePortableDefaultWorkspaceConfig();
+  if (workspaceMigration.changed) {
+    logger.info('Migrated portable default workspace configuration', {
+      migratedFields: workspaceMigration.migratedFields,
+      backupCreated: Boolean(workspaceMigration.backupPath),
+    });
+  }
+
   logger.info('=== ClawX Application Starting ===');
   portableRuntimeHealthMonitor?.start();
   portableRuntimeSnapshotService?.start();

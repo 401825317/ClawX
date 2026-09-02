@@ -56,6 +56,7 @@ async function readOpenClawJson(): Promise<Record<string, unknown>> {
 describe('agent config lifecycle', () => {
   beforeEach(async () => {
     vi.doUnmock('@electron/utils/channel-config');
+    vi.unstubAllEnvs();
     vi.resetModules();
     vi.restoreAllMocks();
     await rm(testHome, { recursive: true, force: true });
@@ -626,6 +627,37 @@ describe('agent config lifecycle', () => {
     await createAgent('Research');
 
     await expect(readFile(join(testHome, '.openclaw', 'workspace-research', 'IDENTITY.md'), 'utf8')).resolves.toContain('ClawX');
+    const persisted = await readOpenClawJson();
+    const persistedEntries = (persisted.agents as { list: Array<Record<string, unknown>> }).list;
+    expect(persistedEntries.find((entry) => entry.id === 'research')?.workspace).toBeUndefined();
+  });
+
+  it('keeps secondary managed agent workspaces in the portable state profile', async () => {
+    const usbHome = join(testHome, 'usb', 'openclaw-home');
+    const runtimeState = join(testHome, 'runtime', 'openclaw-state');
+    await mkdir(runtimeState, { recursive: true });
+    await writeFile(
+      join(runtimeState, 'openclaw.json'),
+      JSON.stringify({ agents: { list: [{ id: 'main', name: 'Main', default: true }] } }),
+      'utf8',
+    );
+    vi.stubEnv('CLAWX_PORTABLE', '1');
+    vi.stubEnv('CLAWX_PORTABLE_RUNTIME_STATE', 'local');
+    vi.stubEnv('OPENCLAW_HOME', usbHome);
+    vi.stubEnv('OPENCLAW_STATE_DIR', runtimeState);
+    vi.stubEnv('OPENCLAW_CONFIG_PATH', join(runtimeState, 'openclaw.json'));
+
+    const { createAgent } = await import('@electron/utils/agent-config');
+    await createAgent('Research');
+
+    await expect(readFile(join(runtimeState, 'workspace-research', 'IDENTITY.md'), 'utf8'))
+      .resolves.toContain('ClawX');
+    const persisted = JSON.parse(await readFile(join(runtimeState, 'openclaw.json'), 'utf8')) as {
+      agents: { list: Array<Record<string, unknown>> };
+    };
+    expect(persisted.agents.list.find((entry) => entry.id === 'research')?.workspace).toBeUndefined();
+    await expect(access(join(usbHome, '.openclaw', 'workspace-research', 'IDENTITY.md')))
+      .rejects.toThrow();
   });
 
   it('creates a profiled Agent with workspace instructions, welcome transcript, and created id', async () => {

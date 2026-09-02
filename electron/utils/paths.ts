@@ -85,16 +85,65 @@ export function resolveOpenClawStateDir(env: NodeJS.ProcessEnv = process.env): s
   return resolve(expandOpenClawPath(configured || join(resolveOpenClawEffectiveHomeDir(env), '.openclaw'), env));
 }
 
+function isPathWithin(root: string, candidate: string): boolean {
+  const relativePath = relative(resolve(root), resolve(candidate));
+  return relativePath === ''
+    || (!isAbsolute(relativePath) && relativePath !== '..' && !relativePath.startsWith(`..${sep}`));
+}
+
+function resolveConfiguredWorkspaceRoot(env: NodeJS.ProcessEnv): string {
+  const configured = env.OPENCLAW_WORKSPACE_DIR?.trim();
+  if (configured) {
+    // OpenClaw treats this variable as an already-addressed filesystem path.
+    // The portable bootstrap supplies an absolute local-runtime path; do not
+    // expand it against OPENCLAW_HOME and send it back to the USB volume.
+    return resolve(configured);
+  }
+  return resolve(resolveOpenClawStateDir(env), 'workspace');
+}
+
 /** Resolve the logical default workspace and its children inside the active OpenClaw state directory. */
 export function resolveOpenClawWorkspacePath(path: string, env: NodeJS.ProcessEnv = process.env): string {
-  const expandedPath = expandPath(path);
-  const defaultWorkspace = expandPath(DEFAULT_WORKSPACE_CWD);
-  const relativePath = relative(defaultWorkspace, expandedPath);
-  const isDefaultWorkspace = relativePath === ''
-    || (!isAbsolute(relativePath) && relativePath !== '..' && !relativePath.startsWith(`..${sep}`));
-  if (!isDefaultWorkspace) return expandedPath;
+  const trimmedPath = path.trim();
+  if (!trimmedPath) return trimmedPath;
 
-  return resolve(resolveOpenClawStateDir(env), 'workspace', relativePath);
+  // Use OpenClaw's effective home for recognition. In portable mode this is
+  // the removable UClawData home, while the resolved target below is the
+  // machine-local state workspace.
+  const expandedPath = expandOpenClawPath(trimmedPath, env);
+  const defaultWorkspace = expandOpenClawPath(DEFAULT_WORKSPACE_CWD, env);
+  const expandedResolved = resolve(expandedPath);
+  if (isPathWithin(defaultWorkspace, expandedResolved)) {
+    const relativePath = relative(resolve(defaultWorkspace), expandedResolved);
+    return resolve(resolveConfiguredWorkspaceRoot(env), relativePath);
+  }
+
+  // OpenClaw creates secondary agent workspaces under the active state
+  // directory when no explicit workspace is configured. ClawX historically
+  // persisted the equivalent ~/.openclaw/workspace-<id> alias, which would
+  // otherwise resolve against the removable OPENCLAW_HOME in portable mode.
+  // Only normalize this known UClaw-managed shape in a local portable runtime;
+  // arbitrary user-selected paths remain untouched.
+  const portableLocalRuntime = env.CLAWX_PORTABLE_RUNTIME_STATE?.trim() === 'local'
+    || (env.CLAWX_PORTABLE?.trim() === '1' && Boolean(env.OPENCLAW_STATE_DIR?.trim()));
+  if (portableLocalRuntime) {
+    const openClawHome = resolveOpenClawEffectiveHomeDir(env);
+    const managedRoot = resolve(join(openClawHome, '.openclaw'));
+    const managedRelative = relative(managedRoot, expandedResolved);
+    const firstSegment = managedRelative.split(sep)[0];
+    if (
+      firstSegment
+      && /^workspace-[A-Za-z0-9_-]+$/u.test(firstSegment)
+      && !isAbsolute(managedRelative)
+      && managedRelative !== '..'
+      && !managedRelative.startsWith(`..${sep}`)
+    ) {
+      return resolve(resolveOpenClawStateDir(env), managedRelative);
+    }
+  }
+
+  // For non-managed paths preserve OpenClaw's effective-home semantics.
+  return expandOpenClawPath(trimmedPath, env);
 }
 
 /** Convert the active state directory's physical default workspace back to its stable logical path. */
@@ -106,11 +155,15 @@ export function collapseOpenClawWorkspacePath(
   const portableWorkspace = collapsePortableDefaultWorkspacePath(path, env);
   if (!isAbsolute(path)) return portableWorkspace ?? path;
 
-  const physicalWorkspace = resolve(stateDir, 'workspace');
-  const relativePath = relative(physicalWorkspace, resolve(path));
-  const isDefaultWorkspace = relativePath === ''
-    || (!isAbsolute(relativePath) && relativePath !== '..' && !relativePath.startsWith(`..${sep}`));
-  if (!isDefaultWorkspace) return portableWorkspace ?? path;
+  const resolvedPath = resolve(path);
+  const roots = [
+    resolve(stateDir, 'workspace'),
+    env.OPENCLAW_WORKSPACE_DIR?.trim() ? resolve(env.OPENCLAW_WORKSPACE_DIR) : null,
+  ].filter((root): root is string => Boolean(root));
+  const matchingRoot = roots.find((root) => isPathWithin(root, resolvedPath));
+  if (!matchingRoot) return portableWorkspace ?? path;
+
+  const relativePath = relative(matchingRoot, resolvedPath);
 
   return relativePath
     ? `${DEFAULT_WORKSPACE_CWD}/${relativePath.split(sep).join('/')}`

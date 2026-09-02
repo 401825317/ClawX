@@ -27,6 +27,7 @@ import {
 } from '../../electron/utils/openclaw-workspace';
 
 beforeEach(async () => {
+  vi.unstubAllEnvs();
   await rm(testHome, { recursive: true, force: true });
 });
 
@@ -226,6 +227,44 @@ describe('ensureClawXDefaultIdentity', () => {
     await ensureClawXDefaultIdentity();
 
     await expect(readFile(join(testHome, '.openclaw', 'workspace', 'IDENTITY.md'), 'utf-8')).resolves.toContain('ClawX');
+  });
+
+  it('seeds an explicit logical default workspace inside the portable state profile', async () => {
+    const usbHome = join(testHome, 'usb', 'openclaw-home');
+    const runtimeState = join(testHome, 'runtime', 'openclaw-state');
+    await mkdir(runtimeState, { recursive: true });
+    await writeFile(
+      join(runtimeState, 'openclaw.json'),
+      JSON.stringify({ agents: { defaults: { workspace: '~/.openclaw/workspace' } } }),
+      'utf8',
+    );
+    vi.stubEnv('CLAWX_PORTABLE', '1');
+    vi.stubEnv('CLAWX_PORTABLE_RUNTIME_STATE', 'local');
+    vi.stubEnv('OPENCLAW_HOME', usbHome);
+    vi.stubEnv('OPENCLAW_STATE_DIR', runtimeState);
+    vi.stubEnv('OPENCLAW_CONFIG_PATH', join(runtimeState, 'openclaw.json'));
+
+    await ensureClawXDefaultIdentity();
+
+    await expect(readFile(join(runtimeState, 'workspace', 'IDENTITY.md'), 'utf8')).resolves.toContain('ClawX');
+    await expect(access(join(usbHome, '.openclaw', 'workspace', 'IDENTITY.md'))).rejects.toThrow();
+  });
+
+  it('uses OPENCLAW_WORKSPACE_DIR when the config has no default workspace', async () => {
+    const customWorkspace = join(testHome, 'custom-workspace');
+    const runtimeState = join(testHome, 'runtime', 'openclaw-state');
+    await mkdir(runtimeState, { recursive: true });
+    await writeFile(join(runtimeState, 'openclaw.json'), JSON.stringify({}), 'utf8');
+    vi.stubEnv('CLAWX_PORTABLE', '1');
+    vi.stubEnv('CLAWX_PORTABLE_RUNTIME_STATE', 'local');
+    vi.stubEnv('OPENCLAW_STATE_DIR', runtimeState);
+    vi.stubEnv('OPENCLAW_CONFIG_PATH', join(runtimeState, 'openclaw.json'));
+    vi.stubEnv('OPENCLAW_WORKSPACE_DIR', customWorkspace);
+
+    await ensureClawXDefaultIdentity();
+
+    await expect(readFile(join(customWorkspace, 'IDENTITY.md'), 'utf8')).resolves.toContain('ClawX');
+    await expect(access(join(runtimeState, 'workspace', 'IDENTITY.md'))).rejects.toThrow();
   });
 });
 

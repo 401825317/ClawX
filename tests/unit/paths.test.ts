@@ -2,7 +2,10 @@
 
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_WORKSPACE_CWD } from '@shared/workspace';
-import { collapseOpenClawWorkspacePath } from '@electron/utils/paths';
+import {
+  collapseOpenClawWorkspacePath,
+  resolveOpenClawWorkspacePath,
+} from '@electron/utils/paths';
 
 const PORTABLE_ID = 'portable-1234';
 const portableEnv = {
@@ -62,5 +65,47 @@ describe('collapseOpenClawWorkspacePath portable recovery', () => {
     const legacyWorkspace = '/tmp/UClawData/openclaw-home/.openclaw/workspace';
     expect(collapseOpenClawWorkspacePath(legacyWorkspace, '/current/state', {}))
       .toBe(legacyWorkspace);
+  });
+});
+
+describe('resolveOpenClawWorkspacePath portable routing', () => {
+  it('routes the logical default workspace and managed secondary aliases to local state', () => {
+    const env = {
+      CLAWX_PORTABLE: '1',
+      CLAWX_PORTABLE_RUNTIME_STATE: 'local',
+      OPENCLAW_HOME: '/Volumes/UClaw/UClawData/openclaw-home',
+      OPENCLAW_STATE_DIR: '/Users/alex/Library/Caches/UClawRuntime/profiles/portable-1234/openclaw-state',
+    } as NodeJS.ProcessEnv;
+
+    expect(resolveOpenClawWorkspacePath(DEFAULT_WORKSPACE_CWD, env)).toBe(
+      '/Users/alex/Library/Caches/UClawRuntime/profiles/portable-1234/openclaw-state/workspace',
+    );
+    expect(resolveOpenClawWorkspacePath('~/.openclaw/workspace-research', env)).toBe(
+      '/Users/alex/Library/Caches/UClawRuntime/profiles/portable-1234/openclaw-state/workspace-research',
+    );
+  });
+
+  it('keeps an external custom workspace on its configured OpenClaw home', () => {
+    const env = {
+      CLAWX_PORTABLE: '1',
+      CLAWX_PORTABLE_RUNTIME_STATE: 'local',
+      OPENCLAW_HOME: '/Volumes/UClaw/UClawData/openclaw-home',
+      OPENCLAW_STATE_DIR: '/Users/alex/Library/Caches/UClawRuntime/profiles/portable-1234/openclaw-state',
+    } as NodeJS.ProcessEnv;
+
+    expect(resolveOpenClawWorkspacePath('/Volumes/projects/customer-a', env))
+      .toBe('/Volumes/projects/customer-a');
+    expect(resolveOpenClawWorkspacePath('~/Projects/customer-a', env))
+      .toBe('/Volumes/UClaw/UClawData/openclaw-home/Projects/customer-a');
+  });
+
+  it('honors OPENCLAW_WORKSPACE_DIR when callers use the environment fallback', () => {
+    const env = {
+      OPENCLAW_WORKSPACE_DIR: '/Volumes/projects/customer-a',
+      OPENCLAW_STATE_DIR: '/tmp/openclaw-state',
+    } as NodeJS.ProcessEnv;
+
+    expect(resolveOpenClawWorkspacePath(env.OPENCLAW_WORKSPACE_DIR!, env))
+      .toBe('/Volumes/projects/customer-a');
   });
 });

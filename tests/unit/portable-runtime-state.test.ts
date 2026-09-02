@@ -219,6 +219,46 @@ describe('portable runtime state', () => {
     await expect(readdir(join(layout.profileDir, 'recovery'))).resolves.toEqual([]);
   });
 
+  it('repairs a non-empty profile when only the default workspace was lost', async () => {
+    const layout = await createLayout();
+    await mkdir(layout.stateDir, { recursive: true });
+    const workspace = join(layout.stateDir, 'workspace');
+    await mkdir(workspace, { recursive: true });
+    await writeFile(join(layout.stateDir, 'openclaw.json'), '{"source":"snapshot"}\n', 'utf8');
+    await writeFile(join(workspace, 'AGENTS.md'), '# preserved bootstrap\n', 'utf8');
+    await writeFile(join(workspace, 'user-note.txt'), 'keep me\n', 'utf8');
+    await syncPortableRuntimeSnapshotV2({
+      stateDir: layout.stateDir,
+      snapshotDir: layout.snapshotV2Dir,
+      portableId: layout.portableId,
+    }, 'workspace-recovery');
+    const snapshot = readLatestPortableSnapshotV2Sync({
+      stateDir: layout.stateDir,
+      snapshotDir: layout.snapshotV2Dir,
+      portableId: layout.portableId,
+    })!;
+
+    // Simulate an interrupted in-place overwrite: the profile still has a
+    // config file, but the workspace subtree is absent and no newer snapshot
+    // generation exists to trigger the old whole-state recovery path.
+    await writeFile(join(layout.stateDir, 'openclaw.json'), '{"source":"local"}\n', 'utf8');
+    await rm(workspace, { recursive: true, force: true });
+    await writeFile(layout.markerPath, `${JSON.stringify({
+      schema: 'uclaw.portable-runtime-state/v1',
+      portableId: layout.portableId,
+      preparedAt: new Date().toISOString(),
+      lastAppliedSnapshotId: snapshot.snapshotId,
+      lastAppliedGeneration: snapshot.generation,
+      lifecycle: 'active',
+    })}\n`, 'utf8');
+
+    preparePortableRuntimeState(layout);
+
+    await expect(readFile(join(layout.stateDir, 'openclaw.json'), 'utf8')).resolves.toContain('local');
+    await expect(readFile(join(layout.stateDir, 'workspace', 'AGENTS.md'), 'utf8')).resolves.toContain('preserved');
+    await expect(readFile(join(layout.stateDir, 'workspace', 'user-note.txt'), 'utf8')).resolves.toContain('keep me');
+  });
+
   it('preserves an unclean stale local state before applying a newer USB generation', async () => {
     const layout = await createLayout();
     await mkdir(layout.stateDir, { recursive: true });
