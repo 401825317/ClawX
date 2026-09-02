@@ -365,6 +365,23 @@ func TestMacReadOnlyExecutableDoesNotNeedChmod(t *testing.T) {
 	}
 }
 
+func TestMacStagingCleanupHandlesReadOnlyAppDescendants(t *testing.T) {
+	requireMacPortableTest(t)
+	stagingDir := filepath.Join(t.TempDir(), "staging")
+	appDir := filepath.Join(stagingDir, "UClaw.app")
+	writeMacFixtureApp(t, appDir, "arm64", "2.0.4", "read-only app", 0o555)
+	resourcesDir := filepath.Join(appDir, "Contents", "Resources")
+	if err := os.Chmod(resourcesDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeStagingDir(stagingDir); err != nil {
+		t.Fatalf("expected read-only staging tree cleanup to succeed: %v", err)
+	}
+	if _, err := os.Stat(stagingDir); !os.IsNotExist(err) {
+		t.Fatalf("expected staging tree removed, got %v", err)
+	}
+}
+
 func TestMacReadOnlyDataDirectoryRejectedBeforeUpdate(t *testing.T) {
 	requireMacPortableTest(t)
 	for _, fixtureArch := range []string{"x64", "arm64"} {
