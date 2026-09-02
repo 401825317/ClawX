@@ -22,6 +22,7 @@ const PACKAGED_PLUGINS = [
   { pluginId: 'parallel', manifestId: 'parallel', packageNames: ['@openclaw/parallel-plugin'] },
   ...[
     'clawx-openai-image',
+    'uclaw-artifact-orchestrator',
     'uclaw-local-artifacts',
     'uclaw-blender',
     'uclaw-video',

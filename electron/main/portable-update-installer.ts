@@ -5,7 +5,10 @@ import { existsSync } from 'node:fs';
 import { chmod, copyFile, mkdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { logger } from '../utils/logger';
-import { getPortableModeInfo } from '../utils/portable-mode';
+import {
+  assertPortableUpdateReplaceable,
+  getPortableModeInfo,
+} from '../utils/portable-mode';
 import { setQuitting } from './app-state';
 import { verifyPortableUpdatePackage } from './portable-update-security';
 
@@ -124,26 +127,39 @@ export async function preparePortableUpdateInstaller(
   zipPath: string,
   info: PortableInstallerUpdateInfo,
 ): Promise<PortableUpdateInstallerLaunch> {
+  assertPortableUpdateReplaceable();
   const portable = getPortableModeInfo();
   if (!portable.enabled || !portable.rootDir || !portable.runtimeUpdatesDir) {
     throw new Error('Portable mode is not enabled or update cache is unavailable');
   }
 
-  const sha512 = info.sha512?.trim().toLowerCase();
-  if (!info.version || !sha512) {
-    throw new Error('Portable update metadata is missing version or sha512');
+  const sha512 = typeof info.sha512 === 'string' ? info.sha512.trim().toLowerCase() : '';
+  if (!info.version || !/^[a-f0-9]{128}$/u.test(sha512)) {
+    throw new Error('Portable update metadata is missing version or a valid sha512');
   }
 
-  const zipStat = await stat(zipPath);
-  const size = info.size && info.size > 0 ? info.size : zipStat.size;
+  const size = info.size;
+  if (typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0) {
+    throw new Error('Portable update metadata is missing a positive size');
+  }
   await verifyPortableUpdatePackage(zipPath, { sha512, size });
 
   const target = portableUpdaterTargetForPlatform();
-  const stamp = timestampForPath();
-  const attemptId = `${stamp}-${randomUUID()}`;
+  // The task, staging directory, readiness marker, and log all share this
+  // identifier.  A wall-clock timestamp alone has millisecond resolution and
+  // can collide when two update checks finish together; that would make the
+  // second task overwrite the first task while both detached helpers operate
+  // on the same staging/ready paths.  Keep the timestamp for diagnostics but
+  // add a UUID so every attempt gets an isolated workspace.
+  const stamp = `${timestampForPath()}-${randomUUID()}`;
+  const attemptId = stamp;
   const sourceHelperPath = resolveBundledPortableUpdaterPath(target);
   const helperPath = await copyHelperToRuntime(sourceHelperPath, portable.runtimeUpdatesDir, target, attemptId);
-  const logDir = logger.getLogDir() || portable.runtimeLogsDir || portable.runtimeUpdatesDir;
+  // Keep helper logs inside the same portable runtime root as the task,
+  // staging, and readiness marker.  Electron's default logger directory can
+  // be ~/Library/Logs/UClaw (or another global app log location); the Go
+  // helper intentionally rejects paths outside that trusted workspace.
+  const logDir = portable.runtimeLogsDir || logger.getLogDir() || portable.runtimeUpdatesDir;
   const taskDir = join(portable.runtimeUpdatesDir, 'tasks');
   const readyDir = join(portable.runtimeUpdatesDir, 'ready');
   const stagingDir = join(portable.runtimeUpdatesDir, 'staging', stamp);

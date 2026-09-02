@@ -21,7 +21,10 @@ export function UpdateSettings() {
   const { t } = useTranslation('settings');
   const {
     status,
-    mode,
+    packageType,
+    canAutoReplace,
+    requiresMigration,
+    disposition,
     currentVersion,
     updateInfo,
     progress,
@@ -46,6 +49,21 @@ export function UpdateSettings() {
     await checkForUpdates();
   }, [checkForUpdates, clearError]);
 
+  // Treat the package family and application disposition as separate, strict
+  // contracts. A portable ZIP with incomplete/unknown metadata must never be
+  // presented as an in-place install merely because a legacy status omitted
+  // the new fields.
+  const isPortablePackage = packageType === 'portable_zip';
+  const isInstallerPackage = packageType === 'installer' && disposition === 'installer';
+  const canInstallPortableInPlace = isPortablePackage
+    && disposition === 'auto-replace'
+    && canAutoReplace
+    && !requiresMigration;
+  const requiresManualMigration = isPortablePackage && !canInstallPortableInPlace;
+  const hasAutoInstallCountdown = (canInstallPortableInPlace || isInstallerPackage)
+    && autoInstallCountdown != null
+    && autoInstallCountdown >= 0;
+
   const renderStatusIcon = () => {
     switch (status) {
       case 'checking':
@@ -63,20 +81,24 @@ export function UpdateSettings() {
   };
 
   const renderStatusText = () => {
-    if (status === 'downloaded' && autoInstallCountdown != null && autoInstallCountdown >= 0) {
+    if (status === 'downloaded' && hasAutoInstallCountdown) {
       return t('updates.status.autoInstalling', { seconds: autoInstallCountdown });
     }
     switch (status) {
       case 'checking':
         return t('updates.status.checking');
       case 'downloading':
-        return mode === 'portable' ? t('updates.status.downloadingPortable') : t('updates.status.downloading');
+        return isPortablePackage ? t('updates.status.downloadingPortable') : t('updates.status.downloading');
       case 'available':
-        return mode === 'portable'
+        return requiresManualMigration
+          ? t('updates.status.portableAvailable', { version: updateInfo?.version })
+          : isPortablePackage
           ? t('updates.status.portableAvailable', { version: updateInfo?.version })
           : t('updates.status.available', { version: updateInfo?.version });
       case 'downloaded':
-        return mode === 'portable'
+        return requiresManualMigration
+          ? t('updates.status.manualMigrationDownloaded', { version: updateInfo?.version })
+          : isPortablePackage
           ? t('updates.status.portableDownloaded', { version: updateInfo?.version })
           : t('updates.status.downloaded', { version: updateInfo?.version });
       case 'error':
@@ -108,11 +130,11 @@ export function UpdateSettings() {
         return (
           <Button onClick={downloadUpdate} size="sm">
             <Download className="h-4 w-4 mr-2" />
-            {mode === 'portable' ? t('updates.action.downloadPortable') : t('updates.action.download')}
+            {isPortablePackage ? t('updates.action.downloadPortable') : t('updates.action.download')}
           </Button>
         );
       case 'downloaded':
-        if (autoInstallCountdown != null && autoInstallCountdown >= 0) {
+        if (hasAutoInstallCountdown) {
           return (
             <Button onClick={cancelAutoInstall} size="sm" variant="outline">
               <XCircle className="h-4 w-4 mr-2" />
@@ -123,7 +145,9 @@ export function UpdateSettings() {
         return (
           <Button onClick={() => void installUpdate()} size="sm" variant="default">
             <Rocket className="h-4 w-4 mr-2" />
-            {mode === 'portable' ? t('updates.action.installPortable') : t('updates.action.install')}
+            {requiresManualMigration
+              ? t('updates.action.openMigrationPackage')
+              : isPortablePackage ? t('updates.action.installPortable') : t('updates.action.install')}
           </Button>
         );
       case 'error':
@@ -215,7 +239,9 @@ export function UpdateSettings() {
 
       {/* Help Text */}
       <p className="text-xs text-muted-foreground">
-        {mode === 'portable' ? t('updates.portableHelp') : t('updates.help')}
+        {requiresManualMigration
+          ? t('updates.manualMigrationHelp')
+          : isPortablePackage ? t('updates.portableHelp') : t('updates.help')}
       </p>
     </div>
   );

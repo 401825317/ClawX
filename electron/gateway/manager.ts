@@ -779,6 +779,19 @@ export class GatewayManager extends EventEmitter {
       if (startupError instanceof GatewayNonRetryableAuthenticationError) {
         this.disableAutomaticRecovery(startupError.message);
       }
+      if (
+        startupError
+        && typeof startupError === 'object'
+        && (startupError as { code?: unknown }).code === 'gateway_plugin_repair_required'
+      ) {
+        // Retrying cannot repair a missing/malformed bundled mirror and would
+        // repeatedly restart the Gateway with the same stale plugin state.
+        // Surface the deterministic repair-required error to the renderer.
+        const repairReason = startupError instanceof Error
+          ? String((startupError as { message?: unknown }).message ?? startupError)
+          : String(startupError);
+        this.disableAutomaticRecovery(repairReason);
+      }
       logger.error(
         `Gateway start failed (port=${this.status.port}, reconnectAttempts=${this.reconnectAttempts}, spawn=${this.lastSpawnSummary ?? 'n/a'})`,
         startupError

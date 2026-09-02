@@ -64,6 +64,8 @@ export type ChannelErrorEvent = string | { message?: string };
 export type UpdateAutoInstallCountdownEvent = {
   seconds: number;
   cancelled?: boolean;
+  /** Status sequence that authorized this countdown, when available. */
+  sequence?: number;
 };
 
 export type HostEventContract = {

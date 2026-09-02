@@ -19,5 +19,5 @@ func stopUpdatedAppProcessTree(pid int, timeout time.Duration, logf func(string,
 			return fmt.Errorf("failed to stop updated app process %d: %w", pid, fallbackErr)
 		}
 	}
-	return waitForParentExit(pid, timeout, logf)
+	return waitForParentExit(pid, timeout, logf, "")
 }

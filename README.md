@@ -184,6 +184,8 @@ In **Settings → General**, you can enable **Launch at system startup** so Claw
 ### 🔔 Update Prompts
 ClawX can automatically check for new versions on startup. When an update is available, it shows an in-app prompt; downloading and installing only happen after you choose the action.
 
+On macOS, every packaged arm64 and x64 client checks the managed `package_type=portable_zip` feed rather than `latest-mac.yml`. The update package type is independent from the data mode: automatic replacement is allowed only when the launch root is a complete, writable portable layout with sibling `portable.flag`, `UClawData`, and `UClaw.app`. A DMG-launched app or an app moved by itself into `/Applications` can download the ZIP but must be fully extracted into a new writable folder and migrated manually; ClawX never creates `UClawData` beside an installed app. Because 2.0.3 still uses the legacy route, its first upgrade is manual. Automatic macOS portable updates begin with the fixed 2.0.4 (or later) build.
+
 ---
 
 ## Getting Started

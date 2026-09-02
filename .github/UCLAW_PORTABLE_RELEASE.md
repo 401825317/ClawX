@@ -15,7 +15,7 @@ Actions 不持有生产凭证，不上传 OSS，不连接 zz-cn，不创建 Git 
 3. 等待 Windows 与 macOS GitHub 托管 Runner 构建完成；最终 `Confirm immutable production candidates` 作业应为绿色。
 4. 在本地下载该 run 的两个精确候选制品。
 5. 先用 `-ValidateOnly` 校验候选身份，再运行本地发布脚本。
-6. 发布器上传或复用 5 个不可变 OSS 对象，在一个数据库事务中登记 3 条 `enabled=false` 记录，并验证公共 Feed 前后完全一致。
+6. 发布器上传或复用 7 个不可变 OSS 对象（Windows ZIP/JSON、macOS x64/arm64 ZIP 与各自 JSON sidecar、aggregate macOS manifest），在一个数据库事务中登记 3 条 `enabled=false` 记录，并验证公共 Feed 前后完全一致。
 
 ## GitHub 配置
 
@@ -83,7 +83,7 @@ gh run download $runId -n "uclaw-macos-production-candidate-$version-$shortCommi
 - Windows JSON、两个 macOS ZIP 和 macOS manifest 必须与本地候选字节一致。
 - 已存在的同名 OSS 对象不可覆盖为不同 size 或 SHA-512；重跑只能复用完全相同的对象。
 - ZIP 必须返回 HTTP 200、精确 `Content-Length`、`Accept-Ranges: bytes`、允许的 Content-Type 和 `PK` 文件头。
-- 所有 5 个 OSS 对象都必须完成远端 SHA-512 回读；JSON HEAD 缺少 `Content-Length` 时仍以完整 SHA-512 和内容一致性为准。
+- 所有 7 个 OSS 对象（Windows ZIP/JSON、macOS x64/arm64 ZIP 与各自 JSON sidecar、aggregate manifest）都必须完成远端 SHA-512 回读；macOS per-architecture JSON sidecars 在本地候选校验时必须与 ZIP、身份和候选元数据一致；JSON HEAD 缺少 `Content-Length` 时仍以完整 SHA-512 和内容一致性为准。
 - `claw_x_releases` 写入使用 `ON_ERROR_STOP` 事务，Windows x64、macOS x64 和 macOS arm64 必须恰好各有一条 `enabled=false` 记录。
 - 暂存前后的所有既有启用记录和三个公共 Feed 必须完全一致。
 

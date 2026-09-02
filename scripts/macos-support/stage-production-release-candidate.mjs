@@ -12,6 +12,8 @@ import {
   assertGitCommit,
   writeJsonAtomic,
 } from '../windows-support/portable-release-utils.mjs';
+import { LOCAL_OPENCLAW_PLUGIN_IDS } from '../openclaw-bundle-config.mjs';
+import { validateLocalPluginsInMacosZip } from './validate-local-plugin-bundle.mjs';
 
 const execFileAsync = promisify(execFile);
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -74,12 +76,23 @@ function assertPortableArchiveEntries(entries, arch) {
     'UClawData/',
     'UClawData/updates/',
     'UClaw.app/Contents/Resources/uclaw-build.json',
-    'UClaw.app/Contents/Resources/openclaw-plugins/clawx-openai-image/index.mjs',
-    'UClaw.app/Contents/Resources/openclaw-plugins/clawx-openai-image/node_modules/undici/package.json',
     `UClaw.app/Contents/Resources/resources/updater/darwin-${arch}/uclaw-portable-updater`,
+    ...LOCAL_OPENCLAW_PLUGIN_IDS.flatMap((pluginId) => [
+      `UClaw.app/Contents/Resources/openclaw-plugins/${pluginId}/package.json`,
+      `UClaw.app/Contents/Resources/openclaw-plugins/${pluginId}/openclaw.plugin.json`,
+      `UClaw.app/Contents/Resources/openclaw-plugins/${pluginId}/index.mjs`,
+    ]),
+    'UClaw.app/Contents/Resources/openclaw-plugins/clawx-openai-image/node_modules/undici/package.json',
   ];
   for (const entry of required) {
     if (!entries.includes(entry)) throw new Error(`macOS ${arch} USB ZIP is missing ${entry}.`);
+  }
+  // The portable contract is extracted directly into the selected root.  A
+  // second top-level directory containing a marker indicates an enclosing
+  // directory (or a duplicate payload) and must not be staged as a release
+  // candidate because it would make the runtime classifier miss the marker.
+  if (entries.some((entry) => entry !== 'portable.flag' && entry.endsWith('/portable.flag'))) {
+    throw new Error(`macOS ${arch} USB ZIP has an unexpected enclosing directory.`);
   }
 }
 
@@ -123,7 +136,14 @@ export async function stageMacosProductionReleaseCandidate(options) {
     if (Number(metadata.size) !== file.size || String(metadata.sha512 ?? '') !== file.sha512) {
       throw new Error(`macOS ${arch} USB ZIP integrity mismatch.`);
     }
-    assertPortableArchiveEntries(await listArchiveEntries(filePath), arch);
+    const archiveEntries = await listArchiveEntries(filePath);
+    assertPortableArchiveEntries(archiveEntries, arch);
+    await validateLocalPluginsInMacosZip({
+      zipPath: filePath,
+      entries: archiveEntries,
+      readEntry: options.readArchiveEntry,
+      label: `macOS ${arch} USB ZIP`,
+    });
     releaseDate = releaseDate || String(metadata.releaseDate ?? '');
     artifacts.push({
       platform: 'mac',

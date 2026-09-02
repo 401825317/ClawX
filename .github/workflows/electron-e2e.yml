@@ -5,9 +5,11 @@ on:
   pull_request:
     branches:
       - main
+      - feature/claw-0.5.1
   push:
     branches:
       - main
+      - feature/claw-0.5.1
 
 jobs:
   electron-e2e:
@@ -38,6 +40,12 @@ jobs:
         with:
           node-version: '24'
           cache: 'pnpm'
+
+      - name: Setup Go for macOS portable updater tests
+        if: runner.os == 'macOS'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
 
       - name: Prefer HTTPS for public GitHub git dependencies
         run: |
@@ -144,7 +152,17 @@ jobs:
 
       - name: Run Electron E2E on macOS
         if: runner.os == 'macOS'
-        run: pnpm run test:e2e
+        run: |
+          pnpm exec vitest run \
+            tests/unit/updater-macos.test.ts \
+            tests/unit/portable-mode-macos.test.ts \
+            tests/unit/openclaw-cli.test.ts \
+            tests/unit/openclaw-posix-wrapper.test.ts \
+            tests/unit/portable-update-ready.test.ts \
+            tests/unit/updates-api.test.ts \
+            tests/unit/acp-chat-service.test.ts
+          (cd tools/portable-updater && go test -v ./...)
+          pnpm run test:e2e
 
       - name: Run Electron E2E on Windows
         if: runner.os == 'Windows'

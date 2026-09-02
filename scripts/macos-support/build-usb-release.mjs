@@ -12,6 +12,8 @@ import {
   assertGitCommit,
   writeJsonAtomic,
 } from '../windows-support/portable-release-utils.mjs';
+import { LOCAL_OPENCLAW_PLUGIN_IDS } from '../openclaw-bundle-config.mjs';
+import { validateLocalPluginsInDirectory, validateLocalPluginsInMacosZip } from './validate-local-plugin-bundle.mjs';
 
 const execFileAsync = promisify(execFile);
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -69,14 +71,18 @@ function assertPortableEntries(entries, arch) {
     'UClawData/',
     'UClawData/updates/',
     'UClaw.app/Contents/Resources/uclaw-build.json',
-    'UClaw.app/Contents/Resources/openclaw-plugins/clawx-openai-image/index.mjs',
-    'UClaw.app/Contents/Resources/openclaw-plugins/clawx-openai-image/node_modules/undici/package.json',
     `UClaw.app/Contents/Resources/resources/updater/darwin-${arch}/uclaw-portable-updater`,
+    ...LOCAL_OPENCLAW_PLUGIN_IDS.flatMap((pluginId) => [
+      `UClaw.app/Contents/Resources/openclaw-plugins/${pluginId}/package.json`,
+      `UClaw.app/Contents/Resources/openclaw-plugins/${pluginId}/openclaw.plugin.json`,
+      `UClaw.app/Contents/Resources/openclaw-plugins/${pluginId}/index.mjs`,
+    ]),
+    'UClaw.app/Contents/Resources/openclaw-plugins/clawx-openai-image/node_modules/undici/package.json',
   ];
   for (const entry of required) {
     if (!entries.includes(entry)) throw new Error(`macOS ${arch} USB ZIP is missing ${entry}.`);
   }
-  if (entries.some((entry) => /^[^/]+\/portable\.flag$/u.test(entry))) {
+  if (entries.some((entry) => entry !== 'portable.flag' && entry.endsWith('/portable.flag'))) {
     throw new Error(`macOS ${arch} USB ZIP has an unexpected enclosing directory.`);
   }
 }
@@ -100,6 +106,10 @@ export async function buildMacosUsbRelease(options = {}) {
     );
     const helper = await stat(helperPath);
     if (!helper.isFile() || helper.size <= 0) throw new Error(`macOS ${arch} portable updater is missing.`);
+    await validateLocalPluginsInDirectory({
+      pluginsRoot: path.join(appPath, 'Contents', 'Resources', 'openclaw-plugins'),
+      label: `macOS ${arch} packaged app`,
+    });
 
     const stagingDir = path.join(releaseDir, `mac-usb-${arch}`);
     const zipName = `UClaw-${version}-mac-${arch}-usb.zip`;
@@ -117,7 +127,13 @@ export async function buildMacosUsbRelease(options = {}) {
     const { stdout } = await execFileAsync('/usr/bin/unzip', ['-Z1', zipPath], {
       maxBuffer: 64 * 1024 * 1024,
     });
-    assertPortableEntries(stdout.split(/\r?\n/u).filter(Boolean), arch);
+    const entries = stdout.split(/\r?\n/u).filter(Boolean);
+    assertPortableEntries(entries, arch);
+    await validateLocalPluginsInMacosZip({
+      zipPath,
+      entries,
+      label: `macOS ${arch} USB ZIP`,
+    });
     const zip = await stat(zipPath);
     const sha512 = await sha512Hex(zipPath);
     const metadata = {

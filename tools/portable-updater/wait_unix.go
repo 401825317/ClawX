@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func waitForParentExit(pid int, timeout time.Duration, logf func(string, ...any)) error {
+func waitForParentExit(pid int, timeout time.Duration, logf func(string, ...any), _ string) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		err := syscall.Kill(pid, 0)

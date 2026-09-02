@@ -141,6 +141,8 @@ export type DialogMessageResult = {
 export type WindowSyncTrafficLightPayload = { sidebarCollapsed: boolean };
 export type UpdateChannel = 'stable' | 'beta' | 'dev';
 export type UpdateMode = 'installed' | 'portable';
+/** How the downloaded artifact can be applied on the current installation. */
+export type UpdateDisposition = 'installer' | 'auto-replace' | 'manual-migration';
 export type UpdateInfoSnapshot = {
   version: string;
   releaseDate?: string;
@@ -164,7 +166,14 @@ export type UpdateProgressSnapshot = {
 };
 export type UpdateStatusSnapshot = {
   status: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
+  /** Monotonic main-process status sequence used to discard delayed IPC events. */
+  sequence?: number;
   mode?: UpdateMode;
+  packageType?: 'portable_zip' | 'installer' | string;
+  canAutoReplace?: boolean;
+  requiresMigration?: boolean;
+  migrationReason?: string;
+  disposition?: UpdateDisposition;
   info?: UpdateInfoSnapshot;
   progress?: UpdateProgressSnapshot;
   error?: string;

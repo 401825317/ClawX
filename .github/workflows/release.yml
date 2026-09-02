@@ -1,5 +1,11 @@
-# UClaw Release Workflow
-# Builds and publishes releases for macOS, Windows, and Linux
+# UClaw Release Workflow (retired)
+#
+# This workflow used to build installer/DMG releases and publish
+# `latest-mac.yml`.  macOS updates are now portable ZIP-only and are built by
+# `.github/workflows/uclaw-portable-production.yml`.  Keep this file as a
+# historical record, but make every job explicitly inert so a tag push or a
+# manual dispatch cannot publish the legacy macOS feed (or overwrite any
+# portable release metadata).
 
 name: Release
 
@@ -20,6 +26,7 @@ permissions:
 jobs:
   # Fails fast on tag pushes if package.json "version" does not match the tag.
   validate-release:
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -29,6 +36,7 @@ jobs:
         run: node scripts/assert-tag-matches-package.mjs
 
   release:
+    if: ${{ false }}
     needs: validate-release
     strategy:
       matrix:
@@ -249,6 +257,7 @@ jobs:
   # Job: Publish to GitHub Releases
   # ──────────────────────────────────────────────────────────────
   publish:
+    if: ${{ false }}
     needs: release
     runs-on: ubuntu-latest
     
@@ -341,6 +350,7 @@ jobs:
   #   releases/vX.Y.Z/ → permanent archive, never deleted
   # ──────────────────────────────────────────────────────────────
   upload-oss:
+    if: ${{ false }}
     needs: release
     runs-on: ubuntu-latest
 
@@ -568,7 +578,7 @@ jobs:
   finalize:
     needs: [publish, upload-oss]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: ${{ false }}
 
     steps:
       - name: Promote release from pre-release to latest

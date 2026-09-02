@@ -23,10 +23,6 @@ const (
 	invalidHandleVal = ^uintptr(0)
 	th32CSProcess    = 0x00000002
 	maxExeFile       = 260
-	// The app is asked to quit before the helper starts. If Electron helpers
-	// still retain installation files after this grace period, they belong to
-	// the update the user explicitly accepted and must be stopped before rename.
-	gracefulExitWait = 15 * time.Second
 	// OpenProcess reports ERROR_INVALID_PARAMETER when the target PID no
 	// longer exists. syscall does not export this Win32 constant on every Go
 	// release used for cross-compilation.
@@ -57,11 +53,12 @@ var (
 	procProcess32NextW      = kernel32.NewProc("Process32NextW")
 )
 
-func waitForParentExit(pid int, timeout time.Duration, logf func(string, ...any)) error {
+func waitForParentExit(pid int, timeout time.Duration, logf func(string, ...any), launchPath string) error {
+	if err := validateParentPID(pid, launchPath); err != nil {
+		return err
+	}
 	deadline := time.Now().Add(timeout)
-	forceAfter := time.Now().Add(gracefulExitWait)
 	children := make(map[int]struct{})
-	forced := false
 	for {
 		descendants, err := snapshotDescendantPIDs(pid)
 		if err != nil {
@@ -95,16 +92,6 @@ func waitForParentExit(pid int, timeout time.Duration, logf func(string, ...any)
 			logf("parent process %d and all observed child processes have exited", pid)
 			return nil
 		}
-		if !forced && time.Now().After(forceAfter) {
-			forced = true
-			pids := make([]int, 0, len(children)+1)
-			pids = append(pids, pid)
-			for childPID := range children {
-				pids = append(pids, childPID)
-			}
-			logf("UClaw process tree did not exit within %s; force-stopping the original app processes before replacement", gracefulExitWait)
-			forceStopWindowsProcesses(pids, logf)
-		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timed out waiting %s for parent process %d and its child processes to exit", timeout, pid)
 		}
@@ -112,10 +99,10 @@ func waitForParentExit(pid int, timeout time.Duration, logf func(string, ...any)
 	}
 }
 
-// forceStopWindowsProcesses only receives the original main process and the
-// descendants observed before it exited. taskkill /T covers descendants that
-// still have their original parent; individual PIDs cover renderer/GPU
-// processes that Windows re-parented during shutdown.
+// forceStopWindowsProcesses is reserved for the replacement process that the
+// helper launched itself. It must not be called with a task-file ParentPID:
+// that PID can be stale/recycled, and taskkill would otherwise terminate an
+// unrelated user's process.
 func forceStopWindowsProcesses(pids []int, logf func(string, ...any)) {
 	unique := make(map[int]struct{}, len(pids))
 	for _, pid := range pids {

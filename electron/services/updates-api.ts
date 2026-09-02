@@ -39,7 +39,13 @@ function normalizeProgress(progress: UpdateStatus['progress']): UpdateProgressSn
 function normalizeStatus(status: UpdateStatus): UpdateStatusSnapshot {
   return {
     status: status.status,
+    sequence: status.sequence,
     mode: status.mode,
+    packageType: status.packageType,
+    canAutoReplace: status.canAutoReplace,
+    requiresMigration: status.requiresMigration,
+    migrationReason: status.migrationReason,
+    disposition: status.disposition,
     info: normalizeInfo(status.info),
     progress: normalizeProgress(status.progress),
     error: status.error,

@@ -715,6 +715,31 @@ describe('GatewayManager managed runtime mutation barrier', () => {
     expect((manager as unknown as { shouldReconnect: boolean }).shouldReconnect).toBe(false);
   });
 
+  it('surfaces a plugin repair barrier without scheduling automatic reconnect', async () => {
+    const repairError = Object.assign(
+      new Error('Gateway startup blocked: plugin repair required before Gateway can start'),
+      { code: 'gateway_plugin_repair_required' },
+    );
+    mocks.runGatewayStartupSequence.mockRejectedValueOnce(repairError);
+
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+    const reconnectSpy = vi.spyOn(
+      manager as unknown as { scheduleReconnect: () => void },
+      'scheduleReconnect',
+    );
+
+    await expect(manager.start()).rejects.toBe(repairError);
+
+    expect(mocks.launchGatewayProcess).not.toHaveBeenCalled();
+    expect(reconnectSpy).not.toHaveBeenCalled();
+    expect((manager as unknown as { shouldReconnect: boolean }).shouldReconnect).toBe(false);
+    expect(manager.getStatus()).toMatchObject({
+      state: 'error',
+      error: expect.stringContaining('plugin repair required'),
+    });
+  });
+
   it('does not classify a runtime package-like message as a startup failure after connection', async () => {
     const child = fakeChild(6116);
     let launchOptions: {

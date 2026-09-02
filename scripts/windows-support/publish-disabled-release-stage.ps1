@@ -132,6 +132,51 @@ function Get-HttpHead {
   }
 }
 
+function Assert-PortableMetadata {
+  param(
+    [Parameter(Mandatory = $true)]$Metadata,
+    [Parameter(Mandatory = $true)][string]$Version,
+    [Parameter(Mandatory = $true)][string]$Commit,
+    [Parameter(Mandatory = $true)][string]$Platform,
+    [Parameter(Mandatory = $true)][string]$Arch,
+    [Parameter(Mandatory = $true)][string]$FileName,
+    [Parameter(Mandatory = $true)][int64]$Size,
+    [Parameter(Mandatory = $true)][string]$Sha512,
+    [Parameter(Mandatory = $true)][string]$BuildId
+  )
+
+  $packageTypes = @(
+    if ($null -ne $Metadata.package_type) { [string]$Metadata.package_type }
+    if ($null -ne $Metadata.packageType) { [string]$Metadata.packageType }
+  ) | Where-Object { $_.Length -gt 0 }
+  $invalidPackageTypes = @($packageTypes | Where-Object { $_ -ne 'portable_zip' })
+  if ($packageTypes.Count -eq 0 -or $invalidPackageTypes.Count -gt 0) {
+    throw "Portable metadata package type mismatch for $FileName."
+  }
+  if ([string]$Metadata.platform -ne $Platform -or [string]$Metadata.arch -ne $Arch) {
+    throw "Portable metadata platform/architecture mismatch for $FileName."
+  }
+  if ([string]$Metadata.version -ne $Version -or [string]$Metadata.gitCommit -ne $Commit) {
+    throw "Portable metadata version/commit mismatch for $FileName."
+  }
+  $metadataFileName = if ($Metadata.file_name) { [string]$Metadata.file_name } else { [string]$Metadata.fileName }
+  if ($metadataFileName -ne $FileName) {
+    # Keep the field name in diagnostics so automated release-gate checks and
+    # operators can distinguish it from the ZIP's own filename.
+    throw "Portable metadataFileName mismatch for $FileName."
+  }
+  if ([string]$Metadata.buildId -ne $BuildId -or [string]$Metadata.buildId -eq '') {
+    throw "Portable metadata build ID mismatch for $FileName."
+  }
+  if ($null -eq $Metadata.size -or [int64]$Metadata.size -ne $Size) {
+    throw "Portable metadata size mismatch for $FileName."
+  }
+  $metadataSha512 = ([string]$Metadata.sha512).ToLowerInvariant()
+  if ($metadataSha512 -notmatch '^[a-f0-9]{128}$' -or $metadataSha512 -cne $Sha512.ToLowerInvariant()) {
+    throw "Portable metadata SHA-512 mismatch for $FileName."
+  }
+}
+
 function Assert-RemoteZip {
   param([string]$Uri, [int64]$ExpectedSize)
   $head = Get-HttpHead $Uri
@@ -303,6 +348,10 @@ if ($windowsCandidate.zipFileName -ne $windowsZipName -or $windowsCandidate.meta
   [string]$windowsMetadata.sha512 -cne $windowsSha -or [int64]$windowsMetadata.size -ne $windowsZip.Length) {
   throw 'Windows candidate bytes do not match its immutable metadata.'
 }
+$windowsBuildId = [string]$windowsCandidate.buildId
+if ([string]::IsNullOrWhiteSpace($windowsBuildId)) { throw 'Windows candidate build ID is missing.' }
+Assert-PortableMetadata -Metadata $windowsMetadata -Version $Version -Commit $Commit -Platform 'win' -Arch 'x64' `
+  -FileName $windowsZipName -Size ([int64]$windowsZip.Length) -Sha512 $windowsSha -BuildId $windowsBuildId
 
 $objects = @(
   [pscustomobject]@{ LocalPath = $windowsZipPath; FileName = $windowsZipName; Size = [int64]$windowsZip.Length; Sha512Hex = $windowsSha },
@@ -319,10 +368,19 @@ foreach ($artifact in @($macosCandidate.artifacts)) {
   $seenMacArchitectures[$arch] = $true
   $zipName = "UClaw-$Version-mac-$arch-usb.zip"
   if ([string]$artifact.packageType -ne 'portable_zip' -or [string]$artifact.fileName -ne $zipName) { throw "macOS $arch portable filename or package type mismatch." }
+  $metadataFileName = if ($artifact.metadataFileName) { [string]$artifact.metadataFileName } else { $zipName -replace '\.zip$', '.json' }
+  $expectedMetadataFileName = $zipName -replace '\.zip$', '.json'
+  if ($metadataFileName -ne $expectedMetadataFileName) { throw "macOS $arch candidate metadataFileName mismatch." }
+  if ([string]$artifact.buildId -eq '') { throw "macOS $arch candidate build ID is missing." }
   $zipPath = Join-Path $macosDir $zipName
   $zip = Get-Item -LiteralPath $zipPath
   $zipSha = Get-Sha512Hex $zipPath
   if ([int64]$artifact.size -ne $zip.Length -or [string]$artifact.sha512 -cne $zipSha) { throw "macOS $arch USB ZIP integrity mismatch." }
+  $metadataPath = Join-Path $macosDir $metadataFileName
+  if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) { throw "macOS $arch companion metadata is missing: $metadataFileName" }
+  $metadata = Get-Content -Raw -LiteralPath $metadataPath | ConvertFrom-Json
+  Assert-PortableMetadata -Metadata $metadata -Version $Version -Commit $Commit -Platform 'mac' -Arch $arch `
+    -FileName $zipName -Size ([int64]$zip.Length) -Sha512 $zipSha -BuildId ([string]$artifact.buildId)
   $objects += [pscustomobject]@{ LocalPath = $zipPath; FileName = $zipName; Size = [int64]$zip.Length; Sha512Hex = (Get-Sha512Hex $zipPath) }
   $releaseRows += [pscustomobject]@{ Platform = 'mac'; Arch = $arch; PackageType = 'portable_zip'; FileName = $zipName; Sha512 = $zipSha; Size = [int64]$zip.Length; ReleaseDate = [string]$macosCandidate.releaseDate }
 }

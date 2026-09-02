@@ -2,8 +2,8 @@
  * Auto-Updater Module
  * Handles automatic application updates using electron-updater
  *
- * Installed builds use electron-updater against the managed UClaw feed.
- * Windows USB builds use the managed portable update API and a verified ZIP.
+ * Packaged macOS builds and Windows USB builds use the managed portable update
+ * API and a verified ZIP. Other installed builds use electron-updater.
  */
 import { autoUpdater, UpdateInfo, ProgressInfo, UpdateDownloadedEvent } from 'electron-updater';
 import { BrowserWindow, app, ipcMain, shell } from 'electron';
@@ -12,6 +12,7 @@ import { mkdir, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { randomUUID } from 'node:crypto';
 import {
   UCLAW_UPDATE_CHECK_TIMEOUT_MS,
   UCLAW_UPDATE_DOWNLOAD_TIMEOUT_MS,
@@ -20,7 +21,17 @@ import {
 import { logger } from '../utils/logger';
 import { EventEmitter } from 'events';
 import { getUclawBackendOrigin } from '../utils/junfeiai-distribution';
-import { getPortableUpdatesDir, isPortableMode } from '../utils/portable-mode';
+import {
+  canAutoReplacePortableUpdate,
+  getPortableDataMode,
+  getPortableModeInfo,
+  getPortableUpdatePackageType,
+  getPortableUpdatesDir,
+  inspectPortableLayout,
+  shouldUsePortableUpdatePackage,
+  type PortableLayoutReason,
+  type PortableUpdatePackageType,
+} from '../utils/portable-mode';
 import { proxyAwareFetch } from '../utils/proxy-fetch';
 import { setQuitting } from './app-state';
 import { launchPortableUpdateInstaller } from './portable-update-installer';
@@ -28,6 +39,7 @@ import {
   assertPortableUpdateZipFilename,
   comparePortableUpdateVersions,
   filenameFromPortableUpdateInfo,
+  isValidPortableUpdateVersion,
   verifyPortableUpdatePackage,
 } from './portable-update-security';
 
@@ -42,7 +54,17 @@ function getPortableLatestUpdateUrl(): URL {
 
 export interface UpdateStatus {
   status: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
+  /** Monotonic sequence for renderer-side stale event filtering. */
+  sequence?: number;
   mode?: 'installed' | 'portable';
+  /** Artifact family used for this update, independent of data placement. */
+  packageType?: PortableUpdatePackageType;
+  /** Whether a downloaded artifact may replace the current app in place. */
+  canAutoReplace?: boolean;
+  /** True when the user must extract/migrate the ZIP manually. */
+  requiresMigration?: boolean;
+  migrationReason?: PortableLayoutReason;
+  disposition?: UpdateDisposition;
   info?: UpdateInfo | PortableUpdateInfo;
   progress?: ProgressInfo;
   error?: string;
@@ -104,6 +126,88 @@ export interface PortableUpdateInfo {
   mandatory?: boolean;
 }
 
+type PortableUpdateArtifactMetadata = {
+  downloadUrl: string;
+  sha512: string;
+  size: number;
+};
+
+type PortableUpdateIntegrityMetadata = Pick<PortableUpdateArtifactMetadata, 'sha512' | 'size'>;
+
+type PortableUpdateFileOperations = {
+  rename: typeof rename;
+  remove: typeof rm;
+};
+
+/**
+ * Replace a completed download without first deleting the previous cached
+ * artifact.  POSIX (including macOS) can atomically replace a regular file by
+ * renaming over it, so that is the fast path.  Some Windows/filesystem
+ * combinations reject that operation while the old file is present; in that
+ * case move the old file to a unique sibling, install the new file, and put
+ * the old file back if the second rename fails.  The caller keeps the partial
+ * path until this function resolves, so every failure remains recoverable.
+ */
+export async function replaceDownloadedUpdateAtomically(
+  partialPath: string,
+  targetPath: string,
+  operations: PortableUpdateFileOperations = { rename, remove: rm },
+): Promise<void> {
+  try {
+    // On macOS this is a single atomic directory entry replacement.  Do not
+    // turn it into rm()+rename(); a failed rename must never lose the old ZIP.
+    await operations.rename(partialPath, targetPath);
+    return;
+  } catch (firstError) {
+    const code = (firstError as NodeJS.ErrnoException | undefined)?.code;
+    // A non-collision error (permissions, I/O, cross-device, etc.) leaves the
+    // original target untouched and should be reported directly.
+    if (code !== 'EEXIST' && code !== 'EPERM' && code !== 'ENOTEMPTY' && code !== 'EACCES') {
+      throw firstError;
+    }
+  }
+
+  const backupPath = `${targetPath}.previous-${randomUUID()}`;
+  try {
+    await operations.rename(targetPath, backupPath);
+  } catch (backupError) {
+    // The old target may have disappeared between the fast path and this
+    // fallback.  Retry the atomic rename once; otherwise preserve the first
+    // meaningful filesystem error for diagnostics.
+    const backupCode = (backupError as NodeJS.ErrnoException | undefined)?.code;
+    if (backupCode === 'ENOENT') {
+      await operations.rename(partialPath, targetPath);
+      return;
+    }
+    throw backupError;
+  }
+
+  try {
+    await operations.rename(partialPath, targetPath);
+  } catch (replacementError) {
+    try {
+      await operations.rename(backupPath, targetPath);
+    } catch (rollbackError) {
+      throw new Error(
+        `Portable update replacement failed and rollback failed: ${(replacementError as Error).message || String(replacementError)}; ${(rollbackError as Error).message || String(rollbackError)}`,
+        // Preserve the rollback failure as the causal error. The replacement
+        // failure is included in the message above; attaching the caught
+        // rollback error keeps diagnostics aligned with the actual terminal
+        // failure and satisfies the caught-error preservation rule.
+        { cause: rollbackError },
+      );
+    }
+    throw replacementError;
+  }
+
+  // The new target is safely in place.  Failure to remove an old cache should
+  // not turn a successful update download into an error; leave the backup for
+  // a later cleanup pass and make the condition visible in logs.
+  await operations.remove(backupPath, { force: true }).catch((cleanupError) => {
+    logger.warn('[Updater] Failed to remove previous portable update cache:', cleanupError);
+  });
+}
+
 function isPortableUpdateInfo(value: unknown): value is PortableUpdateInfo {
   return Boolean(
     value
@@ -124,9 +228,168 @@ function createRequestTimeout(timeoutMs: number, message: string): {
   };
 }
 
+/**
+ * Validate the identity returned by the managed update API before accepting a
+ * download URL. The API carries both camelCase and snake_case forms during
+ * the rollout; the package/platform/architecture values themselves must be
+ * exact so an arm64 client never installs an x64 (or installer) artifact.
+ */
+function validatePortableUpdateIdentity(
+  info: PortableUpdateInfo,
+  expectedPlatform: 'mac' | 'win' | 'linux',
+  expectedArch: string,
+): void {
+  if (!isValidPortableUpdateVersion(info.version)) {
+    throw new Error(`Managed update metadata version is invalid (received ${info.version || 'missing'})`);
+  }
+  const declaredPackageTypes = [
+    { name: 'packageType', value: info.packageType },
+    { name: 'package_type', value: info.package_type },
+  ].filter(({ value }) => value !== undefined);
+  if (declaredPackageTypes.some(({ value }) => typeof value !== 'string')) {
+    throw new Error('Managed update metadata package type must be a string');
+  }
+  const packageTypes = declaredPackageTypes.map(({ value }) => (value as string).trim());
+  if (packageTypes.some((value) => value.length === 0)) {
+    throw new Error('Managed update metadata package type is required');
+  }
+  const packageType = packageTypes[0];
+  if (packageTypes.some((value) => value !== packageType)) {
+    throw new Error('Managed update metadata package type aliases disagree');
+  }
+  const platform = info.platform;
+  const arch = info.arch;
+  if (packageType !== 'portable_zip') {
+    throw new Error(`Managed update metadata must use package_type=portable_zip (received ${packageType || 'missing'})`);
+  }
+  if (platform !== expectedPlatform) {
+    throw new Error(`Managed update metadata platform mismatch (expected ${expectedPlatform}, received ${platform || 'missing'})`);
+  }
+  if (arch !== expectedArch) {
+    throw new Error(`Managed update metadata architecture mismatch (expected ${expectedArch}, received ${arch || 'missing'})`);
+  }
+}
+
+/**
+ * Validate the artifact fields before exposing an update as available or
+ * touching the network/filesystem.  The managed endpoint is an untrusted
+ * boundary: a newer version without a complete URL, digest, or byte count is
+ * not an actionable update and must fail closed.
+ */
+function validatePortableUpdateIntegrity(info: PortableUpdateInfo): PortableUpdateIntegrityMetadata {
+  const sha512 = typeof info.sha512 === 'string' ? info.sha512.trim().toLowerCase() : '';
+  if (!/^[a-f0-9]{128}$/u.test(sha512)) {
+    throw new Error('Managed update metadata sha512 must be a 128-character hexadecimal digest');
+  }
+
+  const size = info.size;
+  if (typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0) {
+    throw new Error('Managed update metadata size must be a positive integer');
+  }
+
+  return { sha512, size };
+}
+
+function validatePortableUpdateArtifact(info: PortableUpdateInfo): PortableUpdateArtifactMetadata {
+  const declaredUrls = [
+    { name: 'downloadUrl', value: info.downloadUrl },
+    { name: 'download_url', value: info.download_url },
+  ].filter(({ value }) => value !== undefined);
+
+  if (declaredUrls.some(({ value }) => typeof value !== 'string')) {
+    throw new Error('Managed update metadata download URL must be a string');
+  }
+
+  const urls = declaredUrls.map(({ value }) => (value as string).trim());
+  if (urls.length === 0 || urls.some((value) => value.length === 0)) {
+    throw new Error('Managed update metadata download URL is required');
+  }
+  const downloadUrl = urls[0];
+  if (urls.some((value) => value !== downloadUrl)) {
+    throw new Error('Managed update metadata download URL aliases disagree');
+  }
+  try {
+    const parsed = new URL(downloadUrl);
+    if (
+      (parsed.protocol !== 'https:' && parsed.protocol !== 'http:')
+      || !parsed.hostname
+      || parsed.username
+      || parsed.password
+    ) {
+      throw new Error('unsupported URL scheme or missing host');
+    }
+  } catch {
+    throw new Error('Managed update metadata download URL is invalid');
+  }
+
+  return { downloadUrl, ...validatePortableUpdateIntegrity(info) };
+}
+
+/**
+ * Update artifacts and colocated application state are separate concerns.
+ * macOS always consumes the managed portable ZIP endpoint, while only a
+ * complete writable portable root may be replaced in place.
+ */
+export type UpdateDisposition = 'installer' | 'auto-replace' | 'manual-migration';
+
+function updateMetadata(): Pick<
+  UpdateStatus,
+  'mode' | 'packageType' | 'canAutoReplace' | 'requiresMigration' | 'migrationReason' | 'disposition'
+> {
+  // Keep development/non-managed runs truthful.  In particular, Electron's
+  // unpackaged Darwin process still uses the generic electron-updater feed;
+  // exposing macOS's production portable_zip metadata there would make the
+  // renderer offer manual ZIP migration for an installer update.
+  if (!usesManagedPortablePackage()) {
+    return {
+      mode: 'installed',
+      packageType: 'installer',
+      canAutoReplace: false,
+      requiresMigration: false,
+      migrationReason: undefined,
+      disposition: 'installer',
+    };
+  }
+
+  const packageType = getPortableUpdatePackageType();
+  const mode = getPortableDataMode();
+  const liveLayout = process.platform === 'darwin' ? inspectPortableLayout() : null;
+  const canAutoReplace = packageType === 'portable_zip'
+    ? liveLayout?.canAutoReplace ?? canAutoReplacePortableUpdate()
+    : true;
+  const requiresMigration = packageType === 'portable_zip' && !canAutoReplace;
+  const migrationReason = requiresMigration
+    ? liveLayout?.reason ?? getPortableModeInfo().migrationReason
+    : undefined;
+  const disposition: UpdateDisposition = packageType === 'installer'
+    ? 'installer'
+    : canAutoReplace ? 'auto-replace' : 'manual-migration';
+  return {
+    mode,
+    packageType,
+    canAutoReplace,
+    requiresMigration,
+    migrationReason,
+    disposition,
+  };
+}
+
+function usesManagedPortablePackage(): boolean {
+  // Packaged macOS builds have one update contract regardless of whether the
+  // app was copied from a DMG, installed under /Applications, or extracted as
+  // a USB ZIP. Keep the electron-updater path available in development so a
+  // local renderer/main diagnostic does not unexpectedly call the managed
+  // production API with a synthetic package identity.
+  return process.platform === 'darwin'
+    ? app.isPackaged
+    : shouldUsePortableUpdatePackage();
+}
+
 export class AppUpdater extends EventEmitter {
   private mainWindow: BrowserWindow | null = null;
-  private status: UpdateStatus = { status: 'idle', mode: isPortableMode() ? 'portable' : 'installed' };
+  private status: UpdateStatus = { status: 'idle', sequence: 0, ...updateMetadata() };
+  private statusSequence = 0;
+  private managedChannel: string;
   private autoInstallTimer: NodeJS.Timeout | null = null;
   private autoInstallCountdown = 0;
 
@@ -156,19 +419,24 @@ export class AppUpdater extends EventEmitter {
     // alpha -> /alpha/alpha-mac.yml, beta -> /beta/beta-mac.yml, etc.
     const version = app.getVersion();
     const channel = detectChannel(version);
+    this.managedChannel = normalizeUpdateChannel(channel);
     const feedUrl = `${getUpdateFeedBaseUrl()}/${channel}`;
 
     logger.info(`[Updater] Version: ${version}, channel: ${channel}, feedUrl: ${feedUrl}`);
 
-    // Set channel so electron-updater requests the correct yml filename.
-    // e.g. channel "alpha" → requests alpha-mac.yml, channel "latest" → requests latest-mac.yml
-    autoUpdater.channel = channel;
-
-    autoUpdater.setFeedURL({
-      provider: 'generic',
-      url: feedUrl,
-      useMultipleRangeRequest: false,
-    });
+    // Darwin managed updates never use electron-updater's generic feed (which
+    // would probe latest-mac.yml/alpha-mac.yml). Keep that provider untouched
+    // and route checks/downloads through the managed portable_zip API below.
+    if (!usesManagedPortablePackage()) {
+      // Set channel so electron-updater requests the correct yml filename.
+      // e.g. channel "alpha" -> requests alpha-mac.yml.
+      autoUpdater.channel = channel;
+      autoUpdater.setFeedURL({
+        provider: 'generic',
+        url: feedUrl,
+        useMultipleRangeRequest: false,
+      });
+    }
 
     this.setupListeners();
   }
@@ -194,7 +462,7 @@ export class AppUpdater extends EventEmitter {
     autoUpdater.on('checking-for-update', () => {
       this.updateStatus({
         status: 'checking',
-        mode: 'installed',
+        ...updateMetadata(),
         info: undefined,
         progress: undefined,
         error: undefined,
@@ -206,7 +474,7 @@ export class AppUpdater extends EventEmitter {
     autoUpdater.on('update-available', (info: UpdateInfo) => {
       this.updateStatus({
         status: 'available',
-        mode: 'installed',
+        ...updateMetadata(),
         info,
         progress: undefined,
         error: undefined,
@@ -218,7 +486,7 @@ export class AppUpdater extends EventEmitter {
     autoUpdater.on('update-not-available', (info: UpdateInfo) => {
       this.updateStatus({
         status: 'not-available',
-        mode: 'installed',
+        ...updateMetadata(),
         info,
         progress: undefined,
         error: undefined,
@@ -228,17 +496,27 @@ export class AppUpdater extends EventEmitter {
     });
 
     autoUpdater.on('download-progress', (progress: ProgressInfo) => {
-      this.updateStatus({ status: 'downloading', mode: 'installed', progress, error: undefined });
+      this.updateStatus({ status: 'downloading', ...updateMetadata(), progress, error: undefined });
       this.emit('download-progress', progress);
     });
 
     autoUpdater.on('update-downloaded', (event: UpdateDownloadedEvent) => {
-      this.updateStatus({ status: 'downloaded', mode: 'installed', info: event, error: undefined });
+      this.updateStatus({ status: 'downloaded', ...updateMetadata(), info: event, error: undefined });
       this.emit('update-downloaded', event);
     });
 
     autoUpdater.on('error', (error: Error) => {
-      this.updateStatus({ status: 'error', mode: 'installed', error: error.message });
+      // An updater error invalidates any in-flight artifact.  Do not leave a
+      // previous downloaded path/info attached to an error status where a
+      // delayed renderer install action could reuse it.
+      this.updateStatus({
+        status: 'error',
+        ...updateMetadata(),
+        info: undefined,
+        progress: undefined,
+        downloadPath: undefined,
+        error: error.message,
+      });
       this.emit('error', error);
     });
   }
@@ -248,9 +526,26 @@ export class AppUpdater extends EventEmitter {
    */
   private updateStatus(newStatus: Partial<UpdateStatus>): void {
     const has = (key: keyof UpdateStatus) => Object.prototype.hasOwnProperty.call(newStatus, key);
+    const hasCompleteMetadata = [
+      'mode',
+      'packageType',
+      'canAutoReplace',
+      'requiresMigration',
+      'disposition',
+    ].every((key) => has(key as keyof UpdateStatus));
+    // Callers handling a high-frequency progress stream pass one live metadata
+    // snapshot through every event. Avoid synchronous filesystem inspection on
+    // every ZIP chunk, especially when the portable root is a removable disk.
+    const metadata = hasCompleteMetadata ? newStatus : updateMetadata();
     this.status = {
       status: newStatus.status ?? this.status.status,
-      mode: newStatus.mode ?? this.status.mode ?? (isPortableMode() ? 'portable' : 'installed'),
+      sequence: ++this.statusSequence,
+      mode: newStatus.mode ?? metadata.mode,
+      packageType: newStatus.packageType ?? metadata.packageType,
+      canAutoReplace: newStatus.canAutoReplace ?? metadata.canAutoReplace,
+      requiresMigration: newStatus.requiresMigration ?? metadata.requiresMigration,
+      migrationReason: has('migrationReason') ? newStatus.migrationReason : metadata.migrationReason,
+      disposition: newStatus.disposition ?? metadata.disposition,
       info: has('info') ? newStatus.info : this.status.info,
       progress: has('progress') ? newStatus.progress : this.status.progress,
       error: has('error') ? newStatus.error : this.status.error,
@@ -277,7 +572,7 @@ export class AppUpdater extends EventEmitter {
    * final status so the UI never gets stuck in 'checking'.
    */
   async checkForUpdates(): Promise<UpdateInfo | PortableUpdateInfo | null> {
-    if (isPortableMode()) {
+    if (usesManagedPortablePackage()) {
       return await this.checkPortableForUpdates();
     }
 
@@ -290,6 +585,10 @@ export class AppUpdater extends EventEmitter {
       if (result == null) {
         this.updateStatus({
           status: 'error',
+          ...updateMetadata(),
+          info: undefined,
+          progress: undefined,
+          downloadPath: undefined,
           error: 'Update check skipped (dev mode – app is not packaged)',
         });
         return null;
@@ -303,7 +602,14 @@ export class AppUpdater extends EventEmitter {
       return result.updateInfo || null;
     } catch (error) {
       logger.error('[Updater] Check for updates failed:', error);
-      this.updateStatus({ status: 'error', error: (error as Error).message || String(error) });
+      this.updateStatus({
+        status: 'error',
+        ...updateMetadata(),
+        info: undefined,
+        progress: undefined,
+        downloadPath: undefined,
+        error: (error as Error).message || String(error),
+      });
       throw error;
     }
   }
@@ -317,14 +623,14 @@ export class AppUpdater extends EventEmitter {
     try {
       this.updateStatus({
         status: 'checking',
-        mode: 'portable',
+        ...updateMetadata(),
         info: undefined,
         progress: undefined,
         error: undefined,
         downloadPath: undefined,
       });
       const currentVersion = app.getVersion();
-      const channel = normalizeUpdateChannel(detectChannel(currentVersion));
+      const channel = this.managedChannel || normalizeUpdateChannel(detectChannel(currentVersion));
       const url = getPortableLatestUpdateUrl();
       url.searchParams.set('channel', channel);
       url.searchParams.set('platform', platformForUpdateApi());
@@ -344,7 +650,7 @@ export class AppUpdater extends EventEmitter {
       if (!isPortableUpdateInfo(info) || !info.version) {
         this.updateStatus({
           status: 'not-available',
-          mode: 'portable',
+          ...updateMetadata(),
           info: undefined,
           progress: undefined,
           error: undefined,
@@ -352,10 +658,11 @@ export class AppUpdater extends EventEmitter {
         });
         return null;
       }
+      validatePortableUpdateIdentity(info, platformForUpdateApi(), process.arch);
       if (comparePortableUpdateVersions(info.version, currentVersion) <= 0) {
         this.updateStatus({
           status: 'not-available',
-          mode: 'portable',
+          ...updateMetadata(),
           info,
           progress: undefined,
           error: undefined,
@@ -363,10 +670,11 @@ export class AppUpdater extends EventEmitter {
         });
         return info;
       }
+      validatePortableUpdateArtifact(info);
 
       this.updateStatus({
         status: 'available',
-        mode: 'portable',
+        ...updateMetadata(),
         info,
         progress: undefined,
         error: undefined,
@@ -380,7 +688,10 @@ export class AppUpdater extends EventEmitter {
       logger.error('[Updater] Portable update check failed:', failure);
       this.updateStatus({
         status: 'error',
-        mode: 'portable',
+        ...updateMetadata(),
+        info: undefined,
+        progress: undefined,
+        downloadPath: undefined,
         error: (failure as Error).message || String(failure),
       });
       throw failure;
@@ -393,7 +704,7 @@ export class AppUpdater extends EventEmitter {
    * Download available update
    */
   async downloadUpdate(): Promise<{ downloadPath?: string }> {
-    if (isPortableMode()) {
+    if (usesManagedPortablePackage()) {
       return await this.downloadPortableUpdate();
     }
 
@@ -402,6 +713,14 @@ export class AppUpdater extends EventEmitter {
       return {};
     } catch (error) {
       logger.error('[Updater] Download update failed:', error);
+      this.updateStatus({
+        status: 'error',
+        ...updateMetadata(),
+        info: undefined,
+        progress: undefined,
+        downloadPath: undefined,
+        error: (error as Error).message || String(error),
+      });
       throw error;
     }
   }
@@ -414,16 +733,26 @@ export class AppUpdater extends EventEmitter {
       `Portable update download timed out after ${UCLAW_UPDATE_DOWNLOAD_TIMEOUT_MS}ms`,
     );
     try {
-      const info = isPortableUpdateInfo(this.status.info)
+      // Only reuse metadata that was explicitly presented as available.  A
+      // not-available response intentionally keeps its info payload for
+      // diagnostics/UI, but that payload must never become an implicit
+      // download authorization if a stale renderer/IPC call arrives later.
+      const cachedInfo = this.status.status === 'available' && isPortableUpdateInfo(this.status.info)
         ? this.status.info
-        : await this.checkPortableForUpdates();
-      const downloadUrl = info?.downloadUrl || info?.download_url;
-      if (!isPortableUpdateInfo(info) || !downloadUrl) {
-        throw new Error('No portable update download URL is available');
+        : undefined;
+      const info = cachedInfo ?? await this.checkPortableForUpdates();
+      if (!isPortableUpdateInfo(info)) {
+        throw new Error('Portable update metadata is not available');
       }
-      if ((info.packageType || info.package_type) !== 'portable_zip') {
-        throw new Error('Portable update metadata must use package_type=portable_zip');
+      if (comparePortableUpdateVersions(info.version, app.getVersion()) <= 0) {
+        throw new Error(`Portable update ${info.version} is not newer than the current version ${app.getVersion()}`);
       }
+      // Revalidate the complete artifact identity at download time as well as
+      // during the check. Status can be restored from renderer/IPC state or a
+      // stale response, and an architecture/platform swap must never reach the
+      // filesystem even if the package family still says portable_zip.
+      validatePortableUpdateIdentity(info, platformForUpdateApi(), process.arch);
+      const artifact = validatePortableUpdateArtifact(info);
 
       const updatesDir = getPortableUpdatesDir();
       if (!updatesDir) {
@@ -431,19 +760,23 @@ export class AppUpdater extends EventEmitter {
       }
       await mkdir(updatesDir, { recursive: true });
 
-      const response = await proxyAwareFetch(downloadUrl, { signal: timeout.controller.signal });
+      const response = await proxyAwareFetch(artifact.downloadUrl, { signal: timeout.controller.signal });
       if (!response.ok || !response.body) {
         throw new Error(`Download failed (${response.status})`);
       }
 
       const filename = filenameFromPortableUpdateInfo(
-        { ...info, downloadUrl },
+        { ...info, downloadUrl: artifact.downloadUrl },
         platformForUpdateApi(),
         process.arch,
       );
       assertPortableUpdateZipFilename(filename);
       const targetPath = join(updatesDir, filename);
-      const partialPath = `${targetPath}.download`;
+      // Give each download attempt its own staging file. A user can click
+      // Download twice (or a stale renderer request can overlap a retry); a
+      // shared `.download` path would let one attempt truncate/remove the
+      // other's bytes before either checksum is evaluated.
+      const partialPath = `${targetPath}.download-${randomUUID()}`;
       partialPathToCleanup = partialPath;
       await rm(partialPath, { force: true });
       const headers = response.headers as unknown as { get: (name: string) => string | null };
@@ -451,10 +784,11 @@ export class AppUpdater extends EventEmitter {
       let transferred = 0;
       let lastTransferred = 0;
       let lastTimestamp = Date.now();
+      const downloadMetadata = updateMetadata();
 
       this.updateStatus({
         status: 'downloading',
-        mode: 'portable',
+        ...downloadMetadata,
         info,
         progress: {
           total,
@@ -480,7 +814,7 @@ export class AppUpdater extends EventEmitter {
         lastTransferred = transferred;
         this.updateStatus({
           status: 'downloading',
-          mode: 'portable',
+          ...downloadMetadata,
           info,
           progress: {
             total,
@@ -493,13 +827,12 @@ export class AppUpdater extends EventEmitter {
       });
 
       await pipeline(bodyStream, createWriteStream(partialPath));
-      const verified = await verifyPortableUpdatePackage(partialPath, info);
-      await rm(targetPath, { force: true });
-      await rename(partialPath, targetPath);
+      const verified = await verifyPortableUpdatePackage(partialPath, artifact);
+      await replaceDownloadedUpdateAtomically(partialPath, targetPath);
       partialPathToCleanup = null;
       this.updateStatus({
         status: 'downloaded',
-        mode: 'portable',
+        ...updateMetadata(),
         info,
         downloadPath: targetPath,
         progress: {
@@ -521,7 +854,10 @@ export class AppUpdater extends EventEmitter {
       logger.error('[Updater] Portable update download failed:', failure);
       this.updateStatus({
         status: 'error',
-        mode: 'portable',
+        ...updateMetadata(),
+        info: undefined,
+        progress: undefined,
+        downloadPath: undefined,
         error: (failure as Error).message || String(failure),
       });
       throw failure;
@@ -542,7 +878,7 @@ export class AppUpdater extends EventEmitter {
    * the window cleanly while ShipIt runs independently to replace the app.
    */
   quitAndInstall(): void {
-    if (isPortableMode()) {
+    if (usesManagedPortablePackage()) {
       void this.installPortableUpdate().catch(() => {});
       return;
     }
@@ -553,7 +889,7 @@ export class AppUpdater extends EventEmitter {
   }
 
   async installDownloadedUpdate(): Promise<void> {
-    if (isPortableMode()) {
+    if (usesManagedPortablePackage()) {
       await this.installPortableUpdate();
       return;
     }
@@ -562,7 +898,15 @@ export class AppUpdater extends EventEmitter {
 
   /** Launch the external helper so the running portable executable can be replaced safely. */
   private async installPortableUpdate(): Promise<void> {
+    // Keep track of whether the package has passed the same integrity checks
+    // used by the downloader.  A failed metadata/integrity check must not
+    // reveal a potentially tampered ZIP from the cache in the error handler.
+    let verifiedPackage = false;
     try {
+      if (this.status.status !== 'downloaded') {
+        throw new Error(`Portable update is not ready to install (status: ${this.status.status})`);
+      }
+      const offeredDisposition = this.status.disposition;
       const info = this.status.info;
       if (!isPortableUpdateInfo(info)) {
         throw new Error('Portable update metadata is not available');
@@ -571,22 +915,90 @@ export class AppUpdater extends EventEmitter {
         throw new Error('Portable update package has not been downloaded');
       }
 
+      // The autoUpdater event surface remains registered for compatibility,
+      // even though packaged macOS builds do not use its feed.  Fail closed if
+      // an unexpected/stale event populates a downloaded status with installer
+      // metadata or an artifact for another platform/architecture.
+      validatePortableUpdateIdentity(info, platformForUpdateApi(), process.arch);
+      const artifact = validatePortableUpdateIntegrity(info);
+      const currentVersion = app.getVersion();
+      if (comparePortableUpdateVersions(info.version, currentVersion) <= 0) {
+        throw new Error(`Portable update ${info.version} is not newer than the current version ${currentVersion}`);
+      }
+
+      // Manual migration does not invoke the Go helper, so re-verify the file
+      // here before revealing it to the user.  The helper repeats this check
+      // for the in-place replacement path.
+      await verifyPortableUpdatePackage(this.status.downloadPath, {
+        sha512: artifact.sha512,
+        size: artifact.size,
+      });
+      verifiedPackage = true;
+
+      const metadata = updateMetadata();
+      this.updateStatus({ status: 'downloaded', ...metadata });
+
+      // A macOS app copied from a DMG or placed in /Applications still uses
+      // the portable ZIP feed, but it has no safe in-place replacement root.
+      // Reveal the verified package and let the user perform a full extract
+      // and data migration instead of creating UClawData beside the app.
+      // The disposition captured when the download was presented is an
+      // explicit authorization for the in-place replacement path.  Do not
+      // infer that authorization from a fresh writable-layout probe: a stale
+      // or hand-crafted `downloaded` status (for example from delayed IPC)
+      // may omit the field or carry an installer/manual disposition.  Such
+      // artifacts are still safe to expose after verification, but require
+      // the user to perform the complete extraction/migration flow.
+      if (
+        offeredDisposition !== 'auto-replace'
+        || metadata.disposition !== 'auto-replace'
+        || metadata.packageType !== 'portable_zip'
+        || !metadata.canAutoReplace
+        || metadata.requiresMigration
+      ) {
+        logger.info('[Updater] Portable package requires manual migration; opening downloaded package');
+        await this.openDownloadedUpdate();
+        return;
+      }
+
+      // `getPortableModeInfo()` is intentionally cached for runtime path
+      // stability, while the replacement gate above is a fresh filesystem
+      // probe.  If a user completes a portable root during this process
+      // lifetime, avoid advertising auto-replace unless the runtime cache has
+      // also observed that root; otherwise the installer cannot construct its
+      // task workspace safely.
+      if (metadata.packageType === 'portable_zip') {
+        const runtimeMode = getPortableModeInfo();
+        if (!runtimeMode.enabled || !runtimeMode.runtimeUpdatesDir || !runtimeMode.rootDir) {
+          throw new Error('Portable runtime is not initialized for in-place replacement; manual migration is required');
+        }
+      }
+
       logger.info(`[Updater] Installing portable update v${info.version} from ${this.status.downloadPath}`);
       await launchPortableUpdateInstaller(this.status.downloadPath, {
         version: info.version,
-        sha512: info.sha512,
-        size: info.size,
+        sha512: artifact.sha512,
+        size: artifact.size,
       });
     } catch (error) {
       logger.error('[Updater] Portable update install failed:', error);
       this.updateStatus({
         status: 'error',
-        mode: 'portable',
+        ...updateMetadata(),
+        ...(verifiedPackage
+          ? {}
+          : {
+              info: undefined,
+              progress: undefined,
+              downloadPath: undefined,
+            }),
         error: (error as Error).message || String(error),
       });
-      await this.openDownloadedUpdate().catch((openError) => {
-        logger.warn('[Updater] Failed to open downloaded portable update after install error:', openError);
-      });
+      if (verifiedPackage) {
+        await this.openDownloadedUpdate().catch((openError) => {
+          logger.warn('[Updater] Failed to open downloaded portable update after install error:', openError);
+        });
+      }
       throw error;
     }
   }
@@ -608,23 +1020,116 @@ export class AppUpdater extends EventEmitter {
    */
   startAutoInstallCountdown(): void {
     this.clearAutoInstallTimer();
+    // A countdown is an install authorization, not merely a UI animation.
+    // Refuse to create one for an idle/available/error status or for a
+    // downloaded portable status that has no verified artifact path.  This
+    // protects against delayed renderer events and stale IPC calls invoking
+    // the method after a newer check has invalidated the package.
+    if (this.status.status !== 'downloaded') {
+      logger.warn(`[Updater] Ignoring auto-install countdown for status ${this.status.status}`);
+      this.sendToRenderer('update:auto-install-countdown', {
+        seconds: -1,
+        cancelled: true,
+        sequence: this.status.sequence,
+      });
+      return;
+    }
+
+    const offeredDisposition = this.status.disposition;
+    const metadata = updateMetadata();
+    this.updateStatus({ ...metadata });
+
+    if (this.status.status !== 'downloaded') {
+      logger.warn('[Updater] Auto-install countdown lost its downloaded state during metadata refresh');
+      this.sendToRenderer('update:auto-install-countdown', {
+        seconds: -1,
+        cancelled: true,
+        sequence: this.status.sequence,
+      });
+      return;
+    }
+
+    if (this.status.packageType === 'portable_zip'
+      && (!this.status.downloadPath || !isPortableUpdateInfo(this.status.info))) {
+      logger.warn('[Updater] Ignoring portable auto-install countdown without a downloaded artifact');
+      this.sendToRenderer('update:auto-install-countdown', {
+        seconds: -1,
+        cancelled: true,
+        sequence: this.status.sequence,
+      });
+      return;
+    }
+
+    // A portable countdown is an authorization to launch the replacement
+    // helper.  Treat every disposition other than an explicit, matching
+    // auto-replace authorization as manual migration.  In particular, an old
+    // or delayed `downloaded` status may omit `disposition`; a writable layout
+    // probe alone must never turn that status into an automatic replacement.
+    const portableAutoReplaceAuthorized = this.status.packageType !== 'portable_zip'
+      || (
+        offeredDisposition === 'auto-replace'
+        && metadata.disposition === 'auto-replace'
+        && metadata.canAutoReplace
+        && !metadata.requiresMigration
+      );
+    if (!portableAutoReplaceAuthorized) {
+      this.sendToRenderer('update:auto-install-countdown', {
+        seconds: -1,
+        cancelled: true,
+        sequence: this.status.sequence,
+      });
+      void this.openDownloadedUpdate();
+      return;
+    }
     this.autoInstallCountdown = AppUpdater.AUTO_INSTALL_DELAY_SECONDS;
-    this.sendToRenderer('update:auto-install-countdown', { seconds: this.autoInstallCountdown });
+    // Keep the sequence tied to the downloaded artifact that authorized this
+    // timer. Subsequent status transitions (for example a fresh check) must
+    // not make an old countdown look current merely because the interval is
+    // still running.
+    const countdownSequence = this.status.sequence;
+    this.sendToRenderer('update:auto-install-countdown', {
+      seconds: this.autoInstallCountdown,
+      sequence: countdownSequence,
+    });
 
     this.autoInstallTimer = setInterval(() => {
+      // Any newer status sequence supersedes the artifact that authorized this
+      // timer.  Stop before calling quitAndInstall so a stale countdown cannot
+      // install a package after a fresh check/download/error transition.
+      if (this.status.status !== 'downloaded' || this.status.sequence !== countdownSequence) {
+        this.clearAutoInstallTimer();
+        this.sendToRenderer('update:auto-install-countdown', {
+          seconds: -1,
+          cancelled: true,
+          sequence: this.status.sequence,
+        });
+        return;
+      }
       this.autoInstallCountdown--;
-      this.sendToRenderer('update:auto-install-countdown', { seconds: this.autoInstallCountdown });
+      this.sendToRenderer('update:auto-install-countdown', {
+        seconds: this.autoInstallCountdown,
+        sequence: countdownSequence,
+      });
 
       if (this.autoInstallCountdown <= 0) {
         this.clearAutoInstallTimer();
-        this.quitAndInstall();
+        // Re-check the sequence immediately before handing control to the
+        // installer; updateStatus may have run between the interval callback
+        // and this branch in a re-entrant event loop.
+        if (this.status.status === 'downloaded' && this.status.sequence === countdownSequence) {
+          this.quitAndInstall();
+        }
       }
     }, 1000);
   }
 
   cancelAutoInstall(): void {
     this.clearAutoInstallTimer();
-    this.sendToRenderer('update:auto-install-countdown', { seconds: -1, cancelled: true });
+    this.sendToRenderer('update:auto-install-countdown', {
+      seconds: -1,
+      cancelled: true,
+      sequence: this.status.sequence,
+    });
   }
 
   private clearAutoInstallTimer(): void {
@@ -638,6 +1143,7 @@ export class AppUpdater extends EventEmitter {
    * Set update channel (stable, beta, dev)
    */
   setChannel(channel: 'stable' | 'beta' | 'dev'): void {
+    this.managedChannel = normalizeUpdateChannel(channel);
     autoUpdater.channel = channel;
   }
 

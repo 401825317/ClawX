@@ -34,6 +34,7 @@ vi.mock('@electron/utils/paths', () => ({
   getOpenClawEntryPath: () => '/tmp/openclaw-runtime/openclaw.mjs',
   getOpenClawResolvedDir: () => '/tmp/openclaw-runtime',
   getOpenClawSkillsDir: () => '/tmp/openclaw-config/skills',
+  resolveOpenClawStateDir: () => '/tmp/openclaw-config',
   isOpenClawPresent: () => true,
 }));
 vi.mock('@electron/utils/uv-env', () => ({ getUvMirrorEnv: vi.fn(async () => ({})) }));
@@ -66,6 +67,7 @@ vi.mock('@electron/utils/plugin-install', () => ({
   ensurePluginInstalled: mocks.ensurePluginInstalled,
   findBestBundledPluginSource: vi.fn(async (sources: string[]) => sources[0] ?? null),
   findMissingPluginRuntimeDependencies: vi.fn(async () => []),
+  readPluginContentFingerprint: vi.fn(async () => 'fingerprint'),
   removeManagedPluginInstall: mocks.removeManagedPluginInstall,
   repairTrustedOfficialPluginInstallRecords: mocks.repairTrustedOfficialPluginInstallRecords,
 }));
@@ -114,7 +116,10 @@ vi.mock('@electron/gateway/async-prelaunch-maintenance-cache', () => ({
   })),
 }));
 
-import { syncGatewayConfigBeforeLaunch } from '@electron/gateway/config-sync';
+import {
+  GatewayPluginRepairRequiredError,
+  syncGatewayConfigBeforeLaunch,
+} from '@electron/gateway/config-sync';
 
 const appSettings = {
   gatewayToken: 'gateway-token',
@@ -144,7 +149,7 @@ describe('Gateway channel startup config sync', () => {
       'wecom',
       ['/bundled/wecom'],
       'wecom',
-      { deferTrustedRecordSync: true },
+      { deferTrustedRecordSync: true, requireBundledSource: true },
     );
     expect(mocks.removeManagedPluginInstall).not.toHaveBeenCalledWith(
       'wecom',
@@ -176,7 +181,7 @@ describe('Gateway channel startup config sync', () => {
       'clawx-openai-image',
       ['/bundled/clawx-openai-image'],
       'UClaw OpenAI Image',
-      { deferTrustedRecordSync: true },
+      { deferTrustedRecordSync: true, requireBundledSource: true },
     );
   });
 
@@ -193,5 +198,49 @@ describe('Gateway channel startup config sync', () => {
     expect(result.configuredChannels).toEqual([]);
     expect(result.skipChannels).toBe(false);
     expect(result.channelStartupSummary).toBe('enabled(unknown)');
+  });
+
+  it('aborts prelaunch when a configured plugin cannot be repaired from its bundled mirror', async () => {
+    mocks.captureChannelStartupSnapshot.mockResolvedValue({
+      config: { channels: { wecom: { enabled: true } } },
+      configuredChannels: ['wecom'],
+      cleanedDanglingWeChatState: false,
+    });
+    mocks.ensurePluginInstalled.mockResolvedValue({
+      installed: false,
+      repairRequired: true,
+      code: 'bundled-source-missing',
+      warning: 'Bundled wecom plugin mirror not found. Checked: /bundled/wecom',
+    });
+
+    const error = await syncGatewayConfigBeforeLaunch(appSettings, '/tmp/openclaw-runtime')
+      .then(() => null, (caught) => caught);
+    expect(error).toBeInstanceOf(GatewayPluginRepairRequiredError);
+    expect(error).toMatchObject({
+      name: 'GatewayPluginRepairRequiredError',
+      code: 'gateway_plugin_repair_required',
+      pluginIds: ['wecom'],
+    });
+    expect((error as Error).message).toMatch(/repair required/i);
+    expect(mocks.repairTrustedOfficialPluginInstallRecords).not.toHaveBeenCalled();
+  });
+
+  it('preserves a user-owned configured plugin without turning startup into a repair outage', async () => {
+    mocks.captureChannelStartupSnapshot.mockResolvedValue({
+      config: { channels: { wecom: { enabled: true } } },
+      configuredChannels: ['wecom'],
+      cleanedDanglingWeChatState: false,
+    });
+    mocks.ensurePluginInstalled.mockResolvedValue({
+      installed: false,
+      code: 'managed-plugin-ownership-conflict',
+      action: 'preserved',
+      ownership: { status: 'user-owned-or-unknown' },
+      warning: 'preserved user-owned plugin',
+    });
+
+    await expect(syncGatewayConfigBeforeLaunch(appSettings, '/tmp/openclaw-runtime'))
+      .resolves.toMatchObject({ channelStartupSummary: 'enabled(wecom)' });
+    expect(mocks.repairTrustedOfficialPluginInstallRecords).toHaveBeenCalled();
   });
 });

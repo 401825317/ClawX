@@ -9,6 +9,10 @@ function createUpdaterMock() {
     getStatus: vi.fn<() => UpdateStatus>(() => ({
       status: 'available' as const,
       mode: 'portable' as const,
+      packageType: 'portable_zip' as const,
+      canAutoReplace: true,
+      requiresMigration: false,
+      disposition: 'auto-replace' as const,
       info: {
         version: '1.2.3',
         releaseDate: '2026-07-25T00:00:00.000Z',
@@ -43,6 +47,11 @@ describe('updates Typed Host API', () => {
     expect(api.status()).toEqual({
       status: 'available',
       mode: 'portable',
+      packageType: 'portable_zip',
+      canAutoReplace: true,
+      requiresMigration: false,
+      migrationReason: undefined,
+      disposition: 'auto-replace',
       info: {
         version: '1.2.3',
         releaseDate: '2026-07-25T00:00:00.000Z',
@@ -67,6 +76,10 @@ describe('updates Typed Host API', () => {
     updater.getStatus.mockReturnValue({
       status: 'downloaded',
       mode: 'portable',
+      packageType: 'portable_zip',
+      canAutoReplace: true,
+      requiresMigration: false,
+      disposition: 'auto-replace',
       info: { version: '1.2.3' },
       downloadPath: 'C:\\runtime\\updates\\UClaw.zip',
     });
@@ -78,6 +91,10 @@ describe('updates Typed Host API', () => {
       status: {
         status: 'downloaded',
         mode: 'portable',
+        packageType: 'portable_zip',
+        canAutoReplace: true,
+        requiresMigration: false,
+        disposition: 'auto-replace',
         downloadPath: 'C:\\runtime\\updates\\UClaw.zip',
       },
     });
@@ -88,6 +105,10 @@ describe('updates Typed Host API', () => {
     updater.getStatus.mockReturnValue({
       status: 'error',
       mode: 'portable',
+      packageType: 'portable_zip',
+      canAutoReplace: true,
+      requiresMigration: false,
+      disposition: 'auto-replace',
       info: { version: '1.2.3' },
       error: 'helper blocked',
       downloadPath: 'C:\\runtime\\updates\\UClaw.zip',
@@ -97,7 +118,42 @@ describe('updates Typed Host API', () => {
     await expect(api.install()).resolves.toMatchObject({
       success: false,
       error: 'Error: helper blocked',
-      status: { status: 'error', mode: 'portable', error: 'helper blocked' },
+      status: {
+        status: 'error',
+        mode: 'portable',
+        packageType: 'portable_zip',
+        canAutoReplace: true,
+        requiresMigration: false,
+        disposition: 'auto-replace',
+        error: 'helper blocked',
+      },
+    });
+  });
+
+  it('preserves manual-migration disposition metadata for installed macOS apps', () => {
+    updater.getStatus.mockReturnValue({
+      status: 'available',
+      mode: 'installed',
+      packageType: 'portable_zip',
+      canAutoReplace: false,
+      requiresMigration: true,
+      migrationReason: 'missing-portable-flag',
+      disposition: 'manual-migration',
+      info: {
+        version: '1.2.3',
+        package_type: 'portable_zip',
+      },
+    });
+    const api = createUpdatesApi(updater as unknown as AppUpdater);
+
+    expect(api.status()).toMatchObject({
+      status: 'available',
+      mode: 'installed',
+      packageType: 'portable_zip',
+      canAutoReplace: false,
+      requiresMigration: true,
+      migrationReason: 'missing-portable-flag',
+      disposition: 'manual-migration',
     });
   });
 });

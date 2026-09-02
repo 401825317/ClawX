@@ -9,6 +9,7 @@ import {
   assertPortableUpdateZipFilename,
   comparePortableUpdateVersions,
   filenameFromPortableUpdateInfo,
+  isValidPortableUpdateVersion,
   sanitizePortableUpdateFilename,
   verifyPortableUpdatePackage,
 } from '@electron/main/portable-update-security';
@@ -28,6 +29,14 @@ describe('portable update package security', () => {
     expect(comparePortableUpdateVersions('1.2.4', '1.2.3')).toBeGreaterThan(0);
   });
 
+  it('rejects malformed versions at the update identity boundary', () => {
+    expect(isValidPortableUpdateVersion('2.0.4')).toBe(true);
+    expect(isValidPortableUpdateVersion('v2.0.4-beta.1+build.7')).toBe(true);
+    expect(isValidPortableUpdateVersion('../../escape')).toBe(false);
+    expect(isValidPortableUpdateVersion('2.0')).toBe(false);
+    expect(isValidPortableUpdateVersion('2.01.0')).toBe(false);
+  });
+
   it('sanitizes server filenames and falls back to the UClaw USB contract', () => {
     expect(sanitizePortableUpdateFilename('../UClaw:1.2.3?.zip')).toBe('..-UClaw-1.2.3-.zip');
     expect(filenameFromPortableUpdateInfo(
@@ -43,6 +52,8 @@ describe('portable update package security', () => {
     expect(() => assertPortableUpdateZipFilename('UClaw-update.exe')).toThrow(/not allowed/i);
     expect(() => assertPortableUpdateZipFilename('UClaw-update.tar')).toThrow(/\.zip/i);
     expect(() => assertPortableUpdateZipFilename('UClaw-update.zip')).not.toThrow();
+    expect(() => assertPortableUpdateZipFilename('../UClaw-update.zip')).toThrow(/path segment/i);
+    expect(() => assertPortableUpdateZipFilename('nested/UClaw-update.zip')).toThrow(/path segment/i);
   });
 
   it('verifies ZIP signature, exact size, and SHA-512 before installation', async () => {
@@ -71,5 +82,21 @@ describe('portable update package security', () => {
 
     await expect(verifyPortableUpdatePackage(filePath, { size: bytes.length, sha512 }))
       .rejects.toThrow(/not a valid zip/i);
+  });
+
+  it('fails closed when integrity metadata is missing or malformed', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'uclaw-portable-update-'));
+    tempDirs.push(dir);
+    const filePath = join(dir, 'UClaw-1.2.3-win-x64-usb.zip');
+    const bytes = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+    await writeFile(filePath, bytes);
+    const sha512 = createHash('sha512').update(bytes).digest('hex');
+
+    await expect(verifyPortableUpdatePackage(filePath, { sha512 }))
+      .rejects.toThrow(/size is required/i);
+    await expect(verifyPortableUpdatePackage(filePath, { size: 0, sha512 }))
+      .rejects.toThrow(/size is required/i);
+    await expect(verifyPortableUpdatePackage(filePath, { size: bytes.length, sha512: 'not-a-digest' }))
+      .rejects.toThrow(/sha512 is required/i);
   });
 });

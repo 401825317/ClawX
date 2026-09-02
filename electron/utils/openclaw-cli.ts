@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import { spawn, type ForkOptions } from 'node:child_process';
 import { homedir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { getOpenClawDir, getOpenClawEntryPath } from './paths';
 import { logger } from './logger';
 
@@ -196,7 +196,7 @@ function getOpenClawEmbeddedExecPath(): { execPath: string; electronRunAsNode: b
   if (app.isPackaged && process.platform === 'darwin') {
     const helperPath = getPackagedMacOSHelperPath();
     if (!helperPath) {
-      throw new Error('ClawX Helper executable not found for embedded OpenClaw launch');
+      throw new Error('UClaw Helper executable not found for embedded OpenClaw launch');
     }
     return { execPath: helperPath, electronRunAsNode: true };
   }
@@ -255,18 +255,73 @@ function getWindowsPowerShellPath(): string {
   return join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 }
 
+/**
+ * Return the product name used by Electron's macOS helper bundles.
+ *
+ * `app.getName()` is not reliable here: in packaged builds it can resolve to
+ * the npm/package name (`clawx`) rather than electron-builder's product name
+ * (`UClaw`).  The app bundle containing process.execPath is authoritative.
+ */
+function getPackagedMacOSBundleName(): string | null {
+  const appBundleDir = dirname(dirname(dirname(process.execPath)));
+  const appBundleBaseName = basename(appBundleDir);
+  if (appBundleBaseName.toLowerCase().endsWith('.app')) {
+    const bundleName = appBundleBaseName.slice(0, -'.app'.length).trim();
+    if (bundleName) return bundleName;
+  }
+
+  return null;
+}
+
+function getPackagedMacOSApplicationName(): string {
+  const bundleName = getPackagedMacOSBundleName();
+  if (bundleName) return bundleName;
+
+  const electronName = app.getName().trim();
+  if (electronName) {
+    // Keep a useful user-facing name even when Electron reports the package
+    // identifier.  This also lets older non-bundled launches find UClaw's
+    // helper after the product rename.
+    if (electronName.toLowerCase() === 'clawx') return 'UClaw';
+    return electronName;
+  }
+
+  return 'UClaw';
+}
+
 function getPackagedMacOSHelperPath(): string | null {
   if (process.platform !== 'darwin' || !app.isPackaged) return null;
-  const appName = app.getName();
-  const helperName = `${appName} Helper`;
-  const helperPath = join(
-    dirname(process.execPath),
-    '../Frameworks',
-    `${helperName}.app`,
-    'Contents/MacOS',
-    helperName,
-  );
-  return existsSync(helperPath) ? helperPath : null;
+  const frameworksDir = join(dirname(process.execPath), '../Frameworks');
+  const bundleName = getPackagedMacOSBundleName();
+  const electronName = app.getName().trim();
+  const names = [
+    getPackagedMacOSApplicationName(),
+    'UClaw',
+    // Keep compatibility with app bundles produced before the UClaw rename.
+    // Older helper frameworks can remain in a newly renamed UClaw.app (for
+    // example after an in-place copy), so ClawX must be a fallback regardless
+    // of the current bundle name.  It stays after the current product name to
+    // ensure a matching UClaw Helper is always preferred.
+    'ClawX',
+    bundleName ? '' : electronName,
+    bundleName ? '' : electronName.toLowerCase() === 'clawx' ? 'UClaw' : '',
+  ].filter((name, index, all) => {
+    if (!name) return false;
+    return all.findIndex((candidate) => candidate.toLowerCase() === name.toLowerCase()) === index;
+  });
+
+  for (const name of names) {
+    const helperName = `${name} Helper`;
+    const helperPath = join(
+      frameworksDir,
+      `${helperName}.app`,
+      'Contents/MacOS',
+      helperName,
+    );
+    if (existsSync(helperPath)) return helperPath;
+  }
+
+  return null;
 }
 
 // ── macOS / Linux install ────────────────────────────────────────────────────
@@ -305,7 +360,12 @@ export async function installOpenClawCli(): Promise<{
     }
 
     symlinkSync(wrapperSrc, target);
-    chmodSync(wrapperSrc, 0o755);
+    // The macOS app bundle is commonly mounted read-only (DMG) or protected
+    // by the Applications folder.  Its executable bit is set at build time;
+    // never try to mutate the bundled resource at runtime.
+    if (platform !== 'darwin') {
+      chmodSync(wrapperSrc, 0o755);
+    }
     logger.info(`OpenClaw CLI symlink created: ${target} -> ${wrapperSrc}`);
     return { success: true, path: target };
   } catch (error) {

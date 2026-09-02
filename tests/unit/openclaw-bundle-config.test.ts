@@ -150,6 +150,32 @@ describe('openclaw bundle config', () => {
     });
   });
 
+  it('keeps every local plugin package and manifest version synchronized', async () => {
+    const { LOCAL_OPENCLAW_PLUGIN_IDS } = await import('../../scripts/openclaw-bundle-config.mjs');
+    for (const pluginId of LOCAL_OPENCLAW_PLUGIN_IDS) {
+      const packageJson = JSON.parse(readFileSync(
+        resolve(process.cwd(), `resources/openclaw-plugins/${pluginId}/package.json`),
+        'utf8',
+      )) as { version?: string };
+      const manifest = JSON.parse(readFileSync(
+        resolve(process.cwd(), `resources/openclaw-plugins/${pluginId}/openclaw.plugin.json`),
+        'utf8',
+      )) as { version?: string };
+      expect(packageJson.version, `${pluginId} package.json version`).toBeTruthy();
+      expect(manifest.version, `${pluginId} manifest version`).toBe(packageJson.version);
+    }
+
+    // Both provider schemas gained new configuration properties in
+    // 1013338e; they must not regress to their pre-schema 0.1.x versions.
+    for (const pluginId of ['uclaw-video', 'clawx-openai-image']) {
+      const packageJson = JSON.parse(readFileSync(
+        resolve(process.cwd(), `resources/openclaw-plugins/${pluginId}/package.json`),
+        'utf8',
+      )) as { version?: string };
+      expect(packageJson.version).toBe('0.2.0');
+    }
+  });
+
   it('writes the build identity schema required by the USB self-check', () => {
     const afterPackSource = readFileSync(
       resolve(process.cwd(), 'scripts/after-pack.cjs'),
@@ -168,7 +194,7 @@ describe('openclaw bundle config', () => {
     expect(writtenSchema).toBe(requiredSchema);
   });
 
-  it('requires the Parallel plugin in the Windows USB self-check', () => {
+  it('requires every local plugin in the Windows USB self-check', async () => {
     const selfCheckSource = readFileSync(
       resolve(process.cwd(), 'scripts/windows-support/UClaw-SelfCheck.mjs'),
       'utf8',
@@ -177,5 +203,12 @@ describe('openclaw bundle config', () => {
     expect(selfCheckSource).toContain(
       "{ pluginId: 'parallel', manifestId: 'parallel', packageNames: ['@openclaw/parallel-plugin'] }",
     );
+    const { LOCAL_OPENCLAW_PLUGIN_IDS } = await import('../../scripts/openclaw-bundle-config.mjs');
+    for (const pluginId of LOCAL_OPENCLAW_PLUGIN_IDS) {
+      // Keep the standalone self-check payload in lockstep with the bundle
+      // allowlist. It cannot import the source config at runtime because the
+      // payload is copied into a user's USB root as a single .cmd artifact.
+      expect(selfCheckSource).toContain(`'${pluginId}'`);
+    }
   });
 });

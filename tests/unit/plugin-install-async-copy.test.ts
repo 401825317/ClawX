@@ -8,6 +8,7 @@ const {
   mockCopyFileSync,
   mockCpSync,
   mockAsyncReaddir,
+  mockAsyncLstat,
   mockAsyncStat,
   mockAsyncCopyFile,
   mockAsyncMkdir,
@@ -17,6 +18,7 @@ const {
   mockCopyFileSync: vi.fn(),
   mockCpSync: vi.fn(),
   mockAsyncReaddir: vi.fn(),
+  mockAsyncLstat: vi.fn(),
   mockAsyncStat: vi.fn(),
   mockAsyncCopyFile: vi.fn(),
   mockAsyncMkdir: vi.fn(),
@@ -43,6 +45,7 @@ vi.mock('node:fs/promises', async () => {
   const mocked = {
     ...actual,
     readdir: mockAsyncReaddir,
+    lstat: mockAsyncLstat,
     stat: mockAsyncStat,
     copyFile: mockAsyncCopyFile,
     mkdir: mockAsyncMkdir,
@@ -138,6 +141,9 @@ describe('plugin installer asynchronous directory copy', () => {
     mockAsyncReaddir.mockReset().mockImplementation((...args: unknown[]) => (
       callActual(actualFs.readdir as (...innerArgs: never[]) => unknown, args)
     ));
+    mockAsyncLstat.mockReset().mockImplementation((...args: unknown[]) => (
+      callActual(actualFs.lstat as (...innerArgs: never[]) => unknown, args)
+    ));
     mockAsyncStat.mockReset().mockImplementation((...args: unknown[]) => (
       callActual(actualFs.stat as (...innerArgs: never[]) => unknown, args)
     ));
@@ -185,7 +191,7 @@ describe('plugin installer asynchronous directory copy', () => {
     )).resolves.toBe(`group=11;file=31;${'x'.repeat(256)}`);
 
     expect(mockAsyncReaddir).toHaveBeenCalled();
-    expect(mockAsyncStat).toHaveBeenCalled();
+    expect(mockAsyncLstat).toHaveBeenCalled();
     expect(mockAsyncCopyFile).toHaveBeenCalledTimes(384);
     expect(mockAsyncMkdir).toHaveBeenCalled();
 
@@ -194,5 +200,42 @@ describe('plugin installer asynchronous directory copy', () => {
     expect(mockCopyFileSync).not.toHaveBeenCalled();
     expect(mockCpSync).not.toHaveBeenCalled();
     expect(atomicsWait).not.toHaveBeenCalled();
+  });
+
+  it('rejects symbolic links instead of dereferencing them into the destination', async () => {
+    const root = await actualFs.mkdtemp(join(tmpdir(), 'uclaw-plugin-symlink-copy-'));
+    temporaryRoots.push(root);
+    const source = join(root, 'source');
+    const destination = join(root, 'destination');
+    const outside = join(root, 'outside-secret.txt');
+    await actualFs.mkdir(source, { recursive: true });
+    await actualFs.writeFile(outside, 'must-not-be-copied', 'utf8');
+    await actualFs.symlink(outside, join(source, 'linked-secret.txt'), 'file');
+
+    const { cpAsyncSafe } = await import('@electron/utils/plugin-install');
+    await expect(cpAsyncSafe(source, destination)).rejects.toThrow('symbolic link');
+    await expect(actualFs.access(join(destination, 'linked-secret.txt'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('rejects special filesystem entries instead of copying them as files', async () => {
+    const root = await actualFs.mkdtemp(join(tmpdir(), 'uclaw-plugin-special-copy-'));
+    temporaryRoots.push(root);
+    const source = join(root, 'source');
+    const destination = join(root, 'destination');
+    await actualFs.mkdir(source, { recursive: true });
+
+    // A FIFO is available on POSIX hosts. Windows has no portable equivalent,
+    // so keep the assertion conditional and retain the cross-platform copy
+    // coverage above.
+    if (process.platform === 'win32') return;
+    const { execFile } = await import('node:child_process');
+    await new Promise<void>((resolve, reject) => {
+      execFile('mkfifo', [join(source, 'plugin.fifo')], (error) => error ? reject(error) : resolve());
+    });
+
+    const { cpAsyncSafe } = await import('@electron/utils/plugin-install');
+    await expect(cpAsyncSafe(source, destination)).rejects.toThrow('unsupported filesystem entry');
   });
 });

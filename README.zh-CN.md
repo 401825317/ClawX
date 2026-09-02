@@ -185,6 +185,8 @@ stdout/stderr 断管时，只会永久熔断受影响的控制台 Sink，文件�
 ### 🔔 更新提示
 ClawX 可以在启动时自动检查新版本。发现更新后会显示应用内提示；只有在你选择操作后，才会下载或安装更新。
 
+在 macOS 上，所有已打包的 arm64/x64 客户端都通过受管更新接口查询 `package_type=portable_zip`，不再读取 `latest-mac.yml`。更新包类型与数据模式独立判断：只有启动目录结构完整、可写，并且同级存在 `portable.flag`、`UClawData` 和 `UClaw.app` 时，才允许自动替换。通过 DMG 启动、只移动 `UClaw.app` 或放入 `/Applications` 的版本仍可下载 ZIP，但必须将 ZIP 完整解压到新的可写目录后手动迁移；客户端不会在已安装的 App 旁创建 `UClawData`。由于 2.0.3 仍使用旧分流逻辑，首次升级需要手动安装完整的新 ZIP；从修复版 2.0.4（或更高版本）开始，macOS 便携更新才会自动生效。
+
 ---
 
 ## 快速上手

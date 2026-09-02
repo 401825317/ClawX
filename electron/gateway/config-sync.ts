@@ -1,4 +1,5 @@
 import { app } from 'electron';
+import { randomUUID } from 'node:crypto';
 import path from 'path';
 import { existsSync, type Dirent } from 'fs';
 import { lstat, mkdir, readdir, readFile, symlink } from 'fs/promises';
@@ -25,6 +26,7 @@ import {
   getOpenClawResolvedDir,
   getOpenClawSkillsDir,
   isOpenClawPresent,
+  resolveOpenClawStateDir,
 } from '../utils/paths';
 import { getUvMirrorEnv } from '../utils/uv-env';
 import { captureChannelStartupSnapshot, readOpenClawConfig } from '../utils/channel-config';
@@ -44,6 +46,7 @@ import {
   ensurePluginInstalled,
   findBestBundledPluginSource,
   findMissingPluginRuntimeDependencies,
+  readPluginContentFingerprint,
   removeManagedPluginInstall,
   repairTrustedOfficialPluginInstallRecords,
 } from '../utils/plugin-install';
@@ -113,6 +116,51 @@ export interface GatewayPrelaunchSyncSummary {
   channelStartupSummary: string;
 }
 
+/**
+ * Raised when a configured ClawX/UClaw plugin cannot be proven compatible
+ * with the current application bundle.  Gateway startup must stop in this
+ * state instead of silently reusing a stale extension from ~/.openclaw.
+ */
+export class GatewayPluginRepairRequiredError extends Error {
+  readonly code = 'gateway_plugin_repair_required';
+  readonly retryable = false;
+  readonly pluginIds: readonly string[];
+  readonly failures: readonly Readonly<{
+    channelType: string;
+    pluginId: string;
+    warning: string;
+  }>[];
+
+  constructor(
+    failures: Array<{ channelType: string; pluginId: string; warning?: string }>,
+  ) {
+    const normalized = failures.map((failure) => ({
+      channelType: failure.channelType,
+      pluginId: failure.pluginId,
+      warning: failure.warning?.trim() || 'bundled plugin mirror/source is missing or invalid',
+    })).sort((left, right) => left.pluginId.localeCompare(right.pluginId));
+    const details = normalized
+      .map((failure) => `${failure.pluginId}: ${failure.warning}`)
+      .join('; ');
+    super(
+      `Gateway startup blocked: plugin repair required before Gateway can start. ${details}`,
+    );
+    this.name = 'GatewayPluginRepairRequiredError';
+    this.pluginIds = [...new Set(normalized.map((failure) => failure.pluginId))];
+    this.failures = normalized;
+  }
+}
+
+export function isGatewayPluginRepairRequiredError(
+  error: unknown,
+): error is GatewayPluginRepairRequiredError {
+  return error instanceof GatewayPluginRepairRequiredError
+    || (typeof error === 'object'
+      && error !== null
+      && 'code' in error
+      && error.code === 'gateway_plugin_repair_required');
+}
+
 // ── Auto-upgrade bundled plugins on startup ──────────────────────
 
 const CHANNEL_PLUGIN_MAP: Record<string, { dirName: string; npmName: string }> = {
@@ -133,6 +181,9 @@ const CHANNEL_PLUGIN_MAP: Record<string, { dirName: string; npmName: string }> =
 
 const PARALLEL_WEB_SEARCH_PROVIDERS = new Set(['parallel', 'parallel-free']);
 const DEFERRED_MAINTENANCE_DELAY_MS = 30_000;
+// Bump whenever plugin startup admission rules change.  Existing cache files
+// must not allow a pre-fix launch to bypass the new fail-closed validation.
+const PLUGIN_MAINTENANCE_POLICY_VERSION = 2;
 
 /** Check whether the current web search selection needs the Parallel plugin runtime. */
 function isParallelWebSearchConfigured(config: unknown): boolean {
@@ -235,21 +286,56 @@ function appVersionForCache(): string {
  * - Dev mode: falls back to node_modules/ with pnpm-aware dep collection
  */
 async function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): Promise<boolean> {
-  const results = await Promise.all(configuredChannels.map(async (channelType) => {
+  const failures: Array<{ channelType: string; pluginId: string; warning?: string }> = [];
+  await Promise.all(configuredChannels.map(async (channelType) => {
     const pluginInfo = CHANNEL_PLUGIN_MAP[channelType];
-    if (!pluginInfo) return true;
-    const result = await ensurePluginInstalled(
-      pluginInfo.dirName,
-      buildCandidateSources(pluginInfo.dirName),
-      channelType === CLAWX_OPENAI_IMAGE_PROVIDER_KEY ? 'UClaw OpenAI Image' : channelType,
-      { deferTrustedRecordSync: true },
-    );
+    if (!pluginInfo) return;
+
+    const pluginLabel = channelType === CLAWX_OPENAI_IMAGE_PROVIDER_KEY
+      ? 'UClaw OpenAI Image'
+      : channelType;
+    let result: Awaited<ReturnType<typeof ensurePluginInstalled>>;
+    try {
+      result = await ensurePluginInstalled(
+        pluginInfo.dirName,
+        buildCandidateSources(pluginInfo.dirName),
+        pluginLabel,
+        {
+          deferTrustedRecordSync: true,
+          // Startup is a compatibility barrier.  If the app bundle no longer
+          // contains the source used to validate this plugin, retaining the
+          // installed copy would silently run a potentially incompatible
+          // schema/content version.
+          requireBundledSource: true,
+        },
+      );
+    } catch (error) {
+      const warning = error instanceof Error ? error.message : String(error);
+      logger.warn(`[plugin] ${channelType}: ${warning}`);
+      failures.push({ channelType, pluginId: pluginInfo.dirName, warning });
+      return;
+    }
+
     if (result.warning) {
       logger.warn(`[plugin] ${channelType}: ${result.warning}`);
     }
-    return result.installed;
+    // A same-name user-owned extension is intentionally preserved by the
+    // installer and remains a valid Gateway choice.  Only an inability to
+    // prove/repair the bundled UClaw source is a hard startup barrier; do not
+    // turn the ownership-preservation policy into a blanket Gateway outage.
+    if (!result.installed && result.repairRequired) {
+      failures.push({
+        channelType,
+        pluginId: pluginInfo.dirName,
+        warning: result.warning,
+      });
+    }
   }));
-  return results.every(Boolean);
+
+  if (failures.length > 0) {
+    throw new GatewayPluginRepairRequiredError(failures);
+  }
+  return true;
 }
 
 /**
@@ -339,7 +425,12 @@ async function buildPluginSourceSignatures(configuredChannels: string[]): Promis
     const pluginInfo = CHANNEL_PLUGIN_MAP[channelType];
     if (!pluginInfo) return null;
     const bundledSources = buildCandidateSources(pluginInfo.dirName);
-    const targetDir = join(getOpenClawConfigDir(), 'extensions', pluginInfo.dirName);
+    // Plugin installs are rooted in OPENCLAW_STATE_DIR (the same resolver used
+    // by plugin-install.ts), not necessarily beside a custom
+    // OPENCLAW_CONFIG_PATH. Keeping the cache key on the real target prevents
+    // a config-path-only change from either masking a stale extension or
+    // invalidating the wrong profile.
+    const targetDir = join(resolveOpenClawStateDir(), 'extensions', pluginInfo.dirName);
     const sourceDir = await findBestBundledPluginSource(bundledSources, targetDir)
       || (!app.isPackaged ? join(process.cwd(), 'node_modules', ...pluginInfo.npmName.split('/')) : '');
     const signature = sourceDir
@@ -347,6 +438,11 @@ async function buildPluginSourceSignatures(configuredChannels: string[]): Promis
         sourceDir,
         manifest: await pathSignatureAsync(fsPath(join(sourceDir, 'openclaw.plugin.json'))),
         packageJson: await pathSignatureAsync(fsPath(join(sourceDir, 'package.json'))),
+        // Include bytes, not only mtime/size, in the maintenance key.  This
+        // guarantees that a schema/content edit invalidates a prior cache hit
+        // even when a build system preserves timestamps or file length.
+        sourceContentFingerprint: await readPluginContentFingerprint(sourceDir),
+        installedContentFingerprint: await readPluginContentFingerprint(targetDir),
         sourceDirectory: await directoryChildrenSignatureAsync(fsPath(sourceDir)),
         installedMissingRuntimeDependencies: await findMissingPluginRuntimeDependencies(targetDir),
       }
@@ -360,14 +456,32 @@ async function buildPluginMaintenanceCacheKey(
   openclawDir: string,
   configuredChannels: string[],
 ): Promise<string> {
+  const sourceSignatures = await buildPluginSourceSignatures(configuredChannels);
+  // Never let an unreadable source fingerprint become a durable cache hit.
+  // A volatile nonce forces the maintenance task to retry (and, in strict
+  // startup mode, fail closed) until the bundled source can be inspected.
+  const sourceIntegrityUnavailable = Object.values(sourceSignatures).some((signature) => (
+    signature
+    && typeof signature === 'object'
+    && 'sourceDir' in signature
+    && typeof signature.sourceDir === 'string'
+    && signature.sourceDir.length > 0
+    && 'sourceContentFingerprint' in signature
+    && signature.sourceContentFingerprint == null
+  ));
   return buildPrelaunchMaintenanceCacheKey({
     task: 'plugin-maintenance',
+    pluginMaintenancePolicyVersion: PLUGIN_MAINTENANCE_POLICY_VERSION,
     appVersion: appVersionForCache(),
     openclawDir,
     cwd: process.cwd(),
     configuredChannels: [...configuredChannels].sort(),
-    extensionsDir: await directoryChildrenSignatureAsync(fsPath(join(getOpenClawConfigDir(), 'extensions'))),
-    sourceSignatures: await buildPluginSourceSignatures(configuredChannels),
+    extensionsDir: await directoryChildrenSignatureAsync(fsPath(join(resolveOpenClawStateDir(), 'extensions'))),
+    sourceSignatures,
+    // Use a fresh nonce whenever inspection failed. A timestamp can repeat
+    // when the initial and final cache-key reads happen in one millisecond,
+    // which would accidentally publish a cache entry for an unreadable source.
+    sourceIntegrityUnavailable: sourceIntegrityUnavailable ? randomUUID() : false,
   });
 }
 
@@ -390,7 +504,7 @@ async function buildPluginInstallArtifactCleanupCacheKey(openclawDir: string): P
     appVersion: appVersionForCache(),
     openclawDir,
     extensionsDirSignature: await directoryChildrenSignatureAsync(
-      fsPath(join(getOpenClawConfigDir(), 'extensions')),
+      fsPath(join(resolveOpenClawStateDir(), 'extensions')),
     ),
   });
 }
@@ -682,6 +796,11 @@ export async function syncGatewayConfigBeforeLaunch(
       logger.warn('[plugin] One or more unconfigured channel plugins could not be removed');
     }
   } catch (err) {
+    if (isGatewayPluginRepairRequiredError(err)) {
+      // A configured plugin without a compatible bundled source is a hard
+      // startup barrier.  Do not fall through to Gateway with the stale copy.
+      throw err;
+    }
     // A missing or malformed snapshot is not evidence that the user removed
     // every channel. Preserve installed plugins and launch channels fail-open.
     logger.warn('Failed to capture trusted channel config; preserving channel runtime state:', err);
@@ -705,13 +824,27 @@ export async function syncGatewayConfigBeforeLaunch(
       const result = await measureAsync(
         timingsMs,
         'parallelPluginMaintenanceMs',
-        () => ensureParallelPluginInstalled({ deferTrustedRecordSync: true }),
+        () => ensureParallelPluginInstalled({
+          deferTrustedRecordSync: true,
+          requireBundledSource: true,
+        }),
       );
       if (result.warning) {
         logger.warn(`[plugin] Parallel Search: ${result.warning}`);
       }
+      // Preserve an explicitly user-owned Parallel extension just like other
+      // channels.  Missing or invalid bundled sources set repairRequired and
+      // remain fail-closed.
+      if (!result.installed && result.repairRequired) {
+        throw new GatewayPluginRepairRequiredError([{
+          channelType: 'parallel',
+          pluginId: 'parallel',
+          warning: result.warning,
+        }]);
+      }
     }
   } catch (err) {
+    if (isGatewayPluginRepairRequiredError(err)) throw err;
     logger.warn('Failed to install Parallel Search plugin:', err);
   }
 

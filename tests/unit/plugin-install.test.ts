@@ -171,6 +171,24 @@ describe('plugin installer diagnostics', () => {
     expect(mockLoggerWarn).not.toHaveBeenCalled();
   });
 
+  it('chooses a valid fallback mirror when the first packaged location is partial', async () => {
+    const partialDir = join(testRoot, 'partial', 'wecom');
+    const validDir = join(testRoot, 'fallback', 'wecom');
+    await actualFs.mkdir(partialDir, { recursive: true });
+    await actualFs.writeFile(
+      join(partialDir, 'openclaw.plugin.json'),
+      '{"id":"wecom","entry":"index.mjs"}\n',
+      'utf8',
+    );
+    await createPluginFixture(validDir, {
+      id: 'wecom',
+      name: '@wecom/wecom-openclaw-plugin',
+    });
+
+    const { findBestBundledPluginSource } = await import('@electron/utils/plugin-install');
+    await expect(findBestBundledPluginSource([partialDir, validDir])).resolves.toBe(validDir);
+  });
+
   it('repairs a same-version plugin when its installed runtime dependency is missing', async () => {
     const sourceDir = join(testRoot, 'bundle', 'clawx-openai-image');
     const targetDir = join(paths.stateDir, 'extensions', 'clawx-openai-image');
@@ -201,6 +219,33 @@ describe('plugin installer diagnostics', () => {
     );
   });
 
+  it('treats optional runtime dependencies as required packaged payloads', async () => {
+    const pluginId = 'uclaw-video';
+    const sourceDir = join(testRoot, 'bundle', pluginId);
+    const targetDir = join(paths.stateDir, 'extensions', pluginId);
+    await createPluginFixture(sourceDir, {
+      id: pluginId,
+      name: 'uclaw-video-plugin',
+      version: '0.2.0',
+    });
+    await createPluginFixture(targetDir, {
+      id: pluginId,
+      name: 'uclaw-video-plugin',
+      version: '0.2.0',
+    });
+    const packagePath = join(sourceDir, 'package.json');
+    const packageJson = JSON.parse(await actualFs.readFile(packagePath, 'utf8')) as Record<string, unknown>;
+    packageJson.optionalDependencies = { 'runtime-helper': '1.0.0' };
+    await actualFs.writeFile(packagePath, `${JSON.stringify(packageJson)}\n`, 'utf8');
+    const targetPackagePath = join(targetDir, 'package.json');
+    const targetPackageJson = JSON.parse(await actualFs.readFile(targetPackagePath, 'utf8')) as Record<string, unknown>;
+    targetPackageJson.optionalDependencies = { 'runtime-helper': '1.0.0' };
+    await actualFs.writeFile(targetPackagePath, `${JSON.stringify(targetPackageJson)}\n`, 'utf8');
+
+    const { findMissingPluginRuntimeDependencies } = await import('@electron/utils/plugin-install');
+    await expect(findMissingPluginRuntimeDependencies(targetDir)).resolves.toEqual(['runtime-helper']);
+  });
+
   it('keeps an incomplete installed plugin when no bundled repair source exists', async () => {
     const targetDir = join(paths.stateDir, 'extensions', 'clawx-openai-image');
     await createPluginFixture(targetDir, {
@@ -222,6 +267,35 @@ describe('plugin installer diagnostics', () => {
       installed: false,
       warning: expect.stringContaining('no bundled repair source is available: undici'),
     });
+    await expect(actualFs.access(join(targetDir, 'openclaw.plugin.json'))).resolves.toBeUndefined();
+  });
+
+  it('fails closed when a packaged startup cannot find the bundled source for an otherwise valid stale copy', async () => {
+    const pluginId = 'uclaw-video';
+    const targetDir = join(paths.stateDir, 'extensions', pluginId);
+    await createPluginFixture(targetDir, {
+      id: pluginId,
+      name: 'uclaw-video-plugin',
+      version: '0.1.0',
+    });
+    await writeManagedPluginMarker(targetDir, pluginId);
+
+    const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
+    const result = await ensurePluginInstalled(
+      pluginId,
+      [join(testRoot, 'missing-source')],
+      'UClaw Video',
+      { requireBundledSource: true },
+    );
+
+    expect(result).toMatchObject({
+      installed: false,
+      repairRequired: true,
+      code: 'bundled-source-missing',
+    });
+    expect(result.warning).toContain('repair/reinstall this UClaw package');
+    // The stale copy is preserved for an explicit repair/rollback, but is
+    // never reported as a successful startup install.
     await expect(actualFs.access(join(targetDir, 'openclaw.plugin.json'))).resolves.toBeUndefined();
   });
 
@@ -344,6 +418,36 @@ describe('plugin installer diagnostics', () => {
     expect(marker.contentFingerprint).toMatch(/^[a-f0-9]{64}$/u);
   });
 
+  it('refreshes a same-version plugin when an auxiliary runtime file changes', async () => {
+    const pluginId = 'uclaw-local-artifacts';
+    const sourceDir = join(testRoot, 'bundle', pluginId);
+    const targetDir = join(paths.stateDir, 'extensions', pluginId);
+    await createPluginFixture(sourceDir, {
+      id: pluginId,
+      name: 'uclaw-local-artifacts-plugin',
+      version: '2.0.0',
+    });
+    await actualFs.writeFile(join(sourceDir, 'workspace-http-preview.mjs'), 'export const revision = 1;\n', 'utf8');
+
+    const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
+    await expect(ensurePluginInstalled(pluginId, [sourceDir], 'UClaw Local Artifacts'))
+      .resolves.toEqual({ installed: true });
+    await expect(actualFs.readFile(join(targetDir, 'workspace-http-preview.mjs'), 'utf8'))
+      .resolves.toContain('revision = 1');
+
+    // Keep package/manifest/entry versions and contents unchanged; only an
+    // imported sibling module changes. The recursive fingerprint must force a
+    // refresh instead of treating this as an already-installed same-version copy.
+    await actualFs.writeFile(join(sourceDir, 'workspace-http-preview.mjs'), 'export const revision = 2;\n', 'utf8');
+    await expect(ensurePluginInstalled(pluginId, [sourceDir], 'UClaw Local Artifacts'))
+      .resolves.toEqual({ installed: true });
+    await expect(actualFs.readFile(join(targetDir, 'workspace-http-preview.mjs'), 'utf8'))
+      .resolves.toContain('revision = 2');
+    expect(mockLoggerInfo).toHaveBeenCalledWith(
+      '[plugin] Refreshing UClaw Local Artifacts plugin: bundled content changed without version bump',
+    );
+  });
+
   it.each([
     ['clawx-openai-image', 'clawx-openai-image-plugin', 'UClaw OpenAI Image'],
     ['uclaw-video', 'uclaw-video-plugin', 'UClaw Video'],
@@ -434,6 +538,44 @@ describe('plugin installer diagnostics', () => {
     await expect(actualFs.readFile(join(targetDir, 'package.json'), 'utf8')).resolves.toBe(before);
   });
 
+  it('fails closed during packaged startup when a ClawX marker is malformed', async () => {
+    const pluginId = 'uclaw-video';
+    const sourceDir = join(testRoot, 'bundle', pluginId);
+    const targetDir = join(paths.stateDir, 'extensions', pluginId);
+    await createPluginFixture(sourceDir, {
+      id: pluginId,
+      name: 'uclaw-video-plugin',
+      version: '0.2.0',
+    });
+    await createPluginFixture(targetDir, {
+      id: pluginId,
+      name: 'uclaw-video-plugin',
+      version: '0.1.0',
+    });
+    await actualFs.writeFile(join(targetDir, '.uclaw-managed-plugin.json'), '{broken', 'utf8');
+
+    const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
+    const result = await ensurePluginInstalled(
+      pluginId,
+      [sourceDir],
+      'UClaw Video',
+      { requireBundledSource: true },
+    );
+
+    expect(result).toMatchObject({
+      installed: false,
+      repairRequired: true,
+      code: 'bundled-source-invalid',
+      ownership: {
+        status: 'indeterminate',
+        evidence: 'invalid-marker',
+        code: 'managed_marker_invalid',
+      },
+    });
+    await expect(actualFs.readFile(join(targetDir, 'package.json'), 'utf8'))
+      .resolves.toContain('0.1.0');
+  });
+
   it('refuses cleanup of an unowned same-name plugin and removes a marked managed one', async () => {
     const pluginId = 'parallel';
     const sourceDir = join(testRoot, 'bundle', pluginId);
@@ -470,6 +612,40 @@ describe('plugin installer diagnostics', () => {
       code: 'removed',
     });
     await expect(actualFs.access(targetDir)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('does not treat a retired uclaw id as owned without positive evidence', async () => {
+    // Retired ids remain valid names for user extensions.  Cleanup must not
+    // delete one solely because it has the historical `uclaw-*` prefix.
+    const pluginId = 'uclaw-artifact-guard';
+    const sourceDir = join(testRoot, 'bundle', pluginId);
+    const targetDir = join(paths.stateDir, 'extensions', pluginId);
+    await createPluginFixture(sourceDir, {
+      id: pluginId,
+      name: 'uclaw-artifact-guard-plugin',
+      version: '2.0.0',
+    });
+    await createPluginFixture(targetDir, {
+      id: pluginId,
+      name: 'user-retired-id-plugin',
+      version: '9.9.9',
+    });
+
+    const { removeManagedPluginInstall } = await import('@electron/utils/plugin-install');
+    await expect(removeManagedPluginInstall(pluginId, {
+      candidateSources: [sourceDir],
+      operation: 'retired-id-cleanup',
+    })).resolves.toMatchObject({
+      removed: false,
+      preserved: true,
+      code: 'ownership-conflict',
+      ownership: {
+        status: 'user-owned-or-unknown',
+        code: 'ownership_not_proven',
+      },
+    });
+    await expect(actualFs.readFile(join(targetDir, 'package.json'), 'utf8'))
+      .resolves.toContain('user-retired-id-plugin');
   });
 
   it.each([

@@ -28,11 +28,21 @@ function removeProcessExitListenersAddedSince(baseline: readonly ProcessExitList
 }
 
 const {
+  mockChmodSync,
   mockExistsSync,
+  mockMkdirSync,
   mockIsPackagedGetter,
+  mockSymlinkSync,
+  mockUnlinkSync,
+  mockAppName,
 } = vi.hoisted(() => ({
+  mockChmodSync: vi.fn<(path: string, mode: number) => void>(),
   mockExistsSync: vi.fn<(path: string) => boolean>(),
+  mockMkdirSync: vi.fn(),
   mockIsPackagedGetter: { value: false },
+  mockSymlinkSync: vi.fn(),
+  mockUnlinkSync: vi.fn(),
+  mockAppName: { value: 'UClaw' },
 }));
 
 function setPlatform(platform: string) {
@@ -43,10 +53,18 @@ vi.mock('node:fs', async () => {
   const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
   return {
     ...actual,
+    chmodSync: mockChmodSync,
     existsSync: mockExistsSync,
+    mkdirSync: mockMkdirSync,
+    symlinkSync: mockSymlinkSync,
+    unlinkSync: mockUnlinkSync,
     default: {
       ...actual,
+      chmodSync: mockChmodSync,
       existsSync: mockExistsSync,
+      mkdirSync: mockMkdirSync,
+      symlinkSync: mockSymlinkSync,
+      unlinkSync: mockUnlinkSync,
     },
   };
 });
@@ -56,7 +74,7 @@ vi.mock('electron', () => ({
     get isPackaged() {
       return mockIsPackagedGetter.value;
     },
-    getName: () => 'ClawX',
+    getName: () => mockAppName.value,
   },
 }));
 
@@ -83,7 +101,12 @@ function setExecPath(execPath: string) {
 
 function resetOpenClawCliMocks() {
   vi.resetModules();
+  mockChmodSync.mockReset();
   mockExistsSync.mockReset();
+  mockMkdirSync.mockReset();
+  mockSymlinkSync.mockReset();
+  mockUnlinkSync.mockReset();
+  mockAppName.value = 'UClaw';
   mockIsPackagedGetter.value = false;
   setPlatform(originalPlatform);
   setResourcesPath(originalResourcesPath);
@@ -261,24 +284,31 @@ describe('getOpenClawEmbeddedForkSpec', () => {
     resetOpenClawCliMocks();
   });
 
-  it('uses the packaged macOS Helper executable instead of the visible app executable', async () => {
-    const execPath = '/Applications/ClawX.app/Contents/MacOS/ClawX';
+  it('launches packaged macOS UClaw Helper with ACP args without chmod-ing the app bundle', async () => {
+    // Electron can report the npm/package name (`clawx`) here.  The bundle
+    // name is authoritative and must still resolve UClaw Helper.
+    mockAppName.value = 'clawx';
+    const execPath = '/Applications/UClaw.app/Contents/MacOS/UClaw';
     const helperPath = join(
       dirname(execPath),
       '../Frameworks',
-      'ClawX Helper.app',
+      'UClaw Helper.app',
       'Contents/MacOS',
-      'ClawX Helper',
+      'UClaw Helper',
     );
     setPlatform('darwin');
     mockIsPackagedGetter.value = true;
-    setResourcesPath('/Applications/ClawX.app/Contents/Resources');
+    setResourcesPath('/Applications/UClaw.app/Contents/Resources');
     setExecPath(execPath);
     mockExistsSync.mockImplementation((p: string) => p === helperPath);
 
     const { getOpenClawEmbeddedForkSpec } = await import('@electron/utils/openclaw-cli');
     const spec = getOpenClawEmbeddedForkSpec(['acp']);
 
+    expect(mockExistsSync).toHaveBeenCalledWith(helperPath);
+    expect(mockExistsSync).not.toHaveBeenCalledWith(expect.stringContaining('clawx Helper'));
+    expect(mockChmodSync).not.toHaveBeenCalled();
+    expect(spec.args).toEqual(['acp']);
     expect(spec).toMatchObject({
       modulePath: mockedEntryPath,
       args: ['acp'],
@@ -298,6 +328,28 @@ describe('getOpenClawEmbeddedForkSpec', () => {
     });
   });
 
+  it('keeps finding the legacy helper when an older ClawX bundle is still running', async () => {
+    mockAppName.value = 'clawx';
+    // A renamed UClaw.app can still contain the legacy helper framework when
+    // it was copied from an older installation. The fallback must not depend
+    // on the current app bundle being named ClawX.
+    const execPath = '/Applications/UClaw.app/Contents/MacOS/UClaw';
+    const helperPath = join(
+      dirname(execPath),
+      '../Frameworks',
+      'ClawX Helper.app',
+      'Contents/MacOS',
+      'ClawX Helper',
+    );
+    setPlatform('darwin');
+    mockIsPackagedGetter.value = true;
+    setExecPath(execPath);
+    mockExistsSync.mockImplementation((p: string) => p === helperPath);
+
+    const { getOpenClawEmbeddedForkSpec } = await import('@electron/utils/openclaw-cli');
+    expect(getOpenClawEmbeddedForkSpec(['acp']).options.execPath).toBe(helperPath);
+  });
+
   it('uses Electron Node mode for dev embedded launches even when PATH contains an older Node', async () => {
     const execPath = 'C:\\workspace\\ClawX\\node_modules\\electron\\dist\\electron.exe';
     setPlatform('win32');
@@ -314,15 +366,44 @@ describe('getOpenClawEmbeddedForkSpec', () => {
   });
 
   it('fails packaged macOS embedded launch when the Helper executable is missing', async () => {
-    const execPath = '/Applications/ClawX.app/Contents/MacOS/ClawX';
+    const execPath = '/Applications/UClaw.app/Contents/MacOS/UClaw';
     setPlatform('darwin');
     mockIsPackagedGetter.value = true;
-    setResourcesPath('/Applications/ClawX.app/Contents/Resources');
+    setResourcesPath('/Applications/UClaw.app/Contents/Resources');
     setExecPath(execPath);
     mockExistsSync.mockReturnValue(false);
 
     const { getOpenClawEmbeddedForkSpec } = await import('@electron/utils/openclaw-cli');
 
-    expect(() => getOpenClawEmbeddedForkSpec(['acp'])).toThrow('ClawX Helper executable not found');
+    expect(() => getOpenClawEmbeddedForkSpec(['acp'])).toThrow('UClaw Helper executable not found');
+    expect(mockExistsSync).not.toHaveBeenCalledWith(expect.stringContaining('clawx Helper'));
+  });
+});
+
+describe('installOpenClawCli (macOS packaged)', () => {
+  beforeEach(() => {
+    resetOpenClawCliMocks();
+    setPlatform('darwin');
+    mockIsPackagedGetter.value = true;
+    setResourcesPath('/Applications/UClaw.app/Contents/Resources');
+  });
+
+  afterEach(() => {
+    resetOpenClawCliMocks();
+  });
+
+  it('does not chmod the bundled wrapper inside a read-only app bundle', async () => {
+    const wrapperPath = join('/Applications/UClaw.app/Contents/Resources', 'cli', 'openclaw');
+    mockExistsSync.mockImplementation((p: string) => p === wrapperPath);
+
+    const { installOpenClawCli } = await import('@electron/utils/openclaw-cli');
+    const result = await installOpenClawCli();
+
+    expect(result.success).toBe(true);
+    expect(mockSymlinkSync).toHaveBeenCalledWith(
+      wrapperPath,
+      expect.stringMatching(/[\\/]\.local[\\/]bin[\\/]openclaw$/u),
+    );
+    expect(mockChmodSync).not.toHaveBeenCalled();
   });
 });

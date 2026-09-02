@@ -169,6 +169,20 @@ describe('plugin installer asynchronous filesystem retries', () => {
       return JSON.stringify({ entry: 'index.mjs', id: 'fixture-plugin', version: '1.0.0' });
     });
     fsPromises.readdir.mockResolvedValue([{ name: 'index.mjs' }]);
+    // cpAsyncSafe performs an lstat-first walk so bundled mirrors cannot
+    // dereference symlinks.  Model the fixture's source directory and file
+    // explicitly; the default ENOENT lstat mock is still useful for the
+    // target/ownership probes above.
+    fsPromises.lstat.mockImplementation(async (filePath: string) => {
+      const normalized = String(filePath).replace(/^\\\\\?\\/, '').replace(/\\\\/g, '/');
+      if (normalized === sourceDir.replace(/\\\\/g, '/')) {
+        return { isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false };
+      }
+      if (normalized === `${sourceDir}\\index.mjs`.replace(/\\\\/g, '/')) {
+        return { isDirectory: () => false, isFile: () => true, isSymbolicLink: () => false };
+      }
+      throw errno('ENOENT');
+    });
     fsPromises.copyFile.mockRejectedValue(errno('EIO'));
 
     const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');

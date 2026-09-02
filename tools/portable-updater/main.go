@@ -22,6 +22,13 @@ const (
 	defaultDataDirName = "UClawData"
 	backupDirName      = ".uclaw-update-backups"
 	resultSuffix       = ".result.json"
+	updatesDirName     = "updates"
+	tasksDirName       = "tasks"
+	stagingDirName     = "staging"
+	readyDirName       = "ready"
+	logsDirName        = "logs"
+	taskFilePrefix     = "portable-update-"
+	taskFileSuffix     = ".json"
 	// Antivirus and Explorer can retain a directory handle for tens of seconds
 	// after Electron exits. Keep the update and rollback windows symmetric so a
 	// recoverable lock never turns into a half-applied installation.
@@ -85,10 +92,11 @@ func (e *updateFailure) Unwrap() error {
 }
 
 type updater struct {
-	task     updateTask
-	taskPath string
-	logFile  *os.File
-	progress *progressReporter
+	task      updateTask
+	taskPath  string
+	workspace *taskWorkspace
+	logFile   *os.File
+	progress  *progressReporter
 }
 
 type replacementCopyProgress struct {
@@ -146,31 +154,61 @@ func main() {
 }
 
 func run(taskPath string) int {
-	task, err := readTask(taskPath)
 	progress := newProgressReporter()
 	defer progress.Close()
 
-	u := &updater{task: task, taskPath: taskPath, progress: progress}
-	if task.LogPath != "" {
-		if logFile, openErr := openLog(task.LogPath); openErr == nil {
-			u.logFile = logFile
-			defer logFile.Close()
-		}
+	normalizedTaskPath, pathErr := normalizeAbsoluteTaskPath(taskPath)
+	u := &updater{taskPath: normalizedTaskPath, progress: progress}
+	if pathErr != nil {
+		u.logf("invalid task path: %v", pathErr)
+		progress.Fail("更新失败", pathErr.Error())
+		return 1
 	}
+	if err := validateTaskFilePath(normalizedTaskPath); err != nil {
+		u.logf("invalid task path: %v", err)
+		progress.Fail("更新失败", err.Error())
+		return 1
+	}
+
+	task, err := readTask(normalizedTaskPath)
 
 	if err != nil {
 		u.logf("failed to read task: %v", err)
 		progress.Fail("更新失败", err.Error())
-		u.writeResult(updateResult{Success: false, Error: err.Error()})
+		// Do not write taskPath+.result.json when the task could not be read.
+		// At this point there is no trusted task payload to establish the
+		// update workspace, and a caller-controlled path must not become an
+		// arbitrary write primitive.
 		return 1
 	}
-	if err := validateTask(&task); err != nil {
+	if err := validateTaskAtPath(&task, normalizedTaskPath); err != nil {
 		u.logf("invalid task: %v", err)
 		progress.Fail("更新失败", err.Error())
 		u.writeResult(updateResult{Success: false, Error: err.Error(), TargetVersion: task.TargetVersion})
 		return 1
 	}
 	u.task = task
+	if workspace, workspaceErr := resolveTaskWorkspace(normalizedTaskPath); workspaceErr == nil {
+		u.workspace = &workspace
+	} else {
+		// validateTaskAtPath already resolved this successfully. Keep the guard
+		// explicit so a future change cannot accidentally run without the
+		// trusted workspace context.
+		u.logf("failed to retain update workspace: %v", workspaceErr)
+		progress.Fail("更新失败", workspaceErr.Error())
+		return 1
+	}
+	// Do not open a caller-supplied log path until every task field has passed
+	// validation. A tampered task must not be able to create directories or
+	// append to an arbitrary file before we reject it.
+	if task.LogPath != "" {
+		if logFile, openErr := openLog(task.LogPath); openErr == nil {
+			u.logFile = logFile
+			defer logFile.Close()
+		} else {
+			u.logf("failed to open update log: %v", openErr)
+		}
+	}
 
 	u.logf("portable update started: version=%s root=%s zip=%s", task.TargetVersion, task.RootDir, task.ZipPath)
 	progress.Update(progressState{
@@ -180,6 +218,15 @@ func run(taskPath string) int {
 	})
 	result := updateResult{TargetVersion: task.TargetVersion}
 	if task.ParentPID > 0 {
+		if err := validateParentPID(task.ParentPID, task.LaunchPath); err != nil {
+			err = fmt.Errorf("refusing to wait for parent process: %w", err)
+			u.logf("portable update aborted before waiting for parent: %v", err)
+			progress.Fail("更新失败", err.Error())
+			result.Success = false
+			result.Error = err.Error()
+			u.writeResult(result)
+			return 1
+		}
 		progress.Update(progressState{
 			Title:   "正在关闭旧版本",
 			Detail:  "等待 UClaw 完全退出，随后开始替换文件。",
@@ -187,7 +234,7 @@ func run(taskPath string) int {
 		})
 		if err := waitForParentExit(task.ParentPID, 45*time.Second, func(format string, args ...any) {
 			u.logf(format, args...)
-		}); err != nil {
+		}, task.LaunchPath); err != nil {
 			err = fmt.Errorf("old UClaw did not exit; update was not started: %w", err)
 			u.logf("portable update aborted before file replacement: %v", err)
 			progress.Fail("更新失败", err.Error())
@@ -245,12 +292,349 @@ func readTask(path string) (updateTask, error) {
 	return task, nil
 }
 
+// validateTaskFilePath establishes the trust anchor used by all paths in a
+// task. Electron writes tasks as direct children of an updates/tasks
+// directory; accepting a symlink or an arbitrary filename here would let a
+// caller choose a different workspace and then smuggle destructive paths in
+// the JSON payload.
+func validateTaskFilePath(path string) error {
+	normalized, err := normalizeAbsoluteTaskPath(path)
+	if err != nil {
+		return err
+	}
+	name := filepath.Base(normalized)
+	if !strings.HasPrefix(name, taskFilePrefix) || !strings.HasSuffix(name, taskFileSuffix) {
+		return fmt.Errorf("task file must be named %s*.json", taskFilePrefix)
+	}
+	tasksDir := filepath.Dir(normalized)
+	if !taskPathNamesEqual(filepath.Base(tasksDir), tasksDirName) {
+		return fmt.Errorf("task file must be inside %s directory", tasksDirName)
+	}
+	updatesRoot := filepath.Dir(tasksDir)
+	if !taskPathNamesEqual(filepath.Base(updatesRoot), updatesDirName) {
+		return fmt.Errorf("task file must be inside an %s workspace", updatesDirName)
+	}
+	if err := validateNoSymlinkComponents(updatesRoot, normalized, "task path"); err != nil {
+		return err
+	}
+	info, err := os.Lstat(normalized)
+	if err != nil {
+		return fmt.Errorf("task file is not available: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return errors.New("task file must be a regular file")
+	}
+	return nil
+}
+
+type taskWorkspace struct {
+	taskPath    string
+	updatesRoot string
+	tasksDir    string
+	stagingRoot string
+	readyRoot   string
+	logsRoot    string
+	stamp       string
+}
+
+func resolveTaskWorkspace(taskPath string) (taskWorkspace, error) {
+	normalized, err := normalizeAbsoluteTaskPath(taskPath)
+	if err != nil {
+		return taskWorkspace{}, err
+	}
+	if err := validateTaskFilePath(normalized); err != nil {
+		return taskWorkspace{}, err
+	}
+	tasksDir := filepath.Dir(normalized)
+	updatesRoot := filepath.Dir(tasksDir)
+	runtimeRoot := filepath.Dir(updatesRoot)
+	name := filepath.Base(normalized)
+	stamp := strings.TrimSuffix(strings.TrimPrefix(name, taskFilePrefix), taskFileSuffix)
+	if stamp == "" {
+		return taskWorkspace{}, errors.New("task file has an empty update attempt id")
+	}
+	return taskWorkspace{
+		taskPath:    normalized,
+		updatesRoot: updatesRoot,
+		tasksDir:    tasksDir,
+		stagingRoot: filepath.Join(updatesRoot, stagingDirName),
+		readyRoot:   filepath.Join(updatesRoot, readyDirName),
+		logsRoot:    filepath.Join(runtimeRoot, logsDirName),
+		stamp:       stamp,
+	}, nil
+}
+
+// validateTaskAtPath applies the regular task checks and then binds all
+// mutable workspace paths to the updates directory that contains the task.
+// Keeping this separate from validateTask preserves small in-process unit
+// helpers while making the external helper entry point fail closed.
+func validateTaskAtPath(task *updateTask, taskPath string) error {
+	if err := validateTask(task); err != nil {
+		return err
+	}
+	workspace, err := resolveTaskWorkspace(taskPath)
+	if err != nil {
+		return err
+	}
+	if taskPathsOverlap(workspace.updatesRoot, task.RootDir) {
+		return errors.New("update workspace must be outside rootDir")
+	}
+	if err := validateNoSymlinkComponents(workspace.updatesRoot, workspace.updatesRoot, "update workspace"); err != nil {
+		return err
+	}
+	if err := validateTrustedZipPath(task.ZipPath, workspace); err != nil {
+		return err
+	}
+	if task.StagingDir == "" {
+		task.StagingDir = filepath.Join(workspace.stagingRoot, workspace.stamp)
+	}
+	if err := validateTrustedWorkspacePath(task.StagingDir, workspace.stagingRoot, "stagingDir", taskPathStaging, workspace.stamp); err != nil {
+		return err
+	}
+	if err := validateTrustedWorkspacePath(task.ReadyPath, workspace.readyRoot, "readyPath", taskPathMarker, taskFilePrefix+workspace.stamp+".ready.json"); err != nil {
+		return err
+	}
+	if task.LogPath != "" {
+		if err := validateTrustedWorkspacePath(task.LogPath, workspace.logsRoot, "logPath", taskPathLog, "portable-updater-"+workspace.stamp+".log"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateTrustedZipPath(path string, workspace taskWorkspace) error {
+	normalized, err := normalizeAbsoluteTaskPath(path)
+	if err != nil {
+		return fmt.Errorf("zipPath is invalid: %w", err)
+	}
+	if !taskPathsEqual(filepath.Dir(normalized), workspace.updatesRoot) {
+		return errors.New("zipPath must be a direct file in the update workspace")
+	}
+	if err := validateNoSymlinkComponents(workspace.updatesRoot, normalized, "zipPath"); err != nil {
+		return err
+	}
+	info, err := os.Lstat(normalized)
+	if err != nil {
+		return fmt.Errorf("zipPath is not available: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return errors.New("zipPath must be a regular file")
+	}
+	return nil
+}
+
+func validateTrustedWorkspacePath(path string, trustedRoot string, label string, kind taskPathKind, expectedBase string) error {
+	normalized, err := normalizeAbsoluteTaskPath(path)
+	if err != nil {
+		return fmt.Errorf("%s is invalid: %w", label, err)
+	}
+	root, err := normalizeAbsoluteTaskPath(trustedRoot)
+	if err != nil {
+		return fmt.Errorf("trusted %s root is invalid: %w", label, err)
+	}
+	if !taskPathNamesEqual(filepath.Base(normalized), expectedBase) {
+		return fmt.Errorf("%s must use the current update attempt name", label)
+	}
+	if !taskPathNamesEqual(filepath.Dir(normalized), filepath.Clean(root)) {
+		return fmt.Errorf("%s must be inside the trusted update workspace", label)
+	}
+	if err := validateNoSymlinkComponents(root, normalized, label); err != nil {
+		return err
+	}
+	if info, statErr := os.Lstat(normalized); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s must not be a symlink", label)
+		}
+		if kind == taskPathStaging {
+			if !info.IsDir() {
+				return fmt.Errorf("%s must be a directory when it already exists", label)
+			}
+		} else if info.IsDir() {
+			return fmt.Errorf("%s must be a file path", label)
+		}
+	} else if !os.IsNotExist(statErr) {
+		return fmt.Errorf("%s cannot be inspected: %w", label, statErr)
+	}
+	return nil
+}
+
+// validateNoSymlinkComponents rejects symlinks in every existing component
+// between the filesystem root and target. It also checks the nearest existing
+// ancestor when target (or its trusted root) has not been created yet, which
+// lets callers safely validate paths before MkdirAll.
+func validateNoSymlinkComponents(trustedRoot string, target string, label string) error {
+	root, err := normalizeAbsoluteTaskPath(trustedRoot)
+	if err != nil {
+		return fmt.Errorf("%s trusted root is invalid: %w", label, err)
+	}
+	path, err := normalizeAbsoluteTaskPath(target)
+	if err != nil {
+		return fmt.Errorf("%s is invalid: %w", label, err)
+	}
+	if !taskPathContains(normalizeTaskPathForComparison(root), normalizeTaskPathForComparison(path)) && !taskPathsEqual(root, path) {
+		return fmt.Errorf("%s is outside its trusted root", label)
+	}
+	if err := inspectPathComponentsWithin(path, root, label); err != nil {
+		return err
+	}
+	return nil
+}
+
+func inspectPathComponents(path string, label string) error {
+	return inspectPathComponentsWithin(path, "", label)
+}
+
+// inspectPathComponentsWithin checks every component from trustedRoot through
+// target.  A bounded walk is important on macOS, where system paths such as
+// /var are symlinks by design; callers should reject links in the task/update
+// workspace itself without rejecting an OS-managed ancestor above it.
+func inspectPathComponentsWithin(path string, trustedRoot string, label string) error {
+	normalizedPath, err := normalizeAbsoluteTaskPath(path)
+	if err != nil {
+		return fmt.Errorf("%s is invalid: %w", label, err)
+	}
+	base := normalizedPath
+	if strings.TrimSpace(trustedRoot) != "" {
+		base, err = normalizeAbsoluteTaskPath(trustedRoot)
+		if err != nil {
+			return fmt.Errorf("%s trusted root is invalid: %w", label, err)
+		}
+		if !taskPathContains(normalizeTaskPathForComparison(base), normalizeTaskPathForComparison(normalizedPath)) && !taskPathsEqual(base, normalizedPath) {
+			return fmt.Errorf("%s is outside its trusted root", label)
+		}
+	} else {
+		// With no explicit boundary, retain the historical helper semantics and
+		// inspect from the filesystem/volume root.
+		volume := filepath.VolumeName(normalizedPath)
+		if volume != "" {
+			base = filepath.Join(volume, string(filepath.Separator))
+		} else {
+			base = string(filepath.Separator)
+		}
+	}
+
+	// Find the nearest existing ancestor of the trusted root. Components above
+	// this anchor are outside the caller-controlled workspace and are not
+	// treated as part of the update path. This matters on macOS, where /var is
+	// a deliberate symlink to /private/var.
+	anchor := base
+	var missingBase []string
+	for {
+		info, statErr := os.Lstat(anchor)
+		if statErr == nil {
+			isSymlink := info.Mode()&os.ModeSymlink != 0
+			if isSymlink {
+				// A symlink is unsafe when it is the trusted root itself. If the
+				// trusted root has not been created yet, however, this can be an
+				// OS-managed alias above the caller-controlled workspace (notably
+				// macOS /var -> /private/var). Only a narrowly allow-listed system
+				// alias is accepted; an arbitrary link (for example /tmp/link ->
+				// another volume) would otherwise let a missing update workspace be
+				// redirected outside the caller's intended path.
+				if len(missingBase) == 0 || taskPathsEqual(anchor, base) {
+					return fmt.Errorf("%s contains a symlink: %s", label, anchor)
+				}
+				resolvedInfo, resolveErr := os.Stat(anchor)
+				if resolveErr != nil {
+					return fmt.Errorf("%s cannot inspect symlink ancestor %s: %w", label, anchor, resolveErr)
+				}
+				if !resolvedInfo.IsDir() {
+					return fmt.Errorf("%s has a non-directory trusted root ancestor: %s", label, anchor)
+				}
+				resolvedAnchor, resolveErr := filepath.EvalSymlinks(anchor)
+				if resolveErr != nil {
+					return fmt.Errorf("%s cannot resolve symlink ancestor %s: %w", label, anchor, resolveErr)
+				}
+				resolvedAnchor, resolveErr = normalizeAbsoluteTaskPath(resolvedAnchor)
+				if resolveErr != nil || !isAllowedSystemPathAlias(anchor, resolvedAnchor) {
+					return fmt.Errorf("%s contains an untrusted symlink: %s", label, anchor)
+				}
+			} else if !info.IsDir() {
+				return fmt.Errorf("%s has a non-directory trusted root ancestor: %s", label, anchor)
+			}
+			break
+		}
+		if !os.IsNotExist(statErr) {
+			return fmt.Errorf("%s cannot be inspected: %w", label, statErr)
+		}
+		parent := filepath.Dir(anchor)
+		if parent == anchor {
+			return fmt.Errorf("%s has no inspectable filesystem root", label)
+		}
+		missingBase = append(missingBase, filepath.Base(anchor))
+		anchor = parent
+	}
+
+	// Walk from the nearest existing anchor down through the trusted root and
+	// finally to the target. Unlike the former early-break implementation this
+	// checks an existing target's *entire* ancestor chain, so a middle symlink
+	// or junction cannot bypass validation.
+	components := make([]string, 0, len(missingBase)+8)
+	for index := len(missingBase) - 1; index >= 0; index-- {
+		components = append(components, missingBase[index])
+	}
+	relTarget, relErr := filepath.Rel(base, normalizedPath)
+	if relErr != nil || filepath.IsAbs(relTarget) || relTarget == ".." || strings.HasPrefix(relTarget, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("%s is outside its trusted root", label)
+	}
+	if relTarget != "." && relTarget != "" {
+		components = append(components, strings.Split(relTarget, string(filepath.Separator))...)
+	}
+
+	current := anchor
+	for index, component := range components {
+		if component == "" || component == "." {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, statErr := os.Lstat(current)
+		if statErr != nil {
+			if os.IsNotExist(statErr) {
+				// Once a component is absent, descendants cannot currently be
+				// traversed. They will be revalidated after creation by callers
+				// that perform MkdirAll/RemoveAll.
+				return nil
+			}
+			return fmt.Errorf("%s cannot be inspected: %w", label, statErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s contains a symlink: %s", label, current)
+		}
+		if index < len(components)-1 && !info.IsDir() {
+			return fmt.Errorf("%s has a non-directory parent: %s", label, current)
+		}
+	}
+	return nil
+}
+
+// isAllowedSystemPathAlias identifies the small set of aliases Apple ships at
+// the filesystem root. These aliases may occur above a not-yet-created runtime
+// workspace (for example /var/folders/...); arbitrary user-created symlinks
+// must remain rejected because they can redirect update writes to another
+// volume or installation.
+func isAllowedSystemPathAlias(aliasPath string, resolvedPath string) bool {
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	aliasPath = filepath.Clean(aliasPath)
+	resolvedPath = filepath.Clean(resolvedPath)
+	for _, alias := range []string{"/var", "/tmp", "/etc"} {
+		expected := filepath.Join("/private", strings.TrimPrefix(alias, string(filepath.Separator)))
+		if taskPathsEqual(aliasPath, alias) && taskPathsEqual(resolvedPath, expected) {
+			return true
+		}
+	}
+	return false
+}
+
 func validateTask(task *updateTask) error {
 	task.ZipPath = strings.TrimSpace(task.ZipPath)
 	task.RootDir = strings.TrimSpace(task.RootDir)
 	task.DataDirName = strings.TrimSpace(task.DataDirName)
 	task.LaunchPath = strings.TrimSpace(task.LaunchPath)
 	task.TargetVersion = strings.TrimSpace(task.TargetVersion)
+	task.LogPath = strings.TrimSpace(task.LogPath)
+	task.StagingDir = strings.TrimSpace(task.StagingDir)
 	task.ReadyPath = strings.TrimSpace(task.ReadyPath)
 	task.Sha512 = strings.ToLower(strings.TrimSpace(task.Sha512))
 	if task.DataDirName == "" {
@@ -265,29 +649,559 @@ func validateTask(task *updateTask) error {
 	if !filepath.IsAbs(task.ReadyPath) {
 		return errors.New("readyPath must be absolute")
 	}
+	if task.StagingDir != "" && !filepath.IsAbs(task.StagingDir) {
+		return errors.New("stagingDir must be absolute")
+	}
+	if task.LogPath != "" && !filepath.IsAbs(task.LogPath) {
+		return errors.New("logPath must be absolute")
+	}
+	// Keep the paths used for all subsequent filesystem operations stable and
+	// free of lexical `..` components. Symlink-aware containment checks below
+	// still use the original filesystem identity, so this normalization does
+	// not turn an escape into an in-root path by string manipulation.
+	for _, pathField := range []struct {
+		name  string
+		value *string
+	}{
+		{name: "zipPath", value: &task.ZipPath},
+		{name: "rootDir", value: &task.RootDir},
+		{name: "launchPath", value: &task.LaunchPath},
+		{name: "readyPath", value: &task.ReadyPath},
+		{name: "stagingDir", value: &task.StagingDir},
+		{name: "logPath", value: &task.LogPath},
+	} {
+		value := *pathField.value
+		if value == "" {
+			continue
+		}
+		normalized, normalizeErr := normalizeAbsoluteTaskPath(value)
+		if normalizeErr != nil {
+			return fmt.Errorf("%s is invalid: %w", pathField.name, normalizeErr)
+		}
+		*pathField.value = normalized
+	}
 	if task.DataDirName == "." || task.DataDirName == ".." || strings.ContainsAny(task.DataDirName, `/\`) {
 		return errors.New("dataDirName must be a single directory name")
 	}
 	if task.Size <= 0 {
 		return errors.New("size must be positive")
 	}
+	if task.ParentPID < 0 {
+		return errors.New("parentPid must be zero or a positive process id")
+	}
 	if task.Sha512 == "" {
 		return errors.New("sha512 is required")
 	}
-	if _, err := os.Stat(task.ZipPath); err != nil {
-		return fmt.Errorf("zip does not exist: %w", err)
+	zipInfo, zipErr := os.Lstat(task.ZipPath)
+	if zipErr != nil {
+		return fmt.Errorf("zip does not exist: %w", zipErr)
 	}
-	if info, err := os.Stat(task.RootDir); err != nil || !info.IsDir() {
-		if err != nil {
-			return fmt.Errorf("rootDir is not available: %w", err)
+	if zipInfo.Mode()&os.ModeSymlink != 0 || !zipInfo.Mode().IsRegular() {
+		return errors.New("zip must be a regular file")
+	}
+	rootInfo, rootErr := os.Lstat(task.RootDir)
+	if rootErr != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
+		if rootErr != nil {
+			return fmt.Errorf("rootDir is not available: %w", rootErr)
 		}
-		return errors.New("rootDir is not a directory")
+		return errors.New("rootDir must be a real directory")
 	}
-	if _, err := os.Stat(filepath.Join(task.RootDir, "portable.flag")); err != nil {
-		return errors.New("rootDir is missing portable.flag")
+	if runtime.GOOS == "darwin" {
+		// A macOS portable ZIP has a strict top-level contract. Do not infer
+		// portability from a lone app bundle or create missing state beside an
+		// installed /Applications app.
+		if task.DataDirName != defaultDataDirName {
+			return fmt.Errorf("dataDirName must be %s on macOS", defaultDataDirName)
+		}
+		if err := validateMacPortableDirectory(task.RootDir, "rootDir"); err != nil {
+			return err
+		}
+		dataPath := filepath.Join(task.RootDir, task.DataDirName)
+		dataInfo, dataErr := os.Lstat(dataPath)
+		if dataErr != nil || dataInfo.Mode()&os.ModeSymlink != 0 || !dataInfo.IsDir() {
+			return errors.New("rootDir is missing UClawData directory")
+		}
+		appPath := filepath.Join(task.RootDir, "UClaw.app")
+		appInfo, appErr := os.Lstat(appPath)
+		if appErr != nil || appInfo.Mode()&os.ModeSymlink != 0 || !appInfo.IsDir() {
+			return errors.New("rootDir is missing UClaw.app bundle")
+		}
+		for _, candidate := range []struct {
+			path  string
+			label string
+			info  os.FileInfo
+		}{
+			{path: task.RootDir, label: "rootDir"},
+			{path: dataPath, label: defaultDataDirName, info: dataInfo},
+			{path: appPath, label: "UClaw.app bundle", info: appInfo},
+		} {
+			if err := validateWritableDirectory(candidate.path, candidate.label, candidate.info); err != nil {
+				return err
+			}
+		}
+		if rel, relErr := filepath.Rel(appPath, task.LaunchPath); relErr != nil || rel == "." || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+			return errors.New("launchPath must be inside UClaw.app")
+		}
+	} else {
+		flagInfo, flagErr := os.Lstat(filepath.Join(task.RootDir, "portable.flag"))
+		if flagErr != nil {
+			return errors.New("rootDir is missing portable.flag")
+		}
+		if flagInfo.Mode()&os.ModeSymlink != 0 || !flagInfo.Mode().IsRegular() {
+			return errors.New("rootDir portable.flag must be a file")
+		}
 	}
 	if rel, err := filepath.Rel(task.RootDir, task.LaunchPath); err != nil || rel == "." || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
 		return errors.New("launchPath must be inside rootDir")
+	}
+	if err := validateTaskWorkspacePaths(task); err != nil {
+		return err
+	}
+	return nil
+}
+
+// normalizeAbsoluteTaskPath returns a stable lexical path for a task field.
+// It deliberately does not resolve symlinks: the caller still needs the
+// original path for filesystem operations, while the safety checks below
+// resolve both the lexical and filesystem identities independently.
+func normalizeAbsoluteTaskPath(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", errors.New("path is empty")
+	}
+	if !filepath.IsAbs(value) {
+		return "", errors.New("path must be absolute")
+	}
+	abs, err := filepath.Abs(value)
+	if err != nil {
+		return "", err
+	}
+	clean := filepath.Clean(abs)
+	if clean == "." || clean == string(filepath.Separator) {
+		return clean, nil
+	}
+	return clean, nil
+}
+
+type taskPathKind uint8
+
+const (
+	taskPathStaging taskPathKind = iota
+	taskPathMarker
+	taskPathLog
+)
+
+// validateTaskWorkspacePaths protects every path that the helper may create,
+// remove, or append to. The update root is never a valid workspace for these
+// paths: a modified task must not be able to make RemoveAll(stagingDir) erase
+// the installation, nor make the readiness marker/log alias user files.
+//
+// Both lexical and symlink-resolved identities are compared. The lexical
+// comparison blocks paths such as rootDir/link-out/marker even when the link
+// points elsewhere; the resolved comparison blocks an external symlink that
+// points back into rootDir. Missing paths are resolved through their nearest
+// existing ancestor so validation also covers paths that will be created later.
+func validateTaskWorkspacePaths(task *updateTask) error {
+	if task == nil {
+		return errors.New("task is nil")
+	}
+	rootDir := task.RootDir
+	if rootDir == "" {
+		return errors.New("rootDir is required before workspace validation")
+	}
+	// The downloaded archive's parent is the only workspace the helper should
+	// mutate.  Keeping this anchor in the generic validator protects direct
+	// in-process callers as well as the canonical task-file path used by run().
+	workspaceRoot, workspaceErr := normalizeAbsoluteTaskPath(filepath.Dir(task.ZipPath))
+	if workspaceErr != nil {
+		return fmt.Errorf("update workspace is invalid: %w", workspaceErr)
+	}
+	// The archive parent may legitimately be an ancestor of RootDir (for
+	// example, a legacy fixture keeps `portable/` beside `update.zip`).  We do
+	// not mutate that parent itself; each concrete staging/marker/log path is
+	// checked below for both positive workspace containment and RootDir overlap.
+
+	if task.StagingDir != "" {
+		if err := validateTaskWorkspacePathInRoot(task.StagingDir, "stagingDir", rootDir, workspaceRoot, taskPathStaging, false); err != nil {
+			return err
+		}
+	} else {
+		// The default staging directory is created beside the downloaded ZIP.
+		// Validate that parent before MkdirTemp so a ZIP hidden inside RootDir
+		// cannot turn the implicit staging location into an in-place delete.
+		stagingParent := filepath.Dir(task.ZipPath)
+		if err := validateTaskWorkspacePathInRoot(stagingParent, "stagingDir parent", rootDir, workspaceRoot, taskPathStaging, true); err != nil {
+			return err
+		}
+	}
+	if err := validateTaskWorkspacePathInRoot(task.ReadyPath, "readyPath", rootDir, workspaceRoot, taskPathMarker, false); err != nil {
+		return err
+	}
+	if task.LogPath != "" {
+		logRoot := workspaceRoot
+		if taskPathNamesEqual(filepath.Base(workspaceRoot), updatesDirName) {
+			logRoot = filepath.Join(filepath.Dir(workspaceRoot), logsDirName)
+		}
+		if err := validateTaskWorkspacePathInRoot(task.LogPath, "logPath", rootDir, logRoot, taskPathLog, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateTaskWorkspacePathInRoot combines the installation containment check
+// with a second, positive containment check against the archive/update
+// workspace.  A task cannot choose an unrelated absolute directory merely
+// because it is outside RootDir; all mutable paths must remain under the ZIP's
+// parent.  allowRoot is used only for the implicit staging parent, which is
+// never passed to RemoveAll itself (MkdirTemp creates a child there).
+func validateTaskWorkspacePathInRoot(path string, label string, rootDir string, workspaceRoot string, kind taskPathKind, allowRoot bool) error {
+	normalized, err := normalizeAbsoluteTaskPath(path)
+	if err != nil {
+		return fmt.Errorf("%s is invalid: %w", label, err)
+	}
+	workspaceNormalized, err := normalizeAbsoluteTaskPath(workspaceRoot)
+	if err != nil {
+		return fmt.Errorf("update workspace is invalid: %w", err)
+	}
+	if err := validateTaskWorkspacePath(normalized, label, rootDir, kind); err != nil {
+		return err
+	}
+	if !taskPathContains(workspaceNormalized, normalized) {
+		return fmt.Errorf("%s must be inside the update workspace", label)
+	}
+	if !allowRoot && taskPathsEqual(workspaceNormalized, normalized) {
+		return fmt.Errorf("%s must be below the update workspace", label)
+	}
+	if err := inspectPathComponentsWithin(normalized, workspaceNormalized, label); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateTaskWorkspacePath(path string, label string, rootDir string, kind taskPathKind) error {
+	normalized, err := normalizeAbsoluteTaskPath(path)
+	if err != nil {
+		return fmt.Errorf("%s is invalid: %w", label, err)
+	}
+	rootNormalized, err := normalizeAbsoluteTaskPath(rootDir)
+	if err != nil {
+		return fmt.Errorf("rootDir is invalid: %w", err)
+	}
+
+	// Compare the lexical paths first, then compare symlink-resolved paths.
+	// Checking both directions catches a candidate that is inside rootDir and a
+	// candidate that is an ancestor of rootDir (the latter would let RemoveAll
+	// delete the installation when used as stagingDir).
+	if taskPathsOverlap(normalized, rootNormalized) {
+		return fmt.Errorf("%s must be outside rootDir", label)
+	}
+	resolvedPath, resolveErr := canonicalTaskPath(normalized)
+	if resolveErr != nil {
+		return fmt.Errorf("%s cannot be resolved safely: %w", label, resolveErr)
+	}
+	resolvedRoot, resolveErr := canonicalTaskPath(rootNormalized)
+	if resolveErr != nil {
+		return fmt.Errorf("rootDir cannot be resolved safely: %w", resolveErr)
+	}
+	if taskPathsOverlap(resolvedPath, resolvedRoot) ||
+		taskPathsOverlap(normalized, resolvedRoot) ||
+		taskPathsOverlap(resolvedPath, rootNormalized) {
+		return fmt.Errorf("%s must be outside rootDir", label)
+	}
+
+	// Never remove a caller-supplied file/symlink as staging, and never follow
+	// a symlink when preparing the marker or opening the log. A missing target
+	// is fine; its parent is checked by canonicalTaskPath above.
+	if info, statErr := os.Lstat(normalized); statErr == nil {
+		switch kind {
+		case taskPathStaging:
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("%s must not be a symlink", label)
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("%s must be a directory when it already exists", label)
+			}
+		case taskPathMarker, taskPathLog:
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("%s must not be a symlink", label)
+			}
+			if info.IsDir() {
+				return fmt.Errorf("%s must be a file path", label)
+			}
+		}
+	} else if !os.IsNotExist(statErr) {
+		return fmt.Errorf("%s cannot be inspected: %w", label, statErr)
+	}
+	return nil
+}
+
+// canonicalTaskPath resolves an existing path, or the nearest existing
+// ancestor plus the unresolved suffix when the final path does not exist.
+// This catches symlink escapes without requiring the updater to create any
+// directory during validation.
+func canonicalTaskPath(path string) (string, error) {
+	normalized, err := normalizeAbsoluteTaskPath(path)
+	if err != nil {
+		return "", err
+	}
+	current := normalized
+	var suffix []string
+	for {
+		if _, statErr := os.Lstat(current); statErr == nil {
+			resolved, evalErr := filepath.EvalSymlinks(current)
+			if evalErr != nil {
+				return "", evalErr
+			}
+			resolved, evalErr = normalizeAbsoluteTaskPath(resolved)
+			if evalErr != nil {
+				return "", evalErr
+			}
+			for index := len(suffix) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, suffix[index])
+			}
+			return filepath.Clean(resolved), nil
+		} else if !os.IsNotExist(statErr) {
+			return "", statErr
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return current, nil
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+	}
+}
+
+func taskPathsOverlap(left string, right string) bool {
+	left = normalizeTaskPathForComparison(left)
+	right = normalizeTaskPathForComparison(right)
+	return taskPathContains(left, right) || taskPathContains(right, left)
+}
+
+func taskPathContains(base string, candidate string) bool {
+	relative, err := filepath.Rel(base, candidate)
+	if err != nil {
+		return false
+	}
+	if relative == "." || relative == "" {
+		return true
+	}
+	if filepath.IsAbs(relative) || relative == ".." {
+		return false
+	}
+	return !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func normalizeTaskPathForComparison(path string) string {
+	path = filepath.Clean(path)
+	// Windows is case-insensitive, and the default macOS volume is commonly
+	// case-insensitive as well. Treating Darwin conservatively here prevents a
+	// case-only alias from bypassing the containment guard on APFS/HFS+.
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		return strings.ToLower(path)
+	}
+	return path
+}
+
+func taskPathNamesEqual(left string, right string) bool {
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
+func taskPathsEqual(left string, right string) bool {
+	return normalizeTaskPathForComparison(left) == normalizeTaskPathForComparison(right)
+}
+
+func validateWritableDirectory(path string, label string, info os.FileInfo) error {
+	if info == nil {
+		var err error
+		info, err = os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("%s is not available: %w", label, err)
+		}
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", label)
+	}
+	if info.Mode().Perm()&0o222 == 0 || info.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("%s is not writable", label)
+	}
+	if err := directoryWriteAccess(path); err != nil {
+		return fmt.Errorf("%s is not writable: %w", label, err)
+	}
+	return nil
+}
+
+// validateMacPortableDirectory validates the on-disk top-level contract using
+// directory entry names rather than Stat(path). APFS/HFS+ can resolve a path
+// case-insensitively, so Stat alone would accept Portable.flag or uclawdata and
+// let a later replacement alias the wrong entry.
+func validateMacPortableDirectory(rootDir string, label string) error {
+	entries, err := os.ReadDir(rootDir)
+	if err != nil {
+		return fmt.Errorf("%s cannot be read: %w", label, err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	if err := validateMacTopLevelCaseCollisions(names); err != nil {
+		return fmt.Errorf("%s has unsafe top-level entries: %w", label, err)
+	}
+	if err := validateMacRequiredEntry(entries, "portable.flag", false, label); err != nil {
+		return err
+	}
+	if err := validateMacRequiredEntry(entries, defaultDataDirName, true, label); err != nil {
+		return err
+	}
+	if err := validateMacRequiredEntry(entries, "UClaw.app", true, label); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateMacRequiredEntry(entries []os.DirEntry, name string, wantDir bool, label string) error {
+	var found os.DirEntry
+	for _, entry := range entries {
+		if entry.Name() == name {
+			found = entry
+			break
+		}
+	}
+	if found == nil {
+		if wantDir {
+			return fmt.Errorf("%s is missing %s directory", label, name)
+		}
+		return fmt.Errorf("%s is missing %s", label, name)
+	}
+	if found.Type()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s %s must not be a symlink", label, name)
+	}
+	info, err := found.Info()
+	if err != nil {
+		return fmt.Errorf("cannot inspect %s %s: %w", label, name, err)
+	}
+	if wantDir {
+		if !info.IsDir() {
+			return fmt.Errorf("%s %s must be a directory", label, name)
+		}
+		return nil
+	}
+	if info.IsDir() || !info.Mode().IsRegular() {
+		return fmt.Errorf("%s %s must be a regular file", label, name)
+	}
+	return nil
+}
+
+// validateMacTopLevelCaseCollisions rejects names that would alias on the
+// default case-insensitive macOS filesystems. It also rejects case variants of
+// the reserved portable names even when no exact spelling is present.
+func validateMacTopLevelCaseCollisions(names []string) error {
+	reserved := []string{"portable.flag", defaultDataDirName, "UClaw.app", backupDirName}
+	for index, name := range names {
+		for _, expected := range reserved {
+			if name != expected && strings.EqualFold(name, expected) {
+				return fmt.Errorf("entry %q is a case variant of reserved name %q", name, expected)
+			}
+		}
+		for previous := 0; previous < index; previous++ {
+			if names[previous] != name && strings.EqualFold(names[previous], name) {
+				return fmt.Errorf("entries %q and %q collide by case", names[previous], name)
+			}
+		}
+	}
+	return nil
+}
+
+type macZipTopLevelEntry struct {
+	hasDirectEntry  bool
+	directIsDir     bool
+	directSymlink   bool
+	hasNestedEntry  bool
+	duplicateDirect bool
+}
+
+// Validate the archive before invoking ditto. On a case-insensitive volume,
+// ditto may collapse two case variants during extraction, making a post-copy
+// check too late to protect UClawData or the app bundle.
+func validateMacPortableZipEntries(files []*zip.File, dataDirName string) error {
+	if dataDirName != defaultDataDirName {
+		return fmt.Errorf("macOS portable data directory must be %s", defaultDataDirName)
+	}
+	entries := make(map[string]macZipTopLevelEntry)
+	names := make([]string, 0, len(files))
+	allPaths := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		normalized, err := normalizedZipEntryPath(file.Name)
+		if err != nil {
+			return err
+		}
+		pathKey := strings.ToLower(normalized)
+		if _, duplicate := allPaths[pathKey]; duplicate {
+			return fmt.Errorf("update archive contains duplicate or case-variant entry %q", file.Name)
+		}
+		allPaths[pathKey] = struct{}{}
+		topLevel := normalized
+		nested := false
+		if separator := strings.IndexByte(normalized, '/'); separator >= 0 {
+			topLevel = normalized[:separator]
+			nested = true
+		}
+		if _, exists := entries[topLevel]; !exists {
+			names = append(names, topLevel)
+		}
+		entry := entries[topLevel]
+		if nested {
+			entry.hasNestedEntry = true
+		} else {
+			if entry.hasDirectEntry {
+				entry.duplicateDirect = true
+			}
+			entry.hasDirectEntry = true
+			entry.directIsDir = file.FileInfo().IsDir()
+			entry.directSymlink = file.Mode()&os.ModeSymlink != 0
+		}
+		entries[topLevel] = entry
+	}
+	if err := validateMacTopLevelCaseCollisions(names); err != nil {
+		return fmt.Errorf("update archive has unsafe top-level entries: %w", err)
+	}
+	for _, required := range []struct {
+		name string
+		dir  bool
+	}{
+		{name: "portable.flag"},
+		{name: defaultDataDirName, dir: true},
+		{name: "UClaw.app", dir: true},
+	} {
+		entry, ok := entries[required.name]
+		if !ok {
+			if required.dir {
+				return fmt.Errorf("update archive is missing %s directory", required.name)
+			}
+			return fmt.Errorf("update archive is missing %s", required.name)
+		}
+		if entry.directSymlink {
+			return fmt.Errorf("update archive %s must not be a symlink", required.name)
+		}
+		if entry.duplicateDirect {
+			return fmt.Errorf("update archive %s appears more than once", required.name)
+		}
+		if required.dir {
+			if entry.hasDirectEntry && !entry.directIsDir {
+				return fmt.Errorf("update archive %s has a file/directory collision", required.name)
+			}
+			if !entry.directIsDir && !entry.hasNestedEntry {
+				return fmt.Errorf("update archive %s must be a directory", required.name)
+			}
+			continue
+		}
+		if !entry.hasDirectEntry || entry.directIsDir || entry.hasNestedEntry {
+			return fmt.Errorf("update archive %s must be a regular file", required.name)
+		}
 	}
 	return nil
 }
@@ -308,18 +1222,56 @@ func (u *updater) logf(format string, args ...any) {
 }
 
 func (u *updater) writeResult(result updateResult) {
+	if err := validateTaskResultPath(u.taskPath); err != nil {
+		u.logf("refusing to write update result: %v", err)
+		return
+	}
 	result.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	raw, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		u.logf("failed to marshal result: %v", err)
 		return
 	}
-	if err := os.WriteFile(u.taskPath+resultSuffix, append(raw, '\n'), 0o600); err != nil {
+	resultPath := u.taskPath + resultSuffix
+	if err := os.WriteFile(resultPath, append(raw, '\n'), 0o600); err != nil {
 		u.logf("failed to write result: %v", err)
 	}
 }
 
+func validateTaskResultPath(taskPath string) error {
+	normalized, err := normalizeAbsoluteTaskPath(taskPath)
+	if err != nil {
+		return err
+	}
+	if err := validateTaskFilePath(normalized); err != nil {
+		return err
+	}
+	resultPath := normalized + resultSuffix
+	if err := validateNoSymlinkComponents(filepath.Dir(normalized), resultPath, "task result path"); err != nil {
+		return err
+	}
+	if info, statErr := os.Lstat(resultPath); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return errors.New("task result path must be a regular file")
+		}
+	} else if !os.IsNotExist(statErr) {
+		return fmt.Errorf("task result path cannot be inspected: %w", statErr)
+	}
+	return nil
+}
+
 func (u *updater) apply() (backupDir string, stagingDir string, launchedPath string, err error) {
+	// `run` validates before calling apply, but keep the destructive operation
+	// safe for in-process callers and tests as well. In particular, this must
+	// happen before prepareStagingDir can invoke RemoveAll on a task path.
+	if err := u.validateForApply(); err != nil {
+		return "", "", "", err
+	}
+	if u.task.ParentPID > 0 {
+		if err := validateParentPID(u.task.ParentPID, u.task.LaunchPath); err != nil {
+			return "", "", "", fmt.Errorf("refusing to use parent process: %w", err)
+		}
+	}
 	u.progress.Update(progressState{
 		Title:   "正在校验更新包",
 		Detail:  "正在检查文件完整性。",
@@ -357,6 +1309,12 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 	if err := u.validateStaging(stagingDir); err != nil {
 		_ = os.RemoveAll(stagingDir)
 		return "", stagingDir, "", err
+	}
+	if runtime.GOOS == "darwin" {
+		if err := validateMacReplacementCaseMatches(stagingDir, u.task.RootDir, u.task.DataDirName); err != nil {
+			_ = os.RemoveAll(stagingDir)
+			return "", stagingDir, "", err
+		}
 	}
 
 	backupDir, err = u.createBackupDir()
@@ -407,8 +1365,8 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 	}
 
 	launchPath := u.task.LaunchPath
-	if _, err := os.Stat(launchPath); err != nil {
-		u.logf("declared launch path unavailable after update: %v", err)
+	if info, statErr := os.Lstat(launchPath); statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		u.logf("declared launch path unavailable after update: %v", statErr)
 		launchPath = findLaunchPath(u.task.RootDir)
 		if launchPath == "" {
 			return u.rollbackAfterFailure(backupDir, stagingDir, copied, moved, errors.New("updated app launch path was not found"))
@@ -416,6 +1374,17 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 	}
 	if err := chmodExecutable(launchPath); err != nil {
 		return u.rollbackAfterFailure(backupDir, stagingDir, copied, moved, fmt.Errorf("failed to make updated app executable: %w", err))
+	}
+	if u.workspace != nil {
+		if err := validateTrustedWorkspacePath(
+			u.task.ReadyPath,
+			u.workspace.readyRoot,
+			"readyPath",
+			taskPathMarker,
+			taskFilePrefix+u.workspace.stamp+".ready.json",
+		); err != nil {
+			return u.rollbackAfterFailure(backupDir, stagingDir, copied, moved, err)
+		}
 	}
 	if err := prepareReadyMarker(u.task.ReadyPath); err != nil {
 		return u.rollbackAfterFailure(backupDir, stagingDir, copied, moved, fmt.Errorf("failed to prepare startup verification: %w", err))
@@ -448,15 +1417,112 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 	return backupDir, stagingDir, launchPath, nil
 }
 
+// validateForApply preserves the small, legacy in-process test fixtures that
+// construct an updater without a task file, while ensuring any real task-file
+// invocation uses the same workspace binding as run().  The helper's public
+// entry point is run(), but keeping this guard here prevents a future caller
+// from accidentally reaching RemoveAll/copy operations with an untrusted
+// canonical task path.
+func (u *updater) validateForApply() error {
+	if u == nil {
+		return errors.New("updater is nil")
+	}
+	if u.workspace != nil {
+		return validateTaskAtPath(&u.task, u.taskPath)
+	}
+	if strings.TrimSpace(u.taskPath) != "" {
+		normalized, normalizeErr := normalizeAbsoluteTaskPath(u.taskPath)
+		if normalizeErr == nil && taskPathLooksCanonical(normalized) {
+			if err := validateTaskFilePath(normalized); err != nil {
+				return err
+			}
+			workspace, err := resolveTaskWorkspace(normalized)
+			if err != nil {
+				return err
+			}
+			u.taskPath = normalized
+			u.workspace = &workspace
+			return validateTaskAtPath(&u.task, normalized)
+		}
+	}
+	return validateTask(&u.task)
+}
+
+func taskPathLooksCanonical(path string) bool {
+	path = filepath.Clean(path)
+	name := filepath.Base(path)
+	if !strings.HasPrefix(name, taskFilePrefix) || !strings.HasSuffix(name, taskFileSuffix) {
+		return false
+	}
+	tasksDir := filepath.Dir(path)
+	updatesRoot := filepath.Dir(tasksDir)
+	return taskPathNamesEqual(filepath.Base(tasksDir), tasksDirName) &&
+		taskPathNamesEqual(filepath.Base(updatesRoot), updatesDirName)
+}
+
 // createBackupDir must not reuse a previous attempt's second-level timestamp.
 // Users can retry immediately after a failed update, and sharing a backup
 // directory would make a later rollback ambiguous.
 func (u *updater) createBackupDir() (string, error) {
-	backupsRoot := filepath.Join(u.task.RootDir, backupDirName)
-	if err := os.MkdirAll(backupsRoot, 0o755); err != nil {
+	if u == nil {
+		return "", errors.New("updater is nil")
+	}
+	rootDir, err := normalizeAbsoluteTaskPath(u.task.RootDir)
+	if err != nil {
+		return "", fmt.Errorf("rootDir is invalid: %w", err)
+	}
+	rootInfo, err := os.Lstat(rootDir)
+	if err != nil {
+		return "", fmt.Errorf("rootDir cannot be inspected: %w", err)
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
+		return "", errors.New("rootDir must be a real directory")
+	}
+	backupsRoot := filepath.Join(rootDir, backupDirName)
+	// The backup directory is destructive-update state. Never let a stale or
+	// tampered symlink redirect it outside the installation root. The bounded
+	// component walk starts at rootDir, so normal macOS aliases above the
+	// portable root (for example /var -> /private/var) remain harmless.
+	if err := validateNoSymlinkComponents(rootDir, backupsRoot, "backup directory"); err != nil {
 		return "", err
 	}
-	return os.MkdirTemp(backupsRoot, time.Now().UTC().Format("20060102-150405")+"-")
+	if info, statErr := os.Lstat(backupsRoot); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", errors.New("backup directory must be a real directory")
+		}
+	} else if !os.IsNotExist(statErr) {
+		return "", fmt.Errorf("backup directory cannot be inspected: %w", statErr)
+	} else {
+		// rootDir is already present, so a single-level Mkdir avoids MkdirAll
+		// following a directory symlink inserted between validation and create.
+		if mkdirErr := os.Mkdir(backupsRoot, 0o755); mkdirErr != nil && !os.IsExist(mkdirErr) {
+			return "", mkdirErr
+		}
+		info, statErr := os.Lstat(backupsRoot)
+		if statErr != nil {
+			return "", fmt.Errorf("backup directory could not be created: %w", statErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", errors.New("backup directory must be a real directory")
+		}
+	}
+	// Re-check immediately before creating a unique child to catch a symlink
+	// swap that happened while Mkdir ran.
+	if err := validateNoSymlinkComponents(rootDir, backupsRoot, "backup directory"); err != nil {
+		return "", err
+	}
+	backupDir, err := os.MkdirTemp(backupsRoot, time.Now().UTC().Format("20060102-150405")+"-")
+	if err != nil {
+		return "", err
+	}
+	// Bind the returned directory to the root we just validated.  If an
+	// attacker swapped the backup parent during MkdirTemp, do not proceed with
+	// a directory that resolves outside the installation.  Leave the unknown
+	// directory in place rather than recursively deleting an untrusted path.
+	if err := validateReplacementRoots(backupDir, rootDir); err != nil {
+		return "", fmt.Errorf("backup directory changed during creation: %w", err)
+	}
+	return backupDir, nil
 }
 
 func (u *updater) rollbackAfterFailure(backupDir string, stagingDir string, copied []string, moved []string, cause error) (string, string, string, error) {
@@ -526,6 +1592,13 @@ func verifyZip(path string, expectedSize int64, expectedSha512 string) error {
 
 func (u *updater) prepareStagingDir() (string, error) {
 	if u.task.StagingDir != "" {
+		if u.workspace != nil {
+			if err := validateTrustedWorkspacePath(u.task.StagingDir, u.workspace.stagingRoot, "stagingDir", taskPathStaging, u.workspace.stamp); err != nil {
+				return "", err
+			}
+		} else if err := validateTaskWorkspacePath(u.task.StagingDir, "stagingDir", u.task.RootDir, taskPathStaging); err != nil {
+			return "", err
+		}
 		if err := os.RemoveAll(u.task.StagingDir); err != nil {
 			return "", err
 		}
@@ -535,7 +1608,28 @@ func (u *updater) prepareStagingDir() (string, error) {
 		return u.task.StagingDir, nil
 	}
 	base := filepath.Dir(u.task.ZipPath)
-	return os.MkdirTemp(base, "uclaw-update-staging-")
+	if u.workspace != nil {
+		base = u.workspace.stagingRoot
+		if err := validateNoSymlinkComponents(u.workspace.updatesRoot, base, "stagingDir parent"); err != nil {
+			return "", err
+		}
+	} else if err := validateTaskWorkspacePath(base, "stagingDir parent", u.task.RootDir, taskPathStaging); err != nil {
+		return "", err
+	}
+	stagingDir, err := os.MkdirTemp(base, "uclaw-update-staging-")
+	if err != nil {
+		return "", err
+	}
+	if u.workspace != nil {
+		if err := validateNoSymlinkComponents(u.workspace.stagingRoot, stagingDir, "stagingDir"); err != nil {
+			_ = os.RemoveAll(stagingDir)
+			return "", err
+		}
+	} else if err := validateTaskWorkspacePath(stagingDir, "stagingDir", u.task.RootDir, taskPathStaging); err != nil {
+		_ = os.RemoveAll(stagingDir)
+		return "", err
+	}
+	return stagingDir, nil
 }
 
 func extractZip(zipPath string, destDir string, onProgress func(percent int, detail string)) error {
@@ -546,6 +1640,11 @@ func extractZip(zipPath string, destDir string, onProgress func(percent int, det
 	defer reader.Close()
 	if err := validateZipEntries(reader.File); err != nil {
 		return err
+	}
+	if runtime.GOOS == "darwin" {
+		if err := validateMacPortableZipEntries(reader.File, defaultDataDirName); err != nil {
+			return err
+		}
 	}
 
 	// macOS app bundles carry code-signing and other metadata in extended
@@ -732,12 +1831,20 @@ func extractSymlink(file *zip.File, target string) error {
 }
 
 func (u *updater) validateStaging(stagingDir string) error {
-	if _, err := os.Stat(filepath.Join(stagingDir, "portable.flag")); err != nil {
+	if runtime.GOOS == "darwin" {
+		if err := validateMacPortableDirectory(stagingDir, "update package"); err != nil {
+			return err
+		}
+	}
+	flagPath := filepath.Join(stagingDir, "portable.flag")
+	if flagInfo, err := os.Lstat(flagPath); err != nil {
 		return errors.New("update package is missing portable.flag")
+	} else if flagInfo.Mode()&os.ModeSymlink != 0 || !flagInfo.Mode().IsRegular() {
+		return errors.New("update package portable.flag must be a regular file")
 	}
 	relLaunch, err := filepath.Rel(u.task.RootDir, u.task.LaunchPath)
 	if err == nil && relLaunch != "." && !strings.HasPrefix(relLaunch, "..") && !filepath.IsAbs(relLaunch) {
-		if _, err := os.Stat(filepath.Join(stagingDir, relLaunch)); err == nil {
+		if info, statErr := os.Lstat(filepath.Join(stagingDir, relLaunch)); statErr == nil && info.Mode()&os.ModeSymlink == 0 && info.Mode().IsRegular() {
 			return nil
 		}
 	}
@@ -758,12 +1865,15 @@ func replacementEntrySet(stagingDir string, dataDirName string) (map[string]stru
 		if shouldSkipRootEntry(name, dataDirName) {
 			continue
 		}
-		replacements[name] = struct{}{}
+		replacements[replacementEntryKey(name)] = struct{}{}
 	}
 	return replacements, nil
 }
 
 func (u *updater) moveCurrentFilesToBackup(backupDir string, replacementEntries map[string]struct{}) ([]string, error) {
+	if err := validateReplacementRoots(backupDir, u.task.RootDir); err != nil {
+		return nil, err
+	}
 	entries, err := os.ReadDir(u.task.RootDir)
 	if err != nil {
 		return nil, err
@@ -774,13 +1884,19 @@ func (u *updater) moveCurrentFilesToBackup(backupDir string, replacementEntries 
 		if shouldSkipRootEntry(name, u.task.DataDirName) {
 			continue
 		}
-		if _, shouldReplace := replacementEntries[name]; !shouldReplace {
+		if _, shouldReplace := replacementEntries[replacementEntryKey(name)]; !shouldReplace {
 			u.logf("leaving root entry unchanged because it is not in the update package: %s", name)
 			continue
+		}
+		if err := validateRollbackEntryName(name); err != nil {
+			return moved, err
 		}
 		src := filepath.Join(u.task.RootDir, name)
 		dst := filepath.Join(backupDir, name)
 		if err := retry(fmt.Sprintf("move %s", name), moveRetryAttempts, moveRetryDelay, func() error {
+			if err := validateReplacementRoots(backupDir, u.task.RootDir); err != nil {
+				return err
+			}
 			return os.Rename(src, dst)
 		}); err != nil {
 			return moved, err
@@ -791,7 +1907,53 @@ func (u *updater) moveCurrentFilesToBackup(backupDir string, replacementEntries 
 }
 
 func shouldSkipRootEntry(name string, dataDirName string) bool {
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		return strings.EqualFold(name, dataDirName) || strings.EqualFold(name, backupDirName)
+	}
 	return name == dataDirName || name == backupDirName
+}
+
+func replacementEntryKey(name string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(name)
+	}
+	return name
+}
+
+// On a case-sensitive APFS volume, lower-casing every replacement key would
+// make an archive entry such as `resources` move an unrelated existing
+// `Resources` tree. On a case-insensitive volume, leaving that alias in place
+// is equally unsafe because rollback would lack the exact backup entry. Reject
+// cross-tree case variants and keep Darwin replacement identity exact.
+func validateMacReplacementCaseMatches(stagingDir string, rootDir string, dataDirName string) error {
+	stagingEntries, err := os.ReadDir(stagingDir)
+	if err != nil {
+		return err
+	}
+	rootEntries, err := os.ReadDir(rootDir)
+	if err != nil {
+		return err
+	}
+	rootByFoldedName := make(map[string]string, len(rootEntries))
+	for _, entry := range rootEntries {
+		if shouldSkipRootEntry(entry.Name(), dataDirName) {
+			continue
+		}
+		key := strings.ToLower(entry.Name())
+		if previous, exists := rootByFoldedName[key]; exists && previous != entry.Name() {
+			return fmt.Errorf("root entries %q and %q collide by case", previous, entry.Name())
+		}
+		rootByFoldedName[key] = entry.Name()
+	}
+	for _, entry := range stagingEntries {
+		if shouldSkipRootEntry(entry.Name(), dataDirName) {
+			continue
+		}
+		if existing, exists := rootByFoldedName[strings.ToLower(entry.Name())]; exists && existing != entry.Name() {
+			return fmt.Errorf("update entry %q differs in case from existing root entry %q", entry.Name(), existing)
+		}
+	}
+	return nil
 }
 
 type replacementProgressTracker struct {
@@ -1253,13 +2415,72 @@ func copyMacAppBundleWithDitto(src string, dst string) error {
 	return nil
 }
 
+// validateReplacementRoots re-establishes the filesystem trust boundary just
+// before a rollback or backup move.  The initial task validation happens well
+// before the destructive phase; checking again here prevents a directory (or
+// its backup parent) swapped to a symlink in the meantime from redirecting a
+// Rename/RemoveAll outside the installation.
+func validateReplacementRoots(backupDir string, rootDir string) error {
+	root, err := normalizeAbsoluteTaskPath(rootDir)
+	if err != nil {
+		return fmt.Errorf("rootDir is invalid: %w", err)
+	}
+	backup, err := normalizeAbsoluteTaskPath(backupDir)
+	if err != nil {
+		return fmt.Errorf("backupDir is invalid: %w", err)
+	}
+	rootInfo, err := os.Lstat(root)
+	if err != nil {
+		return fmt.Errorf("rootDir cannot be inspected: %w", err)
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
+		return errors.New("rootDir must be a real directory")
+	}
+	backupsRoot := filepath.Join(root, backupDirName)
+	if !taskPathsEqual(filepath.Dir(backup), backupsRoot) {
+		return errors.New("backupDir must be a direct child of the backup directory")
+	}
+	if err := validateNoSymlinkComponents(root, backupsRoot, "backup directory"); err != nil {
+		return err
+	}
+	backupInfo, err := os.Lstat(backup)
+	if err != nil {
+		return fmt.Errorf("backupDir cannot be inspected: %w", err)
+	}
+	if backupInfo.Mode()&os.ModeSymlink != 0 || !backupInfo.IsDir() {
+		return errors.New("backupDir must be a real directory")
+	}
+	if err := validateNoSymlinkComponents(backupsRoot, backup, "backupDir"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateRollbackEntryName(name string) error {
+	if name == "" || name == "." || name == ".." || filepath.Base(name) != name ||
+		filepath.IsAbs(name) || filepath.VolumeName(name) != "" || strings.ContainsAny(name, `/\\`) {
+		return fmt.Errorf("unsafe rollback entry name: %q", name)
+	}
+	return nil
+}
+
 func moveEntriesBack(backupDir string, rootDir string, entries []string) error {
+	if err := validateReplacementRoots(backupDir, rootDir); err != nil {
+		return err
+	}
 	var rollbackErr error
 	for i := len(entries) - 1; i >= 0; i-- {
 		name := entries[i]
+		if err := validateRollbackEntryName(name); err != nil {
+			rollbackErr = errors.Join(rollbackErr, err)
+			continue
+		}
 		src := filepath.Join(backupDir, name)
 		dst := filepath.Join(rootDir, name)
 		if err := retry(fmt.Sprintf("restore %s", name), rollbackAttempts, moveRetryDelay, func() error {
+			if err := validateReplacementRoots(backupDir, rootDir); err != nil {
+				return err
+			}
 			if err := os.RemoveAll(dst); err != nil {
 				return err
 			}
@@ -1272,11 +2493,83 @@ func moveEntriesBack(backupDir string, rootDir string, entries []string) error {
 }
 
 func removeCopiedEntries(rootDir string, entries []string) error {
+	if runtime.GOOS == "darwin" {
+		return removeCopiedEntriesMac(rootDir, entries)
+	}
+	root, err := normalizeAbsoluteTaskPath(rootDir)
+	if err != nil {
+		return fmt.Errorf("rootDir is invalid: %w", err)
+	}
+	if info, statErr := os.Lstat(root); statErr != nil {
+		return fmt.Errorf("rootDir cannot be inspected: %w", statErr)
+	} else if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return errors.New("rootDir must be a real directory")
+	}
 	var rollbackErr error
 	for i := len(entries) - 1; i >= 0; i-- {
 		name := entries[i]
+		if err := validateRollbackEntryName(name); err != nil {
+			rollbackErr = errors.Join(rollbackErr, err)
+			continue
+		}
 		if err := retry(fmt.Sprintf("remove replacement %s", name), rollbackAttempts, moveRetryDelay, func() error {
-			return os.RemoveAll(filepath.Join(rootDir, name))
+			if info, statErr := os.Lstat(root); statErr != nil {
+				return statErr
+			} else if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+				return errors.New("rootDir is no longer a real directory")
+			}
+			return os.RemoveAll(filepath.Join(root, name))
+		}); err != nil {
+			rollbackErr = errors.Join(rollbackErr, err)
+		}
+	}
+	return rollbackErr
+}
+
+// macOS app bundles can contain read-only descendants preserved by ditto. A
+// recursive RemoveAll then fails while the old bundle is still parked in the
+// backup. Rename the whole top-level replacement into a quarantine directory
+// first (only the writable root parent is needed), restore the backup, and
+// clean the quarantine best-effort.
+func removeCopiedEntriesMac(rootDir string, entries []string) error {
+	root, err := normalizeAbsoluteTaskPath(rootDir)
+	if err != nil {
+		return fmt.Errorf("rootDir is invalid: %w", err)
+	}
+	if info, statErr := os.Lstat(root); statErr != nil {
+		return fmt.Errorf("rootDir cannot be inspected: %w", statErr)
+	} else if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return errors.New("rootDir must be a real directory")
+	}
+	quarantineDir, err := os.MkdirTemp(root, ".uclaw-rollback-")
+	if err != nil {
+		return fmt.Errorf("create rollback quarantine: %w", err)
+	}
+	if err := validateNoSymlinkComponents(root, quarantineDir, "rollback quarantine"); err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(quarantineDir) }()
+	var rollbackErr error
+	for i := len(entries) - 1; i >= 0; i-- {
+		name := entries[i]
+		if err := validateRollbackEntryName(name); err != nil {
+			rollbackErr = errors.Join(rollbackErr, err)
+			continue
+		}
+		src := filepath.Join(root, name)
+		dst := filepath.Join(quarantineDir, name)
+		if err := retry(fmt.Sprintf("quarantine replacement %s", name), rollbackAttempts, moveRetryDelay, func() error {
+			if info, statErr := os.Lstat(root); statErr != nil {
+				return statErr
+			} else if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+				return errors.New("rootDir is no longer a real directory")
+			}
+			if _, statErr := os.Lstat(src); os.IsNotExist(statErr) {
+				return nil
+			} else if statErr != nil {
+				return statErr
+			}
+			return os.Rename(src, dst)
 		}); err != nil {
 			rollbackErr = errors.Join(rollbackErr, err)
 		}
@@ -1329,6 +2622,21 @@ func findLaunchPath(rootDir string) string {
 		}
 		return ""
 	}
+	if runtime.GOOS == "darwin" {
+		// The macOS portable contract has one canonical bundle. Never glob
+		// sibling `.app` directories: a malformed archive or stale installation
+		// could then launch an unrelated app and falsely satisfy startup
+		// verification.
+		for _, executable := range []string{"UClaw", "ClawX"} {
+			match := filepath.Join(rootDir, "UClaw.app", "Contents", "MacOS", executable)
+			if existsFile(match) {
+				return match
+			}
+		}
+		return ""
+	}
+	// Keep the historical non-macOS fallback for platforms that use a generic
+	// app bundle layout; macOS is intentionally handled by the strict branch.
 	matches, _ := filepath.Glob(filepath.Join(rootDir, "*.app", "Contents", "MacOS", "*"))
 	for _, match := range matches {
 		if existsFile(match) {
@@ -1339,17 +2647,29 @@ func findLaunchPath(rootDir string) string {
 }
 
 func existsFile(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode()&os.ModeSymlink == 0 && info.Mode().IsRegular()
 }
 
 func chmodExecutable(path string) error {
 	if runtime.GOOS == "windows" {
 		return nil
 	}
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("updated app executable is not a regular file: %s", path)
+	}
+	// macOS app bundles (especially apps launched directly from a DMG) may be
+	// mounted read-only. `ditto` and the ZIP already carry the executable bit,
+	// so never mutate the bundle at runtime; only validate that it is runnable.
+	if runtime.GOOS == "darwin" {
+		if info.Mode().Perm()&0o111 == 0 {
+			return fmt.Errorf("updated app executable is not executable: %s", path)
+		}
+		return nil
 	}
 	if info.Mode().Perm()&0o111 != 0 {
 		return nil
@@ -1364,11 +2684,16 @@ func preserveFileMode(path string, expected os.FileMode) error {
 	if runtime.GOOS == "windows" {
 		return nil
 	}
+	if info, statErr := os.Lstat(path); statErr != nil {
+		return statErr
+	} else if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("cannot preserve mode on a non-regular file: %s", path)
+	}
 	chmodErr := os.Chmod(path, expected)
 	if chmodErr == nil {
 		return nil
 	}
-	info, statErr := os.Stat(path)
+	info, statErr := os.Lstat(path)
 	if statErr == nil && info.Mode().Perm()&expected.Perm() == expected.Perm() {
 		return nil
 	}
@@ -1510,6 +2835,36 @@ func defaultStartUpdatedApp(launchPath string, rootDir string, readyPath string)
 }
 
 func cleanupOldBackups(backupsRoot string, keep string, maxAge time.Duration, logf func(string, ...any)) {
+	backupsRoot, err := validateBackupCleanupRoot(backupsRoot)
+	if err != nil {
+		if logf != nil {
+			logf("refusing to clean old backups: %v", err)
+		}
+		return
+	}
+	keepPath := ""
+	if strings.TrimSpace(keep) != "" {
+		keepPath, err = normalizeAbsoluteTaskPath(keep)
+		if err != nil || !taskPathsEqual(filepath.Dir(keepPath), backupsRoot) {
+			if logf != nil {
+				logf("refusing to clean old backups: keep path is outside backup directory")
+			}
+			return
+		}
+		if info, statErr := os.Lstat(keepPath); statErr == nil {
+			if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+				if logf != nil {
+					logf("refusing to clean old backups: keep path is not a real directory")
+				}
+				return
+			}
+		} else if !os.IsNotExist(statErr) {
+			if logf != nil {
+				logf("refusing to clean old backups: keep path cannot be inspected: %v", statErr)
+			}
+			return
+		}
+	}
 	entries, err := os.ReadDir(backupsRoot)
 	if err != nil {
 		return
@@ -1520,15 +2875,67 @@ func cleanupOldBackups(backupsRoot string, keep string, maxAge time.Duration, lo
 			continue
 		}
 		path := filepath.Join(backupsRoot, entry.Name())
-		if path == keep {
+		if err := validateRollbackEntryName(entry.Name()); err != nil {
+			if logf != nil {
+				logf("refusing to clean backup entry %q: %v", entry.Name(), err)
+			}
 			continue
 		}
-		info, err := entry.Info()
-		if err != nil || info.ModTime().After(cutoff) {
+		if taskPathsEqual(path, keepPath) {
+			continue
+		}
+		info, err := os.Lstat(path)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.ModTime().After(cutoff) {
+			continue
+		}
+		// Re-check the parent immediately before the destructive operation. If
+		// it was replaced with a link, leave every backup untouched.
+		if _, rootErr := validateBackupCleanupRoot(backupsRoot); rootErr != nil {
+			if logf != nil {
+				logf("stopped cleaning old backups after root changed: %v", rootErr)
+			}
+			return
+		}
+		if current, currentErr := os.Lstat(path); currentErr != nil || current.Mode()&os.ModeSymlink != 0 || !current.IsDir() {
 			continue
 		}
 		if err := os.RemoveAll(path); err != nil {
-			logf("failed to remove old backup %s: %v", path, err)
+			if logf != nil {
+				logf("failed to remove old backup %s: %v", path, err)
+			}
 		}
 	}
+}
+
+// validateBackupCleanupRoot verifies that a cleanup operation is still bound
+// to a real installation root.  Cleanup runs after a successful update and is
+// best-effort; on any ambiguity it must leave old backups in place rather than
+// risk recursively deleting a directory selected through a symlink.
+func validateBackupCleanupRoot(backupsRoot string) (string, error) {
+	normalized, err := normalizeAbsoluteTaskPath(backupsRoot)
+	if err != nil {
+		return "", err
+	}
+	if !taskPathNamesEqual(filepath.Base(normalized), backupDirName) {
+		return "", errors.New("backup directory has an unexpected name")
+	}
+	root := filepath.Dir(normalized)
+	rootInfo, err := os.Lstat(root)
+	if err != nil {
+		return "", err
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
+		return "", errors.New("backup directory parent must be a real directory")
+	}
+	if err := validateNoSymlinkComponents(root, normalized, "backup directory"); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(normalized)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", errors.New("backup directory must be a real directory")
+	}
+	return normalized, nil
 }

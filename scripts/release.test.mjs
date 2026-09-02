@@ -129,6 +129,11 @@ test('production candidate workflow builds only USB ZIPs and cannot perform prod
     workflow,
     /build-macos-usb:[\s\S]*?actions\/setup-go@v5[\s\S]*?pnpm run package:mac:usb/u,
   );
+  assert.ok(
+    workflow.includes('git fetch --no-tags origin main')
+      && workflow.includes('PLUGIN_VERSION_BASE="$(git merge-base HEAD origin/main)" pnpm run package:mac:usb'),
+    'macOS workflow must provide a plugin-version base to the package command',
+  );
   assert.match(workflow, /candidates-ready:/u);
   assert.match(workflow, /Production OSS and zz-cn staging must be run locally/u);
   for (const forbidden of [
@@ -152,6 +157,21 @@ test('production candidate workflow builds only USB ZIPs and cannot perform prod
   }
 });
 
+test('legacy tag release workflow is inert after the portable ZIP migration', async () => {
+  const workflow = await readFile(
+    path.join(ROOT, '.github', 'workflows', 'release.yml'),
+    'utf8',
+  );
+  assert.match(workflow, /Release Workflow \(retired\)/u);
+  for (const job of ['validate-release', 'release', 'publish', 'upload-oss', 'finalize']) {
+    const jobBlock = workflow.match(
+      new RegExp(`\\n  ${job}:\\n([\\s\\S]*?)(?=\\n  [A-Za-z0-9_-]+:|\\n?$)`, 'u'),
+    )?.[1] ?? '';
+    assert.match(jobBlock, /if:\s*\$\{\{\s*false\s*\}\}/u, `${job} must remain disabled`);
+  }
+  assert.match(workflow, /uclaw-portable-production\.yml/u);
+});
+
 test('disabled stage publisher never enables a release row', async () => {
   const publisher = await readFile(
     path.join(ROOT, 'scripts', 'windows-support', 'publish-disabled-release-stage.ps1'),
@@ -163,6 +183,11 @@ test('disabled stage publisher never enables a release row', async () => {
   assert.match(publisher, /Public release feed changed during disabled staging/u);
   assert.match(publisher, /Get-RemoteSha512Hex/u);
   assert.match(publisher, /OSS SHA-512 mismatch/u);
+  assert.match(publisher, /function Assert-PortableMetadata/u);
+  assert.match(publisher, /Assert-PortableMetadata -Metadata \$windowsMetadata/u);
+  assert.match(publisher, /companion metadata is missing/u);
+  assert.match(publisher, /Assert-PortableMetadata -Metadata \$metadata/u);
+  assert.match(publisher, /metadataFileName mismatch/u);
   assert.match(publisher, /function Get-SingleHttpHeaderValue/u);
   assert.match(publisher, /\[int64\]::TryParse\(\$contentLengthText/u);
   assert.match(publisher, /\$null -ne \$head\.Length -and \$head\.Length -ne \$object\.Size/u);

@@ -245,6 +245,7 @@
       "portableAvailable": "ポータブル更新があります: v{{version}}",
       "downloaded": "インストール準備完了: v{{version}}",
       "portableDownloaded": "ポータブルパッケージをダウンロードしました: v{{version}}",
+      "manualMigrationDownloaded": "ポータブルパッケージをダウンロードしました: v{{version}}（手動移行が必要です）",
       "autoInstalling": "{{seconds}} 秒後に再起動して更新をインストールします...",
       "failed": "更新の確認に失敗しました",
       "latest": "最新バージョンです",
@@ -255,6 +256,7 @@
       "downloading": "ダウンロード中...",
       "download": "更新をダウンロード",
       "downloadPortable": "ポータブル版をダウンロード",
+      "openMigrationPackage": "移行パッケージを開く",
       "install": "インストールして再起動",
       "installPortable": "更新して再起動",
       "cancelAutoInstall": "キャンセル",
@@ -272,10 +274,13 @@
       "downloadedTitle": "UClaw の更新準備ができました",
       "downloadedDescription": "バージョン v{{version}} のダウンロードが完了しました。再起動してインストールしてください。",
       "portableDownloadedDescription": "バージョン v{{version}} のポータブル版をダウンロードしました。UClaw がポータブルフォルダーを更新して自動で再起動します。",
+      "manualMigrationAvailableDescription": "バージョン v{{version}} のポータブル ZIP を利用できます。ZIP を新しい書き込み可能なフォルダーに完全に展開し、portable.flag、UClawData、UClaw.app を同じフォルダーに置いてから、データを手動で移行してください。現在の場所では UClaw が自動更新できず、/Applications にポータブルデータを作成することもありません。",
+      "manualMigrationDownloadedDescription": "バージョン v{{version}} のポータブル ZIP をダウンロードしました。ZIP を新しい書き込み可能なフォルダーに完全に展開し、portable.flag、UClawData、UClaw.app を同じフォルダーに置いてから、データを手動で移行してください。現在の場所では UClaw が自動更新できず、/Applications にポータブルデータを作成することもありません。",
       "unknownVersion": "新しい"
     },
     "help": "UClaw は自動的に更新を確認し、ダウンロードやインストールの前に通知します。",
-    "portableHelp": "UClaw は自動的に更新を確認します。ポータブル版では新版をローカルの実行時更新キャッシュに保存し、UClawData を保持したまま、確認後に更新して再起動します。"
+    "portableHelp": "UClaw は自動的に更新を確認します。ポータブル版では新版をローカルの実行時更新キャッシュに保存し、UClawData を保持したまま、確認後に更新して再起動します。",
+    "manualMigrationHelp": "macOS では、DMG から起動したアプリや /Applications に単独で置いたアプリは、その場所で自動更新できません。ZIP を新しい書き込み可能なフォルダーに完全に展開し、portable.flag、UClawData、UClaw.app を同じフォルダーに置いてから、手動でデータを移行してください。"
   },
   "advanced": {
     "title": "詳細設定",

@@ -17,6 +17,7 @@ import {
   open,
   readFile,
   readdir,
+  readlink,
   realpath,
   rename,
   rm,
@@ -62,6 +63,18 @@ async function pathExists(filePath: string): Promise<boolean> {
   }
 }
 
+async function isRegularFile(filePath: string): Promise<boolean> {
+  try {
+    // Do not follow an entrypoint symlink out of the plugin tree. Bundled
+    // mirrors are self-contained and should contain ordinary files here;
+    // treating an external symlink as a valid source would make ownership and
+    // content checks depend on arbitrary user-controlled paths.
+    return (await lstat(fsPath(filePath))).isFile();
+  } catch {
+    return false;
+  }
+}
+
 async function realpathSafe(filePath: string): Promise<string> {
   return realpath(fsPath(filePath));
 }
@@ -71,7 +84,12 @@ async function realpathSafe(filePath: string): Promise<string> {
  * Node's historical Windows non-ASCII `cp` failures.
  */
 export async function cpAsyncSafe(src: string, dest: string): Promise<void> {
-  await _copyDirAsyncRecursive(fsPath(src), fsPath(dest));
+  const sourcePath = fsPath(src);
+  const sourceInfo = await lstat(sourcePath);
+  if (!sourceInfo.isDirectory()) {
+    throw new Error(`Refusing to copy non-directory plugin source: ${src}`);
+  }
+  await _copyDirAsyncRecursive(sourcePath, fsPath(dest));
 }
 
 async function _copyDirAsyncRecursive(src: string, dest: string): Promise<void> {
@@ -80,11 +98,23 @@ async function _copyDirAsyncRecursive(src: string, dest: string): Promise<void> 
   for (const entry of entries) {
     const srcChild = join(src, entry.name);
     const destChild = join(dest, entry.name);
-    const info = await stat(srcChild);
+    // Do not follow links while copying a plugin tree.  `stat()` used here
+    // previously made a symlink to an arbitrary file/directory look like a
+    // regular source entry, allowing a malformed bundled mirror to copy
+    // bytes from outside the package (or recurse forever through a link
+    // cycle).  Bundled mirrors and staged plugin trees are expected to be
+    // self-contained ordinary files, so fail closed for links and special
+    // filesystem nodes instead of silently dereferencing them.
+    const info = await lstat(srcChild);
+    if (info.isSymbolicLink()) {
+      throw new Error(`Refusing to copy symbolic link in plugin source: ${srcChild}`);
+    }
     if (info.isDirectory()) {
       await _copyDirAsyncRecursive(srcChild, destChild);
-    } else {
+    } else if (info.isFile()) {
       await copyFile(srcChild, destChild);
+    } else {
+      throw new Error(`Refusing to copy unsupported filesystem entry in plugin source: ${srcChild}`);
     }
   }
 }
@@ -404,7 +434,15 @@ export type ManagedPluginRemovalResult = Readonly<{
 export type PluginInstallResult = Readonly<{
   installed: boolean;
   warning?: string;
-  code?: 'managed-plugin-ownership-conflict';
+  /**
+   * Machine-readable failure classification.  The regular UI install flow
+   * keeps returning a best-effort result, while Gateway startup can opt into
+   * the fail-closed `requireBundledSource` mode below and turn these failures
+   * into a repair-required startup error.
+   */
+  code?: 'managed-plugin-ownership-conflict' | 'bundled-source-missing' | 'bundled-source-invalid';
+  /** True when continuing with an existing/stale copy would be unsafe. */
+  repairRequired?: boolean;
   action?: 'preserved';
   ownership?: ManagedPluginOwnership;
 }>;
@@ -422,9 +460,26 @@ type ManagedPluginOwnershipOptions = Readonly<{
   candidateSources?: string[];
 }>;
 
-/** ClawX owns these bundled extension ids across upgrades, including installs created before markers existed. */
+/**
+ * ClawX owns these currently bundled local plugins across upgrades, including
+ * installs created before the managed marker was introduced.
+ *
+ * Do not use a broad `uclaw-*` prefix here.  Retired ids are reusable by a
+ * user's own extension; treating the name alone as ownership would allow the
+ * retirement cleanup to delete that unrelated plugin.  Retired copies are
+ * removable only when they carry a valid UClaw marker (or another positive
+ * ownership proof such as a trusted record/content match).
+ */
+const ACTIVE_CLAWX_MANAGED_PLUGIN_IDS = new Set([
+  'clawx-openai-image',
+  'uclaw-artifact-orchestrator',
+  'uclaw-local-artifacts',
+  'uclaw-blender',
+  'uclaw-video',
+]);
+
 function isClawXManagedPluginId(pluginDirName: string): boolean {
-  return pluginDirName === 'clawx-openai-image' || pluginDirName.startsWith('uclaw-');
+  return ACTIVE_CLAWX_MANAGED_PLUGIN_IDS.has(pluginDirName);
 }
 
 function normalizeComparablePluginPath(filePath: string): string {
@@ -740,12 +795,16 @@ async function assertPluginPackageReady(
   }
 
   const entries = getDeclaredPluginEntries(pkg, manifest);
-  const existingEntries = await Promise.all(entries.map((entry) => pathExists(join(pluginDir, entry))));
+  const existingEntries = await Promise.all(entries.map((entry) => isRegularFile(join(pluginDir, entry))));
   if (entries.length === 0 || !existingEntries.some(Boolean)) {
     throw new Error(`${pluginLabel} plugin has no existing declared entrypoint (${entries.join(', ') || 'none'})`);
   }
 
-  if (pluginDirName === 'clawx-openai-image' || pluginDirName.startsWith('uclaw-')) {
+  // Apply the strict identity contract only to plugins that this build
+  // actually bundles and owns.  A user extension is allowed to reuse a
+  // `uclaw-*` directory name; the prefix alone must not make it subject to
+  // ClawX's package/manifest naming rules.
+  if (isClawXManagedPluginId(pluginDirName)) {
     if (manifest.id !== pluginDirName) {
       throw new Error(`${pluginLabel} plugin id mismatch: expected ${pluginDirName}, got ${manifest.id}`);
     }
@@ -765,28 +824,58 @@ async function assertPluginPackageReady(
   }
 }
 
-async function readPluginContentFingerprint(pluginDir: string): Promise<string | null> {
+/**
+ * Return a deterministic SHA-256 fingerprint for every source-bearing file
+ * in a plugin tree (excluding dependency payloads and the ownership marker).
+ * Startup maintenance uses this as part of its cache key so a same-size
+ * schema/content edit cannot be hidden behind a stale cache hit.
+ */
+export async function readPluginContentFingerprint(pluginDir: string): Promise<string | null> {
   try {
-    const manifestPath = join(pluginDir, 'openclaw.plugin.json');
-    const pkgJsonPath = join(pluginDir, 'package.json');
-    const [manifestRaw, packageRaw] = await Promise.all([
-      readFile(fsPath(manifestPath), 'utf-8'),
-      readFile(fsPath(pkgJsonPath), 'utf-8'),
-    ]);
-    const manifest = JSON.parse(manifestRaw) as { entry?: string };
-    const pkg = JSON.parse(packageRaw) as PluginPackageMetadata;
-    const entryFiles = getDeclaredPluginEntries(pkg, manifest);
+    // Preserve the old fingerprint contract: a directory is not a plugin
+    // identity unless both metadata files are present and valid JSON objects.
+    // Besides keeping malformed sources out of the cache, this prevents an
+    // empty/partial user directory from being mistaken for a bundled mirror
+    // during ownership checks.
+    await readPluginMetadata(pluginDir);
 
     const hash = createHash('sha256');
-    hash.update(manifestRaw);
-    hash.update('\n---manifest---\n');
-    hash.update(packageRaw);
-    for (const entryFile of entryFiles) {
-      const entryPath = join(pluginDir, entryFile);
-      if (!(await pathExists(entryPath))) continue;
-      hash.update(`\n---entry:${entryFile}---\n`);
-      hash.update(await readFile(fsPath(entryPath), 'utf-8'));
-    }
+    // Hash the complete plugin payload, not only package/manifest/entrypoint.
+    // Local plugins commonly import sibling modules (for example
+    // uclaw-local-artifacts/cad-dxf.mjs and workspace-http-preview.mjs) and
+    // ship skills.  Omitting those files lets a same-version stale install
+    // survive a source update.  Walk in lexical order and include relative
+    // path, node type, byte length, and bytes for deterministic fingerprints.
+    const walk = async (absoluteDir: string, relativeDir: string): Promise<void> => {
+      const entries = (await readdir(fsPath(absoluteDir), { withFileTypes: true }))
+        .filter((entry) => entry.name !== 'node_modules' && entry.name !== '.uclaw-managed-plugin.json')
+        .filter((entry) => !isTransientPluginInstallPath(join(relativeDir, entry.name)))
+        // Do not use localeCompare here: fingerprints are persisted across
+        // launches and must not vary with the host's locale settings.
+        .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+
+      for (const entry of entries) {
+        const relativePath = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
+        const absolutePath = join(absoluteDir, entry.name);
+        const info = await lstat(fsPath(absolutePath));
+        if (info.isDirectory()) {
+          hash.update(`dir\0${relativePath}\0\n`);
+          await walk(absolutePath, relativePath);
+        } else if (info.isSymbolicLink()) {
+          // Never follow symlinks: this avoids cycles and prevents content
+          // outside the plugin directory from affecting its identity.
+          const target = await readlink(fsPath(absolutePath));
+          const bytes = Buffer.byteLength(target, 'utf8');
+          hash.update(`symlink\0${relativePath}\0${bytes}\0${target}\n`);
+        } else if (info.isFile()) {
+          const bytes = await readFile(fsPath(absolutePath));
+          hash.update(`file\0${relativePath}\0${bytes.byteLength}\0`);
+          hash.update(bytes);
+          hash.update('\n');
+        }
+      }
+    };
+    await walk(pluginDir, '');
     return hash.digest('hex');
   } catch {
     return null;
@@ -796,8 +885,19 @@ async function readPluginContentFingerprint(pluginDir: string): Promise<string |
 async function readPluginRuntimeDependencyNames(pluginDir: string): Promise<string[]> {
   try {
     const raw = await readFile(fsPath(join(pluginDir, 'package.json')), 'utf-8');
-    const pkg = JSON.parse(raw) as { dependencies?: Record<string, unknown> };
-    return Object.keys(pkg.dependencies || {}).sort();
+    const pkg = JSON.parse(raw) as {
+      dependencies?: Record<string, unknown>;
+      optionalDependencies?: Record<string, unknown>;
+    };
+    // Optional dependencies are still runtime requirements for a packaged
+    // plugin when the plugin imports them conditionally (the bundle and
+    // release validators already enforce this same contract). Keep the
+    // installer/maintenance check aligned so a missing optional payload cannot
+    // leave a stale or partially hydrated plugin active.
+    return Object.keys({
+      ...(pkg.dependencies || {}),
+      ...(pkg.optionalDependencies || {}),
+    }).sort();
   } catch {
     return [];
   }
@@ -825,8 +925,27 @@ export async function findBestBundledPluginSource(
   const availableSources = candidateSources.filter((_dir, index) => sourcePresence[index]);
   if (availableSources.length === 0) return null;
 
-  let bestSource: { dir: string; mtimeMs: number; missingRuntimeDeps: string[] } | null = null;
+  // Prefer a structurally valid candidate when multiple packaged locations
+  // exist. If every candidate is malformed, retain the first manifest-bearing
+  // path so the activation phase can report `bundled-source-invalid` (rather
+  // than collapsing the diagnostic into a misleading "missing" result).
+  const validSources: string[] = [];
   for (const dir of availableSources) {
+    try {
+      const { pkg, manifest } = await readPluginMetadata(dir);
+      const entries = getDeclaredPluginEntries(pkg, manifest);
+      if (entries.length > 0 && (await Promise.all(entries.map((entry) => isRegularFile(join(dir, entry))))).some(Boolean)) {
+        validSources.push(dir);
+      }
+    } catch {
+      // Leave malformed candidates in availableSources for diagnostics when
+      // no valid fallback exists.
+    }
+  }
+  const sourcesToRank = validSources.length > 0 ? validSources : availableSources;
+
+  let bestSource: { dir: string; mtimeMs: number; missingRuntimeDeps: string[] } | null = null;
+  for (const dir of sourcesToRank) {
     let mtimeMs = 0;
     for (const fileName of ['openclaw.plugin.json', 'package.json']) {
       try {
@@ -1204,7 +1323,15 @@ async function prepareAndActivatePlugin(
   }
 }
 
-type PluginInstallOptions = { deferTrustedRecordSync?: boolean };
+/**
+ * Options used by both the UI/channel install path and the Gateway startup
+ * maintenance path.  Startup sets `requireBundledSource` so a missing or
+ * malformed bundled mirror cannot silently leave an old plugin active.
+ */
+export type PluginInstallOptions = {
+  deferTrustedRecordSync?: boolean;
+  requireBundledSource?: boolean;
+};
 const pluginInstallTails = new Map<string, Promise<void>>();
 
 function normalizePluginInstallLockKey(targetDir: string): string {
@@ -1540,6 +1667,7 @@ async function ensurePluginInstalledUnlocked(
 ): Promise<PluginInstallResult> {
   const targetManifest = join(targetDir, 'openclaw.plugin.json');
   const targetPkgJson = join(targetDir, 'package.json');
+  const requireBundledSource = options.requireBundledSource === true;
   const syncTrustedRecord = async (): Promise<void> => {
     if (!options.deferTrustedRecordSync) {
       await syncTrustedOfficialPluginInstallRecord(pluginDirName, targetDir);
@@ -1578,11 +1706,43 @@ async function ensurePluginInstalledUnlocked(
   };
 
   const sourceDir = await findBestBundledPluginSource(candidateSources, targetDir);
+  // In a packaged runtime, a missing mirror is itself a compatibility failure.
+  // Classify it before ownership inspection so a markerless legacy copy is not
+  // mislabeled as a user-owned conflict and quietly retained by callers.
+  if (!sourceDir && requireBundledSource && app.isPackaged) {
+    return {
+      installed: false,
+      repairRequired: true,
+      code: 'bundled-source-missing',
+      warning: `${pluginLabel} plugin bundled mirror/source is missing; repair/reinstall this UClaw package before starting Gateway. Checked: ${candidateSources.join(' | ')}`,
+    };
+  }
   const ownership = await inspectManagedPluginOwnership(pluginDirName, {
     targetDir,
-    candidateSources: sourceDir ? [sourceDir] : candidateSources,
+    // Keep every candidate in the ownership probe. A markerless official
+    // plugin may have been installed from a fallback mirror (for example an
+    // unpacked resources path) while the ranking logic selects a newer copy
+    // from the primary path. Restricting the probe to only the selected source
+    // would incorrectly classify that existing managed copy as user-owned and
+    // refuse a legitimate upgrade.
+    candidateSources,
   });
   if (ownership.status !== 'absent' && ownership.status !== 'managed') {
+    // UClaw-owned local plugins are part of the bundled application contract.
+    // In strict packaged startup mode an invalid marker/indeterminate target
+    // cannot be treated as an ordinary user-owned extension: doing so would
+    // silently keep a potentially incompatible stale copy alive. Preserve the
+    // bytes for explicit repair, but stop Gateway admission until the package
+    // is repaired or reinstalled.
+    if (requireBundledSource && app.isPackaged && isClawXManagedPluginId(pluginDirName)) {
+      return {
+        installed: false,
+        repairRequired: true,
+        code: 'bundled-source-invalid',
+        ownership,
+        warning: `${pluginLabel} plugin ownership state is invalid; repair/reinstall this UClaw package before starting Gateway`,
+      };
+    }
     return ownershipConflictInstallResult(pluginDirName, pluginLabel, ownership);
   }
   const targetHasManifest = await pathExists(targetManifest);
@@ -1602,6 +1762,19 @@ async function ensurePluginInstalledUnlocked(
         readPluginVersion(targetPkgJson),
         findMissingPluginRuntimeDependencies(targetDir),
       ]);
+      // A packaged Gateway must never keep running an old extension merely
+      // because the newly bundled mirror disappeared from the app bundle.
+      // This is deliberately checked even when the installed copy looks
+      // healthy: a source-less copy cannot be compared for schema/content
+      // compatibility and may be the exact stale plugin that broke startup.
+      if (requireBundledSource) {
+        return {
+          installed: false,
+          repairRequired: true,
+          code: 'bundled-source-missing',
+          warning: `${pluginLabel} plugin bundled mirror/source is missing; repair/reinstall this UClaw package before starting Gateway. Checked: ${candidateSources.join(' | ')}`,
+        };
+      }
       if (installedPackageReady && installedVersion && missingRuntimeDeps.length === 0) {
         return finalizeInstalled();
       }
@@ -1612,7 +1785,10 @@ async function ensurePluginInstalledUnlocked(
     }
 
     if (!sourceDir) {
-      return finalizeInstalled();
+      // In strict startup mode keep looking for the dev/node_modules source
+      // below.  Returning the installed copy here would bypass that repair
+      // path and silently accept stale content in an un-packaged launch.
+      if (!requireBundledSource) return finalizeInstalled();
     } else {
       const [installedVersion, sourceVersion] = await Promise.all([
         readPluginVersion(targetPkgJson),
@@ -1692,7 +1868,14 @@ async function ensurePluginInstalledUnlocked(
       },
     );
 
-    return { installed: false, warning: `Failed to install bundled ${pluginLabel} plugin mirror` };
+    return {
+      installed: false,
+      ...(requireBundledSource ? {
+        repairRequired: true,
+        code: 'bundled-source-invalid' as const,
+      } : {}),
+      warning: `Failed to install bundled ${pluginLabel} plugin mirror`,
+    };
   }
 
   // Dev mode fallback: copy from node_modules with pnpm-aware dep resolution
@@ -1757,6 +1940,10 @@ async function ensurePluginInstalledUnlocked(
 
   return {
     installed: false,
+    ...(requireBundledSource ? {
+      repairRequired: true,
+      code: 'bundled-source-missing' as const,
+    } : {}),
     warning: `Bundled ${pluginLabel} plugin mirror not found. Checked: ${candidateSources.join(' | ')}`,
   };
 }

@@ -17,6 +17,21 @@ type ParsedPortableVersion = {
   prerelease: string[] | null;
 };
 
+// Keep the update identity boundary strict.  A malformed version must not be
+// fed into the comparison/fallback filename code where punctuation could
+// become a path segment.  A leading `v` is accepted for compatibility with
+// older feeds, but the semantic version itself follows the SemVer numeric
+// identifier rules.
+const PORTABLE_VERSION_PATTERN = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
+
+export function isValidPortableUpdateVersion(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const text = value.trim();
+  const match = PORTABLE_VERSION_PATTERN.exec(text);
+  if (!match) return false;
+  return !match[4]?.split('.').some((part) => /^0\d+$/u.test(part));
+}
+
 /** Parse the SemVer fields used to decide whether a portable update is newer. */
 function parsePortableVersion(value: string): ParsedPortableVersion {
   const withoutBuild = value.trim().replace(/^v/i, '').split('+', 1)[0];
@@ -103,10 +118,18 @@ export function filenameFromPortableUpdateInfo(
     }
   }
 
-  return `UClaw-${info.version}-${platform}-${arch}-usb.zip`;
+  const safeVersion = sanitizePortableUpdateFilename(info.version)
+    .replace(/[^A-Za-z0-9.+-]/gu, '-')
+    .replace(/\.{2,}/gu, '.')
+    .replace(/^\.+|\.+$/gu, '')
+    || 'unknown';
+  return `UClaw-${safeVersion}-${platform}-${arch}-usb.zip`;
 }
 
 export function assertPortableUpdateZipFilename(filename: string): void {
+  if (!filename || filename !== basename(filename) || filename.includes('/') || filename.includes('\\')) {
+    throw new Error('Portable update filename must be a single safe path segment');
+  }
   const extension = extname(filename).toLowerCase();
   const blockedExtensions = new Set(['.exe', '.msi', '.dmg', '.pkg', '.appimage', '.deb', '.rpm']);
   if (blockedExtensions.has(extension)) {
@@ -145,14 +168,17 @@ export async function verifyPortableUpdatePackage(
   filePath: string,
   info: Pick<PortableUpdatePackageMetadata, 'sha512' | 'size'>,
 ): Promise<{ size: number; sha512: string }> {
-  const file = await stat(filePath);
-  if (info.size && info.size > 0 && file.size !== info.size) {
-    throw new Error(`Portable update size mismatch: expected ${info.size}, got ${file.size}`);
+  if (typeof info.size !== 'number' || !Number.isSafeInteger(info.size) || info.size <= 0) {
+    throw new Error('Portable update size is required and must be a positive integer');
+  }
+  const expectedSha512 = typeof info.sha512 === 'string' ? info.sha512.trim().toLowerCase() : '';
+  if (!/^[a-f0-9]{128}$/u.test(expectedSha512)) {
+    throw new Error('Portable update sha512 is required and must be a 128-character hexadecimal digest');
   }
 
-  const expectedSha512 = info.sha512?.trim().toLowerCase();
-  if (!expectedSha512) {
-    throw new Error('Portable update sha512 is required');
+  const file = await stat(filePath);
+  if (file.size !== info.size) {
+    throw new Error(`Portable update size mismatch: expected ${info.size}, got ${file.size}`);
   }
 
   await assertZipMagic(filePath);

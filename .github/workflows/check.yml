@@ -8,6 +8,10 @@ on:
       - main
       - master
       - develop
+      # The active UClaw release branch also carries the plugin/update
+      # compatibility guard. Keep it covered when release work is reviewed
+      # directly against this branch.
+      - feature/claw-0.5.1
 
 jobs:
   check:
@@ -17,6 +21,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          # The plugin version guard compares the PR head with its base SHA.
+          # Keep the complete graph available so `git show <base>:<path>` is
+          # deterministic even when the plugin was introduced earlier in the
+          # feature branch.
+          fetch-depth: 0
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -39,7 +49,14 @@ jobs:
         run: pnpm run ext:bridge
 
       - name: Run linter
-        run: pnpm run lint
+        # CI must not rewrite the checkout before the plugin content/version
+        # guard compares the PR diff. Use the read-only lint entrypoint.
+        run: pnpm run lint:check
+
+      - name: Check plugin content/version bumps
+        env:
+          PLUGIN_VERSION_BASE: ${{ github.event.pull_request.base.sha }}
+        run: pnpm run check:plugin-versions
 
       - name: Run typecheck
         run: pnpm run typecheck
