@@ -161,6 +161,29 @@ func TestValidateTaskRejectsWorkspacePathsThatOverlapRoot(t *testing.T) {
 	}
 }
 
+func TestRemoveStagingDirHandlesReadOnlyTreeAndMissingPath(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "staging")
+	readOnlyDir := filepath.Join(root, "UClaw.app", "Contents", "Resources")
+	if err := os.MkdirAll(readOnlyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(readOnlyDir, "bundle.bin"), []byte("bundle"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(readOnlyDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeStagingDir(root); err != nil {
+		t.Fatalf("expected read-only staging tree cleanup to pass: %v", err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("expected staging tree removed, got %v", err)
+	}
+	if err := removeStagingDir(root); err != nil {
+		t.Fatalf("expected missing staging path cleanup to be idempotent: %v", err)
+	}
+}
+
 func TestValidateTaskAcceptsExternalWorkspacePaths(t *testing.T) {
 	task, dir := newTaskForWorkspacePathTests(t)
 	task.StagingDir = filepath.Join(dir, "external-staging")
@@ -646,6 +669,9 @@ func TestApplyReplacesPackageEntriesAndPreservesUserFiles(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration-style filesystem test")
 	}
+	if runtime.GOOS == "darwin" {
+		t.Skip("macOS app-bundle behavior is covered by main_macos_test.go")
+	}
 	previousStartUpdatedApp := startUpdatedApp
 	startUpdatedApp = func(_ string, _ string, readyPath string) (*exec.Cmd, error) {
 		cmd := exec.Command(os.Args[0], "-test.run=TestPortableUpdaterProcessHelper")
@@ -737,6 +763,9 @@ func TestApplyReplacesPackageEntriesAndPreservesUserFiles(t *testing.T) {
 }
 
 func TestApplyRollsBackWhenUpdatedAppFailsToStart(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("macOS app-bundle behavior is covered by main_macos_test.go")
+	}
 	previousStartUpdatedApp := startUpdatedApp
 	previousFastMove := tryFastMoveReplacement
 	startUpdatedApp = func(string, string, string) (*exec.Cmd, error) {

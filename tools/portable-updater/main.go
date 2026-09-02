@@ -1298,7 +1298,7 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 			Percent: clampProgressPercent(percent, 20, 58),
 		})
 	}); err != nil {
-		_ = os.RemoveAll(stagingDir)
+		_ = removeStagingDir(stagingDir)
 		return "", stagingDir, "", err
 	}
 	u.progress.Update(progressState{
@@ -1307,19 +1307,19 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 		Percent: 60,
 	})
 	if err := u.validateStaging(stagingDir); err != nil {
-		_ = os.RemoveAll(stagingDir)
+		_ = removeStagingDir(stagingDir)
 		return "", stagingDir, "", err
 	}
 	if runtime.GOOS == "darwin" {
 		if err := validateMacReplacementCaseMatches(stagingDir, u.task.RootDir, u.task.DataDirName); err != nil {
-			_ = os.RemoveAll(stagingDir)
+			_ = removeStagingDir(stagingDir)
 			return "", stagingDir, "", err
 		}
 	}
 
 	backupDir, err = u.createBackupDir()
 	if err != nil {
-		_ = os.RemoveAll(stagingDir)
+		_ = removeStagingDir(stagingDir)
 		return "", stagingDir, "", err
 	}
 	u.logf("backing up current app files to %s", backupDir)
@@ -1330,7 +1330,7 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 	})
 	replacementEntries, err := replacementEntrySet(stagingDir, u.task.DataDirName)
 	if err != nil {
-		_ = os.RemoveAll(stagingDir)
+		_ = removeStagingDir(stagingDir)
 		return backupDir, stagingDir, "", err
 	}
 
@@ -1410,7 +1410,7 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 		return u.rollbackAfterFailure(backupDir, stagingDir, copied, moved, fmt.Errorf("updated app failed startup verification: %w", err))
 	}
 
-	if err := os.RemoveAll(stagingDir); err != nil {
+	if err := removeStagingDir(stagingDir); err != nil {
 		u.logf("failed to remove staging directory after successful update: %v", err)
 	}
 	cleanupOldBackups(filepath.Join(u.task.RootDir, backupDirName), backupDir, 7*24*time.Hour, u.logf)
@@ -1534,7 +1534,7 @@ func (u *updater) rollbackAfterFailure(backupDir string, stagingDir string, copi
 			restartPreviousApp: false,
 		}
 	}
-	if err := os.RemoveAll(stagingDir); err != nil {
+	if err := removeStagingDir(stagingDir); err != nil {
 		u.logf("failed to remove staging directory after rollback: %v", err)
 	}
 	return backupDir, stagingDir, "", &updateFailure{
@@ -1590,6 +1590,55 @@ func verifyZip(path string, expectedSize int64, expectedSha512 string) error {
 	return nil
 }
 
+// removeStagingDir cleans up an extracted update tree. macOS app bundles may
+// legitimately contain read-only descendants (ditto preserves those modes),
+// so make only this disposable staging tree writable before removing it. The
+// installed app bundle is never passed through this helper.
+func removeStagingDir(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	if runtime.GOOS != "darwin" {
+		return os.RemoveAll(path)
+	}
+	// Walk the tree first so read-only descendants do not prevent RemoveAll on
+	// macOS, but keep a missing staging directory idempotent.
+	if info, err := os.Lstat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	} else if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("staging path must be a real directory: %s", path)
+	}
+	writableErr := filepath.Walk(path, func(currentPath string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			if os.IsNotExist(walkErr) {
+				return filepath.SkipDir
+			}
+			return walkErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if info.IsDir() {
+			return os.Chmod(currentPath, info.Mode().Perm()|0o700)
+		}
+		return nil
+	})
+	removeErr := os.RemoveAll(path)
+	if os.IsNotExist(removeErr) {
+		removeErr = nil
+	}
+	if removeErr != nil {
+		if writableErr != nil {
+			return errors.Join(writableErr, removeErr)
+		}
+		return removeErr
+	}
+	return nil
+}
+
 func (u *updater) prepareStagingDir() (string, error) {
 	if u.task.StagingDir != "" {
 		if u.workspace != nil {
@@ -1599,7 +1648,7 @@ func (u *updater) prepareStagingDir() (string, error) {
 		} else if err := validateTaskWorkspacePath(u.task.StagingDir, "stagingDir", u.task.RootDir, taskPathStaging); err != nil {
 			return "", err
 		}
-		if err := os.RemoveAll(u.task.StagingDir); err != nil {
+		if err := removeStagingDir(u.task.StagingDir); err != nil {
 			return "", err
 		}
 		if err := os.MkdirAll(u.task.StagingDir, 0o755); err != nil {
@@ -1622,11 +1671,11 @@ func (u *updater) prepareStagingDir() (string, error) {
 	}
 	if u.workspace != nil {
 		if err := validateNoSymlinkComponents(u.workspace.stagingRoot, stagingDir, "stagingDir"); err != nil {
-			_ = os.RemoveAll(stagingDir)
+			_ = removeStagingDir(stagingDir)
 			return "", err
 		}
 	} else if err := validateTaskWorkspacePath(stagingDir, "stagingDir", u.task.RootDir, taskPathStaging); err != nil {
-		_ = os.RemoveAll(stagingDir)
+		_ = removeStagingDir(stagingDir)
 		return "", err
 	}
 	return stagingDir, nil
@@ -2548,7 +2597,7 @@ func removeCopiedEntriesMac(rootDir string, entries []string) error {
 	if err := validateNoSymlinkComponents(root, quarantineDir, "rollback quarantine"); err != nil {
 		return err
 	}
-	defer func() { _ = os.RemoveAll(quarantineDir) }()
+	defer func() { _ = removeStagingDir(quarantineDir) }()
 	var rollbackErr error
 	for i := len(entries) - 1; i >= 0; i-- {
 		name := entries[i]
@@ -2686,8 +2735,8 @@ func preserveFileMode(path string, expected os.FileMode) error {
 	}
 	if info, statErr := os.Lstat(path); statErr != nil {
 		return statErr
-	} else if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return fmt.Errorf("cannot preserve mode on a non-regular file: %s", path)
+	} else if info.Mode()&os.ModeSymlink != 0 || (!info.Mode().IsRegular() && !info.IsDir()) {
+		return fmt.Errorf("cannot preserve mode on an unsupported entry: %s", path)
 	}
 	chmodErr := os.Chmod(path, expected)
 	if chmodErr == nil {
