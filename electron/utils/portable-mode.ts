@@ -4,7 +4,10 @@ import {
   lstatSync,
   mkdirSync,
   readdirSync,
+  unlinkSync,
+  writeFileSync,
 } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { posix, win32 } from 'node:path';
 import { app } from 'electron';
@@ -34,6 +37,7 @@ export type PortableLayoutReason =
   | 'missing-portable-flag'
   | 'missing-data-directory'
   | 'missing-app-bundle'
+  | 'unsafe-root-entries'
   | 'invalid-root'
   | 'read-only-root'
   | 'read-only-data-directory'
@@ -347,11 +351,41 @@ function readDarwinRootEntryNames(rootDir: string, platform: string): Set<string
 }
 
 /**
+ * Keep the client-side layout probe in lockstep with the macOS updater
+ * helper. Case-insensitive APFS/HFS+ can alias two top-level entries, and a
+ * case variant of a reserved entry can otherwise be selected by `lstatSync`
+ * even though the helper will reject it before replacement.
+ */
+function hasDarwinUnsafeTopLevelEntries(entryNames: readonly string[]): boolean {
+  const reservedNames = [
+    PORTABLE_FLAG_FILE,
+    PORTABLE_DATA_DIR_NAME,
+    'UClaw.app',
+    '.uclaw-update-backups',
+  ];
+  const seen = new Map<string, string>();
+  for (const name of entryNames) {
+    const foldedName = name.toLowerCase();
+    if (reservedNames.some((reserved) => name !== reserved && foldedName === reserved.toLowerCase())) {
+      return true;
+    }
+    const previous = seen.get(foldedName);
+    if (previous !== undefined && previous !== name) return true;
+    seen.set(foldedName, name);
+  }
+  return false;
+}
+
+/**
  * Check a directory using both the POSIX mode bits and the OS access check.
  * The mode-bit check matters in test/diagnostic processes running as root,
  * where `access(2)` can otherwise report a read-only directory as writable.
  */
-function isWritableDirectory(value: string | null, platform: string = process.platform): boolean {
+function isWritableDirectory(
+  value: string | null,
+  platform: string = process.platform,
+  probeMutation = true,
+): boolean {
   if (!isDirectory(value)) return false;
   try {
     const mode = lstatSync(value!).mode;
@@ -364,7 +398,35 @@ function isWritableDirectory(value: string | null, platform: string = process.pl
       : fsConstants.W_OK | fsConstants.X_OK;
     if (platform !== 'win32' && hostPlatform !== 'win32' && (mode & 0o111) === 0) return false;
     accessSync(value!, accessMode);
-    return true;
+    // The extra mutation probe mirrors the Darwin helper's mount-aware check.
+    // Keep non-Darwin classification on the existing mode/access path so a
+    // Windows or Linux portable root does not incur unnecessary filesystem
+    // churn during frequent update-status refreshes.
+    if (platform !== 'darwin' || !probeMutation) return true;
+    // `access(2)` can still report success for a root process on a read-only
+    // volume. The updater needs to create/remove entries in this directory,
+    // so perform the same non-destructive mutation now. A random `wx` file is
+    // removed immediately and never becomes part of the portable layout.
+    const path = pathApi(platform, value!);
+    const probePath = path.join(value!, `.uclaw-write-probe-${randomUUID()}`);
+    let created = false;
+    try {
+      writeFileSync(probePath, '', { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+      created = true;
+    } catch {
+      return false;
+    } finally {
+      if (created) {
+        try {
+          unlinkSync(probePath);
+        } catch {
+          // A directory that cannot remove its own temporary entry is not
+          // safe for the helper's rename/rollback sequence.
+          created = false;
+        }
+      }
+    }
+    return created;
   } catch {
     return false;
   }
@@ -387,6 +449,7 @@ function layoutReason(params: {
   hasPortableFlag: boolean;
   hasDataDirectory: boolean;
   hasAppBundle: boolean;
+  hasUnsafeRootEntries: boolean;
   platform: string;
   rootWritable: boolean;
   dataDirectoryWritable: boolean;
@@ -396,6 +459,7 @@ function layoutReason(params: {
   if (!params.hasPortableFlag) return 'missing-portable-flag';
   if (!params.hasDataDirectory) return 'missing-data-directory';
   if (params.platform === 'darwin' && !params.hasAppBundle) return 'missing-app-bundle';
+  if (params.platform === 'darwin' && params.hasUnsafeRootEntries) return 'unsafe-root-entries';
   if (!params.rootWritable) return 'read-only-root';
   if (!params.dataDirectoryWritable) return 'read-only-data-directory';
   if (params.platform === 'darwin' && !params.appBundleWritable) return 'read-only-app-bundle';
@@ -404,8 +468,10 @@ function layoutReason(params: {
 
 /**
  * Inspect the on-disk macOS portable contract without creating directories or
- * identity files. This function is intentionally side-effect free so update
- * checks can classify an app copied to `/Applications` or launched from a DMG.
+ * identity files. The writability check may create a random temporary probe
+ * file and remove it immediately, but it never manufactures portable state;
+ * update checks can therefore classify an app copied to `/Applications` or
+ * launched from a DMG safely.
  */
 export function inspectPortableLayout(options: {
   platform?: string;
@@ -421,6 +487,8 @@ export function inspectPortableLayout(options: {
   const appBundlePath = resolvePortableAppBundlePath(rootDir, platform, path);
   const darwinEntryNames = readDarwinRootEntryNames(rootDir, platform);
   const rootEntryNames = darwinEntryNames ? [...darwinEntryNames].sort() : [];
+  const hasUnsafeRootEntries = platform === 'darwin'
+    && hasDarwinUnsafeTopLevelEntries(rootEntryNames);
   const hasPortableFlag = isFile(portableFlagPath)
     && (darwinEntryNames === null || darwinEntryNames.has(PORTABLE_FLAG_FILE));
   const hasDataDirectory = isDirectory(dataDir)
@@ -429,11 +497,21 @@ export function inspectPortableLayout(options: {
     ? isDirectory(appBundlePath)
       && (darwinEntryNames?.has('UClaw.app') ?? false)
     : true;
-  const rootWritable = isWritableDirectory(rootDir, platform);
-  const dataDirectoryWritable = isWritableDirectory(dataDir, platform);
-  const appBundleWritable = platform === 'darwin' ? isWritableDirectory(appBundlePath, platform) : true;
   const structureComplete = hasPortableFlag && hasDataDirectory && hasAppBundle;
-  const writable = structureComplete && rootWritable && dataDirectoryWritable && appBundleWritable;
+  // Avoid touching an installed app or its parent `/Applications` directory
+  // while classifying an incomplete layout. Mutation probes are only needed
+  // for a structure that could actually qualify for in-place replacement.
+  const probeMutation = platform === 'darwin' && structureComplete;
+  const rootWritable = isWritableDirectory(rootDir, platform, probeMutation);
+  const dataDirectoryWritable = isWritableDirectory(dataDir, platform, probeMutation);
+  const appBundleWritable = platform === 'darwin'
+    ? isWritableDirectory(appBundlePath, platform, probeMutation)
+    : true;
+  const writable = structureComplete
+    && !hasUnsafeRootEntries
+    && rootWritable
+    && dataDirectoryWritable
+    && appBundleWritable;
   // In-place replacement is only safe after the complete layout and every
   // participating directory has passed the writable probe. This applies to
   // all platforms; a forced/partial portable signal must never advertise an
@@ -444,6 +522,7 @@ export function inspectPortableLayout(options: {
     hasPortableFlag,
     hasDataDirectory,
     hasAppBundle,
+    hasUnsafeRootEntries,
     platform,
     rootWritable,
     dataDirectoryWritable,
@@ -485,7 +564,7 @@ export function getPortableUpdatePackageType(platform = process.platform): Porta
   if (truthyEnv(process.env.CLAWX_PORTABLE)) return 'portable_zip';
   const rootDir = resolvePortableRootDir(platform);
   const path = pathApi(platform, rootDir);
-  // Match the side-effect-free layout classifier above: a stray file,
+  // Match the non-manufacturing layout classifier above: a stray file,
   // symlink, or broken extraction named `UClawData`/`portable.flag` must not
   // silently switch an installed build onto the portable ZIP contract.  In
   // particular, `existsSync()` follows links and would let an unrelated
@@ -582,9 +661,9 @@ export function getPortableModeInfo(): PortableModeInfo {
   // Reuse the lstat-based inspection result for mode detection.  `existsSync`
   // also returns true for a regular file or symlink named `UClawData`, which
   // could otherwise make a malformed installed app look portable and pass a
-  // path into runtime-layout initialization.  The classifier is deliberately
-  // side-effect free and only treats the exact marker file and data directory
-  // types as portable signals.
+  // path into runtime-layout initialization. The classifier only treats the
+  // exact marker file and data directory types as portable signals; its
+  // writability probes do not create any durable layout entries.
   const hasPortableFlag = portableLayout.hasPortableFlag;
   const hasDataDirectory = portableLayout.hasDataDirectory;
   // On macOS, an app bundle can be launched directly from a DMG or copied
@@ -720,7 +799,7 @@ export function isPortableUpdateReplaceable(): boolean {
   return canAutoReplacePortableUpdate();
 }
 
-/** Return the side-effect-free migration/layout classification. */
+/** Return the non-manufacturing migration/layout classification. */
 export function getPortableMigrationInfo(): PortableLayoutInspection {
   // Always resolve the current launch root for a replacement decision.  The
   // mode-info cache is intentionally retained for runtime-path stability, but

@@ -342,6 +342,24 @@ describe('macOS managed portable updater', () => {
     });
   });
 
+  it('rejects insecure HTTP artifact URLs before exposing an update', async () => {
+    setPlatform('darwin');
+    setArch('arm64');
+    proxyAwareFetchMock.mockResolvedValue(makePortableResponse('2.0.4', {
+      download_url: 'http://updates.test/download/UClaw-2.0.4-mac-usb.zip',
+    }));
+
+    const { AppUpdater } = await import('@electron/main/updater');
+    const updater = new AppUpdater();
+
+    await expect(updater.checkForUpdates()).rejects.toThrow(/download URL is invalid/i);
+    expect(updater.getStatus()).toMatchObject({
+      status: 'error',
+      info: undefined,
+      downloadPath: undefined,
+    });
+  });
+
   it('rejects malformed artifact metadata before issuing a download request', async () => {
     setPlatform('darwin');
     setArch('arm64');

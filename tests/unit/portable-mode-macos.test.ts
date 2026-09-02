@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,6 +26,13 @@ vi.mock('@electron/utils/portable-runtime-state', () => ({
 vi.mock('@electron/utils/portable-clawx-state', () => ({
   preparePortableClawXStateSync: (...args: unknown[]) => preparePortableClawXStateSyncMock(...args),
 }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    readdirSync: vi.fn(actual.readdirSync),
+  };
+});
 import {
   applyPortableEnvironment,
   assertPortableUpdateReplaceable,
@@ -317,6 +324,36 @@ describe('macOS portable layout inspection', () => {
     expect(layout.structureComplete).toBe(false);
     expect(layout.canAutoReplace).toBe(false);
     expect(layout.reason).toBe('missing-portable-flag');
+  });
+
+  it('rejects case-colliding reserved entries before authorizing replacement', async () => {
+    const root = await createMacPortableRoot();
+    // The default APFS/HFS+ macOS volume aliases case variants, so inject the
+    // directory-entry view that `readdir(2)` would expose on a case-sensitive
+    // extraction. The helper rejects this layout, and the client probe must
+    // not advertise auto-replace first.
+    const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const readdir = vi.mocked(readdirSync);
+    readdir.mockImplementation((path, options) => {
+      const entries = actualFs.readdirSync(path as never, options as never);
+      if (String(path) !== root || !Array.isArray(entries) || typeof entries[0] !== 'string') {
+        return entries as never;
+      }
+      return [...entries, 'Portable.flag'] as never;
+    });
+
+    try {
+      const layout = inspectPortableLayout({ platform: 'darwin', rootDir: root });
+
+      expect(layout.structureComplete).toBe(true);
+      expect(layout.rootEntryNames).toEqual(expect.arrayContaining(['portable.flag', 'Portable.flag']));
+      expect(layout.canAutoReplace).toBe(false);
+      expect(layout.writable).toBe(false);
+      expect(layout.reason).toBe('unsafe-root-entries');
+      expect(layout.migrationRequired).toBe(true);
+    } finally {
+      readdir.mockImplementation(actualFs.readdirSync);
+    }
   });
 
   it('does not manufacture UClawData from a marker-only macOS layout', async () => {

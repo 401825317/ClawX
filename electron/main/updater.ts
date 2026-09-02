@@ -311,12 +311,12 @@ function validatePortableUpdateArtifact(info: PortableUpdateInfo): PortableUpdat
   try {
     const parsed = new URL(downloadUrl);
     if (
-      (parsed.protocol !== 'https:' && parsed.protocol !== 'http:')
+      parsed.protocol !== 'https:'
       || !parsed.hostname
       || parsed.username
       || parsed.password
     ) {
-      throw new Error('unsupported URL scheme or missing host');
+      throw new Error('HTTPS URL is required and must include a host');
     }
   } catch {
     throw new Error('Managed update metadata download URL is invalid');
