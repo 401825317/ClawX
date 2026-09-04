@@ -193,6 +193,22 @@ export function safeConsoleWrite(sink: ConsoleSink, formatted: string): void {
   }
 }
 
+function formatIsoTimestampWithOffset(date: Date, offsetMinutes: number): string {
+  const normalizedOffset = Math.trunc(offsetMinutes);
+  const localTimestamp = new Date(
+    date.getTime() + normalizedOffset * 60_000,
+  ).toISOString().slice(0, -1);
+  const sign = normalizedOffset >= 0 ? '+' : '-';
+  const absoluteOffset = Math.abs(normalizedOffset);
+  const hours = String(Math.floor(absoluteOffset / 60)).padStart(2, '0');
+  const minutes = String(absoluteOffset % 60).padStart(2, '0');
+  return `${localTimestamp}${sign}${hours}:${minutes}`;
+}
+
+function formatLocalIsoTimestamp(date = new Date()): string {
+  return formatIsoTimestampWithOffset(date, -date.getTimezoneOffset());
+}
+
 function buildLogFilePath(sequence: number): string | null {
   if (!logDir || !logDate) return null;
   const suffix = sequence === 0 ? '' : `-${sequence}`;
@@ -576,8 +592,9 @@ export function initLogger(): void {
     }
 
     // Write a separator for new session (sync is OK — happens once at startup)
-    const sessionHeader = `\n${'='.repeat(80)}\n[${new Date().toISOString()}] === ClawX Session Start (v${app.getVersion()}) ===\n${'='.repeat(80)}\n`;
-    logDate = new Date().toISOString().split('T')[0];
+    const sessionTimestamp = formatLocalIsoTimestamp();
+    const sessionHeader = `\n${'='.repeat(80)}\n[${sessionTimestamp}] === ClawX Session Start (v${app.getVersion()}) ===\n${'='.repeat(80)}\n`;
+    logDate = sessionTimestamp.slice(0, 10);
     selectInitialLogFile(Buffer.byteLength(sessionHeader));
     if (logFilePath && ensureLogDirectoryCapacitySync(Buffer.byteLength(sessionHeader))) {
       appendFileSync(logFilePath, sessionHeader);
@@ -1076,7 +1093,7 @@ function writeErrorWithAggregation(formatted: string, fingerprint: string): void
 }
 
 function formatMessage(level: string, message: string, ...args: unknown[]): string {
-  const timestamp = new Date().toISOString();
+  const timestamp = formatLocalIsoTimestamp();
   const correlation = extractLogCorrelation(args);
   const formattedArgs = args.length > 0 ? ` ${args.map(formatLogArgument).join(' ')}` : '';
 
@@ -1299,6 +1316,7 @@ export const __test = {
   maxPendingLogBytes: MAX_PENDING_LOG_BYTES,
   maxRecentLogBytes: MAX_RECENT_LOG_BYTES,
   boundedLogLine,
+  formatIsoTimestampWithOffset,
   redactSensitiveText,
   flushRepeatedError,
   flushForExit,
