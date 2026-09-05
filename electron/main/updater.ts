@@ -2,8 +2,8 @@
  * Auto-Updater Module
  * Handles automatic application updates using electron-updater
  *
- * Packaged macOS builds and Windows USB builds use the managed portable update
- * API and a verified ZIP. Other installed builds use electron-updater.
+ * Packaged macOS builds and Windows portable builds use the managed portable
+ * update API and a verified ZIP. Other installed builds use electron-updater.
  */
 import { autoUpdater, UpdateInfo, ProgressInfo, UpdateDownloadedEvent } from 'electron-updater';
 import { BrowserWindow, app, ipcMain, shell } from 'electron';
@@ -98,6 +98,105 @@ function platformForUpdateApi(): 'mac' | 'win' | 'linux' {
 
 function normalizeUpdateChannel(channel: string): string {
   return channel === 'stable' ? 'latest' : channel;
+}
+
+function updateArtifactFilename(value: string): string {
+  try {
+    const pathname = new URL(value, 'https://updates.invalid/').pathname;
+    return decodeURIComponent(pathname.slice(pathname.lastIndexOf('/') + 1));
+  } catch {
+    return '';
+  }
+}
+
+function expectedInstalledUpdateFilename(version: string): string | null {
+  if (process.platform === 'win32') {
+    return `UClaw-${version}-win-${process.arch}.exe`;
+  }
+  if (process.platform === 'darwin') {
+    return `UClaw-${version}-mac-${process.arch}.zip`;
+  }
+  if (process.platform === 'linux') {
+    const arch = process.arch === 'x64' ? 'x86_64' : process.arch === 'arm64' ? 'arm64' : null;
+    return arch ? `UClaw-${version}-linux-${arch}.AppImage` : null;
+  }
+  return null;
+}
+
+function isUclawInstalledUpdate(info: UpdateInfo): boolean {
+  const candidates = [
+    typeof info.path === 'string' ? info.path : '',
+    ...(Array.isArray(info.files)
+      ? info.files.map((file) => (typeof file.url === 'string' ? file.url : ''))
+      : []),
+  ].filter(Boolean);
+  if (candidates.length === 0) return false;
+  const filenames = candidates.map(updateArtifactFilename);
+  const expectedFilename = expectedInstalledUpdateFilename(info.version);
+  if (!expectedFilename) return false;
+  if (process.platform === 'win32') {
+    return filenames.every((filename) => filename === expectedFilename);
+  }
+  const expectedPrefix = process.platform === 'darwin'
+    ? `UClaw-${info.version}-mac-`
+    : `UClaw-${info.version}-linux-`;
+  if (!filenames.includes(expectedFilename)
+    || !filenames.every((filename) => filename.startsWith(expectedPrefix))) {
+    return false;
+  }
+  if (process.platform === 'linux') {
+    const fileCandidates = (Array.isArray(info.files) && info.files.length > 0
+      ? info.files.map((file) => updateArtifactFilename(file.url))
+      : [updateArtifactFilename(info.path)]
+    ).filter((filename) => filename.toLowerCase().endsWith('.appimage'));
+    // Match electron-updater's AppImage selection: it looks for the literal
+    // process.arch and otherwise takes the first AppImage in metadata.
+    const selectedFilename = fileCandidates.find((filename) => filename.includes(process.arch))
+      ?? fileCandidates[0];
+    return selectedFilename === expectedFilename;
+  }
+  return true;
+}
+
+function installedUpdateFingerprint(info: UpdateInfo): string {
+  const files = Array.isArray(info.files)
+    ? info.files.map((file) => ({
+        url: typeof file.url === 'string' ? file.url : '',
+        sha512: typeof file.sha512 === 'string' ? file.sha512 : '',
+        size: typeof file.size === 'number' ? file.size : null,
+      })).sort((left, right) => left.url.localeCompare(right.url))
+    : [];
+  return JSON.stringify({
+    version: typeof info.version === 'string' ? info.version : '',
+    path: typeof info.path === 'string' ? info.path : '',
+    sha512: typeof info.sha512 === 'string' ? info.sha512 : '',
+    files,
+  });
+}
+
+function isExpectedDownloadedInstalledUpdate(info: UpdateDownloadedEvent): boolean {
+  if (typeof info.downloadedFile !== 'string') return false;
+  const expectedFilename = expectedInstalledUpdateFilename(info.version);
+  if (!expectedFilename) return false;
+  const normalizedPath = info.downloadedFile.replaceAll('\\', '/');
+  return normalizedPath.slice(normalizedPath.lastIndexOf('/') + 1) === expectedFilename;
+}
+
+function installedUpdateValidationError(info: UpdateInfo): Error | null {
+  const version = typeof info?.version === 'string' ? info.version : '';
+  const label = version || 'unknown';
+  if (!isValidPortableUpdateVersion(version)) {
+    return new Error(`Rejected invalid installed update metadata for version ${label}: invalid version`);
+  }
+  if (comparePortableUpdateVersions(version, app.getVersion()) <= 0) {
+    return new Error(`Rejected invalid installed update metadata for version ${label}: update is not newer`);
+  }
+  if (!isUclawInstalledUpdate(info)) {
+    return new Error(
+      `Rejected invalid installed update metadata for version ${label}: artifact identity mismatch`,
+    );
+  }
+  return null;
 }
 
 type BackendEnvelope<T> = {
@@ -327,8 +426,8 @@ function validatePortableUpdateArtifact(info: PortableUpdateInfo): PortableUpdat
 
 /**
  * Update artifacts and colocated application state are separate concerns.
- * macOS always consumes the managed portable ZIP endpoint, while only a
- * complete writable portable root may be replaced in place.
+ * Packaged macOS and Windows portable builds consume the managed portable ZIP
+ * endpoint, while only a complete writable portable root may be replaced in place.
  */
 export type UpdateDisposition = 'installer' | 'auto-replace' | 'manual-migration';
 
@@ -377,7 +476,7 @@ function updateMetadata(): Pick<
 function usesManagedPortablePackage(): boolean {
   // Packaged macOS builds have one update contract regardless of whether the
   // app was copied from a DMG, installed under /Applications, or extracted as
-  // a USB ZIP. Keep the electron-updater path available in development so a
+  // a portable ZIP. Keep the electron-updater path available in development so a
   // local renderer/main diagnostic does not unexpectedly call the managed
   // production API with a synthetic package identity.
   return process.platform === 'darwin'
@@ -428,9 +527,22 @@ export class AppUpdater extends EventEmitter {
     // would probe latest-mac.yml/alpha-mac.yml). Keep that provider untouched
     // and route checks/downloads through the managed portable_zip API below.
     if (!usesManagedPortablePackage()) {
+      const runtimeIsUpdateSupported = autoUpdater.isUpdateSupported;
+      autoUpdater.isUpdateSupported = async (info: UpdateInfo) => {
+        if (!await Promise.resolve(runtimeIsUpdateSupported.call(autoUpdater, info))) return false;
+        const validationError = installedUpdateValidationError(info);
+        if (validationError) {
+          logger.warn(`[Updater] ${validationError.message}`);
+          return false;
+        }
+        return true;
+      };
       // Set channel so electron-updater requests the correct yml filename.
       // e.g. channel "alpha" -> requests alpha-mac.yml.
       autoUpdater.channel = channel;
+      // electron-updater implicitly enables downgrades whenever channel is
+      // assigned. UClaw channels must never install an older or foreign build.
+      autoUpdater.allowDowngrade = false;
       autoUpdater.setFeedURL({
         provider: 'generic',
         url: feedUrl,
@@ -455,6 +567,39 @@ export class AppUpdater extends EventEmitter {
     return this.status;
   }
 
+  private authorizedInstalledUpdate(allowedStatuses: UpdateStatus['status'][]): UpdateInfo {
+    if (!allowedStatuses.includes(this.status.status)) {
+      throw new Error(`Installed update is not authorized for status ${this.status.status}`);
+    }
+    const info = this.status.info;
+    if (!info || typeof info !== 'object' || typeof info.version !== 'string') {
+      throw new Error('Installed update metadata is not available');
+    }
+    const validationError = installedUpdateValidationError(info as UpdateInfo);
+    if (validationError) throw validationError;
+    if (
+      this.status.status === 'downloaded'
+      && !isExpectedDownloadedInstalledUpdate(info as UpdateDownloadedEvent)
+    ) {
+      throw new Error('Rejected installed update: downloaded artifact identity mismatch');
+    }
+    return info as UpdateInfo;
+  }
+
+  private rejectInstalledUpdate(error: Error): void {
+    this.clearAutoInstallTimer();
+    logger.error('[Updater] Installed update rejected:', error);
+    this.updateStatus({
+      status: 'error',
+      ...updateMetadata(),
+      info: undefined,
+      progress: undefined,
+      error: error.message,
+      downloadPath: undefined,
+    });
+    this.emit('error', error);
+  }
+
   /**
    * Setup auto-updater event listeners
    */
@@ -472,6 +617,11 @@ export class AppUpdater extends EventEmitter {
     });
 
     autoUpdater.on('update-available', (info: UpdateInfo) => {
+      const validationError = installedUpdateValidationError(info);
+      if (validationError) {
+        this.rejectInstalledUpdate(validationError);
+        return;
+      }
       this.updateStatus({
         status: 'available',
         ...updateMetadata(),
@@ -484,10 +634,11 @@ export class AppUpdater extends EventEmitter {
     });
 
     autoUpdater.on('update-not-available', (info: UpdateInfo) => {
+      const validationError = installedUpdateValidationError(info);
       this.updateStatus({
         status: 'not-available',
         ...updateMetadata(),
-        info,
+        info: validationError ? undefined : info,
         progress: undefined,
         error: undefined,
         downloadPath: undefined,
@@ -496,11 +647,33 @@ export class AppUpdater extends EventEmitter {
     });
 
     autoUpdater.on('download-progress', (progress: ProgressInfo) => {
+      try {
+        this.authorizedInstalledUpdate(['available', 'downloading']);
+      } catch (error) {
+        this.rejectInstalledUpdate(error as Error);
+        return;
+      }
       this.updateStatus({ status: 'downloading', ...updateMetadata(), progress, error: undefined });
       this.emit('download-progress', progress);
     });
 
     autoUpdater.on('update-downloaded', (event: UpdateDownloadedEvent) => {
+      try {
+        const offered = this.authorizedInstalledUpdate(['available', 'downloading']);
+        const validationError = installedUpdateValidationError(event);
+        if (validationError) throw validationError;
+        if (installedUpdateFingerprint(event) !== installedUpdateFingerprint(offered)) {
+          throw new Error(
+            `Rejected invalid installed update metadata for version ${event.version}: downloaded candidate mismatch`,
+          );
+        }
+        if (!isExpectedDownloadedInstalledUpdate(event)) {
+          throw new Error('Rejected installed update: downloaded artifact identity mismatch');
+        }
+      } catch (error) {
+        this.rejectInstalledUpdate(error as Error);
+        return;
+      }
       this.updateStatus({ status: 'downloaded', ...updateMetadata(), info: event, error: undefined });
       this.emit('update-downloaded', event);
     });
@@ -614,7 +787,7 @@ export class AppUpdater extends EventEmitter {
     }
   }
 
-  /** Check the managed API for a verified USB ZIP update. */
+  /** Check the managed API for a verified portable ZIP update. */
   private async checkPortableForUpdates(): Promise<PortableUpdateInfo | null> {
     const timeout = createRequestTimeout(
       UCLAW_UPDATE_CHECK_TIMEOUT_MS,
@@ -709,6 +882,7 @@ export class AppUpdater extends EventEmitter {
     }
 
     try {
+      this.authorizedInstalledUpdate(['available']);
       await autoUpdater.downloadUpdate();
       return {};
     } catch (error) {
@@ -725,7 +899,7 @@ export class AppUpdater extends EventEmitter {
     }
   }
 
-  /** Download and verify a USB ZIP before making it installable. */
+  /** Download and verify a portable ZIP before making it installable. */
   private async downloadPortableUpdate(): Promise<{ downloadPath: string }> {
     let partialPathToCleanup: string | null = null;
     const timeout = createRequestTimeout(
@@ -883,9 +1057,12 @@ export class AppUpdater extends EventEmitter {
       return;
     }
 
-    logger.info('[Updater] quitAndInstall called');
-    setQuitting();
-    autoUpdater.quitAndInstall();
+    try {
+      this.authorizedInstalledUpdate(['downloaded']);
+      this.installInstalledUpdate();
+    } catch (error) {
+      this.rejectInstalledUpdate(error as Error);
+    }
   }
 
   async installDownloadedUpdate(): Promise<void> {
@@ -893,7 +1070,19 @@ export class AppUpdater extends EventEmitter {
       await this.installPortableUpdate();
       return;
     }
-    this.quitAndInstall();
+    try {
+      this.authorizedInstalledUpdate(['downloaded']);
+      this.installInstalledUpdate();
+    } catch (error) {
+      this.rejectInstalledUpdate(error as Error);
+      throw error;
+    }
+  }
+
+  private installInstalledUpdate(): void {
+    logger.info('[Updater] quitAndInstall called');
+    setQuitting();
+    autoUpdater.quitAndInstall();
   }
 
   /** Launch the external helper so the running portable executable can be replaced safely. */
@@ -1145,6 +1334,7 @@ export class AppUpdater extends EventEmitter {
   setChannel(channel: 'stable' | 'beta' | 'dev'): void {
     this.managedChannel = normalizeUpdateChannel(channel);
     autoUpdater.channel = channel;
+    autoUpdater.allowDowngrade = false;
   }
 
   /**

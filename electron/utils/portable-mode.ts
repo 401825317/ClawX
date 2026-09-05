@@ -283,6 +283,22 @@ function normalizedPathForComparison(value: string, platform: string): string {
   return platform === 'darwin' ? normalized.toLowerCase() : normalized;
 }
 
+/** Detect electron-builder's self-extracting Windows portable launcher. */
+function hasElectronBuilderPortableIdentity(platform: string = process.platform): boolean {
+  if (platform !== 'win32' || !app.isPackaged) return false;
+
+  const launcherDir = process.env.PORTABLE_EXECUTABLE_DIR?.trim();
+  const launcherFile = process.env.PORTABLE_EXECUTABLE_FILE?.trim();
+  if (!launcherDir || !launcherFile) return false;
+
+  const path = pathApi(platform, launcherDir);
+  const resolvedDir = path.resolve(launcherDir);
+  const resolvedFile = path.resolve(launcherFile);
+  if (path.extname(resolvedFile).toLowerCase() !== '.exe') return false;
+  if (!isFile(resolvedFile)) return false;
+  return path.dirname(resolvedFile).toLowerCase() === resolvedDir.toLowerCase();
+}
+
 export function resolvePortableRootDir(platform: string = process.platform): string {
   const explicitRoot = process.env.CLAWX_PORTABLE_ROOT?.trim();
   if (isPackagedDarwinAppExecutable(platform)) {
@@ -754,6 +770,7 @@ export function inspectPortableLayout(options: {
     appBundleWritable,
   });
   const packageType: PortableUpdatePackageType = platform === 'darwin'
+    || hasElectronBuilderPortableIdentity(platform)
     || truthyEnv(process.env.CLAWX_PORTABLE)
     || hasPortableFlag
     || hasDataDirectory
@@ -786,6 +803,7 @@ export function inspectPortableLayout(options: {
 /** Return the artifact family for update discovery, independent of data mode. */
 export function getPortableUpdatePackageType(platform = process.platform): PortableUpdatePackageType {
   if (platform === 'darwin') return 'portable_zip';
+  if (hasElectronBuilderPortableIdentity(platform)) return 'portable_zip';
   if (truthyEnv(process.env.CLAWX_PORTABLE)) return 'portable_zip';
   const rootDir = resolvePortableRootDir(platform);
   const path = pathApi(platform, rootDir);
@@ -1215,10 +1233,10 @@ export function getPortableUpdatesDir(): string | null {
 export function getPortableUpdateDownloadsDir(): string | null {
   const info = getPortableModeInfo();
   if (info.runtimeUpdatesDir) return info.runtimeUpdatesDir;
-  // macOS always downloads the managed portable ZIP, including for an app
-  // copied from a DMG or installed under `/Applications`. Keep that cache in
-  // the user's local cache and never create UClawData beside the app bundle.
-  if (process.platform === 'darwin' && info.updatePackageType === 'portable_zip') {
+  // A standalone app without a complete colocated data layout cannot safely
+  // create update state beside itself. Keep the verified ZIP in the local
+  // runtime cache and route installation through manual migration.
+  if (info.updatePackageType === 'portable_zip') {
     const runtimeRootDir = resolveLocalRuntimeRootDir();
     return pathApi(process.platform, runtimeRootDir).join(runtimeRootDir, 'updates');
   }

@@ -63,6 +63,8 @@ const portableEnvironmentNames = [
   'CLAWX_BOOTSTRAP_PORTABLE_DATA_ROOT',
   'CLAWX_E2E',
   'CLAWX_USER_DATA_DIR',
+  'PORTABLE_EXECUTABLE_DIR',
+  'PORTABLE_EXECUTABLE_FILE',
   'OPENCLAW_HOME',
   'OPENCLAW_STATE_DIR',
   'OPENCLAW_CONFIG_PATH',
@@ -331,6 +333,104 @@ describe('Windows portable bootstrap repair', () => {
 
     expect(result.reason).toBeUndefined();
     expect(result.attempted).toBe(true);
+  });
+});
+
+describe('Windows electron-builder portable update selection', () => {
+  it('uses matched launcher metadata only for update artifact selection', async () => {
+    const portableRoot = await mkdtemp(join(tmpdir(), 'uclaw-windows-builder-portable-'));
+    const extractionRoot = await mkdtemp(join(tmpdir(), 'uclaw-windows-builder-extracted-'));
+    const runtimeRoot = await mkdtemp(join(tmpdir(), 'uclaw-windows-builder-runtime-'));
+    temporaryRoots.push(portableRoot, extractionRoot, runtimeRoot);
+    const portableExecutable = join(portableRoot, 'UClaw Portable.exe');
+    await writeFile(portableExecutable, 'fixture\n', 'utf8');
+
+    setPlatform('win32');
+    app.isPackaged = true;
+    Object.defineProperty(process, 'execPath', {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: join(extractionRoot, 'UClaw.exe'),
+    });
+    process.env.PORTABLE_EXECUTABLE_DIR = portableRoot;
+    process.env.PORTABLE_EXECUTABLE_FILE = portableExecutable;
+    process.env.CLAWX_RUNTIME_CACHE_ROOT = runtimeRoot;
+    resetPortableModeInfoCache();
+
+    expect(resolvePortableRootDir()).toBe(extractionRoot);
+    expect(getPortableUpdatePackageType('win32')).toBe('portable_zip');
+    expect(shouldUsePortableUpdatePackage('win32')).toBe(true);
+    expect(getPortableModeInfo()).toMatchObject({
+      enabled: false,
+      rootDir: null,
+      updatePackageType: 'portable_zip',
+      packageType: 'portable_zip',
+      dataMode: 'installed',
+      runtimeUpdatesDir: null,
+    });
+    expect(getPortableUpdateDownloadsDir()).toBe(join(runtimeRoot, 'updates'));
+    expect(existsSync(join(portableRoot, 'UClawData'))).toBe(false);
+  });
+
+  it('does not treat launcher-adjacent USB markers as the extracted app data root', async () => {
+    const portableRoot = await mkdtemp(join(tmpdir(), 'uclaw-windows-builder-markers-'));
+    const extractionRoot = await mkdtemp(join(tmpdir(), 'uclaw-windows-builder-extracted-'));
+    temporaryRoots.push(portableRoot, extractionRoot);
+    const portableExecutable = join(portableRoot, 'UClaw Portable.exe');
+    await writeFile(portableExecutable, 'fixture\n', 'utf8');
+    await writeFile(join(portableRoot, 'portable.flag'), 'unrelated marker\n', 'utf8');
+    await mkdir(join(portableRoot, 'UClawData'));
+
+    setPlatform('win32');
+    app.isPackaged = true;
+    Object.defineProperty(process, 'execPath', {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: join(extractionRoot, 'UClaw.exe'),
+    });
+    process.env.PORTABLE_EXECUTABLE_DIR = portableRoot;
+    process.env.PORTABLE_EXECUTABLE_FILE = portableExecutable;
+    resetPortableModeInfoCache();
+
+    expect(resolvePortableRootDir()).toBe(extractionRoot);
+    expect(getPortableUpdatePackageType('win32')).toBe('portable_zip');
+    expect(getPortableModeInfo()).toMatchObject({
+      enabled: false,
+      rootDir: null,
+      dataMode: 'installed',
+      canAutoReplace: false,
+    });
+  });
+
+  it('requires the builder launcher file to belong to its declared directory', async () => {
+    const portableRoot = await mkdtemp(join(tmpdir(), 'uclaw-windows-builder-invalid-'));
+    const otherRoot = await mkdtemp(join(tmpdir(), 'uclaw-windows-builder-other-'));
+    const extractionRoot = await mkdtemp(join(tmpdir(), 'uclaw-windows-builder-extracted-'));
+    temporaryRoots.push(portableRoot, otherRoot, extractionRoot);
+    const portableExecutable = join(otherRoot, 'UClaw Portable.exe');
+    await writeFile(portableExecutable, 'fixture\n', 'utf8');
+
+    setPlatform('win32');
+    app.isPackaged = true;
+    Object.defineProperty(process, 'execPath', {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: join(extractionRoot, 'UClaw.exe'),
+    });
+    process.env.PORTABLE_EXECUTABLE_DIR = portableRoot;
+    process.env.PORTABLE_EXECUTABLE_FILE = portableExecutable;
+    resetPortableModeInfoCache();
+
+    expect(resolvePortableRootDir()).toBe(extractionRoot);
+    expect(getPortableUpdatePackageType('win32')).toBe('installer');
+    expect(shouldUsePortableUpdatePackage('win32')).toBe(false);
+
+    process.env.PORTABLE_EXECUTABLE_FILE = join(portableRoot, 'missing.exe');
+    resetPortableModeInfoCache();
+    expect(getPortableUpdatePackageType('win32')).toBe('installer');
   });
 });
 

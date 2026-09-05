@@ -10,6 +10,7 @@ const {
   appMock,
   autoUpdaterMock,
   canAutoReplaceMock,
+  defaultIsUpdateSupportedMock,
   getPortableModeInfoMock,
   launchPortableUpdateInstallerMock,
   portableState,
@@ -18,11 +19,25 @@ const {
   verifyPortableUpdatePackageMock,
 } = vi.hoisted(() => {
   const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
+  let currentChannel: string | undefined;
+  const defaultIsUpdateSupported = vi.fn((_info: unknown) => true);
   const autoUpdater = {
     autoDownload: false,
     autoInstallOnAppQuit: false,
-    channel: undefined as string | undefined,
+    allowDowngrade: false,
+    get channel(): string | undefined {
+      return currentChannel;
+    },
+    set channel(value: string | undefined) {
+      currentChannel = value;
+      // Match electron-updater: assigning channel always enables downgrade.
+      // UClaw must explicitly disable it after selecting a managed feed channel.
+      this.allowDowngrade = true;
+    },
     logger: undefined as unknown,
+    isUpdateSupported: defaultIsUpdateSupported as (
+      info: unknown,
+    ) => boolean | Promise<boolean>,
     setFeedURL: vi.fn(),
     checkForUpdates: vi.fn(),
     downloadUpdate: vi.fn(),
@@ -66,6 +81,7 @@ const {
     appMock,
     autoUpdaterMock: autoUpdater,
     canAutoReplaceMock: vi.fn(() => portableState.canAutoReplace),
+    defaultIsUpdateSupportedMock: defaultIsUpdateSupported,
     getPortableModeInfoMock: vi.fn(() => {
       // Mirror the production cache shape closely enough for the updater's
       // in-place replacement guard. A portable data mode may still be
@@ -142,7 +158,7 @@ vi.mock('@electron/main/portable-update-security', () => ({
   assertPortableUpdateZipFilename: vi.fn(),
   comparePortableUpdateVersions: vi.fn((left: string, right: string) => {
     if (left === right) return 0;
-    if (left === '2.0.2') return -1;
+    if (left === '2.0.2' || left === '0.5.6') return -1;
     return 1;
   }),
   filenameFromPortableUpdateInfo: vi.fn(() => 'UClaw-update-mac.zip'),
@@ -220,6 +236,13 @@ beforeEach(() => {
   autoUpdaterMock.removeAllListeners();
   autoUpdaterMock.setFeedURL.mockReset();
   autoUpdaterMock.checkForUpdates.mockReset();
+  autoUpdaterMock.downloadUpdate.mockReset();
+  autoUpdaterMock.quitAndInstall.mockReset();
+  defaultIsUpdateSupportedMock.mockReset();
+  defaultIsUpdateSupportedMock.mockReturnValue(true);
+  autoUpdaterMock.isUpdateSupported = defaultIsUpdateSupportedMock;
+  autoUpdaterMock.channel = undefined;
+  autoUpdaterMock.allowDowngrade = false;
   appMock.isPackaged = true;
   appMock.getVersion.mockReturnValue('2.0.3');
   portableState.packageType = 'portable_zip';
@@ -241,6 +264,26 @@ afterEach(() => {
 });
 
 describe('macOS managed portable updater', () => {
+  it('routes a Windows portable package through the managed UClaw API', async () => {
+    setPlatform('win32');
+    setArch('x64');
+    portableState.packageType = 'portable_zip';
+    proxyAwareFetchMock.mockResolvedValue(makePortableResponse('2.0.4', { platform: 'win' }));
+
+    const { AppUpdater } = await import('@electron/main/updater');
+    autoUpdaterMock.setFeedURL.mockClear();
+    const updater = new AppUpdater();
+    await updater.checkForUpdates();
+
+    expect(autoUpdaterMock.setFeedURL).not.toHaveBeenCalled();
+    expect(autoUpdaterMock.checkForUpdates).not.toHaveBeenCalled();
+    const [request] = proxyAwareFetchMock.mock.calls[0] as [URL, RequestInit];
+    expect(request.pathname).toContain('/api/clawx/updates/latest');
+    expect(request.searchParams.get('platform')).toBe('win');
+    expect(request.searchParams.get('package_type')).toBe('portable_zip');
+    expect(request.searchParams.get('arch')).toBe('x64');
+  });
+
   it.each(['arm64', 'x64'])('queries portable_zip metadata for macOS %s', async (arch) => {
     setPlatform('darwin');
     setArch(arch);
@@ -412,6 +455,230 @@ describe('macOS managed portable updater', () => {
     await updater.checkForUpdates();
     expect(autoUpdaterMock.checkForUpdates).toHaveBeenCalledTimes(1);
     expect(proxyAwareFetchMock).not.toHaveBeenCalled();
+  });
+
+  it('disables downgrades after every generic feed channel selection', async () => {
+    setPlatform('win32');
+    setArch('x64');
+    portableState.packageType = 'installer';
+
+    const { AppUpdater } = await import('@electron/main/updater');
+    autoUpdaterMock.allowDowngrade = false;
+    const updater = new AppUpdater();
+
+    expect(autoUpdaterMock.channel).toBe('latest');
+    expect(autoUpdaterMock.allowDowngrade).toBe(false);
+
+    updater.setChannel('beta');
+    expect(autoUpdaterMock.channel).toBe('beta');
+    expect(autoUpdaterMock.allowDowngrade).toBe(false);
+  });
+
+  it('rejects an upstream ClawX artifact from the generic update feed', async () => {
+    setPlatform('win32');
+    setArch('x64');
+    portableState.packageType = 'installer';
+
+    const { AppUpdater } = await import('@electron/main/updater');
+    const updater = new AppUpdater();
+    autoUpdaterMock.emit('update-available', {
+      version: '2.0.4',
+      path: 'ClawX-2.0.4-win-x64.exe',
+      files: [{ url: 'ClawX-2.0.4-win-x64.exe' }],
+    });
+
+    expect(updater.getStatus()).toMatchObject({
+      status: 'error',
+      info: undefined,
+      error: expect.stringMatching(/rejected invalid installed update metadata/i),
+    });
+    await expect(updater.downloadUpdate()).rejects.toThrow(/not authorized/i);
+    await expect(updater.installDownloadedUpdate()).rejects.toThrow(/not authorized/i);
+    expect(autoUpdaterMock.downloadUpdate).not.toHaveBeenCalled();
+    expect(autoUpdaterMock.quitAndInstall).not.toHaveBeenCalled();
+  });
+
+  it('rejects a foreign artifact before electron-updater caches the candidate', async () => {
+    setPlatform('win32');
+    setArch('x64');
+    portableState.packageType = 'installer';
+
+    await import('@electron/main/updater');
+    const supported = await autoUpdaterMock.isUpdateSupported({
+      version: '2.0.4',
+      path: 'ClawX-2.0.4-win-x64.exe',
+      files: [{ url: 'ClawX-2.0.4-win-x64.exe' }],
+    });
+
+    expect(supported).toBe(false);
+    expect(defaultIsUpdateSupportedMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a Windows UClaw artifact for another architecture', async () => {
+    setPlatform('win32');
+    setArch('x64');
+    portableState.packageType = 'installer';
+
+    const { AppUpdater } = await import('@electron/main/updater');
+    const updater = new AppUpdater();
+    autoUpdaterMock.emit('update-available', {
+      version: '2.0.4',
+      path: 'UClaw-2.0.4-win-arm64.exe',
+      files: [{ url: 'UClaw-2.0.4-win-arm64.exe' }],
+    });
+
+    expect(updater.getStatus()).toMatchObject({
+      status: 'error',
+      info: undefined,
+      error: expect.stringMatching(/artifact identity mismatch/i),
+    });
+  });
+
+  it('requires a Linux AppImage for the running architecture', async () => {
+    setPlatform('linux');
+    setArch('arm64');
+    portableState.packageType = 'installer';
+
+    await import('@electron/main/updater');
+    expect(await autoUpdaterMock.isUpdateSupported({
+      version: '2.0.4',
+      path: 'UClaw-2.0.4-linux-x86_64.AppImage',
+      files: [{ url: 'UClaw-2.0.4-linux-x86_64.AppImage' }],
+    })).toBe(false);
+    expect(await autoUpdaterMock.isUpdateSupported({
+      version: '2.0.4',
+      path: 'UClaw-2.0.4-linux-x86_64.AppImage',
+      files: [
+        { url: 'UClaw-2.0.4-linux-x86_64.AppImage' },
+        { url: 'UClaw-2.0.4-linux-arm64.AppImage' },
+        { url: 'UClaw-2.0.4-linux-arm64.deb' },
+      ],
+    })).toBe(true);
+  });
+
+  it('rejects Linux x64 metadata that electron-updater would resolve to arm64', async () => {
+    setPlatform('linux');
+    setArch('x64');
+    portableState.packageType = 'installer';
+
+    await import('@electron/main/updater');
+    expect(await autoUpdaterMock.isUpdateSupported({
+      version: '2.0.4',
+      path: 'UClaw-2.0.4-linux-x86_64.AppImage',
+      files: [
+        { url: 'UClaw-2.0.4-linux-arm64.AppImage' },
+        { url: 'UClaw-2.0.4-linux-x86_64.AppImage' },
+      ],
+    })).toBe(false);
+  });
+
+  it('accepts a newer version-matched UClaw artifact from the generic update feed', async () => {
+    setPlatform('win32');
+    setArch('x64');
+    portableState.packageType = 'installer';
+
+    const { AppUpdater } = await import('@electron/main/updater');
+    const updater = new AppUpdater();
+    autoUpdaterMock.emit('update-available', {
+      version: '2.0.4',
+      path: 'UClaw-2.0.4-win-x64.exe',
+      files: [{ url: 'UClaw-2.0.4-win-x64.exe' }],
+    });
+
+    expect(updater.getStatus()).toMatchObject({
+      status: 'available',
+      info: { version: '2.0.4' },
+      error: undefined,
+    });
+    expect(await autoUpdaterMock.isUpdateSupported({
+      version: '2.0.4',
+      path: 'UClaw-2.0.4-win-x64.exe',
+      files: [{ url: 'UClaw-2.0.4-win-x64.exe' }],
+    })).toBe(true);
+
+    await updater.downloadUpdate();
+    expect(autoUpdaterMock.downloadUpdate).toHaveBeenCalledTimes(1);
+    autoUpdaterMock.emit('update-downloaded', {
+      version: '2.0.4',
+      path: 'UClaw-2.0.4-win-x64.exe',
+      files: [{ url: 'UClaw-2.0.4-win-x64.exe' }],
+      downloadedFile: 'C:\\Temp\\UClaw-2.0.4-win-x64.exe',
+    });
+    await updater.installDownloadedUpdate();
+    expect(autoUpdaterMock.quitAndInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a foreign download-complete event and refuses installation', async () => {
+    setPlatform('win32');
+    setArch('x64');
+    portableState.packageType = 'installer';
+
+    const { AppUpdater } = await import('@electron/main/updater');
+    const updater = new AppUpdater();
+    autoUpdaterMock.emit('update-available', {
+      version: '2.0.4',
+      path: 'UClaw-2.0.4-win-x64.exe',
+      files: [{ url: 'UClaw-2.0.4-win-x64.exe' }],
+    });
+    autoUpdaterMock.emit('update-downloaded', {
+      version: '2.0.4',
+      path: 'ClawX-2.0.4-win-x64.exe',
+      files: [{ url: 'ClawX-2.0.4-win-x64.exe' }],
+      downloadedFile: 'C:\\Temp\\ClawX-2.0.4-win-x64.exe',
+    });
+
+    expect(updater.getStatus()).toMatchObject({ status: 'error', info: undefined });
+    await expect(updater.installDownloadedUpdate()).rejects.toThrow(/not authorized/i);
+    expect(autoUpdaterMock.quitAndInstall).not.toHaveBeenCalled();
+  });
+
+  it('rejects a downloaded artifact whose metadata changed after it was offered', async () => {
+    setPlatform('win32');
+    setArch('x64');
+    portableState.packageType = 'installer';
+
+    const { AppUpdater } = await import('@electron/main/updater');
+    const updater = new AppUpdater();
+    autoUpdaterMock.emit('update-available', {
+      version: '2.0.4',
+      path: 'UClaw-2.0.4-win-x64.exe',
+      sha512: 'offered-sha512',
+      files: [{ url: 'UClaw-2.0.4-win-x64.exe', sha512: 'offered-sha512', size: 100 }],
+    });
+    autoUpdaterMock.emit('update-downloaded', {
+      version: '2.0.4',
+      path: 'UClaw-2.0.4-win-x64.exe',
+      sha512: 'changed-sha512',
+      files: [{ url: 'UClaw-2.0.4-win-x64.exe', sha512: 'changed-sha512', size: 100 }],
+      downloadedFile: 'C:\\Temp\\UClaw-2.0.4-win-x64.exe',
+    });
+
+    expect(updater.getStatus()).toMatchObject({
+      status: 'error',
+      info: undefined,
+      error: expect.stringMatching(/downloaded candidate mismatch/i),
+    });
+    expect(autoUpdaterMock.quitAndInstall).not.toHaveBeenCalled();
+  });
+
+  it('rejects an older UClaw artifact from the generic update feed', async () => {
+    setPlatform('win32');
+    setArch('x64');
+    portableState.packageType = 'installer';
+
+    const { AppUpdater } = await import('@electron/main/updater');
+    const updater = new AppUpdater();
+    autoUpdaterMock.emit('update-available', {
+      version: '0.5.6',
+      path: 'UClaw-0.5.6-win-x64.exe',
+      files: [{ url: 'UClaw-0.5.6-win-x64.exe' }],
+    });
+
+    expect(updater.getStatus()).toMatchObject({
+      status: 'error',
+      info: undefined,
+      error: expect.stringMatching(/rejected invalid installed update metadata/i),
+    });
   });
 
   it('keeps macOS channel selection on the managed API instead of latest-mac.yml', async () => {
