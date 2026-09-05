@@ -66,11 +66,11 @@ uclaw-macos-production-candidate-<version>-<short-commit>
 ```text
 %APPDATA%\UClaw\release-credentials\
   oss-release.json
-  production-ssh.json
+  aiwxxx-production-ssh.json
 ```
 
 - `oss-release.json` 的 `accessKeySecretDpapi` 是 PowerShell `ConvertFrom-SecureString` 输出。
-- `production-ssh.json` 的 `passwordDpapi` 是 PowerShell `ConvertFrom-SecureString` 输出。
+- `aiwxxx-production-ssh.json` 的 `passwordDpapi` 是 PowerShell `ConvertFrom-SecureString` 输出，且必须声明 `releaseOrigin: "https://aiwxxx.com"`。旧 `production-ssh.json` 不再是本机发布器的默认目标，避免误写入历史环境。
 - `ossutil.exe` 固定为 `%TEMP%\uclaw-ossutil\ossutil-2.3.0-windows-amd64\ossutil.exe`。
 - DPAPI 文件必须由实际执行发布的同一机器、同一 Windows 用户创建。
 - 从其他电脑或 Windows 用户复制来的 DPAPI 文件无法解密，不能转换成 GitHub Secret。

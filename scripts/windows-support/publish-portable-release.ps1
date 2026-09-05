@@ -15,7 +15,7 @@ param(
 
   [string]$OssCredentialPath = (Join-Path $env:APPDATA 'UClaw\release-credentials\oss-release.json'),
 
-  [string]$SshCredentialPath = (Join-Path $env:APPDATA 'UClaw\release-credentials\production-ssh.json'),
+  [string]$SshCredentialPath = (Join-Path $env:APPDATA 'UClaw\release-credentials\aiwxxx-production-ssh.json'),
 
   [string]$OssutilPath = (Join-Path $env:TEMP 'uclaw-ossutil\ossutil-2.3.0-windows-amd64\ossutil.exe'),
 

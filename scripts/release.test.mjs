@@ -232,6 +232,9 @@ test('disabled stage publisher never enables a release row', async () => {
   assert.match(publisher, /\[switch\]\$WindowsOnly/u);
   assert.match(publisher, /\[switch\]\$OverwriteExistingOssObjects/u);
   assert.match(publisher, /\[switch\]\$AllowUnsignedWindowsCandidate/u);
+  assert.match(publisher, /aiwxxx-production-ssh\.json/u);
+  assert.match(publisher, /releaseOrigin=https:\/\/aiwxxx\.com/u);
+  assert.match(publisher, /Local production SSH credentials must declare releaseOrigin/u);
   assert.match(publisher, /\$overwriteArgument = if \(\$OverwriteExistingOssObjects\) \{ '--force' \} else \{ '--update' \}/u);
   assert.match(publisher, /if \(\$AllowUnsignedWindowsCandidate\)/u);
   assert.match(publisher, /Publishing an unsigned Windows portable candidate under explicit operator authorization/u);

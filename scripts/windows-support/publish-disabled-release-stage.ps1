@@ -19,7 +19,7 @@ param(
 
   [string]$OssCredentialPath = (Join-Path $env:APPDATA 'UClaw\release-credentials\oss-release.json'),
 
-  [string]$SshCredentialPath = (Join-Path $env:APPDATA 'UClaw\release-credentials\production-ssh.json'),
+  [string]$SshCredentialPath = (Join-Path $env:APPDATA 'UClaw\release-credentials\aiwxxx-production-ssh.json'),
 
   [string]$OssutilPath = (Join-Path $env:TEMP 'uclaw-ossutil\ossutil-2.3.0-windows-amd64\ossutil.exe'),
 
@@ -505,7 +505,10 @@ else {
   if (Test-PathInside $resolvedSshCredentialPath $repoRoot) { throw 'SSH credentials must be stored outside the Git repository.' }
   $ossCredential = Get-Content -Raw -LiteralPath $resolvedOssCredentialPath | ConvertFrom-Json
   $script:SshMetadata = Get-Content -Raw -LiteralPath $resolvedSshCredentialPath | ConvertFrom-Json
-  if ([int]$script:SshMetadata.schemaVersion -ne 1 -or -not $script:SshMetadata.passwordDpapi) { throw 'Invalid production SSH credential metadata.' }
+  if ([int]$script:SshMetadata.schemaVersion -ne 1 -or -not $script:SshMetadata.passwordDpapi) { throw 'Invalid aiwxxx production SSH credential metadata.' }
+  if ([string]$script:SshMetadata.releaseOrigin -ne 'https://aiwxxx.com') {
+    throw 'Local production SSH credentials must declare releaseOrigin=https://aiwxxx.com.'
+  }
 }
 if (-not (Test-Path -LiteralPath $OssutilPath -PathType Leaf)) { throw "ossutil not found: $OssutilPath" }
 if ($ossCredential.bucket -ne 'uclaw-ver' -or $ossCredential.region -ne 'cn-beijing' -or $ossCredential.prefix -ne 'releases/latest/') { throw 'OSS credential metadata does not target the approved UClaw release location.' }
