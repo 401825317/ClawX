@@ -13,10 +13,7 @@ import { listProviderAccounts } from '../services/providers/provider-store';
 import {
   enrichManagedTokenUsageCosts,
   getManagedTokenCostSnapshot,
-  type ManagedTokenCostSnapshot,
 } from '../services/managed-token-usage-cost-service';
-
-const COST_ENRICHMENT_WAIT_MS = 2_500;
 
 export {
   extractSessionIdFromTranscriptFileName,
@@ -118,20 +115,6 @@ async function listManagedTokenCostScopes(): Promise<ManagedTokenCostScope[]> {
   }
 }
 
-async function getManagedTokenCostSnapshotWithinDisplayBudget(): Promise<ManagedTokenCostSnapshot | null> {
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      getManagedTokenCostSnapshot(),
-      new Promise<null>((resolve) => {
-        timeout = setTimeout(() => resolve(null), COST_ENRICHMENT_WAIT_MS);
-      }),
-    ]);
-  } finally {
-    if (timeout) clearTimeout(timeout);
-  }
-}
-
 function stripProviderRequestIds(entries: readonly TokenUsageHistoryEntry[]): TokenUsageHistoryEntry[] {
   return entries.map((entry) => {
     const { providerRequestId: _providerRequestId, ...publicEntry } = entry;
@@ -170,6 +153,8 @@ export async function getRecentTokenUsageHistory(limit?: number): Promise<TokenU
     return stripProviderRequestIds(limitedResults);
   }
 
-  const snapshot = await getManagedTokenCostSnapshotWithinDisplayBudget();
+  // The snapshot loader already has a bounded network timeout. Await it here so a
+  // slower successful production response is not discarded as unavailable.
+  const snapshot = await getManagedTokenCostSnapshot();
   return stripProviderRequestIds(enrichManagedTokenUsageCosts(limitedResults, snapshot));
 }

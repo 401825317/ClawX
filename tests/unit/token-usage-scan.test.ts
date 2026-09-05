@@ -146,26 +146,52 @@ describe('token usage session scan', () => {
     );
 
     const settledSnapshot = { quotaPerUnit: 500_000, logs: [] };
-    costMocks.getSnapshot.mockResolvedValue(settledSnapshot);
+    let notifySnapshotRequested: () => void = () => undefined;
+    const snapshotRequested = new Promise<void>((resolve) => {
+      notifySnapshotRequested = resolve;
+    });
+    let resolveSnapshot: (value: typeof settledSnapshot) => void = () => undefined;
+    const delayedSnapshot = new Promise<typeof settledSnapshot>((resolve) => {
+      resolveSnapshot = resolve;
+    });
+    costMocks.getSnapshot.mockImplementation(() => {
+      notifySnapshotRequested();
+      return delayedSnapshot;
+    });
     costMocks.enrich.mockImplementation((entries: Array<Record<string, unknown>>) => (
       entries.map((entry) => ({ ...entry, costUsd: 0.053618, costUnavailable: undefined }))
     ));
 
     const { getRecentTokenUsageHistory } = await import('@electron/utils/token-usage');
-    const entries = await getRecentTokenUsageHistory();
+    vi.useFakeTimers();
+    const historyPromise = getRecentTokenUsageHistory();
+    try {
+      await snapshotRequested;
+      let historySettled = false;
+      void historyPromise.then(() => {
+        historySettled = true;
+      });
+      await vi.advanceTimersByTimeAsync(2_501);
+      expect(historySettled).toBe(false);
 
-    expect(costMocks.getSnapshot).toHaveBeenCalledTimes(1);
-    expect(costMocks.enrich).toHaveBeenCalledWith(
-      [expect.objectContaining({
-        sessionId: 'managed-session',
-        costUnavailable: true,
-        providerRequestId: 'server-request-1',
-      })],
-      settledSnapshot,
-    );
-    expect(entries).toEqual([
-      expect.objectContaining({ sessionId: 'managed-session', costUsd: 0.053618 }),
-    ]);
-    expect(entries[0]).not.toHaveProperty('providerRequestId');
+      resolveSnapshot(settledSnapshot);
+      const entries = await historyPromise;
+
+      expect(costMocks.getSnapshot).toHaveBeenCalledTimes(1);
+      expect(costMocks.enrich).toHaveBeenCalledWith(
+        [expect.objectContaining({
+          sessionId: 'managed-session',
+          costUnavailable: true,
+          providerRequestId: 'server-request-1',
+        })],
+        settledSnapshot,
+      );
+      expect(entries).toEqual([
+        expect.objectContaining({ sessionId: 'managed-session', costUsd: 0.053618 }),
+      ]);
+      expect(entries[0]).not.toHaveProperty('providerRequestId');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

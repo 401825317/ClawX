@@ -27,6 +27,8 @@ touchedAreas:
   - tests/unit/token-usage.test.ts
 expectedUserBehavior:
   - Managed model usage rows show the settled server charge when one billing log matches uniquely.
+  - The first history load waits for the bounded settled-log request instead of discarding a slower successful response.
+  - A successful snapshot remains cached across the Models page 15-second refresh interval.
   - Placeholder zero costs are never presented as free usage.
   - Offline, unavailable, or ambiguous billing data falls back without inventing a charge.
 requiredProfiles:
@@ -43,6 +45,7 @@ acceptance:
   - Relay credentials are read only in Electron Main and never cross the Host API boundary.
   - Billing lookups target only the configured UClaw production origin.
   - New usage is joined by the unique settled request ID; historical usage requires a bidirectionally unique model, token, and timestamp match.
+  - The Main-process request timeout remains the only network wait bound, and its successful result remains reusable for at least one automatic UI refresh.
   - Existing provider-supplied positive and genuine zero costs remain unchanged.
   - Provider request IDs and Relay credentials remain in Electron Main and never cross the Host API boundary.
   - Renderer does not add direct IPC or backend fetch calls.

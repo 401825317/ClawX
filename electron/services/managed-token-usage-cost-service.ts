@@ -18,7 +18,7 @@ import { getProviderSecret } from './secrets/secret-store';
 const TOKEN_LOG_PATH = '/api/log/token';
 const STATUS_PATH = '/api/status';
 const REQUEST_TIMEOUT_MS = 10_000;
-const SUCCESS_CACHE_MS = 5_000;
+const SUCCESS_CACHE_MS = 60_000;
 const MATCH_WINDOW_MS = 15_000;
 const CONSUMPTION_LOG_TYPE = 2;
 

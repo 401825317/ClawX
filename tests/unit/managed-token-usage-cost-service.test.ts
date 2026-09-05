@@ -337,4 +337,31 @@ describe('managed token usage cost snapshot loading', () => {
 
     expect(mocks.proxyAwareFetch).not.toHaveBeenCalled();
   });
+
+  it('keeps a successful snapshot through the Models page 15-second refresh interval', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    mocks.proxyAwareFetch.mockImplementation(async (input: unknown) => {
+      const url = String(input);
+      if (url.endsWith('/api/log/token')) {
+        return jsonResponse({ success: true, data: [] });
+      }
+      if (url.endsWith('/api/status')) {
+        return jsonResponse({ success: true, data: { quota_per_unit: 500_000 } });
+      }
+      throw new Error('Unexpected managed usage URL');
+    });
+
+    await expect(getManagedTokenCostSnapshot()).resolves.toEqual({
+      quotaPerUnit: 500_000,
+      logs: [],
+    });
+    now.mockReturnValue(1_015_000);
+    await expect(getManagedTokenCostSnapshot()).resolves.toEqual({
+      quotaPerUnit: 500_000,
+      logs: [],
+    });
+
+    expect(mocks.proxyAwareFetch).toHaveBeenCalledTimes(2);
+    now.mockRestore();
+  });
 });
