@@ -22,6 +22,8 @@ param(
 
   [string]$OssutilPath = (Join-Path $env:TEMP 'uclaw-ossutil\ossutil-2.3.0-windows-amd64\ossutil.exe'),
 
+  [string]$OssProxy = '',
+
   [switch]$ValidateOnly
 )
 
@@ -228,8 +230,15 @@ function Get-PublicFeedIdentity {
 }
 
 function Initialize-SshAskpass {
-  param([string]$CredentialPath, [string]$Directory)
-  if ($CredentialPath.Contains("'")) { throw 'SSH credential path cannot contain a single quote.' }
+  param(
+    [string]$CredentialPath,
+    [string]$Directory,
+    [string]$PasswordEnvironmentVariable = ''
+  )
+  if ($PasswordEnvironmentVariable -and $PasswordEnvironmentVariable -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
+    throw 'SSH password environment variable name is invalid.'
+  }
+  if ($CredentialPath -and $CredentialPath.Contains("'")) { throw 'SSH credential path cannot contain a single quote.' }
   $powerShellExecutable = if ($PSVersionTable.PSEdition -eq 'Core') {
     Join-Path $PSHOME 'pwsh.exe'
   }
@@ -240,7 +249,17 @@ function Initialize-SshAskpass {
   New-Item -ItemType Directory -Force -Path $Directory | Out-Null
   $askpassPs1 = Join-Path $Directory 'askpass.ps1'
   $askpassCmd = Join-Path $Directory 'askpass.cmd'
-  @"
+  if ($PasswordEnvironmentVariable) {
+    @"
+`$ErrorActionPreference = 'Stop'
+`$password = [Environment]::GetEnvironmentVariable('$PasswordEnvironmentVariable')
+if ([string]::IsNullOrWhiteSpace(`$password)) { throw 'Production SSH password environment variable is missing.' }
+[Console]::Out.WriteLine(`$password)
+`$password = `$null
+"@ | Set-Content -LiteralPath $askpassPs1 -Encoding ASCII
+  }
+  else {
+    @"
 `$ErrorActionPreference = 'Stop'
 `$credential = Get-Content -Raw -LiteralPath '$CredentialPath' | ConvertFrom-Json
 `$securePassword = ConvertTo-SecureString ([string]`$credential.passwordDpapi)
@@ -253,6 +272,7 @@ try {
   [Runtime.InteropServices.Marshal]::ZeroFreeBSTR(`$pointer)
 }
 "@ | Set-Content -LiteralPath $askpassPs1 -Encoding ASCII
+  }
   @"
 @echo off
 "$powerShellExecutable" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$askpassPs1"
@@ -402,17 +422,49 @@ if ($ValidateOnly) {
   return
 }
 
-$repoRoot = (Resolve-Path -LiteralPath (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) '..\..')).Path
-$resolvedOssCredentialPath = (Resolve-Path -LiteralPath $OssCredentialPath).Path
-$resolvedSshCredentialPath = (Resolve-Path -LiteralPath $SshCredentialPath).Path
-if (Test-PathInside $resolvedOssCredentialPath $repoRoot) { throw 'OSS credentials must be stored outside the Git repository.' }
-if (Test-PathInside $resolvedSshCredentialPath $repoRoot) { throw 'SSH credentials must be stored outside the Git repository.' }
-if (-not (Test-Path -LiteralPath $OssutilPath -PathType Leaf)) { throw "ossutil not found: $OssutilPath" }
+$actionSecretNames = @(
+  'UCLAW_OSS_ACCESS_KEY_ID',
+  'UCLAW_OSS_ACCESS_KEY_SECRET',
+  'UCLAW_PRODUCTION_SSH_HOST',
+  'UCLAW_PRODUCTION_SSH_USER',
+  'UCLAW_PRODUCTION_SSH_PASSWORD',
+  'UCLAW_PRODUCTION_DATABASE'
+)
+$actionSecrets = @{}
+foreach ($name in $actionSecretNames) { $actionSecrets[$name] = [Environment]::GetEnvironmentVariable($name) }
+$hasAnyActionSecret = @($actionSecrets.Values | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -gt 0
+$usesActionSecrets = $false
 
-$ossCredential = Get-Content -Raw -LiteralPath $resolvedOssCredentialPath | ConvertFrom-Json
-$script:SshMetadata = Get-Content -Raw -LiteralPath $resolvedSshCredentialPath | ConvertFrom-Json
+if ($hasAnyActionSecret) {
+  $missingActionSecrets = @($actionSecretNames | Where-Object { [string]::IsNullOrWhiteSpace($actionSecrets[$_]) })
+  if ($missingActionSecrets.Count -gt 0) {
+    throw "GitHub Actions release secrets are incomplete: $($missingActionSecrets -join ', ')."
+  }
+  $usesActionSecrets = $true
+  $ossCredential = [pscustomobject]@{
+    accessKeyId = $actionSecrets['UCLAW_OSS_ACCESS_KEY_ID']
+    bucket = 'uclaw-ver'
+    region = 'cn-beijing'
+    prefix = 'releases/latest/'
+  }
+  $script:SshMetadata = [pscustomobject]@{
+    user = $actionSecrets['UCLAW_PRODUCTION_SSH_USER']
+    host = $actionSecrets['UCLAW_PRODUCTION_SSH_HOST']
+    database = $actionSecrets['UCLAW_PRODUCTION_DATABASE']
+  }
+}
+else {
+  $repoRoot = (Resolve-Path -LiteralPath (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) '..\..')).Path
+  $resolvedOssCredentialPath = (Resolve-Path -LiteralPath $OssCredentialPath).Path
+  $resolvedSshCredentialPath = (Resolve-Path -LiteralPath $SshCredentialPath).Path
+  if (Test-PathInside $resolvedOssCredentialPath $repoRoot) { throw 'OSS credentials must be stored outside the Git repository.' }
+  if (Test-PathInside $resolvedSshCredentialPath $repoRoot) { throw 'SSH credentials must be stored outside the Git repository.' }
+  $ossCredential = Get-Content -Raw -LiteralPath $resolvedOssCredentialPath | ConvertFrom-Json
+  $script:SshMetadata = Get-Content -Raw -LiteralPath $resolvedSshCredentialPath | ConvertFrom-Json
+  if ([int]$script:SshMetadata.schemaVersion -ne 1 -or -not $script:SshMetadata.passwordDpapi) { throw 'Invalid production SSH credential metadata.' }
+}
+if (-not (Test-Path -LiteralPath $OssutilPath -PathType Leaf)) { throw "ossutil not found: $OssutilPath" }
 if ($ossCredential.bucket -ne 'uclaw-ver' -or $ossCredential.region -ne 'cn-beijing' -or $ossCredential.prefix -ne 'releases/latest/') { throw 'OSS credential metadata does not target the approved UClaw release location.' }
-if ([int]$script:SshMetadata.schemaVersion -ne 1 -or -not $script:SshMetadata.passwordDpapi) { throw 'Invalid production SSH credential metadata.' }
 
 $feedBefore = @(
   Get-PublicFeedIdentity -Platform 'win' -Arch 'x64' -PackageType 'portable_zip'
@@ -432,9 +484,14 @@ try {
     if (-not $head.Exists) { $pending += $object }
   }
   if ($pending.Count -gt 0) {
-    $secureSecret = ConvertTo-SecureString ([string]$ossCredential.accessKeySecretDpapi)
-    $secretPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureSecret)
-    $secret = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($secretPointer)
+    if ($usesActionSecrets) {
+      $secret = $actionSecrets['UCLAW_OSS_ACCESS_KEY_SECRET']
+    }
+    else {
+      $secureSecret = ConvertTo-SecureString ([string]$ossCredential.accessKeySecretDpapi)
+      $secretPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureSecret)
+      $secret = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($secretPointer)
+    }
     @"
 [default]
 accessKeyID=$($ossCredential.accessKeyId)
@@ -442,7 +499,16 @@ accessKeySecret=$secret
 region=$($ossCredential.region)
 "@ | Set-Content -LiteralPath $temporaryConfig -Encoding ASCII
     foreach ($object in $pending) {
-      & $OssutilPath cp $object.LocalPath "oss://$($ossCredential.bucket)/$($ossCredential.prefix)$($object.FileName)" --config-file $temporaryConfig --update
+      $ossutilArguments = @(
+        'cp',
+        $object.LocalPath,
+        "oss://$($ossCredential.bucket)/$($ossCredential.prefix)$($object.FileName)",
+        '--config-file',
+        $temporaryConfig,
+        '--update'
+      )
+      if ($OssProxy) { $ossutilArguments += @('--proxy', $OssProxy) }
+      & $OssutilPath @ossutilArguments
       if ($LASTEXITCODE -ne 0) { throw "OSS upload failed for $($object.FileName) with exit code $LASTEXITCODE." }
     }
   }
@@ -464,7 +530,12 @@ region=$($ossCredential.region)
     throw 'Remote macOS metadata does not match the exact candidate.'
   }
 
-  $script:AskpassPath = Initialize-SshAskpass -CredentialPath $resolvedSshCredentialPath -Directory $askpassDirectory
+  $script:AskpassPath = if ($usesActionSecrets) {
+    Initialize-SshAskpass -Directory $askpassDirectory -PasswordEnvironmentVariable 'UCLAW_PRODUCTION_SSH_PASSWORD'
+  }
+  else {
+    Initialize-SshAskpass -CredentialPath $resolvedSshCredentialPath -Directory $askpassDirectory
+  }
   $postgres = Get-PostgresContainer
   $notes = if ($ReleaseNotes) { $ReleaseNotes } else { "UClaw $Version staged pending activation." }
   $mandatorySql = if ($Mandatory) { 'true' } else { 'false' }

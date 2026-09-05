@@ -117,7 +117,7 @@ test('production workflow builds the Windows USB ZIP without signing credentials
   }
 });
 
-test('production candidate workflow builds only USB ZIPs and cannot perform production writes', async () => {
+test('production workflow can perform only explicitly approved disabled staging', async () => {
   const workflow = await readFile(
     path.join(ROOT, '.github', 'workflows', 'uclaw-portable-production.yml'),
     'utf8',
@@ -135,7 +135,15 @@ test('production candidate workflow builds only USB ZIPs and cannot perform prod
     'macOS workflow must provide a plugin-version base to the package command',
   );
   assert.match(workflow, /candidates-ready:/u);
-  assert.match(workflow, /Production OSS and UClaw staging must be run locally/u);
+  assert.match(workflow, /stage_disabled:/u);
+  assert.match(workflow, /stage-disabled:/u);
+  assert.match(workflow, /if: \$\{\{ inputs\.stage_disabled == true \}\}/u);
+  assert.match(workflow, /environment: uclaw-disabled-stage/u);
+  assert.match(workflow, /scripts\/windows-support\/publish-disabled-release-stage\.ps1/u);
+  assert.match(workflow, /UCLAW_OSS_ACCESS_KEY_SECRET: \$\{\{ secrets\.UCLAW_OSS_ACCESS_KEY_SECRET \}\}/u);
+  assert.match(workflow, /UCLAW_PRODUCTION_SSH_PASSWORD: \$\{\{ secrets\.UCLAW_PRODUCTION_SSH_PASSWORD \}\}/u);
+  assert.match(workflow, /ossutil archive SHA-256 mismatch/u);
+  assert.match(workflow, /Upload disabled staging receipt/u);
   for (const forbidden of [
     'MAC_CERTS',
     'APPLE_APP_SPECIFIC_PASSWORD',
@@ -147,7 +155,6 @@ test('production candidate workflow builds only USB ZIPs and cannot perform prod
     'git tag -a',
     'git push origin "refs/tags/',
     'scripts/windows-support/publish-portable-release.ps1',
-    'scripts/windows-support/publish-disabled-release-stage.ps1',
     'self-hosted',
     'uclaw-release',
     'RELEASE_MANDATORY',
@@ -193,6 +200,10 @@ test('disabled stage publisher never enables a release row', async () => {
   assert.match(publisher, /Sha512Hex = Get-Sha512Hex \$metadataPath/u);
   assert.match(publisher, /objects = \$objects\.Count/u);
   assert.match(publisher, /function Get-SingleHttpHeaderValue/u);
+  assert.match(publisher, /GitHub Actions release secrets are incomplete/u);
+  assert.match(publisher, /UCLAW_OSS_ACCESS_KEY_SECRET/u);
+  assert.match(publisher, /UCLAW_PRODUCTION_SSH_PASSWORD/u);
+  assert.match(publisher, /PasswordEnvironmentVariable/u);
   assert.match(publisher, /\[int64\]::TryParse\(\$contentLengthText/u);
   assert.match(publisher, /\$null -ne \$head\.Length -and \$head\.Length -ne \$object\.Size/u);
   assert.match(publisher, /\$PSVersionTable\.PSEdition -eq 'Core'/u);

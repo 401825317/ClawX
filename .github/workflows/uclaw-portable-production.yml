@@ -7,6 +7,11 @@ on:
         description: Stable version from package.json, for example 1.0.6
         required: true
         type: string
+      stage_disabled:
+        description: Upload the immutable candidates and create disabled zz-cn records after Environment approval
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   actions: read
@@ -154,92 +159,6 @@ jobs:
         shell: pwsh
         run: pnpm run package:win:usb
 
-      - name: Require SignPath credential
-        shell: pwsh
-        env:
-          SIGNPATH_TOKEN_PRESENT: ${{ secrets.SIGNPATH_API_TOKEN }}
-        run: |
-          if (-not $env:SIGNPATH_TOKEN_PRESENT) {
-            throw 'Repository secret SIGNPATH_API_TOKEN is required for a signed Windows USB release.'
-          }
-
-      - name: Prepare unsigned Windows USB executables for SignPath
-        shell: pwsh
-        run: |
-          $executables = @(
-            'release\win-unpacked\UClaw.exe',
-            'release\win-unpacked\resources\resources\updater\win32-x64\uclaw-portable-updater.exe'
-          )
-          $inputDirectory = 'release\signpath-input'
-          Remove-Item -LiteralPath $inputDirectory -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path $inputDirectory -Force | Out-Null
-          foreach ($executable in $executables) {
-            if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
-              throw "USB package is missing executable: $executable"
-            }
-            $signature = Get-AuthenticodeSignature -LiteralPath $executable
-            if ($signature.Status -ne 'NotSigned') {
-              throw "Expected an unsigned executable before SignPath: $executable ($($signature.Status))"
-            }
-            Copy-Item -LiteralPath $executable -Destination $inputDirectory -Force
-          }
-          "USB_UNSIGNED_EXE_COUNT=$($executables.Count)" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      # SignPath Trusted Build requires the input artifact to exist on GitHub first.
-      - name: Upload unsigned Windows USB executables for SignPath
-        id: upload-unsigned-usb-artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: unsigned-uclaw-usb-executables-${{ github.run_id }}-${{ github.run_attempt }}
-          path: release/signpath-input/*.exe
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Sign Windows USB executables via SignPath
-        id: signpath-sign-windows-usb
-        uses: signpath/github-action-submit-signing-request@v2
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: "78e37079-23df-4800-b41c-33312ad7c1e3"
-          project-slug: "ValueCell"
-          signing-policy-slug: "ValueCell-sign"
-          github-artifact-id: ${{ steps.upload-unsigned-usb-artifact.outputs.artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: release/signed-executables
-
-      - name: Replace USB executables with signed ones
-        shell: pwsh
-        run: |
-          $targets = @{
-            'UClaw.exe' = 'release\win-unpacked\UClaw.exe'
-            'uclaw-portable-updater.exe' = 'release\win-unpacked\resources\resources\updater\win32-x64\uclaw-portable-updater.exe'
-          }
-          $signedExeFiles = @(Get-ChildItem -Path 'release\signed-executables' -Filter *.exe -File -Recurse)
-          if ($signedExeFiles.Count -ne [int]$env:USB_UNSIGNED_EXE_COUNT) {
-            throw "Signed executable count ($($signedExeFiles.Count)) does not match unsigned count ($env:USB_UNSIGNED_EXE_COUNT)"
-          }
-          foreach ($name in $targets.Keys) {
-            $matches = @($signedExeFiles | Where-Object { $_.Name -eq $name })
-            if ($matches.Count -ne 1) {
-              throw "Expected exactly one signed $name; found $($matches.Count)."
-            }
-            $signature = Get-AuthenticodeSignature -LiteralPath $matches[0].FullName
-            if ($signature.Status -ne 'Valid') {
-              throw "Invalid Authenticode signature for ${name}: $($signature.Status)."
-            }
-            Copy-Item -LiteralPath $matches[0].FullName -Destination $targets[$name] -Force
-          }
-          foreach ($target in $targets.Values) {
-            $signature = Get-AuthenticodeSignature -LiteralPath $target
-            if ($signature.Status -ne 'Valid') {
-              throw "Final USB executable is not signed: $target ($($signature.Status))"
-            }
-          }
-
-      - name: Rebuild signed Windows USB ZIP
-        shell: pwsh
-        run: node scripts/build-usb-release.mjs --win --arch=x64
-
       - name: Refresh integrity metadata from final ZIP
         shell: pwsh
         run: |
@@ -358,6 +277,84 @@ jobs:
 
           - Commit: `${{ needs.preflight.outputs.commit }}`
           - Windows x64 and macOS x64/arm64 USB candidates are stored as immutable Actions artifacts
-          - Production OSS and UClaw staging must be run locally with the DPAPI-protected publisher
-          - No production feed or GitHub Release was changed by this workflow
+          - Disabled staging requested: `${{ inputs.stage_disabled }}`
+          - A requested disabled staging run requires the protected `uclaw-disabled-stage` Environment
+          - No public production feed or GitHub Release is changed by this workflow
           EOF
+
+  stage-disabled:
+    name: Upload candidates and stage disabled release
+    needs:
+      - preflight
+      - build-windows-usb
+      - build-macos-usb
+    if: ${{ inputs.stage_disabled == true }}
+    runs-on: windows-latest
+    timeout-minutes: 120
+    environment: uclaw-disabled-stage
+    env:
+      UCLAW_OSS_ACCESS_KEY_ID: ${{ secrets.UCLAW_OSS_ACCESS_KEY_ID }}
+      UCLAW_OSS_ACCESS_KEY_SECRET: ${{ secrets.UCLAW_OSS_ACCESS_KEY_SECRET }}
+      UCLAW_PRODUCTION_SSH_HOST: ${{ secrets.UCLAW_PRODUCTION_SSH_HOST }}
+      UCLAW_PRODUCTION_SSH_USER: ${{ secrets.UCLAW_PRODUCTION_SSH_USER }}
+      UCLAW_PRODUCTION_SSH_PASSWORD: ${{ secrets.UCLAW_PRODUCTION_SSH_PASSWORD }}
+      UCLAW_PRODUCTION_DATABASE: ${{ secrets.UCLAW_PRODUCTION_DATABASE }}
+    steps:
+      - name: Checkout locked publisher
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+
+      - name: Download locked Windows candidate
+        uses: actions/download-artifact@v5
+        with:
+          name: uclaw-production-candidate-${{ needs.preflight.outputs.version }}-${{ needs.preflight.outputs.short_commit }}
+          path: stage/windows-candidate
+
+      - name: Download locked macOS candidates
+        uses: actions/download-artifact@v5
+        with:
+          name: uclaw-macos-production-candidate-${{ needs.preflight.outputs.version }}-${{ needs.preflight.outputs.short_commit }}
+          path: stage/macos-candidate
+
+      - name: Download pinned OSS publisher
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'ossutil-2.3.0-windows-amd64.zip'
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri 'https://gosspublic.alicdn.com/ossutil/v2/2.3.0/ossutil-2.3.0-windows-amd64.zip' `
+            -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          $expected = '98209156987667b39fd12a0c7b940342900daef61a9306ea7f34acf17f287da2'
+          if ($actual -ne $expected) { throw 'ossutil archive SHA-256 mismatch.' }
+          Expand-Archive -LiteralPath $archive -DestinationPath (Join-Path $env:RUNNER_TEMP 'uclaw-ossutil') -Force
+
+      - name: Require protected release secrets
+        shell: pwsh
+        run: |
+          $names = @(
+            'UCLAW_OSS_ACCESS_KEY_ID', 'UCLAW_OSS_ACCESS_KEY_SECRET',
+            'UCLAW_PRODUCTION_SSH_HOST', 'UCLAW_PRODUCTION_SSH_USER',
+            'UCLAW_PRODUCTION_SSH_PASSWORD', 'UCLAW_PRODUCTION_DATABASE'
+          )
+          $missing = @($names | Where-Object { [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_)) })
+          if ($missing.Count -gt 0) { throw "Protected Environment is missing required release secrets: $($missing -join ', ')." }
+
+      - name: Upload OSS objects and stage disabled zz-cn records
+        shell: pwsh
+        run: |
+          & scripts/windows-support/publish-disabled-release-stage.ps1 `
+            -WindowsCandidateDirectory 'stage/windows-candidate' `
+            -MacosCandidateDirectory 'stage/macos-candidate' `
+            -Version '${{ needs.preflight.outputs.version }}' `
+            -Commit '${{ needs.preflight.outputs.commit }}' `
+            -OssutilPath (Join-Path $env:RUNNER_TEMP 'uclaw-ossutil/ossutil-2.3.0-windows-amd64/ossutil.exe')
+
+      - name: Upload disabled staging receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: uclaw-disabled-stage-receipt-${{ needs.preflight.outputs.version }}-${{ needs.preflight.outputs.short_commit }}
+          path: stage/windows-candidate/stage-publication.json
+          if-no-files-found: warn
+          retention-days: 90

@@ -2,9 +2,9 @@
 
 正式候选使用 `.github/workflows/uclaw-portable-production.yml`。GitHub Actions 只在托管 Runner 上构建 Windows x64 与 macOS x64/arm64 USB ZIP，校验精确版本、commit、build ID、size 和 SHA-512，并上传不可变候选制品。
 
-Actions 不持有生产凭证，不上传 OSS，不连接生产 API，不创建 Git 标签或 GitHub Release，也不依赖自托管 Runner。当前 USB 候选为未签名制品；本地暂存不会改变候选字节或补加签名。
+默认 Actions 只构建候选包。手动 dispatch 明确选择 `stage_disabled=true` 后，才会进入受 GitHub Environment `uclaw-disabled-stage` 保护的发布 job。该 job 下载同一次 Actions run 的不可变候选，上传 OSS，写入 zz-cn 的禁用记录，并保存回执；不创建 Git 标签、GitHub Release 或公开更新。
 
-生产 OSS/候选暂存必须在保存了 DPAPI 凭证的 Windows 机器上执行。所有新记录固定为 `enabled=false`，现有公共更新 Feed 必须保持不变；启用候选属于独立审批操作。
+所有新记录固定为 `enabled=false`，现有公共更新 Feed 必须保持不变；启用候选属于独立审批操作。本机 DPAPI 发布器保留为应急路径，但不再是常规 CI 发布的唯一入口。
 
 正式发包不执行源码 E2E、成品 Full、托管 Live、新用户注册、激活或重登回归。功能 QA 是独立任务，不属于候选构建或生产暂存。
 
@@ -13,13 +13,23 @@ Actions 不持有生产凭证，不上传 OSS，不连接生产 API，不创建 
 1. 确认待发布代码位于负责人批准的发布分支远端最新提交，`package.json` 使用新的稳定版本号。
 2. 手动运行 `UClaw Windows USB and macOS Production Candidates`，输入同一版本号；工作流会固定 checkout `feature/claw-0.5.1`，无需在 Actions 页面另选分支。
 3. 等待 Windows 与 macOS GitHub 托管 Runner 构建完成；最终 `Confirm immutable production candidates` 作业应为绿色。
-4. 在本地下载该 run 的两个精确候选制品。
-5. 先用 `-ValidateOnly` 校验候选身份，再运行本地发布脚本。
-6. 发布器上传或复用 7 个不可变 OSS 对象（Windows ZIP/JSON、macOS x64/arm64 ZIP 与各自 JSON sidecar、aggregate macOS manifest），在一个数据库事务中登记 3 条 `enabled=false` 记录，并验证公共 Feed 前后完全一致。
+4. 需要禁用预发布时，以同一版本再次手动 dispatch 并选择 `stage_disabled=true`。Environment 审批通过后，Actions 下载同 run 的两个精确候选制品。
+5. 发布器上传或复用 7 个不可变 OSS 对象（Windows ZIP/JSON、macOS x64/arm64 ZIP 与各自 JSON sidecar、aggregate macOS manifest），在一个数据库事务中登记 3 条 `enabled=false` 记录，并验证公共 Feed 前后完全一致。
 
 ## GitHub 配置
 
-该工作流只需要标准 GitHub 托管 Runner 和仓库读取权限，不需要 Actions Secrets、Environment 或自托管 Runner。默认分支只负责登记手动触发入口，实际源码始终锁定 `feature/claw-0.5.1` 的远端最新提交。
+构建 job 只需要标准 GitHub 托管 Runner 和仓库读取权限。禁用预发布 job 使用 GitHub Environment `uclaw-disabled-stage`，必须配置以下 Environment Secrets：
+
+```text
+UCLAW_OSS_ACCESS_KEY_ID
+UCLAW_OSS_ACCESS_KEY_SECRET
+UCLAW_PRODUCTION_SSH_HOST
+UCLAW_PRODUCTION_SSH_USER
+UCLAW_PRODUCTION_SSH_PASSWORD
+UCLAW_PRODUCTION_DATABASE
+```
+
+这些值仅以进程环境变量传给发布器，不写入命令行、Actions 制品或回执。建议 Environment 开启必需审批者。默认分支只负责登记手动触发入口，实际源码始终锁定 `feature/claw-0.5.1` 的远端最新提交。
 
 工作流保留 14 天的两个 Actions 制品：
 
