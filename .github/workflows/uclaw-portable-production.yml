@@ -154,6 +154,92 @@ jobs:
         shell: pwsh
         run: pnpm run package:win:usb
 
+      - name: Require SignPath credential
+        shell: pwsh
+        env:
+          SIGNPATH_TOKEN_PRESENT: ${{ secrets.SIGNPATH_API_TOKEN }}
+        run: |
+          if (-not $env:SIGNPATH_TOKEN_PRESENT) {
+            throw 'Repository secret SIGNPATH_API_TOKEN is required for a signed Windows USB release.'
+          }
+
+      - name: Prepare unsigned Windows USB executables for SignPath
+        shell: pwsh
+        run: |
+          $executables = @(
+            'release\win-unpacked\UClaw.exe',
+            'release\win-unpacked\resources\resources\updater\win32-x64\uclaw-portable-updater.exe'
+          )
+          $inputDirectory = 'release\signpath-input'
+          Remove-Item -LiteralPath $inputDirectory -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $inputDirectory -Force | Out-Null
+          foreach ($executable in $executables) {
+            if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+              throw "USB package is missing executable: $executable"
+            }
+            $signature = Get-AuthenticodeSignature -LiteralPath $executable
+            if ($signature.Status -ne 'NotSigned') {
+              throw "Expected an unsigned executable before SignPath: $executable ($($signature.Status))"
+            }
+            Copy-Item -LiteralPath $executable -Destination $inputDirectory -Force
+          }
+          "USB_UNSIGNED_EXE_COUNT=$($executables.Count)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      # SignPath Trusted Build requires the input artifact to exist on GitHub first.
+      - name: Upload unsigned Windows USB executables for SignPath
+        id: upload-unsigned-usb-artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-uclaw-usb-executables-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release/signpath-input/*.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Sign Windows USB executables via SignPath
+        id: signpath-sign-windows-usb
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: "78e37079-23df-4800-b41c-33312ad7c1e3"
+          project-slug: "ValueCell"
+          signing-policy-slug: "ValueCell-sign"
+          github-artifact-id: ${{ steps.upload-unsigned-usb-artifact.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: release/signed-executables
+
+      - name: Replace USB executables with signed ones
+        shell: pwsh
+        run: |
+          $targets = @{
+            'UClaw.exe' = 'release\win-unpacked\UClaw.exe'
+            'uclaw-portable-updater.exe' = 'release\win-unpacked\resources\resources\updater\win32-x64\uclaw-portable-updater.exe'
+          }
+          $signedExeFiles = @(Get-ChildItem -Path 'release\signed-executables' -Filter *.exe -File -Recurse)
+          if ($signedExeFiles.Count -ne [int]$env:USB_UNSIGNED_EXE_COUNT) {
+            throw "Signed executable count ($($signedExeFiles.Count)) does not match unsigned count ($env:USB_UNSIGNED_EXE_COUNT)"
+          }
+          foreach ($name in $targets.Keys) {
+            $matches = @($signedExeFiles | Where-Object { $_.Name -eq $name })
+            if ($matches.Count -ne 1) {
+              throw "Expected exactly one signed $name; found $($matches.Count)."
+            }
+            $signature = Get-AuthenticodeSignature -LiteralPath $matches[0].FullName
+            if ($signature.Status -ne 'Valid') {
+              throw "Invalid Authenticode signature for ${name}: $($signature.Status)."
+            }
+            Copy-Item -LiteralPath $matches[0].FullName -Destination $targets[$name] -Force
+          }
+          foreach ($target in $targets.Values) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $target
+            if ($signature.Status -ne 'Valid') {
+              throw "Final USB executable is not signed: $target ($($signature.Status))"
+            }
+          }
+
+      - name: Rebuild signed Windows USB ZIP
+        shell: pwsh
+        run: node scripts/build-usb-release.mjs --win --arch=x64
+
       - name: Refresh integrity metadata from final ZIP
         shell: pwsh
         run: |
