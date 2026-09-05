@@ -209,7 +209,7 @@ export function getOpenClawEmbeddedForkSpec(args: string[] = []): OpenClawEmbedd
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     OPENCLAW_NO_RESPAWN: '1',
-    OPENCLAW_EMBEDDED_IN: 'ClawX',
+    OPENCLAW_EMBEDDED_IN: 'UClaw',
     OPENCLAW_EXEC_SHELL_SNAPSHOT: '0',
   };
 
@@ -481,8 +481,8 @@ function ensureLocalBinInPath(): void {
     if (content.includes(marker)) return;
 
     const line = shell.includes('fish')
-      ? '\n# Added by ClawX\nfish_add_path "$HOME/.local/bin"\n'
-      : '\n# Added by ClawX\nexport PATH="$HOME/.local/bin:$PATH"\n';
+      ? '\n# Added by UClaw\nfish_add_path "$HOME/.local/bin"\n'
+      : '\n# Added by UClaw\nexport PATH="$HOME/.local/bin:$PATH"\n';
 
     appendFileSync(profileFile, line);
     logger.info(`Added ~/.local/bin to PATH in ${profileFile}`);
@@ -555,7 +555,7 @@ export function generateCompletionCache(): void {
       ...process.env,
       ELECTRON_RUN_AS_NODE: '1',
       OPENCLAW_NO_RESPAWN: '1',
-      OPENCLAW_EMBEDDED_IN: 'ClawX',
+      OPENCLAW_EMBEDDED_IN: 'UClaw',
     },
     stdio: 'ignore',
     detached: false,
@@ -592,7 +592,7 @@ export function installCompletionToProfile(): void {
         ...process.env,
         ELECTRON_RUN_AS_NODE: '1',
         OPENCLAW_NO_RESPAWN: '1',
-        OPENCLAW_EMBEDDED_IN: 'ClawX',
+        OPENCLAW_EMBEDDED_IN: 'UClaw',
       },
       stdio: 'ignore',
       detached: false,

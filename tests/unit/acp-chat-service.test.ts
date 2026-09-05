@@ -189,7 +189,7 @@ describe('AcpChatService', () => {
         windowsHide: true,
         env: expect.objectContaining({
           OPENCLAW_NO_RESPAWN: '1',
-          OPENCLAW_EMBEDDED_IN: 'ClawX',
+          OPENCLAW_EMBEDDED_IN: 'UClaw',
           OPENCLAW_EXEC_SHELL_SNAPSHOT: '0',
         }),
       }),

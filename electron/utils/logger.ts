@@ -593,7 +593,7 @@ export function initLogger(): void {
 
     // Write a separator for new session (sync is OK — happens once at startup)
     const sessionTimestamp = formatLocalIsoTimestamp();
-    const sessionHeader = `\n${'='.repeat(80)}\n[${sessionTimestamp}] === ClawX Session Start (v${app.getVersion()}) ===\n${'='.repeat(80)}\n`;
+    const sessionHeader = `\n${'='.repeat(80)}\n[${sessionTimestamp}] === UClaw Session Start (v${app.getVersion()}) ===\n${'='.repeat(80)}\n`;
     logDate = sessionTimestamp.slice(0, 10);
     selectInitialLogFile(Buffer.byteLength(sessionHeader));
     if (logFilePath && ensureLogDirectoryCapacitySync(Buffer.byteLength(sessionHeader))) {

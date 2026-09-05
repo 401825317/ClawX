@@ -3506,7 +3506,7 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
     // Remove the Tool Search directory defaults seeded by older ClawX builds.
     if (disableLegacyClawXToolSearchDefault(config)) {
       modified = true;
-      console.log('[batch-sync] Disabled legacy ClawX tools.toolSearch directory default');
+      console.log('[batch-sync] Disabled legacy UClaw tools.toolSearch directory default');
     }
 
     // UClaw owns these bundled runtime plugins, so every Gateway launch must
@@ -4336,10 +4336,10 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       toolsConfig.deny = denyResult.deny;
       toolsModified = true;
       if (subagentDenyResult.modified) {
-        console.log('[sanitize] Added Subagent tools to tools.deny for ClawX desktop');
+        console.log('[sanitize] Added Subagent tools to tools.deny for UClaw desktop');
       }
       if (workshopDenyResult.modified) {
-        console.log('[sanitize] Added "skill_workshop" to tools.deny for ClawX desktop');
+        console.log('[sanitize] Added "skill_workshop" to tools.deny for UClaw desktop');
       }
       if (denyResult.modified) {
         console.log('[sanitize] Removed legacy "web_search" from tools.deny for UClaw desktop');
@@ -4361,7 +4361,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       execConfig.ask = 'off';
       toolsConfig.exec = execConfig;
       toolsModified = true;
-      console.log('[sanitize] Set tools.exec.security="full" and tools.exec.ask="off" to disable exec approvals for ClawX desktop');
+      console.log('[sanitize] Set tools.exec.security="full" and tools.exec.ask="off" to disable exec approvals for UClaw desktop');
     }
 
     if (toolsModified) {
@@ -4384,7 +4384,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       sessionConfig.dmScope = 'per-channel-peer';
       config.session = sessionConfig;
       modified = true;
-      console.log('[sanitize] Set session.dmScope="per-channel-peer" so channel DMs appear as separate sessions in ClawX');
+      console.log('[sanitize] Set session.dmScope="per-channel-peer" so channel DMs appear as separate sessions in UClaw');
     }
 
     // ── Skill Workshop hard-disable (OpenClaw 6.10+) ─────────────────
@@ -4416,10 +4416,10 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     if (gatewayModified) {
       gatewayTools.deny = gatewayDenyResult.deny;
       if (gatewaySubagentDenyResult.modified) {
-        console.log('[sanitize] Added Subagent tools to gateway.tools.deny for ClawX desktop');
+        console.log('[sanitize] Added Subagent tools to gateway.tools.deny for UClaw desktop');
       }
       if (gatewayWorkshopDenyResult.modified) {
-        console.log('[sanitize] Added "skill_workshop" to gateway.tools.deny for ClawX desktop');
+        console.log('[sanitize] Added "skill_workshop" to gateway.tools.deny for UClaw desktop');
       }
       if (gatewayDenyResult.modified) {
         console.log('[sanitize] Removed legacy "web_search" from gateway.tools.deny for UClaw desktop');
@@ -4456,7 +4456,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       workshop.autonomous = autonomous;
       skillsObj.workshop = workshop;
       skillsModified = true;
-      console.log('[sanitize] Disabled skills.workshop.autonomous for ClawX desktop');
+      console.log('[sanitize] Disabled skills.workshop.autonomous for UClaw desktop');
     }
 
     const skillEntries = (
@@ -4472,7 +4472,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       };
       skillsObj.entries = skillEntries;
       skillsModified = true;
-      console.log('[sanitize] Enabled bundled skill-creator for direct skill authoring in ClawX desktop');
+      console.log('[sanitize] Enabled bundled skill-creator for direct skill authoring in UClaw desktop');
     }
 
     if (skillsModified) {

@@ -865,13 +865,13 @@ export class PortableRuntimeSnapshotService {
           sourceDir: path.join(this.layout.dataDir, 'clawx'),
           backupDir: path.join(this.layout.profileDir, 'clawx-core-state'),
         });
-        this.log('Portable ClawX core state completed', {
+        this.log('Portable UClaw core state completed', {
           reason,
           skipped: clawxResult.skipped,
           fileCount: clawxResult.fileCount,
         });
       } catch (error) {
-        this.log('Portable ClawX core state deferred', {
+        this.log('Portable UClaw core state deferred', {
           reason,
           error: error instanceof Error ? error.message : String(error),
         });

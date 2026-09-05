@@ -35,7 +35,7 @@ export async function syncProxyConfigToOpenClaw(
     const currentProxy = typeof telegramConfig.proxy === 'string' ? telegramConfig.proxy : '';
 
     if (!settings.proxyEnabled && preserveExistingWhenDisabled && currentProxy) {
-      logger.info('Skipped Telegram proxy sync because ClawX proxy is disabled and preserve mode is enabled');
+      logger.info('Skipped Telegram proxy sync because UClaw proxy is disabled and preserve mode is enabled');
       return;
     }
 

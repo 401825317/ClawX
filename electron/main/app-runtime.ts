@@ -161,7 +161,7 @@ if (process.platform === 'linux') {
 // The losing process must exit immediately so it never reaches Gateway startup.
 const gotElectronLock = isE2EMode ? true : app.requestSingleInstanceLock();
 if (!gotElectronLock) {
-  console.info('[ClawX] Another instance already holds the single-instance lock; exiting duplicate process');
+  console.info('[UClaw] Another instance already holds the single-instance lock; exiting duplicate process');
   app.exit(0);
 }
 let releaseProcessInstanceFileLock: () => void = () => {};
@@ -182,12 +182,12 @@ if (gotElectronLock && !isE2EMode) {
           ? 'unknown lock format/content'
           : 'unknown owner';
       console.info(
-        `[ClawX] Another instance already holds process lock (${fileLock.lockPath}, ${ownerDescriptor}); exiting duplicate process`,
+        `[UClaw] Another instance already holds process lock (${fileLock.lockPath}, ${ownerDescriptor}); exiting duplicate process`,
       );
       app.exit(0);
     }
   } catch (error) {
-    console.warn('[ClawX] Failed to acquire process instance file lock; continuing with Electron single-instance lock only', error);
+    console.warn('[UClaw] Failed to acquire process instance file lock; continuing with Electron single-instance lock only', error);
   }
 }
 const gotTheLock = gotElectronLock && gotFileLock;
@@ -541,7 +541,7 @@ async function initialize(): Promise<void> {
     });
   }
 
-  logger.info('=== ClawX Application Starting ===');
+  logger.info('=== UClaw Application Starting ===');
   portableRuntimeHealthMonitor?.start();
   portableRuntimeSnapshotService?.start();
   logger.debug(
@@ -705,7 +705,7 @@ async function initialize(): Promise<void> {
   // workspace so ClawX desktop sessions skip OpenClaw's chat-first bootstrap.
   if (!isE2EMode) {
     void ensureClawXDefaultIdentity().catch((error) => {
-      logger.warn('Failed to seed default ClawX identity:', error);
+      logger.warn('Failed to seed default UClaw identity:', error);
     });
   }
 
@@ -737,7 +737,7 @@ async function initialize(): Promise<void> {
     sendMainWindowEvent('gateway:status-changed', status);
     if (status.state === 'running' && !isE2EMode) {
       void ensureClawXContext().catch((error) => {
-        logger.warn('Failed to re-merge ClawX context after gateway reconnect:', error);
+        logger.warn('Failed to re-merge UClaw context after gateway reconnect:', error);
       });
     }
   });
@@ -851,7 +851,7 @@ async function initialize(): Promise<void> {
   // is ready, so ensureClawXContext will retry until the target files appear.
   if (!isE2EMode) {
     void ensureClawXContext().catch((error) => {
-      logger.warn('Failed to merge ClawX context into workspace:', error);
+      logger.warn('Failed to merge UClaw context into workspace:', error);
     });
   }
 
@@ -901,7 +901,7 @@ if (gotTheLock) {
 
   // When a second instance is launched, focus the existing window instead.
   app.on('second-instance', () => {
-    logger.info('Second ClawX instance detected; redirecting to the existing window');
+    logger.info('Second UClaw instance detected; redirecting to the existing window');
 
     const focusRequest = requestSecondInstanceFocus(
       mainWindowFocusState,

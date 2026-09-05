@@ -1,6 +1,6 @@
 {
   "title": "設定",
-  "subtitle": "ClawX の体験をカスタマイズ",
+  "subtitle": "UClaw の体験をカスタマイズ",
   "portableRuntimeHealth": {
     "repeatedlyDeferredTitle": "ポータブルバックアップが遅延しています",
     "repeatedlyDeferredDescription": "{{attempts}} 回続けてポータブルバックアップを更新できませんでした。ポータブルドライブを接続して書き込み可能な状態にしてください。UClaw は自動的に再試行します。",
@@ -84,7 +84,7 @@
     "language": "言語",
     "menuLanguageUpdated": "メニューの言語を更新しました",
     "launchAtStartup": "システム起動時に自動起動",
-    "launchAtStartupDesc": "ログイン時に ClawX を自動的に起動します"
+    "launchAtStartupDesc": "ログイン時に UClaw を自動的に起動します"
   },
   "aiProviders": {
     "title": "AI プロバイダー",
@@ -111,7 +111,7 @@
     "notRequired": "不要",
     "empty": {
       "title": "プロバイダーが構成されていません",
-      "desc": "ClawX の使用を開始するには AI プロバイダーを追加してください",
+      "desc": "UClaw の使用を開始するには AI プロバイダーを追加してください",
       "cta": "最初のプロバイダーを追加"
     },
     "dialog": {
@@ -135,7 +135,7 @@
       "protocol": "プロトコル",
       "advancedConfig": "詳細設定",
       "userAgent": "User-Agent",
-      "userAgentPlaceholder": "ClawX/1.0",
+      "userAgentPlaceholder": "UClaw/1.0",
       "fallbackModels": "フォールバックモデル",
       "fallbackProviders": "別プロバイダーへのフォールバック",
       "fallbackModelIds": "同一プロバイダーのフォールバックモデル ID",
@@ -211,7 +211,7 @@
     "appLogs": "アプリケーションログ",
     "openFolder": "フォルダーを開く",
     "autoStart": "ゲートウェイ自動起動",
-    "autoStartDesc": "ClawX 起動時にゲートウェイを自動起動",
+    "autoStartDesc": "UClaw 起動時にゲートウェイを自動起動",
     "proxyTitle": "プロキシ",
     "proxyDesc": "Electron と Gateway の通信をローカルプロキシ経由にします。",
     "proxyServer": "プロキシサーバー",
@@ -288,7 +288,7 @@
     "devMode": "開発者モード",
     "devModeDesc": "開発者ツールとショートカットを表示",
     "telemetry": "匿名利用データ",
-    "telemetryDesc": "ClawX 改善のため、匿名の基本的な利用データの提供を許可します"
+    "telemetryDesc": "UClaw 改善のため、匿名の基本的な利用データの提供を許可します"
   },
   "developer": {
     "title": "開発者",
@@ -346,7 +346,7 @@
   },
   "about": {
     "title": "バージョン情報",
-    "appName": "ClawX",
+    "appName": "UClaw",
     "tagline": "グラフィカル AI アシスタント",
     "basedOn": "OpenClaw ベース",
     "version": "バージョン {{version}}",

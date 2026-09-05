@@ -187,7 +187,7 @@ test.describe('OpenClaw Dreams', () => {
         [stableStringify(['config.patch', {
           raw: buildDreamingEnabledPatchRaw(true),
           baseHash: configHash,
-          note: 'Enable memory dreaming from ClawX Dreams.',
+          note: 'Enable memory dreaming from UClaw Dreams.',
         }])]: {
           success: true,
           result: { ok: true },

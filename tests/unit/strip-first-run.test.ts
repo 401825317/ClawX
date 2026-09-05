@@ -134,9 +134,9 @@ describe('stripFirstRunSection', () => {
 
   it('still changes AGENTS content when only First Run is removed', () => {
     const section = [
-      '## ClawX Environment',
+      '## UClaw Environment',
       '',
-      'You are ClawX.',
+      'You are UClaw.',
     ].join('\n');
     const original = [
       '# AGENTS.md',
@@ -150,9 +150,9 @@ describe('stripFirstRunSection', () => {
       'Read SOUL.md first.',
       '',
       '<!-- clawx:begin -->',
-      '## ClawX Environment',
+      '## UClaw Environment',
       '',
-      'You are ClawX.',
+      'You are UClaw.',
       '<!-- clawx:end -->',
       '',
     ].join('\n');
@@ -169,13 +169,13 @@ describe('stripFirstRunSection', () => {
 });
 
 describe('ensureClawXIdentityFile', () => {
-  it('writes a default ClawX identity when the workspace has none', async () => {
+  it('writes a default UClaw identity when the workspace has none', async () => {
     const workspaceDir = join(testHome, '.openclaw', 'workspace');
     await mkdir(workspaceDir, { recursive: true });
 
     await ensureClawXIdentityFile(workspaceDir);
 
-    await expect(readFile(join(workspaceDir, 'IDENTITY.md'), 'utf-8')).resolves.toContain('ClawX');
+    await expect(readFile(join(workspaceDir, 'IDENTITY.md'), 'utf-8')).resolves.toContain('UClaw');
   });
 
   it('replaces the untouched OpenClaw identity template but preserves custom identities', async () => {
@@ -202,7 +202,7 @@ describe('ensureClawXIdentityFile', () => {
     );
 
     await ensureClawXIdentityFile(workspaceDir);
-    await expect(readFile(join(workspaceDir, 'IDENTITY.md'), 'utf-8')).resolves.toContain('ClawX');
+    await expect(readFile(join(workspaceDir, 'IDENTITY.md'), 'utf-8')).resolves.toContain('UClaw');
     await expect(readFile(join(workspaceDir, 'IDENTITY.md'), 'utf-8')).resolves.not.toContain('pick something you like');
 
     await writeFile(join(workspaceDir, 'IDENTITY.md'), '# IDENTITY.md\n\n- **Name:** Paisley\n', 'utf-8');
@@ -218,7 +218,7 @@ describe('ensureClawXIdentityFile', () => {
     await ensureClawXIdentityFile(workspaceDir);
 
     await expect(access(join(workspaceDir, 'BOOTSTRAP.md'))).rejects.toThrow();
-    await expect(readFile(join(workspaceDir, 'IDENTITY.md'), 'utf-8')).resolves.toContain('ClawX');
+    await expect(readFile(join(workspaceDir, 'IDENTITY.md'), 'utf-8')).resolves.toContain('UClaw');
   });
 });
 
@@ -226,7 +226,7 @@ describe('ensureClawXDefaultIdentity', () => {
   it('creates the default workspace and seeds IDENTITY.md for startup-owned workspaces', async () => {
     await ensureClawXDefaultIdentity();
 
-    await expect(readFile(join(testHome, '.openclaw', 'workspace', 'IDENTITY.md'), 'utf-8')).resolves.toContain('ClawX');
+    await expect(readFile(join(testHome, '.openclaw', 'workspace', 'IDENTITY.md'), 'utf-8')).resolves.toContain('UClaw');
   });
 
   it('seeds an explicit logical default workspace inside the portable state profile', async () => {
@@ -246,7 +246,7 @@ describe('ensureClawXDefaultIdentity', () => {
 
     await ensureClawXDefaultIdentity();
 
-    await expect(readFile(join(runtimeState, 'workspace', 'IDENTITY.md'), 'utf8')).resolves.toContain('ClawX');
+    await expect(readFile(join(runtimeState, 'workspace', 'IDENTITY.md'), 'utf8')).resolves.toContain('UClaw');
     await expect(access(join(usbHome, '.openclaw', 'workspace', 'IDENTITY.md'))).rejects.toThrow();
   });
 
@@ -263,7 +263,7 @@ describe('ensureClawXDefaultIdentity', () => {
 
     await ensureClawXDefaultIdentity();
 
-    await expect(readFile(join(customWorkspace, 'IDENTITY.md'), 'utf8')).resolves.toContain('ClawX');
+    await expect(readFile(join(customWorkspace, 'IDENTITY.md'), 'utf8')).resolves.toContain('UClaw');
     await expect(access(join(runtimeState, 'workspace', 'IDENTITY.md'))).rejects.toThrow();
   });
 });
@@ -294,9 +294,9 @@ describe('ensureClawXContext', () => {
     ]);
 
     expect(result).toBe('done');
-    await expect(readFile(join(defaultWorkspace, 'AGENTS.md'), 'utf-8')).resolves.toContain('## ClawX Environment');
+    await expect(readFile(join(defaultWorkspace, 'AGENTS.md'), 'utf-8')).resolves.toContain('## UClaw Environment');
     const toolsContent = await readFile(join(defaultWorkspace, 'TOOLS.md'), 'utf-8');
-    expect(toolsContent).toContain('## ClawX Tool Notes');
+    expect(toolsContent).toContain('## UClaw Tool Notes');
     expect(toolsContent).toContain('Use `web_search` for general web research');
     expect(toolsContent).toContain('do not retry it repeatedly');
     expect(toolsContent).not.toContain('When asked to search, look up, or interact with a web page, use the browser tool');

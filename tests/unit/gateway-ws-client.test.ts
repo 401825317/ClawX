@@ -132,8 +132,13 @@ describe('connectGatewaySocket', () => {
     await flushMicrotasks();
 
     expect(socket.sentFrames).toHaveLength(1);
-    const connectFrame = JSON.parse(socket.sentFrames[0]) as { id: string; method: string };
+    const connectFrame = JSON.parse(socket.sentFrames[0]) as {
+      id: string;
+      method: string;
+      params?: { client?: { displayName?: string } };
+    };
     expect(connectFrame.method).toBe('connect');
+    expect(connectFrame.params?.client?.displayName).toBe('UClaw');
     expect((connectFrame as { params?: { minProtocol?: number; maxProtocol?: number } }).params).toMatchObject({
       minProtocol: 4,
       maxProtocol: 4,

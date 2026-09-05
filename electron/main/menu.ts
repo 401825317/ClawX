@@ -201,7 +201,7 @@ export async function createMenu(language?: string): Promise<void> {
         {
           label: labels.help.documentation,
           click: async () => {
-            await shell.openExternal('https://claw-x.com');
+            await shell.openExternal('https://aiwxxx.com');
           },
         },
         {

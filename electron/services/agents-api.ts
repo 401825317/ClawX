@@ -103,7 +103,7 @@ export function createAgentsApi(ctx: AgentsApiContext): CompleteHostServiceRegis
         console.warn('[agents] Failed to sync provider auth after agent creation:', syncError);
       }
       void ensureClawXContext({ waitForAllConfiguredWorkspaces: true }).catch((err) => {
-        console.warn('[agents] Failed to ensure ClawX context after agent creation:', err);
+        console.warn('[agents] Failed to ensure UClaw context after agent creation:', err);
       });
       const createdAgent = snapshot.agents.find((agent) => agent.id === snapshot.createdAgentId);
       if (createdAgent) {

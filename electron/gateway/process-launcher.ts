@@ -248,8 +248,8 @@ const GATEWAY_FETCH_PATCH_SOURCE = `
         removeHeader(flat, 'http-referer');
         removeHeader(flat, 'x-title');
         removeHeader(flat, 'x-openrouter-title');
-        flat['HTTP-Referer'] = 'https://claw-x.com';
-        flat['X-OpenRouter-Title'] = 'ClawX';
+        flat['HTTP-Referer'] = 'https://aiwxxx.com';
+        flat['X-OpenRouter-Title'] = 'UClaw';
       }
       if (isUclawRequest) {
         Object.keys(diagnosticHeaders).forEach(function (key) {

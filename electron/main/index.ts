@@ -51,6 +51,6 @@ void import('./app-runtime').catch((error) => {
   const fingerprint = createHash('sha256')
     .update(`${classification}\u0000${errorName}\u0000${errorCode}`, 'utf8')
     .digest('hex');
-  safeConsoleWrite('error', `[ClawX] ${classification} errorName=${errorName} errorCode=${errorCode} fingerprint=${fingerprint}`);
+  safeConsoleWrite('error', `[UClaw] ${classification} errorName=${errorName} errorCode=${errorCode} fingerprint=${fingerprint}`);
   app.quit();
 });
