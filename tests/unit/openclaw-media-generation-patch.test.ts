@@ -16,6 +16,16 @@ const upstreamDetachPolicy = [
   '\treturn Boolean(normalizedSessionKey);',
   '}',
 ].join('\n');
+const openAiVideoProviderRegistration =
+  '\t\tapi.registerVideoGenerationProvider(buildOpenAIVideoGenerationProvider());';
+const disabledOpenAiVideoProviderMarker = 'UCLAW_BUNDLED_OPENAI_VIDEO_PROVIDER_DISABLED';
+const openAiExtensionSource = [
+  'register(api) {',
+  '\t\tapi.registerProvider(buildOpenAIProvider());',
+  '\t\tapi.registerImageGenerationProvider(buildOpenAIImageGenerationProvider());',
+  openAiVideoProviderRegistration,
+  '\t}',
+].join('\n');
 
 async function createTempRoot(prefix: string): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), prefix));
@@ -54,6 +64,23 @@ describe('OpenClaw media generation runtime patch', () => {
     });
   });
 
+  it('removes only the bundled OpenAI video provider registration', async () => {
+    const { rewriteOpenAiVideoProviderRegistration } = await importPatchModule();
+    const rewritten = rewriteOpenAiVideoProviderRegistration(openAiExtensionSource);
+
+    expect(rewritten.replacements).toBe(1);
+    expect(rewritten.content).not.toContain(openAiVideoProviderRegistration);
+    expect(rewritten.content).toContain(disabledOpenAiVideoProviderMarker);
+    expect(rewritten.content).toContain('api.registerProvider(buildOpenAIProvider());');
+    expect(rewritten.content).toContain(
+      'api.registerImageGenerationProvider(buildOpenAIImageGenerationProvider());',
+    );
+    expect(rewriteOpenAiVideoProviderRegistration(rewritten.content)).toEqual({
+      content: rewritten.content,
+      replacements: 0,
+    });
+  });
+
   it('patches the copied runtime and rejects an unsupported OpenClaw layout', async () => {
     expect(existsSync(patchModulePath)).toBe(true);
 
@@ -62,15 +89,41 @@ describe('OpenClaw media generation runtime patch', () => {
     const dist = join(root, 'dist');
     await mkdir(dist, { recursive: true });
     const target = join(dist, 'openclaw-tools-test.js');
+    const openAiExtension = join(dist, 'extensions', 'openai', 'index.js');
+    await mkdir(join(dist, 'extensions', 'openai'), { recursive: true });
     await writeFile(target, `before\n${upstreamDetachPolicy}\nafter`, 'utf8');
+    await writeFile(openAiExtension, openAiExtensionSource, 'utf8');
 
     await expect(patchOpenClawMediaGenerationRuntime(root)).resolves.toEqual({
-      filesPatched: 1,
-      filesScanned: 1,
+      filesPatched: 2,
+      filesScanned: 2,
     });
     await expect(readFile(target, 'utf8')).resolves.toContain('UCLAW_SYNC_MEDIA_GENERATION');
+    await expect(readFile(openAiExtension, 'utf8')).resolves.toContain(
+      disabledOpenAiVideoProviderMarker,
+    );
+    await expect(patchOpenClawMediaGenerationRuntime(root)).resolves.toEqual({
+      filesPatched: 0,
+      filesScanned: 2,
+    });
 
     await expect(patchOpenClawMediaGenerationRuntime(join(root, 'missing')))
       .rejects.toThrow('OpenClaw dist directory not found');
+  });
+
+  it('does not partially patch an unsupported OpenAI extension layout', async () => {
+    const { patchOpenClawMediaGenerationRuntime } = await importPatchModule();
+    const root = await createTempRoot('uclaw-media-runtime-invalid-');
+    const dist = join(root, 'dist');
+    const target = join(dist, 'openclaw-tools-test.js');
+    const openAiExtension = join(dist, 'extensions', 'openai', 'index.js');
+    await mkdir(join(dist, 'extensions', 'openai'), { recursive: true });
+    const originalRuntime = `before\n${upstreamDetachPolicy}\nafter`;
+    await writeFile(target, originalRuntime, 'utf8');
+    await writeFile(openAiExtension, 'register(api) {}', 'utf8');
+
+    await expect(patchOpenClawMediaGenerationRuntime(root))
+      .rejects.toThrow('Expected exactly one OpenAI video provider registration state');
+    await expect(readFile(target, 'utf8')).resolves.toBe(originalRuntime);
   });
 });
