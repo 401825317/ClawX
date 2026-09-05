@@ -17,6 +17,9 @@ import { basename, dirname, join } from 'node:path';
 import { getOpenClawDir, getOpenClawEntryPath } from './paths';
 import { logger } from './logger';
 
+const PACKAGED_WINDOWS_ACP_MAX_OLD_SPACE_MB = 1024;
+const PACKAGED_WINDOWS_COMPLETION_MAX_OLD_SPACE_MB = 512;
+
 // ── Quoting helpers ──────────────────────────────────────────────────────────
 
 function escapeForDoubleQuotes(value: string): string {
@@ -35,6 +38,14 @@ function getPackagedWindowsNodePath(): string | null {
   if (!app.isPackaged || process.platform !== 'win32') return null;
   const nodePath = join(process.resourcesPath, 'bin', 'node.exe');
   return existsSync(nodePath) ? nodePath : null;
+}
+
+function copyProcessEnvWithoutNodeOptions(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === 'node_options') delete env[key];
+  }
+  return env;
 }
 
 // ── CLI command string (for display / copy) ──────────────────────────────────
@@ -206,8 +217,9 @@ function getOpenClawEmbeddedExecPath(): { execPath: string; electronRunAsNode: b
 
 export function getOpenClawEmbeddedForkSpec(args: string[] = []): OpenClawEmbeddedForkSpec {
   const { execPath, electronRunAsNode } = getOpenClawEmbeddedExecPath();
+  const isPackagedWindows = app.isPackaged && process.platform === 'win32';
   const env: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...(isPackagedWindows ? copyProcessEnvWithoutNodeOptions() : process.env),
     OPENCLAW_NO_RESPAWN: '1',
     OPENCLAW_EMBEDDED_IN: 'UClaw',
     OPENCLAW_EXEC_SHELL_SNAPSHOT: '0',
@@ -226,7 +238,9 @@ export function getOpenClawEmbeddedForkSpec(args: string[] = []): OpenClawEmbedd
       cwd: getOpenClawDir(),
       env,
       execPath,
-      execArgv: [],
+      execArgv: isPackagedWindows
+        ? [`--max-old-space-size=${PACKAGED_WINDOWS_ACP_MAX_OLD_SPACE_MB}`]
+        : [],
       stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
       windowsHide: true,
     },
@@ -542,17 +556,22 @@ function getNodeExecForCli(): string {
   return process.execPath;
 }
 
-export function generateCompletionCache(): void {
+export function generateCompletionCache(spawnProcess: typeof spawn = spawn): void {
   if (!app.isPackaged) return;
 
   const entryPath = getOpenClawEntryPath();
   if (!existsSync(entryPath)) return;
 
   const execPath = getNodeExecForCli();
+  const isPackagedWindows = process.platform === 'win32';
+  const env = isPackagedWindows ? copyProcessEnvWithoutNodeOptions() : { ...process.env };
+  const nodeArgs = isPackagedWindows
+    ? [`--max-old-space-size=${PACKAGED_WINDOWS_COMPLETION_MAX_OLD_SPACE_MB}`]
+    : [];
 
-  const child = spawn(execPath, [entryPath, 'completion', '--write-state'], {
+  const child = spawnProcess(execPath, [...nodeArgs, entryPath, 'completion', '--write-state'], {
     env: {
-      ...process.env,
+      ...env,
       ELECTRON_RUN_AS_NODE: '1',
       OPENCLAW_NO_RESPAWN: '1',
       OPENCLAW_EMBEDDED_IN: 'UClaw',

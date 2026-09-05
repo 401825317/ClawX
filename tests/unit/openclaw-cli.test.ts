@@ -7,6 +7,7 @@ const originalExecPath = process.execPath;
 const originalComSpec = process.env.ComSpec;
 const originalPath = process.env.PATH;
 const originalElectronRunAsNode = process.env.ELECTRON_RUN_AS_NODE;
+const originalNodeOptions = process.env.NODE_OPTIONS;
 const mockedEntryPath = 'C:\\Program Files\\ClawX\\resources\\openclaw\\openclaw.mjs';
 
 type ProcessExitListener = (code: number) => void;
@@ -35,6 +36,8 @@ const {
   mockSymlinkSync,
   mockUnlinkSync,
   mockAppName,
+  mockSpawn,
+  mockSpawnedChildOn,
 } = vi.hoisted(() => ({
   mockChmodSync: vi.fn<(path: string, mode: number) => void>(),
   mockExistsSync: vi.fn<(path: string) => boolean>(),
@@ -43,6 +46,8 @@ const {
   mockSymlinkSync: vi.fn(),
   mockUnlinkSync: vi.fn(),
   mockAppName: { value: 'UClaw' },
+  mockSpawn: vi.fn(),
+  mockSpawnedChildOn: vi.fn(),
 }));
 
 function setPlatform(platform: string) {
@@ -106,6 +111,9 @@ function resetOpenClawCliMocks() {
   mockMkdirSync.mockReset();
   mockSymlinkSync.mockReset();
   mockUnlinkSync.mockReset();
+  mockSpawn.mockReset();
+  mockSpawnedChildOn.mockReset();
+  mockSpawn.mockReturnValue({ on: mockSpawnedChildOn });
   mockAppName.value = 'UClaw';
   mockIsPackagedGetter.value = false;
   setPlatform(originalPlatform);
@@ -125,6 +133,11 @@ function resetOpenClawCliMocks() {
     delete process.env.ELECTRON_RUN_AS_NODE;
   } else {
     process.env.ELECTRON_RUN_AS_NODE = originalElectronRunAsNode;
+  }
+  if (originalNodeOptions === undefined) {
+    delete process.env.NODE_OPTIONS;
+  } else {
+    process.env.NODE_OPTIONS = originalNodeOptions;
   }
 }
 
@@ -300,6 +313,7 @@ describe('getOpenClawEmbeddedForkSpec', () => {
     mockIsPackagedGetter.value = true;
     setResourcesPath('/Applications/UClaw.app/Contents/Resources');
     setExecPath(execPath);
+    process.env.NODE_OPTIONS = '--require trusted-macos-hook.cjs';
     mockExistsSync.mockImplementation((p: string) => p === helperPath);
 
     const { getOpenClawEmbeddedForkSpec } = await import('@electron/utils/openclaw-cli');
@@ -323,6 +337,7 @@ describe('getOpenClawEmbeddedForkSpec', () => {
           OPENCLAW_NO_RESPAWN: '1',
           OPENCLAW_EMBEDDED_IN: 'UClaw',
           OPENCLAW_EXEC_SHELL_SNAPSHOT: '0',
+          NODE_OPTIONS: '--require trusted-macos-hook.cjs',
         }),
       },
     });
@@ -365,6 +380,21 @@ describe('getOpenClawEmbeddedForkSpec', () => {
     expect(spec.options.env).toMatchObject({ ELECTRON_RUN_AS_NODE: '1' });
   });
 
+  it('isolates packaged Windows ACP from host Node flags and applies its memory limit', async () => {
+    setPlatform('win32');
+    mockIsPackagedGetter.value = true;
+    setResourcesPath('C:\\Program Files\\ClawX\\resources');
+    process.env.NODE_OPTIONS = '--max-old-space-size=64 --require unsafe-hook.cjs';
+    mockExistsSync.mockImplementation((p: string) => /[\\/]bin[\\/]node\.exe$/i.test(p));
+
+    const { getOpenClawEmbeddedForkSpec } = await import('@electron/utils/openclaw-cli');
+    const spec = getOpenClawEmbeddedForkSpec(['acp']);
+
+    expect(spec.options.env).not.toHaveProperty('NODE_OPTIONS');
+    expect(spec.options.execArgv).toEqual(['--max-old-space-size=1024']);
+    expect(spec.options.execPath).toBe(join('C:\\Program Files\\ClawX\\resources', 'bin', 'node.exe'));
+  });
+
   it('fails packaged macOS embedded launch when the Helper executable is missing', async () => {
     const execPath = '/Applications/UClaw.app/Contents/MacOS/UClaw';
     setPlatform('darwin');
@@ -377,6 +407,42 @@ describe('getOpenClawEmbeddedForkSpec', () => {
 
     expect(() => getOpenClawEmbeddedForkSpec(['acp'])).toThrow('UClaw Helper executable not found');
     expect(mockExistsSync).not.toHaveBeenCalledWith(expect.stringContaining('clawx Helper'));
+  });
+});
+
+describe('generateCompletionCache (Windows packaged)', () => {
+  beforeEach(() => {
+    resetOpenClawCliMocks();
+    setPlatform('win32');
+    mockIsPackagedGetter.value = true;
+    setExecPath('C:\\Program Files\\ClawX\\UClaw.exe');
+    process.env.NODE_OPTIONS = '--max-old-space-size=64';
+    mockExistsSync.mockImplementation((p: string) => p === mockedEntryPath);
+  });
+
+  afterEach(() => {
+    resetOpenClawCliMocks();
+  });
+
+  it('removes host Node flags and places its memory limit before the entry module', async () => {
+    const { generateCompletionCache } = await import('@electron/utils/openclaw-cli');
+    generateCompletionCache(mockSpawn as unknown as typeof import('node:child_process').spawn);
+
+    expect(mockSpawn).toHaveBeenCalledOnce();
+    const [command, args, options] = mockSpawn.mock.calls[0];
+    expect(command).toBe('C:\\Program Files\\ClawX\\UClaw.exe');
+    expect(args).toEqual([
+      '--max-old-space-size=512',
+      mockedEntryPath,
+      'completion',
+      '--write-state',
+    ]);
+    expect(options.env).not.toHaveProperty('NODE_OPTIONS');
+    expect(options.env).toMatchObject({
+      ELECTRON_RUN_AS_NODE: '1',
+      OPENCLAW_NO_RESPAWN: '1',
+      OPENCLAW_EMBEDDED_IN: 'UClaw',
+    });
   });
 });
 
