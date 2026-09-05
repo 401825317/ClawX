@@ -1139,11 +1139,11 @@ describe('UClaw video plugin', () => {
       await expect(provider?.generateVideo({ ...request, inputAudios: [{ buffer: Buffer.from('audio') }] }))
         .rejects.toThrow('does not support audio reference inputs');
       await expect(provider?.generateVideo({ ...request, audio: true }))
-        .rejects.toThrow('does not support generated audio');
+        .rejects.toThrow('does not expose an output-audio toggle');
       await expect(provider?.generateVideo({ ...request, watermark: true }))
         .rejects.toThrow('does not support watermarks');
       await expect(provider?.generateVideo({ ...request, audio: 'enabled' }))
-        .rejects.toThrow('does not support generated audio');
+        .rejects.toThrow('does not expose an output-audio toggle');
       await expect(provider?.generateVideo({ ...request, watermark: 1 }))
         .rejects.toThrow('does not support watermarks');
       await expect(provider?.generateVideo({
@@ -1159,7 +1159,7 @@ describe('UClaw video plugin', () => {
     }
   });
 
-  it('blocks unsupported references and normalizes duration in the video tool hook', async () => {
+  it('blocks unsupported references and watermark without rejecting audio in the video tool hook', async () => {
     const hooks = new Map<string, (event: Record<string, unknown>, ctx: Record<string, unknown>) => unknown>();
     const plugin = await import('../../resources/openclaw-plugins/uclaw-video/index.mjs');
     plugin.default.register({
@@ -1214,8 +1214,16 @@ describe('UClaw video plugin', () => {
 
     await expect(Promise.resolve().then(() => hook?.({
       toolName: 'video_generate',
-      params: { prompt: 'Generate a short clip.', audio: true },
-    }, {}))).rejects.toThrow('does not support generated audio');
+      params: {
+        prompt: 'Generate a short clip.',
+        audio: true,
+      },
+    }, {}))).resolves.toEqual({
+      params: expect.objectContaining({
+        model: 'uclaw-video/grok-image-video',
+        audio: true,
+      }),
+    });
     await expect(Promise.resolve().then(() => hook?.({
       toolName: 'video_generate',
       params: { prompt: 'Generate a short clip.', watermark: true },

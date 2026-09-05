@@ -1093,8 +1093,14 @@ function assertSupportedToolReferences(params) {
 
 function assertSupportedOutputOptions(params) {
   if (params?.audio !== undefined && params.audio !== false) {
-    throw new Error('UClaw video generation does not support generated audio');
+    throw new Error(
+      'UClaw video generation does not expose an output-audio toggle; generated video may include provider-default audio',
+    );
   }
+  assertSupportedWatermarkOption(params);
+}
+
+function assertSupportedWatermarkOption(params) {
   if (params?.watermark !== undefined && params.watermark !== false) {
     throw new Error('UClaw video generation does not support watermarks');
   }
@@ -1655,7 +1661,7 @@ function registerTurnPreferenceHooks(api, config) {
       })()
       : params;
     assertSupportedToolReferences(effectiveParams);
-    assertSupportedOutputOptions(effectiveParams);
+    assertSupportedWatermarkOption(effectiveParams);
     const inputImageCount = normalizeToolReferenceImages(effectiveParams).length;
     const requestedModelId = preference?.videoOptions?.modelId ?? effectiveParams.model;
     const { model, mode } = modelForInputImages(config, inputImageCount, requestedModelId);
