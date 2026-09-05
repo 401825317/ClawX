@@ -56,6 +56,7 @@
         "cacheRead": "缓存读取 {{value}}",
         "cacheWrite": "缓存写入 {{value}}",
         "cost": "费用 ${{amount}}",
+        "costUnavailable": "费用未提供",
         "viewContent": "查看内容",
         "contentDialogTitle": "用量明细内容",
         "close": "关闭",

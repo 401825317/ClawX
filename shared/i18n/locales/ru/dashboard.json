@@ -56,6 +56,7 @@
         "cacheRead": "Чтение кэша {{value}}",
         "cacheWrite": "Запись кэша {{value}}",
         "cost": "Стоимость ${{amount}}",
+        "costUnavailable": "Стоимость недоступна",
         "viewContent": "Просмотр содержимого",
         "contentDialogTitle": "Детали использования",
         "close": "Закрыть",

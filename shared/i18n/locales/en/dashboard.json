@@ -56,6 +56,7 @@
         "cacheRead": "Cache read {{value}}",
         "cacheWrite": "Cache write {{value}}",
         "cost": "Cost ${{amount}}",
+        "costUnavailable": "Cost unavailable",
         "viewContent": "View content",
         "contentDialogTitle": "Usage detail content",
         "close": "Close",

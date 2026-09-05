@@ -4,6 +4,7 @@ export interface TokenUsageHistoryEntry {
   agentId: string;
   model?: string;
   provider?: string;
+  providerRequestId?: string;
   content?: string;
   usageStatus: 'available' | 'missing' | 'error';
   inputTokens: number;
@@ -12,6 +13,7 @@ export interface TokenUsageHistoryEntry {
   cacheWriteTokens: number;
   totalTokens: number;
   costUsd?: number;
+  costUnavailable?: boolean;
 }
 
 export function extractSessionIdFromTranscriptFileName(fileName: string): string | undefined {
@@ -68,7 +70,47 @@ interface ParsedUsageTokens {
   cacheWriteTokens: number;
   totalTokens: number;
   costUsd?: number;
+  costUnavailable?: boolean;
   usageStatus: UsageRecordStatus;
+}
+
+export interface ManagedTokenCostScope {
+  providerIds: readonly string[];
+  modelIds: readonly string[];
+}
+
+function resolveCostAvailability(
+  usage: ParsedUsageTokens,
+  provider: string | undefined,
+  model: string | undefined,
+  managedCostScopes: readonly ManagedTokenCostScope[] | undefined,
+): ParsedUsageTokens {
+  const isManagedModel = provider !== undefined
+    && model !== undefined
+    && managedCostScopes?.some((scope) => (
+      scope.providerIds.includes(provider)
+      && (
+        scope.modelIds.includes(model)
+        || scope.providerIds.some((providerId) => (
+          model.startsWith(`${providerId}/`)
+          && scope.modelIds.includes(model.slice(providerId.length + 1))
+        ))
+      )
+    )) === true;
+
+  if (
+    (usage.costUsd === 0 || usage.costUsd === undefined)
+    && usage.totalTokens > 0
+    && isManagedModel
+  ) {
+    return {
+      ...usage,
+      costUsd: undefined,
+      costUnavailable: true,
+    };
+  }
+
+  return usage;
 }
 
 function normalizeUsageNumber(value: unknown): number | undefined {
@@ -203,6 +245,7 @@ interface TranscriptLineShape {
     model?: string;
     modelRef?: string;
     provider?: string;
+    providerRequestId?: string;
     usage?: TranscriptUsageShape;
     details?: {
       provider?: string;
@@ -214,6 +257,14 @@ interface TranscriptLineShape {
       };
     };
   };
+}
+
+function normalizeProviderRequestId(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim();
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u.test(normalized)
+    ? normalized
+    : undefined;
 }
 
 function normalizeUsageContent(value: unknown): string | undefined {
@@ -259,7 +310,11 @@ function normalizeUsageContent(value: unknown): string | undefined {
 
 export function parseUsageEntriesFromJsonl(
   content: string,
-  context: { sessionId: string; agentId: string },
+  context: {
+    sessionId: string;
+    agentId: string;
+    managedCostScopes?: readonly ManagedTokenCostScope[];
+  },
   limit?: number,
 ): TokenUsageHistoryEntry[] {
   const entries: TokenUsageHistoryEntry[] = [];
@@ -286,14 +341,18 @@ export function parseUsageEntriesFromJsonl(
       if (!usage) continue;
 
       const contentText = normalizeUsageContent((message as Record<string, unknown>).content);
+      const provider = message.provider;
+      const model = message.model ?? message.modelRef;
+      const providerRequestId = normalizeProviderRequestId(message.providerRequestId);
       entries.push({
         timestamp: parsed.timestamp,
         sessionId: context.sessionId,
         agentId: context.agentId,
-        model: message.model ?? message.modelRef,
-        provider: message.provider,
+        model,
+        provider,
+        ...(providerRequestId ? { providerRequestId } : {}),
         ...(contentText ? { content: contentText } : {}),
-        ...usage,
+        ...resolveCostAvailability(usage, provider, model, context.managedCostScopes),
       });
       continue;
     }
@@ -312,6 +371,7 @@ export function parseUsageEntriesFromJsonl(
 
     const provider = details.provider ?? details.externalContent?.provider ?? message.provider;
     const model = details.model ?? message.model ?? message.modelRef;
+    const providerRequestId = normalizeProviderRequestId(message.providerRequestId);
     const contentText = normalizeUsageContent(details.content)
       ?? normalizeUsageContent((message as Record<string, unknown>).content);
 
@@ -321,8 +381,9 @@ export function parseUsageEntriesFromJsonl(
       agentId: context.agentId,
       model,
       provider,
+      ...(providerRequestId ? { providerRequestId } : {}),
       ...(contentText ? { content: contentText } : {}),
-      ...usage,
+      ...resolveCostAvailability(usage, provider, model, context.managedCostScopes),
     });
   }
 

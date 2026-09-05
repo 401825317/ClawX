@@ -2,6 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { parseUsageEntriesFromJsonl } from '@electron/utils/token-usage-core';
 
 describe('parseUsageEntriesFromJsonl', () => {
+  const managedCostScopes = [{
+    providerIds: ['openai', 'lingzhiwuxian'],
+    modelIds: ['smart-latest', 'deepseek-v4-flash'],
+  }];
+
   it('extracts assistant usage entries in reverse chronological order', () => {
     const jsonl = [
       JSON.stringify({
@@ -72,6 +77,233 @@ describe('parseUsageEntriesFromJsonl', () => {
         costUsd: 0.0012,
       },
     ]);
+  });
+
+  it.each(['openai', 'lingzhiwuxian'])(
+    'marks zero managed-provider cost as unavailable when tokens were consumed (%s)',
+    (provider) => {
+      const jsonl = JSON.stringify({
+        type: 'message',
+        timestamp: '2026-09-05T01:00:00.000Z',
+        message: {
+          role: 'assistant',
+          model: 'smart-latest',
+          provider,
+          usage: {
+            input: 300,
+            output: 219,
+            cacheRead: 31_232,
+            total: 31_751,
+            cost: { total: 0 },
+          },
+        },
+      });
+
+      expect(parseUsageEntriesFromJsonl(jsonl, {
+        sessionId: 'managed',
+        agentId: 'main',
+        managedCostScopes,
+      })).toEqual([
+        {
+          timestamp: '2026-09-05T01:00:00.000Z',
+          sessionId: 'managed',
+          agentId: 'main',
+          model: 'smart-latest',
+          provider,
+          usageStatus: 'available',
+          inputTokens: 300,
+          outputTokens: 219,
+          cacheReadTokens: 31_232,
+          cacheWriteTokens: 0,
+          totalTokens: 31_751,
+          costUsd: undefined,
+          costUnavailable: true,
+        },
+      ]);
+    },
+  );
+
+  it('marks missing managed-provider cost as unavailable when tokens were consumed', () => {
+    const jsonl = JSON.stringify({
+      type: 'message',
+      timestamp: '2026-09-05T01:00:00.000Z',
+      message: {
+        role: 'assistant',
+        model: 'smart-latest',
+        provider: 'openai',
+        usage: { input: 20, output: 7, total: 27 },
+      },
+    });
+
+    const [entry] = parseUsageEntriesFromJsonl(jsonl, {
+      sessionId: 'managed-missing-cost',
+      agentId: 'main',
+      managedCostScopes,
+    });
+
+    expect(entry.costUsd).toBeUndefined();
+    expect(entry.costUnavailable).toBe(true);
+  });
+
+  it('matches a provider-prefixed managed modelRef', () => {
+    const jsonl = JSON.stringify({
+      type: 'message',
+      timestamp: '2026-09-05T01:02:00.000Z',
+      message: {
+        role: 'assistant',
+        modelRef: 'openai/smart-latest',
+        provider: 'openai',
+        usage: {
+          input: 10,
+          output: 5,
+          total: 15,
+          cost: { total: 0 },
+        },
+      },
+    });
+
+    const [entry] = parseUsageEntriesFromJsonl(jsonl, {
+      sessionId: 'managed-model-ref',
+      agentId: 'main',
+      managedCostScopes,
+    });
+
+    expect(entry.costUsd).toBeUndefined();
+    expect(entry.costUnavailable).toBe(true);
+  });
+
+  it('preserves a validated provider request ID for settled-cost correlation', () => {
+    const jsonl = JSON.stringify({
+      type: 'message',
+      timestamp: '2026-09-05T06:41:28.685Z',
+      message: {
+        role: 'assistant',
+        model: 'smart-latest',
+        provider: 'openai',
+        providerRequestId: 'req-1234_abcd.ef:01',
+        usage: { input: 10, output: 5, total: 15, cost: { total: 0 } },
+      },
+    });
+
+    const [entry] = parseUsageEntriesFromJsonl(jsonl, {
+      sessionId: 'managed-request-id',
+      agentId: 'main',
+      managedCostScopes,
+    });
+
+    expect(entry.providerRequestId).toBe('req-1234_abcd.ef:01');
+  });
+
+  it('drops malformed provider request IDs from transcript data', () => {
+    const jsonl = JSON.stringify({
+      type: 'message',
+      timestamp: '2026-09-05T06:41:28.685Z',
+      message: {
+        role: 'assistant',
+        model: 'smart-latest',
+        provider: 'openai',
+        providerRequestId: 'request id with spaces',
+        usage: { input: 10, output: 5, total: 15, cost: { total: 0 } },
+      },
+    });
+
+    const [entry] = parseUsageEntriesFromJsonl(jsonl, {
+      sessionId: 'managed-invalid-request-id',
+      agentId: 'main',
+      managedCostScopes,
+    });
+
+    expect(entry).not.toHaveProperty('providerRequestId');
+  });
+
+  it('preserves an explicit zero cost when the OpenAI provider is not managed', () => {
+    const jsonl = JSON.stringify({
+      type: 'message',
+      timestamp: '2026-09-05T01:05:00.000Z',
+      message: {
+        role: 'assistant',
+        model: 'smart-latest',
+        provider: 'openai',
+        usage: {
+          input: 10,
+          output: 5,
+          total: 15,
+          cost: { total: 0 },
+        },
+      },
+    });
+
+    expect(parseUsageEntriesFromJsonl(jsonl, { sessionId: 'local', agentId: 'main' })).toEqual([
+      {
+        timestamp: '2026-09-05T01:05:00.000Z',
+        sessionId: 'local',
+        agentId: 'main',
+        model: 'smart-latest',
+        provider: 'openai',
+        usageStatus: 'available',
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 15,
+        costUsd: 0,
+      },
+    ]);
+  });
+
+  it('preserves zero cost for a model outside the managed account allowlist', () => {
+    const jsonl = JSON.stringify({
+      type: 'message',
+      timestamp: '2026-09-05T01:10:00.000Z',
+      message: {
+        role: 'assistant',
+        model: 'user-configured-model',
+        provider: 'openai',
+        usage: {
+          input: 10,
+          output: 5,
+          total: 15,
+          cost: { total: 0 },
+        },
+      },
+    });
+
+    const [entry] = parseUsageEntriesFromJsonl(jsonl, {
+      sessionId: 'outside-allowlist',
+      agentId: 'main',
+      managedCostScopes,
+    });
+
+    expect(entry.costUsd).toBe(0);
+    expect(entry).not.toHaveProperty('costUnavailable');
+  });
+
+  it.each([
+    { label: 'no tokens were consumed', totalTokens: 0, costUsd: 0 },
+    { label: 'the provider supplied a positive cost', totalTokens: 15, costUsd: 0.002 },
+  ])('preserves managed-provider cost when $label', ({ totalTokens, costUsd }) => {
+    const jsonl = JSON.stringify({
+      type: 'message',
+      timestamp: '2026-09-05T01:15:00.000Z',
+      message: {
+        role: 'assistant',
+        model: 'smart-latest',
+        provider: 'openai',
+        usage: {
+          total: totalTokens,
+          cost: { total: costUsd },
+        },
+      },
+    });
+
+    const [entry] = parseUsageEntriesFromJsonl(jsonl, {
+      sessionId: 'managed-real-cost',
+      agentId: 'main',
+      managedCostScopes,
+    });
+
+    expect(entry.costUsd).toBe(costUsd);
+    expect(entry).not.toHaveProperty('costUnavailable');
   });
 
   it('skips lines without assistant usage', () => {

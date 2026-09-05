@@ -25,6 +25,7 @@ import {
 import { patchOpenClawAcpStreamingRuntime } from './openclaw-acp-streaming-patch.mjs';
 import { patchOpenClawAcpTerminalErrorRuntime } from './openclaw-acp-terminal-error-patch.mjs';
 import { patchOpenClawMediaGenerationRuntime } from './openclaw-media-generation-patch.mjs';
+import { patchOpenClawResponseRequestIdRuntime } from './openclaw-response-request-id-patch.mjs';
 import { patchExtensionOpenClawSelfImports } from './openclaw-self-import-patch.mjs';
 
 const ROOT = path.resolve(__dirname, '..');
@@ -1049,6 +1050,10 @@ echo`   🩹 Verified UClaw ACP terminal error patch (${acpTerminalErrorPatch.fi
 // so a manual bundle build cannot omit the postinstall runtime patch.
 const mediaGenerationPatch = await patchOpenClawMediaGenerationRuntime(OUTPUT);
 echo`   🩹 Verified UClaw media generation patch (${mediaGenerationPatch.filesPatched} file(s) patched)`;
+
+// Persist the provider request ID so Main can join transcripts to settled usage logs.
+const responseRequestIdPatch = await patchOpenClawResponseRequestIdRuntime(OUTPUT);
+echo`   🩹 Verified UClaw Responses request ID patch (${responseRequestIdPatch.filesPatched} file(s) patched)`;
 
 const openclawSelfImportPatch = patchExtensionOpenClawSelfImports(OUTPUT);
 if (openclawSelfImportPatch.specifiersPatched > 0) {

@@ -56,6 +56,7 @@
         "cacheRead": "キャッシュ読取 {{value}}",
         "cacheWrite": "キャッシュ書込 {{value}}",
         "cost": "コスト ${{amount}}",
+        "costUnavailable": "コスト情報なし",
         "viewContent": "内容を見る",
         "contentDialogTitle": "使用量詳細の内容",
         "close": "閉じる",

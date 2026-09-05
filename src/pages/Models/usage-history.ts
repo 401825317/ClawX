@@ -12,6 +12,7 @@ export type UsageHistoryEntry = {
   cacheWriteTokens: number;
   totalTokens: number;
   costUsd?: number;
+  costUnavailable?: boolean;
 };
 
 export type UsageWindow = '7d' | '30d' | 'all';

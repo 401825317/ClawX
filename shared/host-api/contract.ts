@@ -941,6 +941,7 @@ export type UsageHistoryEntry = {
   cacheWriteTokens: number;
   totalTokens: number;
   costUsd?: number;
+  costUnavailable?: boolean;
 };
 export type UsageHistoryPayload = { limit?: number };
 

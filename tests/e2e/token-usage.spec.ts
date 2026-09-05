@@ -1,13 +1,30 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Page } from '@playwright/test';
-import { completeSetup, expect, test } from './fixtures/electron';
+import {
+  closeElectronApp,
+  completeSetup,
+  expect,
+  getStableWindow,
+  installIpcMocks,
+  test,
+} from './fixtures/electron';
 
 const TEST_AGENT_ID = 'agent';
 const ZERO_TOKEN_SESSION_ID = 'agent-session-zero-token';
 const NONZERO_TOKEN_SESSION_ID = 'agent-session-nonzero-token';
+const MANAGED_ZERO_COST_SESSION_ID = 'agent-session-managed-zero-cost';
 const GATEWAY_INJECTED_SESSION_ID = 'agent-session-gateway-injected';
 const DELIVERY_MIRROR_SESSION_ID = 'agent-session-delivery-mirror';
+
+function stableStringify(value: unknown): string {
+  if (value == null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  return `{${Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, entryValue]) => `${JSON.stringify(key)}:${stableStringify(entryValue)}`)
+    .join(',')}}`;
+}
 
 async function seedTokenUsageTranscripts(homeDir: string): Promise<void> {
   const sessionDir = join(homeDir, '.openclaw', 'agents', TEST_AGENT_ID, 'sessions');
@@ -58,6 +75,35 @@ async function seedTokenUsageTranscripts(homeDir: string): Promise<void> {
     'utf8',
   );
   await writeFile(
+    join(sessionDir, `${MANAGED_ZERO_COST_SESSION_ID}.jsonl`),
+    [
+      JSON.stringify({
+        type: 'message',
+        timestamp: new Date(now.getTime() + 1_000).toISOString(),
+        message: {
+          role: 'assistant',
+          model: 'smart-latest',
+          provider: 'openai',
+          usage: {
+            input: 300,
+            output: 219,
+            cacheRead: 31_232,
+            total: 31_751,
+            cost: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              total: 0,
+            },
+          },
+        },
+      }),
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  await writeFile(
     join(sessionDir, `${GATEWAY_INJECTED_SESSION_ID}.jsonl`),
     [
       JSON.stringify({
@@ -99,6 +145,39 @@ async function seedTokenUsageTranscripts(homeDir: string): Promise<void> {
   );
 }
 
+async function seedManagedProviderStore(userDataDir: string): Promise<void> {
+  const now = new Date().toISOString();
+  await mkdir(userDataDir, { recursive: true });
+  await writeFile(
+    join(userDataDir, 'clawx-providers.json'),
+    JSON.stringify({
+      schemaVersion: 0,
+      providers: {},
+      providerAccounts: {
+        openai: {
+          id: 'openai',
+          vendorId: 'openai',
+          label: 'OpenAI',
+          authMode: 'api_key',
+          enabled: true,
+          isDefault: true,
+          metadata: {
+            managedBy: 'uclaw',
+            managedAllowedModels: ['smart-latest', 'deepseek-v4-flash'],
+          },
+          createdAt: now,
+          updatedAt: now,
+        },
+      },
+      apiKeys: {},
+      providerSecrets: {},
+      defaultProvider: 'openai',
+      defaultProviderAccountId: 'openai',
+    }, null, 2),
+    'utf8',
+  );
+}
+
 test.describe('ClawX token usage history', () => {
 
   async function validateUsageHistory(page: Page): Promise<void> {
@@ -113,6 +192,7 @@ test.describe('ClawX token usage history', () => {
       typeof entry?.sessionId === 'string' && (
         entry.sessionId === ZERO_TOKEN_SESSION_ID
         || entry.sessionId === NONZERO_TOKEN_SESSION_ID
+        || entry.sessionId === MANAGED_ZERO_COST_SESSION_ID
       ),
     );
     if (!hasSeededEntries) {
@@ -120,25 +200,109 @@ test.describe('ClawX token usage history', () => {
     }
   }
 
-  test('displays assistant usage for agent directory with zero and non-zero tokens', async ({ page, homeDir }) => {
+  test('displays token usage and labels managed placeholder cost as unavailable', async ({
+    homeDir,
+    launchElectronApp,
+    userDataDir,
+  }) => {
     await seedTokenUsageTranscripts(homeDir);
-    await completeSetup(page);
-    await validateUsageHistory(page);
+    await seedManagedProviderStore(userDataDir);
+    const electronApp = await launchElectronApp({ managedProvider: false, skipSetup: true });
 
-    const usageHistory = await page.evaluate(async () => {
-      return window.electron.ipcRenderer.invoke('usage:recentTokenHistory', 20);
-    });
+    try {
+      const page = await getStableWindow(electronApp);
+      await installIpcMocks(electronApp, {
+        gatewayStatus: {
+          state: 'running',
+          gatewayReady: true,
+          port: 18789,
+          pid: 12345,
+          connectedAt: Date.now(),
+        },
+      });
+      await expect(page.getByTestId('main-layout')).toBeVisible();
+      await validateUsageHistory(page);
 
-    const zeroEntry = usageHistory.find((entry) => entry?.sessionId === ZERO_TOKEN_SESSION_ID);
-    const nonzeroEntry = usageHistory.find((entry) => entry?.sessionId === NONZERO_TOKEN_SESSION_ID);
-    expect(zeroEntry).toBeTruthy();
-    expect(nonzeroEntry).toBeTruthy();
-    expect(nonzeroEntry?.totalTokens).toBe(27);
-    expect(zeroEntry?.totalTokens).toBe(0);
-    expect(zeroEntry?.agentId).toBe(TEST_AGENT_ID);
-    expect(nonzeroEntry?.agentId).toBe(TEST_AGENT_ID);
-    expect(zeroEntry?.provider).toBe('kimi');
-    expect(nonzeroEntry?.provider).toBe('kimi');
+      const usageHistory = await page.evaluate(async () => {
+        return window.electron.ipcRenderer.invoke('usage:recentTokenHistory', 20);
+      });
+
+      const zeroEntry = usageHistory.find((entry) => entry?.sessionId === ZERO_TOKEN_SESSION_ID);
+      const nonzeroEntry = usageHistory.find((entry) => entry?.sessionId === NONZERO_TOKEN_SESSION_ID);
+      const managedZeroCostEntry = usageHistory.find((entry) => entry?.sessionId === MANAGED_ZERO_COST_SESSION_ID);
+      expect(zeroEntry).toBeTruthy();
+      expect(nonzeroEntry).toBeTruthy();
+      expect(managedZeroCostEntry).toBeTruthy();
+      expect(nonzeroEntry?.totalTokens).toBe(27);
+      expect(zeroEntry?.totalTokens).toBe(0);
+      expect(zeroEntry?.agentId).toBe(TEST_AGENT_ID);
+      expect(nonzeroEntry?.agentId).toBe(TEST_AGENT_ID);
+      expect(zeroEntry?.provider).toBe('kimi');
+      expect(nonzeroEntry?.provider).toBe('kimi');
+      expect(managedZeroCostEntry?.costUsd).toBeUndefined();
+      expect(managedZeroCostEntry?.costUnavailable).toBe(true);
+
+      await page.getByTestId('sidebar-nav-models').click();
+      await expect(page.getByTestId('models-page')).toBeVisible();
+
+      const managedZeroCostRow = page.locator('[data-testid="token-usage-entry"]', {
+        hasText: MANAGED_ZERO_COST_SESSION_ID,
+      });
+      await expect(managedZeroCostRow).toBeVisible();
+      await expect(managedZeroCostRow.getByTestId('token-usage-cost-unavailable')).toHaveText('Cost unavailable');
+      await expect(managedZeroCostRow.getByTestId('token-usage-cost')).toHaveCount(0);
+    } finally {
+      await closeElectronApp(electronApp);
+    }
+  });
+
+  test('displays a settled managed charge returned through the Host API', async ({
+    launchElectronApp,
+  }) => {
+    const electronApp = await launchElectronApp({ managedProvider: false, skipSetup: true });
+    const timestamp = new Date().toISOString();
+
+    try {
+      const page = await getStableWindow(electronApp);
+      await installIpcMocks(electronApp, {
+        gatewayStatus: {
+          state: 'running',
+          gatewayReady: true,
+          port: 18789,
+          pid: 12345,
+          connectedAt: Date.now(),
+        },
+        hostApi: {
+          [stableStringify(['usage', 'recentTokenHistory', { limit: undefined }])]: [{
+            timestamp,
+            sessionId: 'settled-managed-session',
+            agentId: 'main',
+            model: 'smart-latest',
+            provider: 'openai',
+            usageStatus: 'available',
+            inputTokens: 12_206,
+            outputTokens: 391,
+            cacheReadTokens: 19_456,
+            cacheWriteTokens: 0,
+            totalTokens: 32_053,
+            costUsd: 0.053618,
+          }],
+        },
+      });
+
+      await expect(page.getByTestId('main-layout')).toBeVisible();
+      await page.getByTestId('sidebar-nav-models').click();
+      await expect(page.getByTestId('models-page')).toBeVisible();
+
+      const settledRow = page.locator('[data-testid="token-usage-entry"]', {
+        hasText: 'settled-managed-session',
+      });
+      await expect(settledRow).toBeVisible();
+      await expect(settledRow.getByTestId('token-usage-cost')).toHaveText('Cost $0.0536');
+      await expect(settledRow.getByTestId('token-usage-cost-unavailable')).toHaveCount(0);
+    } finally {
+      await closeElectronApp(electronApp);
+    }
   });
 
   // TODO: This test needs a reliable way to inject mocked gateway status into

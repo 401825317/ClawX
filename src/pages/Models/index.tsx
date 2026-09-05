@@ -480,9 +480,21 @@ export function Models() {
                                 : t('dashboard:recentTokenHistory.usageParseError')}
                             </span>
                           )}
-                          {typeof entry.costUsd === 'number' && Number.isFinite(entry.costUsd) && (
-                            <span className="flex items-center gap-1.5 ml-auto text-foreground/80 bg-black/5 dark:bg-white/5 px-2 py-0.5 rounded-md">
-                              {t('dashboard:recentTokenHistory.cost', { amount: entry.costUsd.toFixed(4) })}
+                          {entry.costUnavailable ? (
+                            <span
+                              data-testid="token-usage-cost-unavailable"
+                              className="flex items-center gap-1.5 ml-auto text-muted-foreground bg-black/5 dark:bg-white/5 px-2 py-0.5 rounded-md"
+                            >
+                              {t('dashboard:recentTokenHistory.costUnavailable')}
+                            </span>
+                          ) : typeof entry.costUsd === 'number' && Number.isFinite(entry.costUsd) && (
+                            <span
+                              data-testid="token-usage-cost"
+                              className="flex items-center gap-1.5 ml-auto text-foreground/80 bg-black/5 dark:bg-white/5 px-2 py-0.5 rounded-md"
+                            >
+                              {t('dashboard:recentTokenHistory.cost', {
+                                amount: formatUsageCostAmount(entry.costUsd),
+                              })}
                             </span>
                           )}
                           {devModeUnlocked && entry.content && (
@@ -548,6 +560,12 @@ export function Models() {
 
 function formatTokenCount(value: number): string {
   return Intl.NumberFormat().format(value);
+}
+
+function formatUsageCostAmount(costUsd: number): string {
+  return costUsd > 0 && costUsd < 0.00005
+    ? costUsd.toFixed(6)
+    : costUsd.toFixed(4);
 }
 
 function getUsageTotalClass(entry: UsageHistoryEntry): string {

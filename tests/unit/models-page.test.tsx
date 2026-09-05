@@ -1,4 +1,4 @@
-import { act, render } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Models } from '@/pages/Models/index';
 
@@ -47,6 +47,14 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string, fallback?: string | { count?: number }) => {
       if (typeof fallback === 'string') return fallback;
+      if (
+        key === 'dashboard:recentTokenHistory.cost'
+        && fallback
+        && typeof fallback === 'object'
+        && 'amount' in fallback
+      ) {
+        return `Cost $${String(fallback.amount)}`;
+      }
       return key;
     },
   }),
@@ -54,7 +62,7 @@ vi.mock('react-i18next', () => ({
 
 function createUsageEntry(totalTokens: number) {
   return {
-    timestamp: '2026-04-01T12:00:00.000Z',
+    timestamp: new Date().toISOString(),
     sessionId: `session-${totalTokens}`,
     agentId: 'main',
     model: 'gpt-5',
@@ -97,5 +105,40 @@ describe('Models page auto refresh', () => {
     });
 
     expect(hostApiFetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows unavailable instead of a zero-dollar badge for managed placeholder cost', async () => {
+    hostApiFetchMock.mockResolvedValue([{
+      ...createUsageEntry(31_751),
+      model: 'smart-latest',
+      costUsd: undefined,
+      costUnavailable: true,
+    }]);
+
+    render(<Models />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId('token-usage-cost-unavailable')).toHaveTextContent(
+      'dashboard:recentTokenHistory.costUnavailable',
+    );
+    expect(screen.queryByTestId('token-usage-cost')).not.toBeInTheDocument();
+  });
+
+  it('does not round a positive settled charge down to zero', async () => {
+    hostApiFetchMock.mockResolvedValue([{
+      ...createUsageEntry(1),
+      costUsd: 0.000002,
+    }]);
+
+    render(<Models />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId('token-usage-cost')).toHaveTextContent('Cost $0.000002');
   });
 });

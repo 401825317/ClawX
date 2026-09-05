@@ -5,9 +5,18 @@ import { logger } from './logger';
 import {
   extractSessionIdFromTranscriptFileName,
   parseUsageEntriesFromJsonl,
+  type ManagedTokenCostScope,
   type TokenUsageHistoryEntry,
 } from './token-usage-core';
 import { listConfiguredAgentIds } from './agent-config';
+import { listProviderAccounts } from '../services/providers/provider-store';
+import {
+  enrichManagedTokenUsageCosts,
+  getManagedTokenCostSnapshot,
+  type ManagedTokenCostSnapshot,
+} from '../services/managed-token-usage-cost-service';
+
+const COST_ENRICHMENT_WAIT_MS = 2_500;
 
 export {
   extractSessionIdFromTranscriptFileName,
@@ -89,8 +98,52 @@ async function listRecentSessionFiles(): Promise<Array<{ filePath: string; sessi
   }
 }
 
+async function listManagedTokenCostScopes(): Promise<ManagedTokenCostScope[]> {
+  try {
+    const accounts = await listProviderAccounts();
+    return accounts.flatMap((account) => {
+      const modelIds = account.metadata?.managedAllowedModels;
+      if (account.metadata?.managedBy !== 'uclaw' || !Array.isArray(modelIds) || modelIds.length === 0) {
+        return [];
+      }
+
+      return [{
+        providerIds: [...new Set([account.id, account.vendorId])],
+        modelIds: [...new Set(modelIds)],
+      }];
+    });
+  } catch (error) {
+    logger.debug('Failed to resolve managed token cost metadata:', error);
+    return [];
+  }
+}
+
+async function getManagedTokenCostSnapshotWithinDisplayBudget(): Promise<ManagedTokenCostSnapshot | null> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      getManagedTokenCostSnapshot(),
+      new Promise<null>((resolve) => {
+        timeout = setTimeout(() => resolve(null), COST_ENRICHMENT_WAIT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function stripProviderRequestIds(entries: readonly TokenUsageHistoryEntry[]): TokenUsageHistoryEntry[] {
+  return entries.map((entry) => {
+    const { providerRequestId: _providerRequestId, ...publicEntry } = entry;
+    return publicEntry;
+  });
+}
+
 export async function getRecentTokenUsageHistory(limit?: number): Promise<TokenUsageHistoryEntry[]> {
-  const files = await listRecentSessionFiles();
+  const [files, managedCostScopes] = await Promise.all([
+    listRecentSessionFiles(),
+    listManagedTokenCostScopes(),
+  ]);
   const results: TokenUsageHistoryEntry[] = [];
   const maxEntries = typeof limit === 'number' && Number.isFinite(limit)
     ? Math.max(Math.floor(limit), 0)
@@ -103,6 +156,7 @@ export async function getRecentTokenUsageHistory(limit?: number): Promise<TokenU
       const entries = parseUsageEntriesFromJsonl(content, {
         sessionId: file.sessionId,
         agentId: file.agentId,
+        managedCostScopes,
       }, Number.isFinite(maxEntries) ? maxEntries - results.length : undefined);
       results.push(...entries);
     } catch (error) {
@@ -111,5 +165,11 @@ export async function getRecentTokenUsageHistory(limit?: number): Promise<TokenU
   }
 
   results.sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
-  return Number.isFinite(maxEntries) ? results.slice(0, maxEntries) : results;
+  const limitedResults = Number.isFinite(maxEntries) ? results.slice(0, maxEntries) : results;
+  if (!limitedResults.some((entry) => entry.costUnavailable)) {
+    return stripProviderRequestIds(limitedResults);
+  }
+
+  const snapshot = await getManagedTokenCostSnapshotWithinDisplayBudget();
+  return stripProviderRequestIds(enrichManagedTokenUsageCosts(limitedResults, snapshot));
 }
