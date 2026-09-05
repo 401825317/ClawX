@@ -101,16 +101,16 @@ test('production workflow builds the Windows USB ZIP without signing credentials
   assert.match(workflow, /Refresh integrity metadata from final ZIP/u);
   assert.match(workflow, /UCLAW_RELEASE_BRANCH: feature\/claw-0\.5\.1/u);
   assert.match(workflow, /ref: \$\{\{ env\.UCLAW_RELEASE_BRANCH \}\}/u);
+  const buildWindowsBlock = workflow.match(/\n  build-windows-usb:[\s\S]*?(?=\n  [A-Za-z0-9_-]+:|$)/u)?.[0] ?? '';
   for (const forbidden of [
     'SIGNPATH_API_TOKEN',
     'signpath/github-action-submit-signing-request',
-    'SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG',
     'run-packaged-regression',
     'pnpm run test:e2e',
     'invoke-live-registration-gate',
   ]) {
     assert.equal(
-      workflow.includes(forbidden),
+      buildWindowsBlock.includes(forbidden),
       false,
       `Unexpected production workflow dependency: ${forbidden}`,
     );
@@ -144,11 +144,15 @@ test('production workflow can perform only explicitly approved disabled staging'
   assert.match(workflow, /UCLAW_PRODUCTION_SSH_PASSWORD: \$\{\{ secrets\.UCLAW_PRODUCTION_SSH_PASSWORD \}\}/u);
   assert.match(workflow, /ossutil archive SHA-256 mismatch/u);
   assert.match(workflow, /Upload disabled staging receipt/u);
+  assert.match(workflow, /sign-windows-usb:/u);
+  assert.match(workflow, /sign-macos-usb:/u);
+  assert.match(workflow, /Sign UClaw executables via SignPath/u);
+  assert.match(workflow, /Build signed and notarized macOS USB packages/u);
+  assert.match(workflow, /Authenticode validation failed/u);
+  assert.match(workflow, /codesign --verify --deep --strict/u);
+  assert.match(workflow, /spctl --assess --type execute/u);
+  assert.match(workflow, /repack-portable-release\.mjs/u);
   for (const forbidden of [
-    'MAC_CERTS',
-    'APPLE_APP_SPECIFIC_PASSWORD',
-    'xcrun stapler',
-    'spctl --assess',
     '.dmg',
     '.blockmap',
     'softprops/action-gh-release',

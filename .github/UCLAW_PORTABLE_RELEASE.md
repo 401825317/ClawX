@@ -2,7 +2,7 @@
 
 正式候选使用 `.github/workflows/uclaw-portable-production.yml`。GitHub Actions 只在托管 Runner 上构建 Windows x64 与 macOS x64/arm64 USB ZIP，校验精确版本、commit、build ID、size 和 SHA-512，并上传不可变候选制品。
 
-默认 Actions 只构建候选包。手动 dispatch 明确选择 `stage_disabled=true` 后，才会进入受 GitHub Environment `uclaw-disabled-stage` 保护的发布 job。该 job 下载同一次 Actions run 的不可变候选，上传 OSS，写入 zz-cn 的禁用记录，并保存回执；不创建 Git 标签、GitHub Release 或公开更新。
+默认 Actions 只构建未签名候选包。手动 dispatch 明确选择 `stage_disabled=true` 后，才会进入受 GitHub Environment `uclaw-disabled-stage` 保护的签名与发布 job：Windows 对 USB 包内的 `UClaw.exe` 和更新助手执行 SignPath 签名，macOS 以 Developer ID 签名并公证 App；两端重封 ZIP、刷新 size/SHA-512/JSON 后才上传 OSS、写入 zz-cn 的禁用记录并保存回执；不创建 Git 标签、GitHub Release 或公开更新。
 
 所有新记录固定为 `enabled=false`，现有公共更新 Feed 必须保持不变；启用候选属于独立审批操作。本机 DPAPI 发布器保留为应急路径，但不再是常规 CI 发布的唯一入口。
 
@@ -13,8 +13,8 @@
 1. 确认待发布代码位于负责人批准的发布分支远端最新提交，`package.json` 使用新的稳定版本号。
 2. 手动运行 `UClaw Windows USB and macOS Production Candidates`，输入同一版本号；工作流会固定 checkout `feature/claw-0.5.1`，无需在 Actions 页面另选分支。
 3. 等待 Windows 与 macOS GitHub 托管 Runner 构建完成；最终 `Confirm immutable production candidates` 作业应为绿色。
-4. 需要禁用预发布时，以同一版本再次手动 dispatch 并选择 `stage_disabled=true`。Environment 审批通过后，Actions 下载同 run 的两个精确候选制品。
-5. 发布器上传或复用 7 个不可变 OSS 对象（Windows ZIP/JSON、macOS x64/arm64 ZIP 与各自 JSON sidecar、aggregate macOS manifest），在一个数据库事务中登记 3 条 `enabled=false` 记录，并验证公共 Feed 前后完全一致。
+4. 需要禁用预发布时，以同一版本再次手动 dispatch 并选择 `stage_disabled=true`。Environment 审批通过后，Actions 从锁定 commit 重建最终签名的 Windows/macOS ZIP，并刷新其元数据。
+5. 发布器仅上传或复用最终签名的 7 个不可变 OSS 对象（Windows ZIP/JSON、macOS x64/arm64 ZIP 与各自 JSON sidecar、aggregate macOS manifest），在一个数据库事务中登记 3 条 `enabled=false` 记录，并验证公共 Feed 前后完全一致。
 
 ## GitHub 配置
 
@@ -27,9 +27,15 @@ UCLAW_PRODUCTION_SSH_HOST
 UCLAW_PRODUCTION_SSH_USER
 UCLAW_PRODUCTION_SSH_PASSWORD
 UCLAW_PRODUCTION_DATABASE
+SIGNPATH_API_TOKEN
+MACOS_CSC_LINK
+MACOS_CSC_KEY_PASSWORD
+APPLE_ID
+APPLE_APP_SPECIFIC_PASSWORD
+APPLE_TEAM_ID
 ```
 
-这些值仅以进程环境变量传给发布器，不写入命令行、Actions 制品或回执。建议 Environment 开启必需审批者。默认分支只负责登记手动触发入口，实际源码始终锁定 `feature/claw-0.5.1` 的远端最新提交。
+这些值仅以进程环境变量传给对应签名器或发布器，不写入命令行、Actions 制品或回执。Windows 签名后必须通过 `Get-AuthenticodeSignature`，macOS 必须通过 `codesign --verify` 和 Gatekeeper `spctl`；任一检查失败不会执行 OSS/zz-cn 暂存。建议 Environment 开启必需审批者。默认分支只负责登记手动触发入口，实际源码始终锁定 `feature/claw-0.5.1` 的远端最新提交。
 
 工作流保留 14 天的两个 Actions 制品：
 

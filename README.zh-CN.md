@@ -159,7 +159,6 @@ CAD 请求使用版本化 `cad-editor` 契约和本地 `create_dxf_file` 工具�
 UClaw 托管分发会在首次设置中提供账号登录、注册、验证码和设备授权。凭证只保存在 Electron Main 与受保护的 Secret Store 中。登录或切换账号成功后，UClaw 会使用已提交的新凭证自动重启 Gateway；Gateway 就绪信号确认前会保持启动中。登录成功及每次启动时，UClaw 会对账并修复主 Provider `openai` 与兼容 Provider `lingzhiwuxian`，使两者使用同一 Relay Key 和 new-api 客户端配置下发的同一文本模型集合；默认路由为 `openai/<服务端默认模型>`。聊天模型选择器只展示该服务端下发列表。既有普通第三方及图片/视频 Provider 配置仍保留在本地，但在托管的 Provider 与模型界面中隐藏。社区分发继续使用原有 Provider 设置流程。
 已登录的 UClaw 用户可以从侧栏进入虾粮商店，查看虾粮余额、创建充值订单、通过二维码或安全的浏览器链接完成支付，并分页查看历史订单。系统会自动检查支付状态，并在支付成功后刷新余额。
 当 UClaw 发布已启用的客服配置时，侧栏还会显示“帮助与客服”，可查看一个或多个官方客服二维码、工作时间、备注，并可复制微信号。该公共配置不要求登录，也不会影响 Chat 或 Gateway 状态。
-受管 UClaw 分发还会通过 Electron Main 的 Host API 读取配置生产后端（`https://aiwxxx.com`）发布的启用公告；读取无需登录，也不会发送账号凭证。公告按发布时间和过期时间过滤，并支持普通、重要、紧急三级：每条重要公告只提示一次应用内通知，紧急公告会以阻断式弹窗要求确认，侧栏铃铛保留当前未读列表。外链仅允许有效的 HTTP(S) URL。临时拉取失败时保留上一次有效公告；禁用或无效配置安全关闭。社区分发不会拉取托管公告。
 在开发者模式下，独立的“图像生成”页面支持配置 OpenAI 兼容生图端点（Base URL、API Key 和模型名，例如 `gpt-image-2`），生图请求会走专用的 `/v1/images/generations` 服务，聊天仍继续使用正常的 OpenAI Provider。
 聊天输入框开启“图片模式”后，会通过 ACP 传递本轮图片尺寸和质量偏好（默认 `medium`）。是否调用 `image_generate` 仍由 Agent 模型决定，输入框不会直接发起生图请求。
 如果你通过 **自定义（Custom）Provider** 对接 OpenAI-compatible 网关，可以在 **设置 → AI Providers → 编辑 Provider** 中配置自定义 `User-Agent`，以提高兼容性。
@@ -452,7 +451,7 @@ pnpm release              # 构建并校验本地 Windows USB 候选包，不执
 pnpm package:linux        # 为 Linux 打包
 ```
 
-Windows USB 构建会输出 `UClaw-<version>-win-x64-usb.zip` 及同名 JSON 元数据。持久数据保存在 `UClawData`，高频状态使用本机隔离运行目录；便携更新只有在 ZIP 格式、文件大小和 SHA-512 全部校验通过后才会安装。替换阶段会持续显示递归文件数和字节进度；Windows 同盘更新直接移动已校验文件，跨盘复制最多使用四个工作线程，`UClawData` 始终不参与替换和回滚。`pnpm release` 仅作为 Windows 本地候选包构建：它要求 Git 工作区干净，构建 USB 包，并校验精确的版本、提交、build ID、文件大小和 SHA-512，不执行功能回归；不会签名、上传、修改生产更新记录、创建 Git 标签或 GitHub Release。`.github/workflows/uclaw-portable-production.yml` 只在 GitHub 托管 Runner 上构建不可变的未签名 Windows/macOS USB 候选；生产 OSS 上传和 UClaw 禁用态暂存由保存 DPAPI 凭证的授权 Windows 机器单独执行。
+Windows USB 构建会输出 `UClaw-<version>-win-x64-usb.zip` 及同名 JSON 元数据。持久数据保存在 `UClawData`，高频状态使用本机隔离运行目录；便携更新只有在 ZIP 格式、文件大小和 SHA-512 全部校验通过后才会安装。替换阶段会持续显示递归文件数和字节进度；Windows 同盘更新直接移动已校验文件，跨盘复制最多使用四个工作线程，`UClawData` 始终不参与替换和回滚。`pnpm release` 仅作为 Windows 本地候选包构建：它要求 Git 工作区干净，构建 USB 包，并校验精确的版本、提交、build ID、文件大小和 SHA-512，不执行功能回归；不会签名、上传、修改生产更新记录、创建 Git 标签或 GitHub Release。`.github/workflows/uclaw-portable-production.yml` 默认只在 GitHub 托管 Runner 上构建不可变的未签名 Windows/macOS USB 候选。显式审批的受保护暂存路径会通过 SignPath 签名 Windows 的 UClaw 可执行文件、对 macOS App 签名并公证、按最终字节重建 ZIP 元数据，然后才上传 OSS 和写入 `enabled=false` 的 zz-cn 记录。
 
 在无头 Linux 环境下，Electron 测试需要显示服务；可使用 `xvfb-run -a pnpm run test:e2e`。
 
