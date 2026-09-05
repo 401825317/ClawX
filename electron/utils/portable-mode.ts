@@ -400,6 +400,10 @@ function isTrustedWindowsUsbRoot(rootDir: string, resourcesDir: string): boolean
   }
   if (identityKeys.some((key) => usbIdentity[key] !== packagedIdentity[key])) return false;
 
+  return hasCompleteWindowsUsbPayload(rootDir, resourcesDir);
+}
+
+function hasCompleteWindowsUsbPayload(rootDir: string, resourcesDir: string): boolean {
   // Only manufacture the portable marker for a root that still contains the
   // package payload. An arbitrary installed app must never become portable by
   // merely having a leftover UClawData directory.
@@ -410,6 +414,20 @@ function isTrustedWindowsUsbRoot(rootDir: string, resourcesDir: string): boolean
     pathApi('win32').join(resourcesDir, 'openclaw', 'package.json'),
   ];
   return requiredPayload.every(isRegularFileSync);
+}
+
+function isIsolatedBootstrapAtPackagedWindowsRoot(rootDir: string, resourcesDir: string, platform: string): boolean {
+  if (
+    platform !== 'win32'
+    || !app.isPackaged
+    || !truthyEnv(process.env.CLAWX_E2E)
+    || !process.env.CLAWX_BOOTSTRAP_PORTABLE_DATA_ROOT?.trim()
+  ) {
+    return false;
+  }
+  return normalizedPathForComparison(rootDir, platform)
+    === normalizedPathForComparison(resolvePackagedPortableRootDir(platform), platform)
+    && hasCompleteWindowsUsbPayload(rootDir, resourcesDir);
 }
 
 /**
@@ -455,7 +473,8 @@ export function repairPortableLayoutBeforeBootstrap(options: {
   })) {
     return { attempted: false, repaired: false, actions: [] };
   }
-  if (!isTrustedWindowsUsbRoot(rootDir, resourcesDir)) {
+  if (!isTrustedWindowsUsbRoot(rootDir, resourcesDir)
+    && !isIsolatedBootstrapAtPackagedWindowsRoot(rootDir, resourcesDir, platform)) {
     return { attempted: true, repaired: false, actions: [], reason: 'untrusted-usb-root' };
   }
 

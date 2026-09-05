@@ -60,6 +60,8 @@ const portableEnvironmentNames = [
   'CLAWX_RUNTIME_CACHE_ROOT',
   'CLAWX_RUNTIME_CACHE_DIR',
   'CLAWX_UPDATE_DOWNLOAD_DIR',
+  'CLAWX_BOOTSTRAP_PORTABLE_DATA_ROOT',
+  'CLAWX_E2E',
   'CLAWX_USER_DATA_DIR',
   'OPENCLAW_HOME',
   'OPENCLAW_STATE_DIR',
@@ -298,6 +300,37 @@ describe('Windows portable bootstrap repair', () => {
     });
     expect(second.repaired).toBe(false);
     expect(second.actions).toEqual([]);
+  });
+
+  it('admits the real packaged root for an isolated bootstrap even before USB identity repair', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'uclaw-windows-bootstrap-root-'));
+    temporaryRoots.push(root);
+    const resourcesDir = join(root, 'resources');
+    await mkdir(join(resourcesDir, 'openclaw'), { recursive: true });
+    for (const filePath of [
+      join(root, 'UClaw.exe'),
+      join(resourcesDir, 'app.asar'),
+      join(resourcesDir, 'openclaw', 'openclaw.mjs'),
+      join(resourcesDir, 'openclaw', 'package.json'),
+    ]) {
+      await writeFile(filePath, 'fixture\n', 'utf8');
+    }
+    await writeFile(join(root, 'portable.flag'), 'UClaw USB portable mode\n', 'utf8');
+    setPlatform('win32');
+    Object.defineProperty(process, 'execPath', {
+      configurable: true,
+      enumerable: true,
+      value: join(root, 'UClaw.exe'),
+    });
+    app.isPackaged = true;
+    process.env.CLAWX_PORTABLE_ROOT = root;
+    process.env.CLAWX_E2E = '1';
+    process.env.CLAWX_BOOTSTRAP_PORTABLE_DATA_ROOT = join(root, 'sandbox-data');
+
+    const result = repairPortableLayoutBeforeBootstrap();
+
+    expect(result.reason).toBeUndefined();
+    expect(result.attempted).toBe(true);
   });
 });
 
