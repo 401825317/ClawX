@@ -19,7 +19,7 @@ param(
 
   [string]$OssutilPath = (Join-Path $env:TEMP 'uclaw-ossutil\ossutil-2.3.0-windows-amd64\ossutil.exe'),
 
-  [string]$PublicFeedUri = 'https://zz-cn.lingzhiwuxian.com/api/clawx/updates/latest?channel=latest&platform=win&arch=x64&package_type=portable_zip',
+  [string]$PublicFeedUri = 'https://aiwxxx.com/api/clawx/updates/latest?channel=latest&platform=win&arch=x64&package_type=portable_zip',
 
   [switch]$ValidateOnly
 )

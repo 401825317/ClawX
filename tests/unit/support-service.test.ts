@@ -84,6 +84,7 @@ describe('support service', () => {
       expect.objectContaining({
         method: 'GET',
         headers: { Accept: 'application/json' },
+        credentials: 'omit',
       }),
     );
     expect(JSON.stringify(mocks.fetch.mock.calls)).not.toMatch(/authorization|token/i);

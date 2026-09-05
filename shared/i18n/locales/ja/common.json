@@ -74,5 +74,21 @@
         "copyWechat": "WeChat ID をコピー: {{id}}",
         "copied": "WeChat ID をコピーしました",
         "copyFailed": "WeChat ID のコピーに失敗しました"
+    },
+    "announcements": {
+        "title": "お知らせ",
+        "description": "UClaw チームからの最新のお知らせです。",
+        "latest": "最新",
+        "history": "履歴",
+        "empty": "お知らせはありません",
+        "historyEmpty": "お知らせの履歴はありません",
+        "archived": "履歴",
+        "openLink": "詳細を開く",
+        "urgent": "緊急のお知らせ",
+        "level": {
+            "normal": "更新",
+            "important": "重要",
+            "urgent": "緊急"
+        }
     }
 }

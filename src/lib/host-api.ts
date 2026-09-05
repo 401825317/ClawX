@@ -72,6 +72,7 @@ import type {
   BillingOrderStatusPayload,
 } from '@shared/billing';
 import type { SupportContactConfig } from '@shared/support';
+import type { ClientAnnouncementConfig } from '@shared/announcements';
 import type {
   ArtifactTaskPreparePayload,
   ArtifactWebpageValidationPayload,
@@ -144,6 +145,7 @@ export type {
   WorkspaceOpenHandlersResult,
 } from '@shared/host-api/contract';
 export type { SupportContact, SupportContactConfig } from '@shared/support';
+export type { ClientAnnouncement, ClientAnnouncementConfig, ClientAnnouncementLevel } from '@shared/announcements';
 
 export const hostApi = {
   app: {
@@ -391,6 +393,9 @@ export const hostApi = {
   },
   support: {
     config: () => invokeHost('support', 'config') as Promise<SupportContactConfig | null>,
+  },
+  announcements: {
+    config: () => invokeHost('announcements', 'config') as Promise<ClientAnnouncementConfig | null>,
   },
   files: {
     stagePaths: (input: { filePaths: string[] }) => invokeHost('files', 'stagePaths', input),

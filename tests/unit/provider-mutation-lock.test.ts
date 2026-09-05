@@ -35,7 +35,7 @@ describe('provider mutation identity guard', () => {
       id: 'legacy-relay',
       vendorId: 'custom',
       type: 'custom',
-      baseUrl: 'https://ZZ-CN.LINGZHIWUXIAN.COM/v1/',
+      baseUrl: 'https://AIWXXX.COM/v1/',
       modelId: 'smart-latest',
     };
 
@@ -71,7 +71,7 @@ describe('provider mutation identity guard', () => {
       id: 'other-model',
       vendorId: 'custom',
       type: 'custom',
-      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      baseUrl: 'https://aiwxxx.com/v1',
       model: 'other-model',
     };
     const codexCustom = {
@@ -95,18 +95,28 @@ describe('provider mutation identity guard', () => {
   });
 
   it.each([
-    ['different protocol', 'http://zz-cn.lingzhiwuxian.com/v1'],
+    ['different protocol', 'http://aiwxxx.com/v1'],
     ['temporary local debug endpoint', 'http://127.0.0.1:8083/v1'],
     ['unrelated local endpoint', 'https://127.0.0.1:8083/v1'],
-    ['query parameters', 'https://zz-cn.lingzhiwuxian.com/v1?tenant=other'],
-    ['URL credentials', 'https://user:password@zz-cn.lingzhiwuxian.com/v1'],
-    ['URL fragment', 'https://zz-cn.lingzhiwuxian.com/v1#other'],
+    ['query parameters', 'https://aiwxxx.com/v1?tenant=other'],
+    ['URL credentials', 'https://user:password@aiwxxx.com/v1'],
+    ['URL fragment', 'https://aiwxxx.com/v1#other'],
   ])('does not classify a smart-latest custom Provider with %s as managed', (_case, baseUrl) => {
     expect(isOpenAiProviderIdentity({
       id: 'custom-relay',
       vendorId: 'custom',
       type: 'custom',
       baseUrl,
+      model: 'smart-latest',
+    })).toBe(false);
+  });
+
+  it('does not claim the retired production relay hostname as current UClaw ownership', () => {
+    expect(isOpenAiProviderIdentity({
+      id: 'retired-relay',
+      vendorId: 'custom',
+      type: 'custom',
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
       model: 'smart-latest',
     })).toBe(false);
   });

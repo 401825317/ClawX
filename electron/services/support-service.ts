@@ -1,28 +1,9 @@
 import type { SupportContact, SupportContactConfig } from '../../shared/support';
 import {
-  UCLAW_SUPPORT_REQUEST_TIMEOUT_MS,
-  UCLAW_SUPPORT_ROUTES,
-} from '../../shared/junfeiai-endpoints';
-import {
-  getUclawBackendOrigin,
   isUclawManagedDistribution,
 } from '../utils/junfeiai-distribution';
-import { proxyAwareFetch } from '../utils/proxy-fetch';
 import { isRecord } from './payload-utils';
-
-type FetchJsonResponse = {
-  ok: boolean;
-  status: number;
-  statusText: string;
-  json: () => Promise<unknown>;
-};
-
-class SupportHttpError extends Error {
-  constructor(message: string, public readonly status: number) {
-    super(message);
-    this.name = 'SupportHttpError';
-  }
-}
+import { fetchPublicClientConfigPayload } from './public-client-config-service';
 
 function stringValue(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -45,55 +26,6 @@ function safeHttpUrl(value: unknown): string | undefined {
     return parsed.toString();
   } catch {
     return undefined;
-  }
-}
-
-function payloadMessage(payload: unknown, fallback: string): string {
-  if (!isRecord(payload)) return fallback;
-  return visibleText(payload.message)
-    ?? visibleText(payload.msg)
-    ?? (typeof payload.error === 'string' ? visibleText(payload.error) : undefined)
-    ?? fallback;
-}
-
-function unwrapPayload(payload: unknown): unknown {
-  if (!isRecord(payload)) return payload;
-  if (payload.success === false) {
-    throw new SupportHttpError(payloadMessage(payload, 'UClaw support request failed'), 400);
-  }
-  if (!Object.hasOwn(payload, 'data')) return payload;
-  if (typeof payload.code === 'number' && payload.code !== 0) {
-    throw new SupportHttpError(payloadMessage(payload, 'UClaw support request failed'), 400);
-  }
-  return payload.data;
-}
-
-/** Request one public UClaw JSON document without attaching user credentials. */
-async function requestPublicJson(path: string): Promise<unknown> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), UCLAW_SUPPORT_REQUEST_TIMEOUT_MS);
-  try {
-    const response = await proxyAwareFetch(`${getUclawBackendOrigin()}${path}`, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-      signal: controller.signal,
-    }) as unknown as FetchJsonResponse;
-    const payload = await response.json().catch(() => null);
-    if (!response.ok) {
-      throw new SupportHttpError(
-        payloadMessage(payload, `${response.status} ${response.statusText}`),
-        response.status,
-      );
-    }
-    return unwrapPayload(payload);
-  } catch (error) {
-    if (error instanceof SupportHttpError) throw error;
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('UClaw support request timed out', { cause: error });
-    }
-    throw new Error('Unable to reach UClaw support', { cause: error });
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -145,24 +77,13 @@ function normalizeSupport(value: unknown): SupportContactConfig | null {
 }
 
 function supportFromClientPayload(payload: unknown): unknown {
-  return isRecord(payload) ? payload.support : undefined;
-}
-
-function supportFromBootstrapPayload(payload: unknown): unknown {
   if (!isRecord(payload)) return undefined;
+  if (Object.hasOwn(payload, 'support')) return payload.support;
   return isRecord(payload.client) ? payload.client.support : undefined;
 }
 
 /** Read and normalize the current Help & Support configuration. */
 export async function getSupportContactConfig(): Promise<SupportContactConfig | null> {
   if (!isUclawManagedDistribution()) return null;
-
-  try {
-    const payload = await requestPublicJson(UCLAW_SUPPORT_ROUTES.clientConfig);
-    return normalizeSupport(supportFromClientPayload(payload));
-  } catch (error) {
-    if (!(error instanceof SupportHttpError) || error.status !== 404) throw error;
-    const bootstrap = await requestPublicJson(UCLAW_SUPPORT_ROUTES.bootstrap);
-    return normalizeSupport(supportFromBootstrapPayload(bootstrap));
-  }
+  return normalizeSupport(supportFromClientPayload(await fetchPublicClientConfigPayload()));
 }

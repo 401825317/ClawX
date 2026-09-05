@@ -156,8 +156,8 @@ export function normalizeManagedRuntimeInstallationId(installationId: string): s
   const raw = installationId.trim();
   if (!raw || raw.length > 4_096) return null;
   // Diagnostic headers never expose the persisted installation identity. Keep
-  // rollout hashing on that exact pseudonymous value so Main and zz-cn see the
-  // same bucket even for legacy IDs that happen to look like SHA-256 strings.
+  // rollout hashing on that exact pseudonymous value so Main and the backend
+  // see the same bucket even for legacy IDs that happen to look like SHA-256 strings.
   return createHash('sha256').update(raw).digest('hex');
 }
 

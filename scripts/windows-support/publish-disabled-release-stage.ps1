@@ -202,7 +202,7 @@ function Assert-RemoteZip {
 function Get-PublicFeedIdentity {
   param([string]$Platform, [string]$Arch, [string]$PackageType)
   $cacheBust = [guid]::NewGuid().ToString('N')
-  $uri = "https://zz-cn.lingzhiwuxian.com/api/clawx/updates/latest?channel=latest&platform=$Platform&arch=$Arch&package_type=$PackageType&_stage_check=$cacheBust"
+  $uri = "https://aiwxxx.com/api/clawx/updates/latest?channel=latest&platform=$Platform&arch=$Arch&package_type=$PackageType&_stage_check=$cacheBust"
   $response = Invoke-RestMethod -Uri $uri -Headers @{ 'Cache-Control' = 'no-cache'; 'Pragma' = 'no-cache' } -TimeoutSec 30
   if ($response.success -ne $true) { throw "Public release feed failed for $Platform/$Arch/$PackageType." }
   $data = $response.data

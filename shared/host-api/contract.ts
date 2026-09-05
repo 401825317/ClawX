@@ -49,6 +49,7 @@ import type {
   BillingResult,
 } from '../billing';
 import type { SupportContactConfig } from '../support';
+import type { ClientAnnouncementConfig } from '../announcements';
 import type { PortableRuntimeHealthSnapshot } from '../portable-runtime-health';
 import type {
   ArtifactTaskPreparePayload,
@@ -1124,6 +1125,9 @@ export type HostApiContract = {
   };
   support: {
     config: () => SupportContactConfig | null;
+  };
+  announcements: {
+    config: () => ClientAnnouncementConfig | null;
   };
   files: {
     stagePaths: (payload: StagePathsPayload) => StagedFileResult[];

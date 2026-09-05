@@ -88,6 +88,7 @@ import { createArtifactTasksApi } from '../services/artifact-tasks-api';
 import { createLongTermRulesApi } from '../services/long-term-rules-api';
 import { createBillingApi } from '../services/billing-api';
 import { createSupportApi } from '../services/support-api';
+import { createAnnouncementsApi } from '../services/announcements-api';
 import { createSessionsApi } from '../services/sessions-api';
 import { createSkillsApi } from '../services/skills-api';
 import { createUsageApi } from '../services/usage-api';
@@ -252,6 +253,7 @@ function registerTypedHostHandlers(
     longTermRules: createLongTermRulesApi(),
     billing: createBillingApi({ gatewayManager }),
     support: createSupportApi(),
+    announcements: createAnnouncementsApi(),
     files: createFilesApi({
       attachmentAccess,
       attachmentPlayback,

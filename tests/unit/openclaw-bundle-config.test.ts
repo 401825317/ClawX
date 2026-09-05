@@ -211,4 +211,15 @@ describe('openclaw bundle config', () => {
       expect(selfCheckSource).toContain(`'${pluginId}'`);
     }
   });
+
+  it('keeps the self-check aligned with the typed Host API and announcement route', () => {
+    const selfCheckSource = readFileSync(
+      resolve(process.cwd(), 'scripts/windows-support/UClaw-SelfCheck.mjs'),
+      'utf8',
+    );
+
+    expect(selfCheckSource).not.toContain('13210');
+    expect(selfCheckSource).toContain('/api/clawx/client-config');
+    expect(selfCheckSource).toContain("credentials: 'omit'");
+  });
 });

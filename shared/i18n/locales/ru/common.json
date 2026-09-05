@@ -74,5 +74,21 @@
         "copyWechat": "Скопировать WeChat ID: {{id}}",
         "copied": "WeChat ID скопирован",
         "copyFailed": "Не удалось скопировать WeChat ID"
+    },
+    "announcements": {
+        "title": "Объявления",
+        "description": "Последние сообщения команды UClaw.",
+        "latest": "Последние",
+        "history": "История",
+        "empty": "Объявлений нет",
+        "historyEmpty": "Истории объявлений нет",
+        "archived": "В архиве",
+        "openLink": "Открыть подробности",
+        "urgent": "Срочное объявление",
+        "level": {
+            "normal": "Обновление",
+            "important": "Важно",
+            "urgent": "Срочно"
+        }
     }
 }

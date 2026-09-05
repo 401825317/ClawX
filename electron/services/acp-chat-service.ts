@@ -640,6 +640,8 @@ export class AcpChatService {
 
   async sendPrompt(payload: AcpChatPromptPayload): Promise<AcpChatOperationResult> {
     const mainReceivedAtMs = Date.now();
+    const phaseDurations: Record<string, number> = {};
+    let connectionPromptWaitMs = 0;
     if (!isValidSessionKey(payload.sessionKey) || !payload.cwd) return fail('Invalid ACP prompt payload');
     if (!this.activeSessionKey) return fail('No active ACP session');
     if (payload.sessionKey !== this.activeSessionKey) return fail('ACP prompt session is not active');
@@ -668,7 +670,9 @@ export class AcpChatService {
     let imagePreferenceId: string | undefined;
     let videoPreferenceId: string | undefined;
     try {
+      let phaseStartedAtMs = Date.now();
       const runtimeIdentity = await this.requireReadyGatewayRuntime();
+      phaseDurations.readyGatewayMs = Date.now() - phaseStartedAtMs;
       const promptCwd = payload.cwd === accessGrant.executionCwd
         ? payload.cwd
         : await import('node:fs/promises')
@@ -686,12 +690,17 @@ export class AcpChatService {
           clientToMainMs: elapsedMs(clientStartedAtMs, mainReceivedAtMs),
         },
       });
+      phaseStartedAtMs = Date.now();
       const connection = await this.ensureConnection(runtimeIdentity);
+      phaseDurations.ensureConnectionMs = Date.now() - phaseStartedAtMs;
       this.requireSameGatewayRuntime(runtimeIdentity);
+      phaseStartedAtMs = Date.now();
       const promptBuild = await this.buildPromptBlocks(payload);
+      phaseDurations.promptBuildMs = Date.now() - phaseStartedAtMs;
       const prompt = promptBuild.blocks;
       const artifactPolicy = artifactTaskService.getPolicy(payload.sessionKey);
       if (artifactPolicy) {
+        phaseStartedAtMs = Date.now();
         const controls = [
           connection.setSessionConfigOption({
             sessionId: acpSessionId,
@@ -710,11 +719,13 @@ export class AcpChatService {
         ];
         const results = await Promise.allSettled(controls);
         const rejected = results.filter((result) => result.status === 'rejected');
+        phaseDurations.sessionControlsMs = Date.now() - phaseStartedAtMs;
         if (rejected.length > 0) {
           logger.warn(`[artifact-task] ${rejected.length} ACP session control(s) were rejected; runtime plugin policy remains active`);
         }
       }
       const message = payload.message?.trim();
+      phaseStartedAtMs = Date.now();
       if (payload.imageOptions && message) {
         const preference = await this.turnImagePreferenceStore.enqueue({
           sessionKey: payload.sessionKey,
@@ -742,6 +753,7 @@ export class AcpChatService {
         });
         videoPreferenceId = preference?.id;
       }
+      phaseDurations.preferenceEnqueueMs = Date.now() - phaseStartedAtMs;
       if (this.historicalSessionKey === payload.sessionKey) {
         this.historicalSessionKey = null;
         this.historicalGeneration = null;
@@ -754,9 +766,11 @@ export class AcpChatService {
         sessionKey: payload.sessionKey,
         generation,
         details: {
+          requestId: userMessageId,
           clientToMainMs: elapsedMs(clientStartedAtMs, mainReceivedAtMs),
           mainToDispatchMs: elapsedMs(mainReceivedAtMs, promptContext.dispatchedAtMs),
           clientToDispatchMs: elapsedMs(clientStartedAtMs, promptContext.dispatchedAtMs),
+          preDispatchPhases: phaseDurations,
         },
       });
       const originalMessageId = userMessageId;
@@ -772,6 +786,7 @@ export class AcpChatService {
         });
         promptContext.terminalFailureReject = rejectTerminalFailure;
         const promptWaiter = promptContext.terminalFailureReject;
+        const promptAttemptStartedAtMs = Date.now();
         try {
           await Promise.race([
             connection.prompt({
@@ -782,16 +797,18 @@ export class AcpChatService {
             }),
             terminalFailureWait,
           ]);
+          connectionPromptWaitMs += Date.now() - promptAttemptStartedAtMs;
           if (attempt > 1) {
             this.trace('session/prompt:recovered', {
               sessionKey: payload.sessionKey,
               generation,
-              details: { attempt, contextRecoveryAttempted },
+              details: { requestId: userMessageId, attempt, contextRecoveryAttempted },
             });
           }
           promptContext.pendingTerminalFailure = null;
           break;
         } catch (attemptError) {
+          connectionPromptWaitMs += Date.now() - promptAttemptStartedAtMs;
           this.requireSameGatewayRuntime(runtimeIdentity);
           const failure = normalizeAcpChatError(attemptError);
           const replaySafe = !promptContext.toolCallObserved && promptContext.firstTextAtMs == null;
@@ -819,7 +836,7 @@ export class AcpChatService {
             this.trace('session/prompt:retry', {
               sessionKey: payload.sessionKey,
               generation,
-              details: { attempt, delayMs, reason: failure.code, recovery: 'structured-summary' },
+              details: { requestId: userMessageId, attempt, delayMs, reason: failure.code, recovery: 'structured-summary' },
             });
             logger.warn(`[acp-chat] Context recovery retry ${attempt}/${maxAttempts} scheduled after ${delayMs}ms`);
             await waitForDelay(delayMs);
@@ -835,7 +852,7 @@ export class AcpChatService {
             this.trace('session/prompt:retry', {
               sessionKey: payload.sessionKey,
               generation,
-              details: { attempt, delayMs, reason: failure.code, recovery: 'continue-recorded-request' },
+              details: { requestId: userMessageId, attempt, delayMs, reason: failure.code, recovery: 'continue-recorded-request' },
             });
             logger.warn(`[acp-chat] Replay-safe upstream retry ${attempt}/${maxAttempts} scheduled after ${delayMs}ms`);
             await waitForDelay(delayMs);
@@ -868,8 +885,11 @@ export class AcpChatService {
         sessionKey: payload.sessionKey,
         generation,
         details: {
+          requestId: userMessageId,
           outcome: 'success',
           firstTextObserved: promptContext.firstTextAtMs != null,
+          connectionPromptWaitMs,
+          preDispatchPhases: phaseDurations,
           ...promptCompletionDurations(promptContext, completedAtMs),
           ...(promptContext.firstTextAtMs != null ? {
             firstTextToCompleteMs: elapsedMs(promptContext.firstTextAtMs, completedAtMs),
@@ -879,7 +899,7 @@ export class AcpChatService {
       this.trace('session/prompt:success', {
         sessionKey: payload.sessionKey,
         generation,
-        details: { blockCount: prompt.length, acpSessionId },
+        details: { requestId: userMessageId, blockCount: prompt.length, acpSessionId },
       });
       artifactTaskService.complete(payload.sessionKey, 'success');
       return ok(generation);
@@ -907,6 +927,7 @@ export class AcpChatService {
         sessionKey: payload.sessionKey,
         generation,
         details: {
+          requestId: userMessageId,
           outcome: 'failure',
           firstTextObserved: promptContext.firstTextAtMs != null,
           ...promptCompletionDurations(promptContext, completedAtMs),
@@ -917,7 +938,7 @@ export class AcpChatService {
       });
       this.trace('session/prompt:failed', {
         sessionKey: payload.sessionKey,
-        details: { error: error instanceof Error ? error.message : String(error) },
+        details: { requestId: userMessageId, error: error instanceof Error ? error.message : String(error) },
       });
       artifactTaskService.reportFailure(payload.sessionKey, error);
       artifactTaskService.complete(payload.sessionKey, 'failure');

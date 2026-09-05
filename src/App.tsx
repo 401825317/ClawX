@@ -28,6 +28,8 @@ import { rendererExtensionRegistry } from './extensions/registry';
 import { loadExternalRendererExtensions } from './extensions/_ext-bridge.generated';
 import { UpdateNotifier } from './components/update/UpdateNotifier';
 import { ManagedAuthGate } from './components/auth/ManagedAuthGate';
+import { AnnouncementsInitializer } from './components/client/AnnouncementsInitializer';
+import { UrgentAnnouncementDialog } from './components/client/UrgentAnnouncementDialog';
 import { useNewChatAction } from './components/layout/use-new-chat-action';
 import { hostEvents } from './lib/host-events';
 import { captureRendererException, syncRendererObservability } from './lib/observability';
@@ -230,6 +232,8 @@ function App() {
         </Routes>
 
         <UpdateNotifier />
+        <AnnouncementsInitializer enabled={setupComplete && !skipSetupForE2E} />
+        <UrgentAnnouncementDialog />
         <ManagedAuthGate enabled={setupComplete && !skipSetupForE2E} />
 
         {/* Global toast notifications */}

@@ -74,5 +74,21 @@
         "copyWechat": "复制微信号：{{id}}",
         "copied": "微信号已复制",
         "copyFailed": "复制微信号失败"
+    },
+    "announcements": {
+        "title": "公告",
+        "description": "UClaw 团队发布的最新通知。",
+        "latest": "最新公告",
+        "history": "历史公告",
+        "empty": "暂无公告",
+        "historyEmpty": "暂无历史公告",
+        "archived": "历史记录",
+        "openLink": "查看详情",
+        "urgent": "紧急公告",
+        "level": {
+            "normal": "通知",
+            "important": "重要",
+            "urgent": "紧急"
+        }
     }
 }

@@ -272,6 +272,6 @@ jobs:
 
           - Commit: `${{ needs.preflight.outputs.commit }}`
           - Windows x64 and macOS x64/arm64 USB candidates are stored as immutable Actions artifacts
-          - Production OSS and zz-cn staging must be run locally with the DPAPI-protected publisher
+          - Production OSS and UClaw staging must be run locally with the DPAPI-protected publisher
           - No production feed or GitHub Release was changed by this workflow
           EOF

@@ -85,6 +85,7 @@ describe('UClaw managed endpoint configuration', () => {
     expect(UCLAW_DEFAULT_API_PROTOCOL).toBe('openai-responses');
     expect(UCLAW_RUNTIME_CONTRACT_VERSION).toBe(rawConfig.provider.managedRuntimeContractVersion);
     expect(UCLAW_PRODUCTION_ORIGIN).toBe(configuredOrigin);
+    expect(UCLAW_PRODUCTION_ORIGIN).toBe('https://aiwxxx.com');
     expect(UCLAW_MANAGED_PROVIDER_BASE_URL).toBe(`${configuredOrigin}/v1`);
   });
 

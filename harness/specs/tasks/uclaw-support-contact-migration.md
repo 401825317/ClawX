@@ -67,7 +67,7 @@ docs:
 
 ## Migration constraints
 
-- Adapt only the support-contact behavior from `master`; do not port announcements, managed model options, or Gateway reload behavior from the legacy client-config flow.
+- This historical support-only task remains limited to support contacts; announcement behavior is specified separately in `uclaw-announcements-migration.md`.
 - Keep support independent from Managed Auth, billing, Chat stores, session history, ACP, and Gateway lifecycle code.
 - Preserve the current branch's in-progress Managed Auth changes and exclude them from this task's commit.
 

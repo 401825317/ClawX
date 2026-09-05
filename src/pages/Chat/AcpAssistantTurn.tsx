@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import logoUclaw from '@/assets/logo-uclaw.png';
 import type { AcpAssistantTurnDisplayGroup } from '@/lib/acp/timeline-groups';
@@ -19,6 +19,7 @@ import {
 import { AcpToolCallGroup } from './AcpToolCallGroup';
 import type { ChatSession } from '@/stores/chat/types';
 import { AcpTurnFailureCard } from './AcpTurnFailureCard';
+import { hostApi } from '@/lib/host-api';
 
 function formatDuration(durationMs: number, language: string): string {
   const wholeSeconds = Math.floor(Math.max(0, durationMs) / 1000);
@@ -62,6 +63,8 @@ export function AcpAssistantTurn({
   fileSummaries = [],
   workspaceRoot,
   timing,
+  sessionKey,
+  generation,
   assistantAvatarSrc,
   parentSessionKey,
   subagentSessions = [],
@@ -72,6 +75,8 @@ export function AcpAssistantTurn({
   fileSummaries?: AcpTurnFileSummary[];
   workspaceRoot?: string;
   timing?: AcpTurnTiming;
+  sessionKey?: string;
+  generation?: number;
   assistantAvatarSrc?: string;
   parentSessionKey?: string;
   subagentSessions?: ChatSession[];
@@ -79,6 +84,31 @@ export function AcpAssistantTurn({
   onRecharge?: () => void;
 }) {
   const displayEntries = useMemo(() => groupConsecutiveToolCalls(group.items), [group.items]);
+  const visibleTraceKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const assistantItem = group.items.find((item) => (
+      item.kind === 'message-segment'
+      && item.role === 'assistant'
+      && item.parts.some((part) => part.kind === 'markdown' && part.text.trim().length > 0)
+    ));
+    if (!assistantItem || assistantItem.kind !== 'message-segment') return;
+    const traceKey = assistantItem.id;
+    if (visibleTraceKeyRef.current === traceKey) return;
+    visibleTraceKeyRef.current = traceKey;
+    void hostApi.diagnostics.recordAcpTrace({
+      event: 'renderer/assistant-visible',
+      direction: 'projection',
+      sessionKey,
+      generation,
+      details: {
+        requestId: group.userMessageId,
+        assistantMessageId: assistantItem.messageId,
+        itemId: assistantItem.id,
+        partCount: assistantItem.parts.length,
+      },
+    });
+  }, [generation, group.items, group.userMessageId, sessionKey]);
 
   return (
     <div data-testid="acp-assistant-turn" className="group flex w-full justify-start gap-3">

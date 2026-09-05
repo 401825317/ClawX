@@ -2,9 +2,9 @@
 
 正式候选使用 `.github/workflows/uclaw-portable-production.yml`。GitHub Actions 只在托管 Runner 上构建 Windows x64 与 macOS x64/arm64 USB ZIP，校验精确版本、commit、build ID、size 和 SHA-512，并上传不可变候选制品。
 
-Actions 不持有生产凭证，不上传 OSS，不连接 zz-cn，不创建 Git 标签或 GitHub Release，也不依赖自托管 Runner。当前 USB 候选为未签名制品；本地暂存不会改变候选字节或补加签名。
+Actions 不持有生产凭证，不上传 OSS，不连接生产 API，不创建 Git 标签或 GitHub Release，也不依赖自托管 Runner。当前 USB 候选为未签名制品；本地暂存不会改变候选字节或补加签名。
 
-生产 OSS/zz-cn 暂存必须在保存了 DPAPI 凭证的 Windows 机器上执行。所有新记录固定为 `enabled=false`，现有公共更新 Feed 必须保持不变；启用候选属于独立审批操作。
+生产 OSS/候选暂存必须在保存了 DPAPI 凭证的 Windows 机器上执行。所有新记录固定为 `enabled=false`，现有公共更新 Feed 必须保持不变；启用候选属于独立审批操作。
 
 正式发包不执行源码 E2E、成品 Full、托管 Live、新用户注册、激活或重登回归。功能 QA 是独立任务，不属于候选构建或生产暂存。
 

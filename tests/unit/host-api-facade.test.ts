@@ -75,6 +75,28 @@ describe('hostApi facade', () => {
     await expect(hostApi.managedClientConfig.videoModels()).resolves.toBeNull();
   });
 
+  it('calls announcements.config through hostInvoke without a payload', async () => {
+    const config = {
+      enabled: true,
+      items: [{
+        id: 'maintenance',
+        title: 'Maintenance',
+        content: 'Scheduled update',
+        level: 'important',
+        publishedAt: '2026-09-04T12:00:00.000Z',
+      }],
+    } as const;
+    hostInvoke.mockResolvedValueOnce({ id: 'req', ok: true, data: config });
+    const { hostApi } = await import('@/lib/host-api');
+
+    await expect(hostApi.announcements.config()).resolves.toEqual(config);
+    expect(hostInvoke).toHaveBeenCalledWith(expect.objectContaining({
+      module: 'announcements',
+      action: 'config',
+    }));
+    expect(hostInvoke.mock.calls[0]?.[0]).not.toHaveProperty('payload');
+  });
+
   it('calls settings.getAll through hostInvoke', async () => {
     hostInvoke.mockResolvedValueOnce({ id: 'req', ok: true, data: { theme: 'dark' } });
     const { hostApi } = await import('@/lib/host-api');

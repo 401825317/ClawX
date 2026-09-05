@@ -11,6 +11,7 @@ import type {
   ManagedClientImageModelPolicy,
   ManagedClientRuntimeConfig,
 } from '../../../shared/managed-client-config';
+import type { ClientAnnouncementConfig } from '../../../shared/announcements';
 
 export type LaunchElectronOptions = {
   skipSetup?: boolean;
@@ -34,6 +35,7 @@ type IpcMockConfig = {
   hostApi?: Record<string, unknown>;
   hostApiErrors?: Record<string, string>;
   managedClientConfig?: ManagedClientConfigFixtureOptions;
+  announcements?: ClientAnnouncementConfig | null;
   recordHostInvocations?: boolean;
   recordLegacyIpcInvocations?: boolean;
 };
@@ -560,6 +562,7 @@ export async function installIpcMocks(
         || mockConfig.hostApiErrors
         || mockConfig.gatewayStatus
         || mockConfig.managedClientConfig
+        || mockConfig.announcements !== undefined
       ) {
         ipcMain.removeHandler('host:invoke');
         ipcMain.handle('host:invoke', async (event: unknown, request: {
@@ -625,6 +628,10 @@ export async function installIpcMocks(
                 return respond(request.id, unwrapLegacyResponse(mockConfig.hostApi[key]));
               }
             }
+          }
+
+          if (request?.module === 'announcements' && request.action === 'config') {
+            return respond(request.id, mockConfig.announcements ?? null);
           }
 
           if (request?.module === 'managedClientConfig') {

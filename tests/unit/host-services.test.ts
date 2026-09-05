@@ -2029,6 +2029,7 @@ describe('host services', () => {
       managedClientConfig: 'createManagedClientConfigApi',
       billing: 'createBillingApi',
       support: 'createSupportApi',
+      announcements: 'createAnnouncementsApi',
     };
     for (const [service, factory] of Object.entries(expectedFactories)) {
       const property = services && ts.isObjectLiteralExpression(services)

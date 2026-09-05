@@ -77,6 +77,8 @@ export function AcpTimeline({
             <AcpAssistantTurn
               group={group}
               fileSummaries={fileActivity?.turnSummariesByTurnId[group.id]}
+              sessionKey={snapshot.sessionId}
+              generation={snapshot.loadGeneration}
               workspaceRoot={workspaceRoot}
               timing={group.userMessageId ? turnTimingsByUserMessageId[group.userMessageId] : undefined}
               assistantAvatarSrc={assistantAvatarSrc}

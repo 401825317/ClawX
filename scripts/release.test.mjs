@@ -135,7 +135,7 @@ test('production candidate workflow builds only USB ZIPs and cannot perform prod
     'macOS workflow must provide a plugin-version base to the package command',
   );
   assert.match(workflow, /candidates-ready:/u);
-  assert.match(workflow, /Production OSS and zz-cn staging must be run locally/u);
+  assert.match(workflow, /Production OSS and UClaw staging must be run locally/u);
   for (const forbidden of [
     'MAC_CERTS',
     'APPLE_APP_SPECIFIC_PASSWORD',

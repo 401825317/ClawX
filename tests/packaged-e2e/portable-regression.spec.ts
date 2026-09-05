@@ -55,7 +55,7 @@ const allowExternalDelivery = process.env.UCLAW_REGRESSION_ALLOW_EXTERNAL_DELIVE
 const liveLoginStdin = process.env.UCLAW_REGRESSION_LIVE_LOGIN_STDIN === '1';
 const liveRegisterAdminStdin = process.env.UCLAW_REGRESSION_LIVE_REGISTER_ADMIN_STDIN === '1';
 const managedBackendOrigin = process.env.UCLAW_REGRESSION_BACKEND_ORIGIN?.trim()
-  || 'https://zz-cn.lingzhiwuxian.com';
+  || 'https://aiwxxx.com';
 const externalDelivery = {
   channel: process.env.UCLAW_REGRESSION_DELIVERY_CHANNEL?.trim() || '',
   accountId: process.env.UCLAW_REGRESSION_DELIVERY_ACCOUNT_ID?.trim() || '',

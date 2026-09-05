@@ -494,27 +494,6 @@ async function waitForPort(port, timeoutMs) {
   return false;
 }
 
-async function probeHostApiAuthBoundary() {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 3000);
-  try {
-    const response = await fetch('http://127.0.0.1:13210/api/status', {
-      signal: controller.signal,
-      redirect: 'manual',
-    });
-    const valid = response.status === 401;
-    record(valid ? 'PASS' : 'FAIL', 'Host API 身份确认', valid
-      ? '未携带内部 token 时返回 HTTP 401，符合 UClaw Host API 行为'
-      : `返回 HTTP ${response.status}，13210 端口可能不属于当前 UClaw`);
-    return valid;
-  } catch (error) {
-    record('FAIL', 'Host API 身份确认', error instanceof Error ? error.message : String(error));
-    return false;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 function listUClawPids() {
   if (process.platform !== 'win32') return [];
   const result = runCommand('tasklist.exe', ['/FI', 'IMAGENAME eq UClaw.exe', '/FO', 'CSV', '/NH']);
@@ -532,12 +511,13 @@ function listeningPid(port) {
 }
 
 async function checkNetwork() {
-  const host = 'zz-cn.lingzhiwuxian.com';
+  const host = process.env.UCLAW_SELF_CHECK_BACKEND_HOST?.trim() || 'aiwxxx.com';
+  const backendLabel = 'UClaw 后端';
   try {
     const result = await dns.lookup(host);
-    record('PASS', 'zz-cn DNS', `${host} -> ${result.address}`);
+    record('PASS', `${backendLabel} DNS`, `${host} -> ${result.address}`);
   } catch (error) {
-    record('FAIL', 'zz-cn DNS', error instanceof Error ? error.message : String(error));
+    record('FAIL', `${backendLabel} DNS`, error instanceof Error ? error.message : String(error));
   }
 
   const tcp443 = await new Promise((resolve) => {
@@ -550,22 +530,58 @@ async function checkNetwork() {
     socket.once('connect', () => finish(true));
     socket.once('error', () => finish(false));
   });
-  record(tcp443 ? 'PASS' : 'FAIL', 'zz-cn HTTPS 443', tcp443 ? 'TCP 连接成功' : 'TCP 连接失败');
+  record(tcp443 ? 'PASS' : 'FAIL', `${backendLabel} HTTPS 443`, tcp443 ? 'TCP 连接成功' : 'TCP 连接失败');
 
-  for (const [label, url] of [
-    ['zz-cn 状态接口', `https://${host}/api/status`],
-    ['UClaw bootstrap', `https://${host}/api/clawx/bootstrap`],
+  for (const endpoint of [
+    { label: `${backendLabel} 状态接口`, url: `https://${host}/api/status` },
+    { label: 'UClaw bootstrap', url: `https://${host}/api/clawx/bootstrap` },
+    { label: 'UClaw client-config', url: `https://${host}/api/clawx/client-config`, inspectAnnouncements: true },
   ]) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15_000);
     const startedAt = Date.now();
     try {
-      const response = await fetch(url, { signal: controller.signal, redirect: 'follow' });
-      const level = response.status === 200 ? 'PASS' : response.status === 429 ? 'FAIL' : 'WARN';
+      const response = await fetch(endpoint.url, {
+        signal: controller.signal,
+        redirect: 'follow',
+        headers: { Accept: 'application/json' },
+        credentials: 'omit',
+      });
+      let level = response.status === 200 ? 'PASS' : response.status === 429 ? 'FAIL' : 'WARN';
       const suffix = response.status === 429 ? '，服务端限流已触发' : '';
-      record(level, label, `HTTP ${response.status}，${Date.now() - startedAt}ms${suffix}`);
+      let detail = `HTTP ${response.status}，${Date.now() - startedAt}ms${suffix}`;
+      if (endpoint.inspectAnnouncements && response.status === 200) {
+        const payload = await response.json().catch(() => null);
+        const envelope = payload && typeof payload === 'object' && payload.data && typeof payload.data === 'object'
+          ? payload.data
+          : payload;
+        const client = envelope && typeof envelope === 'object' && envelope.client && typeof envelope.client === 'object'
+          ? envelope.client
+          : envelope;
+        const announcements = client && typeof client === 'object' ? client.announcements : undefined;
+        const validAnnouncements = announcements && typeof announcements === 'object' && !Array.isArray(announcements);
+        const validEnabled = !validAnnouncements
+          || announcements.enabled === undefined
+          || typeof announcements.enabled === 'boolean';
+        const validItems = !validAnnouncements
+          || announcements.items === undefined
+          || Array.isArray(announcements.items);
+        const envelopeError = payload && typeof payload === 'object'
+          && (payload.success === false || (typeof payload.code === 'number' && payload.code !== 0));
+        if (envelopeError || !validEnabled || !validItems) {
+          level = 'FAIL';
+          detail += '，公告配置结构无效';
+        } else if (!validAnnouncements) {
+          level = 'WARN';
+          detail += '，响应未提供公告配置';
+        } else {
+          const itemCount = Array.isArray(announcements.items) ? announcements.items.length : 0;
+          detail += `，公告 ${itemCount} 条`;
+        }
+      }
+      record(level, endpoint.label, detail);
     } catch (error) {
-      record('FAIL', label, error instanceof Error ? error.message : String(error));
+      record('FAIL', endpoint.label, error instanceof Error ? error.message : String(error));
     } finally {
       clearTimeout(timer);
     }
@@ -779,15 +795,14 @@ async function main() {
 
   if (!staticOnly && process.platform === 'win32') {
     const initialPids = listUClawPids();
-    const hostPortInitiallyOpen = await probePort(13210);
     const gatewayPortInitiallyOpen = await probePort(18789);
-    const foreignPortConflict = initialPids.length === 0 && (hostPortInitiallyOpen || gatewayPortInitiallyOpen);
+    const foreignPortConflict = initialPids.length === 0 && gatewayPortInitiallyOpen;
     record(initialPids.length > 0 ? 'PASS' : 'INFO', 'UClaw 进程', initialPids.length > 0
       ? `发现 ${initialPids.length} 个 Electron 进程（正常的多进程架构）：${initialPids.join(', ')}`
       : '尚未运行');
 
     if (foreignPortConflict) {
-      record('FAIL', '端口所有权', `UClaw 未运行，但端口已被占用：13210=${hostPortInitiallyOpen ? listeningPid(13210) ?? 'unknown' : 'free'}，18789=${gatewayPortInitiallyOpen ? listeningPid(18789) ?? 'unknown' : 'free'}；已跳过自动启动`);
+      record('FAIL', '端口所有权', `UClaw 未运行，但 Gateway 端口已被占用：18789=${listeningPid(18789) ?? 'unknown'}；已跳过自动启动`);
     } else if (initialPids.length === 0 && startApp && requiredResults[0]) {
       try {
         const child = spawn(path.join(rootDir, 'UClaw.exe'), [], {
@@ -797,21 +812,16 @@ async function main() {
           windowsHide: false,
         });
         child.unref();
-        record('INFO', '启动 UClaw', `已启动 PID ${child.pid}，等待 Host API 与 Gateway`);
+        record('INFO', '启动 UClaw', `已启动 PID ${child.pid}，等待 Gateway`);
       } catch (error) {
         record('FAIL', '启动 UClaw', error instanceof Error ? error.message : String(error));
       }
     }
 
-    const hostReady = foreignPortConflict ? hostPortInitiallyOpen : await waitForPort(13210, startApp ? 45_000 : 2_000);
     const gatewayReady = foreignPortConflict ? gatewayPortInitiallyOpen : await waitForPort(18789, startApp ? 45_000 : 2_000);
-    record(hostReady ? 'PASS' : 'FAIL', 'Host API 端口 13210', hostReady
-      ? `正在监听，PID ${listeningPid(13210) ?? 'unknown'}`
-      : '未监听；应用主进程未完整启动或端口被系统保留');
     record(gatewayReady ? 'PASS' : 'WARN', 'Gateway 端口 18789', gatewayReady
       ? `正在监听，PID ${listeningPid(18789) ?? 'unknown'}`
       : '未监听；请检查登录状态、relay token、端口冲突及 Gateway 日志');
-    if (hostReady) await probeHostApiAuthBoundary();
 
     const proxyNames = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY'];
     const proxyState = proxyNames.map((name) => `${name}=${process.env[name] ? 'set' : 'unset'}`).join(', ');

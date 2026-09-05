@@ -1142,8 +1142,16 @@ describe('AcpChatService', () => {
       expect.objectContaining({
         event: 'session/prompt:complete',
         details: expect.objectContaining({
+          requestId: 'msg-user',
           outcome: 'success',
           firstTextObserved: true,
+          connectionPromptWaitMs: expect.any(Number),
+          preDispatchPhases: expect.objectContaining({
+            readyGatewayMs: expect.any(Number),
+            ensureConnectionMs: expect.any(Number),
+            promptBuildMs: expect.any(Number),
+            preferenceEnqueueMs: expect.any(Number),
+          }),
           clientToCompleteMs: expect.any(Number),
           firstTextToCompleteMs: expect.any(Number),
         }),
