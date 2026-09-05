@@ -2,6 +2,7 @@
 
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -178,6 +179,35 @@ describe('portable first-launch integrity repair', () => {
     expect(result.status).toBe('blocked');
     expect(result.errors.some((error) => error.includes('uv.exe'))).toBe(true);
     expect(result.markerPath).toBeUndefined();
+  });
+
+  it('blocks startup when the physical app.asar archive is missing', () => {
+    const packageRoot = createPortablePackage();
+    unlinkSync(join(packageRoot.resourcesDir, 'app.asar'));
+
+    const result = runPortableFirstLaunchRepair(inputFor(packageRoot));
+
+    expect(result.status).toBe('blocked');
+    expect(result.errors).toContain('required package file missing: resources/app.asar');
+    expect(result.markerPath).toBeUndefined();
+  });
+
+  it('uses a physical file check when Electron exposes app.asar as a directory', () => {
+    const packageRoot = createPortablePackage();
+    const appAsarPath = join(packageRoot.resourcesDir, 'app.asar');
+    const ordinaryFileStats = lstatSync(join(packageRoot.resourcesDir, 'openclaw', 'openclaw.mjs'));
+    unlinkSync(appAsarPath);
+    mkdirSync(appAsarPath);
+    expect(lstatSync(appAsarPath).isDirectory()).toBe(true);
+
+    const result = runPortableFirstLaunchRepair(inputFor(packageRoot), {
+      physicalLstatSync: (filePath) => filePath === appAsarPath
+        ? ordinaryFileStats
+        : lstatSync(filePath),
+    });
+
+    expect(result.status).toBe('repaired');
+    expect(result.errors).toEqual([]);
   });
 
   it('uses an isolated portable data root when the immutable package root is separate', () => {

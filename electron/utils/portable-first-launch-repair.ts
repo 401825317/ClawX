@@ -6,7 +6,10 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join, relative, resolve, sep } from 'node:path';
+
+const require = createRequire(import.meta.url);
 
 export const PORTABLE_FIRST_LAUNCH_REPAIR_SCHEMA = 1;
 const REPAIR_MARKER_FILE = '.uclaw-first-launch-repair.json';
@@ -59,6 +62,17 @@ export type PortableFirstLaunchRepairResult = {
   markerPath?: string;
 };
 
+type PhysicalLstatSync = (filePath: string) => { isFile(): boolean };
+
+export type PortableFirstLaunchRepairDependencies = {
+  physicalLstatSync?: PhysicalLstatSync;
+};
+
+// Electron's ASAR-aware node:fs exposes app.asar as a virtual directory.
+const defaultPhysicalLstatSync: PhysicalLstatSync = process.versions.electron
+  ? (require('original-fs') as typeof import('node:fs')).lstatSync
+  : lstatSync;
+
 function readJson(filePath: string): JsonRecord | null {
   try {
     const value = JSON.parse(readFileSync(filePath, 'utf8')) as unknown;
@@ -73,6 +87,14 @@ function readJson(filePath: string): JsonRecord | null {
 function isFile(filePath: string): boolean {
   try {
     return lstatSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function isPhysicalFile(filePath: string, physicalLstatSync: PhysicalLstatSync): boolean {
+  try {
+    return physicalLstatSync(filePath).isFile();
   } catch {
     return false;
   }
@@ -195,7 +217,10 @@ function inspectPlugin(resourcesDir: string, spec: PackagedPluginSpec, errors: s
   }
 }
 
-function inspectPackage(input: PortableFirstLaunchRepairInput): string[] {
+function inspectPackage(
+  input: PortableFirstLaunchRepairInput,
+  physicalLstatSync: PhysicalLstatSync,
+): string[] {
   const errors: string[] = [];
   const { platform, arch, rootDir, resourcesDir, expectedVersion } = input;
   const packageRootDir = input.packageRootDir ?? rootDir;
@@ -248,7 +273,10 @@ function inspectPackage(input: PortableFirstLaunchRepairInput): string[] {
     );
   }
   for (const [label, filePath] of requiredFiles) {
-    if (!isFile(filePath)) errors.push(`required package file missing: ${label}`);
+    const exists = label === 'resources/app.asar'
+      ? isPhysicalFile(filePath, physicalLstatSync)
+      : isFile(filePath);
+    if (!exists) errors.push(`required package file missing: ${label}`);
   }
   if (!readJson(join(resourcesDir, 'openclaw', 'package.json'))) {
     errors.push('OpenClaw package metadata missing or invalid');
@@ -369,12 +397,16 @@ function markerMatches(filePath: string, input: PortableFirstLaunchRepairInput):
  */
 export function runPortableFirstLaunchRepair(
   input: PortableFirstLaunchRepairInput,
+  dependencies: PortableFirstLaunchRepairDependencies = {},
 ): PortableFirstLaunchRepairResult {
   if (!input.enabled || !input.packaged) {
     return { status: 'not-applicable', actions: [], errors: [] };
   }
 
-  const errors = inspectPackage(input);
+  const errors = inspectPackage(
+    input,
+    dependencies.physicalLstatSync ?? defaultPhysicalLstatSync,
+  );
   if (errors.length > 0) {
     return { status: 'blocked', actions: [], errors };
   }
