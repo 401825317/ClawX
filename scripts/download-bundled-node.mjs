@@ -1,11 +1,26 @@
 #!/usr/bin/env zx
 
 import 'zx/globals';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 const ROOT_DIR = path.resolve(__dirname, '..');
 const NODE_VERSION = '22.19.0';
 const BASE_URL = `https://nodejs.org/dist/v${NODE_VERSION}`;
 const OUTPUT_BASE = path.join(ROOT_DIR, 'resources', 'bin');
+const downloadProxy = process.env.CLAWX_DOWNLOAD_PROXY;
+const execFileAsync = promisify(execFile);
+
+async function downloadToFile(url, destination) {
+  if (downloadProxy) {
+    const curl = process.platform === 'win32' ? `${process.env.SystemRoot}\\System32\\curl.exe` : 'curl';
+    await execFileAsync(curl, ['--fail', '--location', '--proxy', downloadProxy, '--output', destination, url]);
+    return;
+  }
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Failed to download: ${response.statusText}`);
+  await fs.writeFile(destination, Buffer.from(await response.arrayBuffer()));
+}
 
 const TARGETS = {
   'win32-x64': {
@@ -48,10 +63,7 @@ async function setupTarget(id) {
 
   try {
     echo`⬇️ Downloading: ${downloadUrl}`;
-    const response = await fetch(downloadUrl);
-    if (!response.ok) throw new Error(`Failed to download: ${response.statusText}`);
-    const buffer = await response.arrayBuffer();
-    await fs.writeFile(archivePath, Buffer.from(buffer));
+    await downloadToFile(downloadUrl, archivePath);
 
     echo`📂 Extracting...`;
     if (os.platform() === 'win32') {

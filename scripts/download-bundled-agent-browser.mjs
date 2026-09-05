@@ -1,11 +1,28 @@
 #!/usr/bin/env zx
 
 import 'zx/globals';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 const ROOT_DIR = path.resolve(__dirname, '..');
 const AGENT_BROWSER_VERSION = 'v0.27.0';
 const BASE_URL = `https://github.com/vercel-labs/agent-browser/releases/download/${AGENT_BROWSER_VERSION}`;
 const OUTPUT_BASE = path.join(ROOT_DIR, 'resources', 'bin');
+const downloadProxy = process.env.CLAWX_DOWNLOAD_PROXY;
+const execFileAsync = promisify(execFile);
+
+async function downloadToFile(url, destination) {
+  if (downloadProxy) {
+    const curl = process.platform === 'win32' ? `${process.env.SystemRoot}\\System32\\curl.exe` : 'curl';
+    await execFileAsync(curl, ['--fail', '--location', '--proxy', downloadProxy, '--output', destination, url]);
+    return;
+  }
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to download ${path.basename(destination)}: ${response.status} ${response.statusText}`);
+  }
+  await fs.writeFile(destination, Buffer.from(await response.arrayBuffer()));
+}
 
 // Mapping Node platforms/archs to agent-browser release asset naming.
 // Assets are bare binaries (no archive). win32-arm64 has no native asset, so
@@ -78,12 +95,7 @@ async function setupTarget(id) {
   // Download (bare binary — no extraction needed)
   const startedAt = Date.now();
   echo(`   ⬇️  Downloading: ${downloadUrl}`);
-  const response = await fetch(downloadUrl);
-  if (!response.ok) {
-    throw new Error(`Failed to download ${target.asset}: ${response.status} ${response.statusText}`);
-  }
-  const buffer = await response.arrayBuffer();
-  await fs.writeFile(destBin, Buffer.from(buffer));
+  await downloadToFile(downloadUrl, destBin);
 
   // Permission fix
   if (os.platform() !== 'win32') {
