@@ -231,7 +231,11 @@ test('disabled stage publisher never enables a release row', async () => {
   assert.match(publisher, /function Assert-SignedWindowsPortableCandidate/u);
   assert.match(publisher, /\[switch\]\$WindowsOnly/u);
   assert.match(publisher, /\[switch\]\$OverwriteExistingOssObjects/u);
+  assert.match(publisher, /\[switch\]\$AllowUnsignedWindowsCandidate/u);
   assert.match(publisher, /\$overwriteArgument = if \(\$OverwriteExistingOssObjects\) \{ '--force' \} else \{ '--update' \}/u);
+  assert.match(publisher, /if \(\$AllowUnsignedWindowsCandidate\)/u);
+  assert.match(publisher, /Publishing an unsigned Windows portable candidate under explicit operator authorization/u);
+  assert.match(publisher, /skipped_explicit_authorization/u);
   assert.match(publisher, /Assert-PortableMetadata -Metadata \$windowsMetadata/u);
   assert.match(publisher, /companion metadata is missing/u);
   assert.match(publisher, /Assert-PortableMetadata -Metadata \$metadata/u);

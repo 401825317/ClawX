@@ -23,6 +23,8 @@ param(
 
   [switch]$OverwriteExistingOssObjects,
 
+  [switch]$AllowUnsignedWindowsCandidate,
+
   [switch]$ValidateOnly
 )
 
@@ -44,6 +46,7 @@ $arguments = @{
   OssutilPath = $OssutilPath
   OssProxy = $OssProxy
   OverwriteExistingOssObjects = $OverwriteExistingOssObjects
+  AllowUnsignedWindowsCandidate = $AllowUnsignedWindowsCandidate
   ValidateOnly = $ValidateOnly
 }
 

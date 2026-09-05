@@ -27,6 +27,10 @@ param(
 
   [switch]$OverwriteExistingOssObjects,
 
+  # Emergency compatibility only. The default remains to require Valid
+  # Authenticode signatures for the two Windows portable executables.
+  [switch]$AllowUnsignedWindowsCandidate,
+
   [switch]$ValidateOnly
 )
 
@@ -403,7 +407,12 @@ $windowsBuildId = [string]$windowsCandidate.buildId
 if ([string]::IsNullOrWhiteSpace($windowsBuildId)) { throw 'Windows candidate build ID is missing.' }
 Assert-PortableMetadata -Metadata $windowsMetadata -Version $Version -Commit $Commit -Platform 'win' -Arch 'x64' `
   -FileName $windowsZipName -Size ([int64]$windowsZip.Length) -Sha512 $windowsSha -BuildId $windowsBuildId
-Assert-SignedWindowsPortableCandidate -ZipPath $windowsZipPath
+if ($AllowUnsignedWindowsCandidate) {
+  Write-Warning 'Publishing an unsigned Windows portable candidate under explicit operator authorization.'
+}
+else {
+  Assert-SignedWindowsPortableCandidate -ZipPath $windowsZipPath
+}
 
 $objects = @(
   [pscustomobject]@{ LocalPath = $windowsZipPath; FileName = $windowsZipName; Size = [int64]$windowsZip.Length; Sha512Hex = $windowsSha },
@@ -672,6 +681,7 @@ FROM claw_x_releases WHERE channel='latest' AND version=$(ConvertTo-SqlLiteral $
     commit = $Commit
     enabled = $false
     mandatory = $Mandatory
+    windowsSignatureVerification = if ($AllowUnsignedWindowsCandidate) { 'skipped_explicit_authorization' } else { 'valid' }
     uploadedObjects = @($objects | ForEach-Object { "https://uclaw-ver.oss-cn-beijing.aliyuncs.com/releases/latest/$($_.FileName)" })
     databaseRows = $databaseRows
     publicFeedBefore = $feedBefore | ConvertFrom-Json
