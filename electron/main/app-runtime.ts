@@ -48,6 +48,8 @@ import {
   setActivePortableRuntimeHealthMonitor,
 } from '../utils/portable-runtime-health';
 import { migratePortableDefaultWorkspaceConfig } from '../utils/portable-workspace-migration';
+import { runPortableFirstLaunchRepair } from '../utils/portable-first-launch-repair';
+import { resolvePackagedPortableRootDir } from '../utils/portable-mode';
 import {
   isConfiguredPortableOpenClawRuntimePrepared,
   prepareConfiguredPortableOpenClawRuntime,
@@ -539,6 +541,49 @@ async function initialize(): Promise<void> {
       migratedFields: workspaceMigration.migratedFields,
       backupCreated: Boolean(workspaceMigration.backupPath),
     });
+  }
+
+  // A manual ZIP extraction can leave a complete-looking app directory while
+  // silently dropping a runtime binary, OpenClaw payload, or plugin dependency.
+  // Validate the immutable package before any Gateway consumer starts. Mutable
+  // state and runtime-cache recovery have already run in portable bootstrap;
+  // this gate never overwrites user data or user-owned extensions.
+  if (portableModeInfo.enabled && app.isPackaged && portableModeInfo.portableLayout.hasPortableFlag) {
+    const firstLaunchRepair = runPortableFirstLaunchRepair({
+      enabled: portableModeInfo.enabled,
+      packaged: app.isPackaged,
+      platform: process.platform,
+      arch: process.arch,
+      rootDir: portableModeInfo.rootDir,
+      packageRootDir: resolvePackagedPortableRootDir(process.platform),
+      resourcesDir: process.resourcesPath,
+      runtimeProfileDir: portableModeInfo.runtimeProfileDir,
+      expectedVersion: app.getVersion(),
+    });
+    if (firstLaunchRepair.actions.length > 0) {
+      logger.info('Portable first-launch integrity check completed', {
+        status: firstLaunchRepair.status,
+        actions: firstLaunchRepair.actions,
+        markerPath: firstLaunchRepair.markerPath,
+      });
+    }
+    if (firstLaunchRepair.status === 'blocked') {
+      const details = firstLaunchRepair.errors.slice(0, 12).join('\n');
+      logger.error('Portable package integrity check blocked startup', {
+        errors: firstLaunchRepair.errors,
+      });
+      dialog.showErrorBox(
+        'UClaw 启动检查失败',
+        [
+          '当前便携包内容不完整，Gateway 未启动。',
+          '请重新下载完整版本，并解压到新的目录后再启动。',
+          '',
+          details,
+        ].join('\n'),
+      );
+      app.quit();
+      throw new Error(`Portable package integrity check failed: ${firstLaunchRepair.errors.join('; ')}`);
+    }
   }
 
   logger.info('=== UClaw Application Starting ===');

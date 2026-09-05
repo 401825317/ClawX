@@ -431,6 +431,14 @@ export async function runPackagedBootstrapGate({
       environment.XDG_DATA_HOME,
       environment.XDG_CACHE_HOME,
     ].map((directory) => fs.promises.mkdir(directory, { recursive: true })));
+    // The isolated bootstrap root intentionally starts with empty user data,
+    // but it still needs the portable marker so the main-process first-launch
+    // integrity gate exercises the same portable branch as the final ZIP.
+    await fs.promises.writeFile(
+      path.join(environment.CLAWX_PORTABLE_ROOT, 'portable.flag'),
+      'UClaw USB portable mode\n',
+      'utf8',
+    );
 
     child = spawnProcess(executablePath, [
       `--remote-debugging-port=${ports.cdpPort}`,

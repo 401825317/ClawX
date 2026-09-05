@@ -5,6 +5,24 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 describe('app runtime managed gate startup', () => {
+  it('checks a packaged portable payload before runtime preparation or Gateway startup', () => {
+    const source = readFileSync(join(process.cwd(), 'electron/main/app-runtime.ts'), 'utf8');
+    const initialize = source.slice(
+      source.indexOf('async function initialize()'),
+      source.indexOf('if (gotTheLock)'),
+    );
+    const migration = initialize.indexOf('await migratePortableDefaultWorkspaceConfig();');
+    const packageGate = initialize.indexOf('runPortableFirstLaunchRepair({');
+    const runtimePreparation = initialize.indexOf('prepareConfiguredPortableOpenClawRuntime();');
+    const providerSync = initialize.indexOf('syncAllProviderAuthToRuntime(');
+
+    expect(migration).toBeGreaterThan(-1);
+    expect(packageGate).toBeGreaterThan(migration);
+    expect(runtimePreparation).toBeGreaterThan(packageGate);
+    expect(providerSync).toBeGreaterThan(packageGate);
+    expect(initialize).toContain('Portable package integrity check blocked startup');
+  });
+
   it('applies proxy settings before starting the non-blocking gate watcher and rule repair', () => {
     const source = readFileSync(join(process.cwd(), 'electron/main/app-runtime.ts'), 'utf8');
     const initialize = source.slice(

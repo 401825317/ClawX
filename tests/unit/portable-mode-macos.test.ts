@@ -42,6 +42,7 @@ import {
   getPortableUpdateDownloadsDir,
   getPortableUpdatePackageType,
   inspectPortableLayout,
+  repairPortableLayoutBeforeBootstrap,
   resetPortableModeInfoCache,
   shouldUsePortableUpdatePackage,
   resolvePortableRootDir,
@@ -244,6 +245,59 @@ describe('macOS update package selection', () => {
     resetPortableModeInfoCache();
 
     expect(getPortableModeInfo().runtimeRootDir).toBe(scopedRuntimeRoot);
+  });
+});
+
+describe('Windows portable bootstrap repair', () => {
+  it('recreates only the missing marker and data directory for a trusted USB package', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'uclaw-windows-portable-repair-'));
+    temporaryRoots.push(root);
+    const resourcesDir = join(root, 'resources');
+    await mkdir(join(resourcesDir, 'openclaw'), { recursive: true });
+    for (const filePath of [
+      join(root, 'UClaw.exe'),
+      join(resourcesDir, 'app.asar'),
+      join(resourcesDir, 'openclaw', 'openclaw.mjs'),
+      join(resourcesDir, 'openclaw', 'package.json'),
+    ]) {
+      await writeFile(filePath, 'fixture\n', 'utf8');
+    }
+    const identity = {
+      schemaVersion: 2,
+      product: 'UClaw',
+      appVersion: '2.0.4',
+      buildId: 'build-id',
+      gitCommit: '0123456789012345678901234567890123456789',
+      sourceTreeState: 'clean',
+      platform: 'win32',
+      arch: 'x64',
+    };
+    await writeFile(join(resourcesDir, 'uclaw-build.json'), `${JSON.stringify(identity)}\n`, 'utf8');
+    await writeFile(
+      join(root, 'uclaw-usb-build.json'),
+      `${JSON.stringify({ ...identity, packageType: 'portable_zip' })}\n`,
+      'utf8',
+    );
+
+    const first = repairPortableLayoutBeforeBootstrap({
+      platform: 'win32',
+      packaged: true,
+      rootDir: root,
+      resourcesDir,
+    });
+    expect(first.repaired).toBe(true);
+    expect(first.actions).toEqual(['created-portable-flag', 'created-data-directory']);
+    expect(existsSync(join(root, 'portable.flag'))).toBe(true);
+    expect(existsSync(join(root, 'UClawData'))).toBe(true);
+
+    const second = repairPortableLayoutBeforeBootstrap({
+      platform: 'win32',
+      packaged: true,
+      rootDir: root,
+      resourcesDir,
+    });
+    expect(second.repaired).toBe(false);
+    expect(second.actions).toEqual([]);
   });
 });
 

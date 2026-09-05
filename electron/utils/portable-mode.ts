@@ -3,10 +3,13 @@ import {
   closeSync,
   constants as fsConstants,
   lstatSync,
+  readFileSync,
   mkdirSync,
   openSync,
   readdirSync,
+  renameSync,
   unlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -22,6 +25,9 @@ import { preparePortableClawXStateSync } from './portable-clawx-state';
 const PORTABLE_DATA_DIR_NAME = 'UClawData';
 const PORTABLE_FLAG_FILE = 'portable.flag';
 const RUNTIME_CACHE_DIR_NAME = 'UClawRuntime';
+const USB_BUILD_IDENTITY_FILE = 'uclaw-usb-build.json';
+const PACKAGED_BUILD_IDENTITY_FILE = 'resources/uclaw-build.json';
+const PORTABLE_PACKAGE_TYPE = 'portable_zip';
 
 /** The package channel is independent from where the user's state lives. */
 export type PortableUpdatePackageType = 'portable_zip' | 'installer';
@@ -124,6 +130,13 @@ let cachedPortableModeCacheKey: string | null = null;
 // the host OS available so POSIX permission checks are not imposed on a
 // Windows filesystem whose mode bits do not represent execute permissions.
 const hostPlatform = process.platform;
+
+export type PortableLayoutRepairResult = {
+  attempted: boolean;
+  repaired: boolean;
+  actions: readonly string[];
+  reason?: string;
+};
 
 function truthyEnv(value: string | undefined): boolean {
   if (!value) return false;
@@ -311,6 +324,175 @@ export function resolvePackagedPortableRootDir(platform: string = process.platfo
     }
   }
   return execDir;
+}
+
+function readJsonObjectSync(filePath: string): Record<string, unknown> | null {
+  try {
+    const value = JSON.parse(readFileSync(filePath, 'utf8')) as unknown;
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isRegularFileSync(filePath: string): boolean {
+  try {
+    return lstatSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function isDirectorySync(filePath: string): boolean {
+  try {
+    return lstatSync(filePath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function atomicWriteTextSync(filePath: string, content: string): void {
+  const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporaryPath, content, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    renameSync(temporaryPath, filePath);
+  } finally {
+    try {
+      unlinkSync(temporaryPath);
+    } catch {
+      // The temporary file is already gone after a successful rename.
+    }
+  }
+}
+
+function isTrustedWindowsUsbRoot(rootDir: string, resourcesDir: string): boolean {
+  const usbIdentity = readJsonObjectSync(pathApi('win32').join(rootDir, USB_BUILD_IDENTITY_FILE));
+  const packagedIdentity = readJsonObjectSync(pathApi('win32').join(rootDir, PACKAGED_BUILD_IDENTITY_FILE));
+  if (!usbIdentity || !packagedIdentity) return false;
+
+  const identityKeys = ['schemaVersion', 'product', 'appVersion', 'buildId', 'gitCommit'] as const;
+  if (
+    usbIdentity.schemaVersion !== 2
+    || packagedIdentity.schemaVersion !== 2
+    || usbIdentity.product !== 'UClaw'
+    || packagedIdentity.product !== 'UClaw'
+    || usbIdentity.packageType !== PORTABLE_PACKAGE_TYPE
+    || usbIdentity.platform !== 'win32'
+    || usbIdentity.arch !== 'x64'
+    || packagedIdentity.platform !== 'win32'
+    || packagedIdentity.arch !== 'x64'
+    || usbIdentity.sourceTreeState !== 'clean'
+    || packagedIdentity.sourceTreeState !== 'clean'
+  ) {
+    return false;
+  }
+  if (identityKeys.some((key) => (
+    !isNonEmptyString(usbIdentity[key]) && key !== 'schemaVersion'
+  ))) {
+    return false;
+  }
+  if (identityKeys.some((key) => usbIdentity[key] !== packagedIdentity[key])) return false;
+
+  // Only manufacture the portable marker for a root that still contains the
+  // package payload. An arbitrary installed app must never become portable by
+  // merely having a leftover UClawData directory.
+  const requiredPayload = [
+    pathApi('win32').join(rootDir, 'UClaw.exe'),
+    pathApi('win32').join(resourcesDir, 'app.asar'),
+    pathApi('win32').join(resourcesDir, 'openclaw', 'openclaw.mjs'),
+    pathApi('win32').join(resourcesDir, 'openclaw', 'package.json'),
+  ];
+  return requiredPayload.every(isRegularFileSync);
+}
+
+/**
+ * Repair only an unambiguous, packaged Windows USB root before environment
+ * classification. This lets a manually copied package recover from a missing
+ * marker or data directory without ever claiming an ordinary installed app.
+ */
+export function repairPortableLayoutBeforeBootstrap(options: {
+  platform?: string;
+  rootDir?: string;
+  resourcesDir?: string;
+  packaged?: boolean;
+} = {}): PortableLayoutRepairResult {
+  const platform = options.platform ?? process.platform;
+  if (platform !== 'win32' || !(options.packaged ?? app.isPackaged)) {
+    return { attempted: false, repaired: false, actions: [] };
+  }
+
+  const rootDir = options.rootDir
+    ? pathApi(platform, options.rootDir).resolve(options.rootDir)
+    : resolvePortableRootDir(platform);
+  const resourcesDir = options.resourcesDir
+    ? pathApi(platform, options.resourcesDir).resolve(options.resourcesDir)
+    : pathApi(platform).join(rootDir, 'resources');
+  if (!isDirectorySync(rootDir)) {
+    return { attempted: true, repaired: false, actions: [], reason: 'invalid-root' };
+  }
+  // Ordinary installer layouts also have resources/uclaw-build.json but do
+  // not carry the USB identity or portable data markers. Avoid treating every
+  // installed Windows launch as a failed portable probe.
+  const candidateSignals = [
+    pathApi(platform).join(rootDir, PORTABLE_FLAG_FILE),
+    pathApi(platform).join(rootDir, PORTABLE_DATA_DIR_NAME),
+    pathApi(platform).join(rootDir, USB_BUILD_IDENTITY_FILE),
+  ];
+  if (!candidateSignals.some((candidate) => {
+    try {
+      lstatSync(candidate);
+      return true;
+    } catch {
+      return false;
+    }
+  })) {
+    return { attempted: false, repaired: false, actions: [] };
+  }
+  if (!isTrustedWindowsUsbRoot(rootDir, resourcesDir)) {
+    return { attempted: true, repaired: false, actions: [], reason: 'untrusted-usb-root' };
+  }
+
+  const path = pathApi(platform);
+  const markerPath = path.join(rootDir, PORTABLE_FLAG_FILE);
+  const dataDir = path.join(rootDir, PORTABLE_DATA_DIR_NAME);
+  const actions: string[] = [];
+  try {
+    const markerStat = (() => {
+      try { return lstatSync(markerPath); } catch { return null; }
+    })();
+    if (markerStat && !markerStat.isFile()) {
+      return { attempted: true, repaired: false, actions, reason: 'portable-flag-is-not-file' };
+    }
+    const dataStat = (() => {
+      try { return lstatSync(dataDir); } catch { return null; }
+    })();
+    if (dataStat && !dataStat.isDirectory()) {
+      return { attempted: true, repaired: false, actions, reason: 'data-directory-is-not-directory' };
+    }
+
+    if (!markerStat) {
+      atomicWriteTextSync(markerPath, 'UClaw USB portable mode\n');
+      actions.push('created-portable-flag');
+    }
+    if (!dataStat) {
+      mkdirSync(dataDir, { recursive: true });
+      actions.push('created-data-directory');
+    }
+    return { attempted: true, repaired: actions.length > 0, actions };
+  } catch (error) {
+    return {
+      attempted: true,
+      repaired: false,
+      actions,
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function isDirectory(value: string | null): boolean {
