@@ -25,6 +25,8 @@ param(
 
   [string]$OssProxy = '',
 
+  [switch]$OverwriteExistingOssObjects,
+
   [switch]$ValidateOnly
 )
 
@@ -513,8 +515,10 @@ try {
   foreach ($object in $objects) {
     $uri = "https://uclaw-ver.oss-cn-beijing.aliyuncs.com/releases/latest/$($object.FileName)"
     $head = Get-HttpHead $uri
-    if ($head.Exists -and $null -ne $head.Length -and $head.Length -ne $object.Size) { throw "Immutable OSS object already exists with a different size: $($object.FileName)" }
-    if (-not $head.Exists) { $pending += $object }
+    if ($head.Exists -and $null -ne $head.Length -and $head.Length -ne $object.Size -and -not $OverwriteExistingOssObjects) {
+      throw "Immutable OSS object already exists with a different size: $($object.FileName)"
+    }
+    if ($OverwriteExistingOssObjects -or -not $head.Exists) { $pending += $object }
   }
   if ($pending.Count -gt 0) {
     if ($usesActionSecrets) {
@@ -532,13 +536,14 @@ accessKeySecret=$secret
 region=$($ossCredential.region)
 "@ | Set-Content -LiteralPath $temporaryConfig -Encoding ASCII
     foreach ($object in $pending) {
+      $overwriteArgument = if ($OverwriteExistingOssObjects) { '--force' } else { '--update' }
       $ossutilArguments = @(
         'cp',
         $object.LocalPath,
         "oss://$($ossCredential.bucket)/$($ossCredential.prefix)$($object.FileName)",
         '--config-file',
         $temporaryConfig,
-        '--update'
+        $overwriteArgument
       )
       if ($OssProxy) { $ossutilArguments += @('--proxy', $OssProxy) }
       & $OssutilPath @ossutilArguments

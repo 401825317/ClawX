@@ -57,7 +57,7 @@ uclaw-macos-production-candidate-<version>-<short-commit>
 
 探针对象固定使用 `releases/latest/.oss-probes/<random>.json`，成功标准是上传、公开回读 SHA-256 一致、精确删除、删除后 `ossutil stat` 不再找到对象。探针不读取 production SSH 凭据，也不连接或写入数据库。
 
-严禁把 `uclaw-production-candidate-*` 或 `uclaw-macos-production-candidate-*` 这两个未签名 Actions 制品交给 `publish-disabled-release-stage.ps1`。最终对象名不可变，未签名对象一旦占用 `releases/latest/`，后续签名产物会被拒绝覆盖。常规暂存只能使用 `stage_disabled` 模式；应急恢复必须从同一次受保护运行下载 `uclaw-signed-production-candidate-*` 和 `uclaw-signed-macos-production-candidate-*`，并先独立核对签名和公证证据。
+严禁把 `uclaw-production-candidate-*` 或 `uclaw-macos-production-candidate-*` 这两个未签名 Actions 制品交给 `publish-disabled-release-stage.ps1`。最终对象名默认不可变，未签名对象一旦占用 `releases/latest/`，后续签名产物会被拒绝覆盖。常规暂存只能使用 `stage_disabled` 模式；应急恢复必须从同一次受保护运行下载 `uclaw-signed-production-candidate-*` 和 `uclaw-signed-macos-production-candidate-*`，并先独立核对签名和公证证据。仅在负责人明确授权同版本替换时，本地兼容入口 `publish-portable-release.ps1` 才可传入 `-OverwriteExistingOssObjects`；该开关仍要求完整 SHA-512 回读、有效 Windows 签名和 `enabled=false` 的 zz-cn 记录。
 
 ## DPAPI 凭证
 
