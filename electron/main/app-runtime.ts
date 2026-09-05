@@ -549,7 +549,9 @@ async function initialize(): Promise<void> {
   // state and runtime-cache recovery have already run in portable bootstrap;
   // this gate never overwrites user data or user-owned extensions.
   if (portableModeInfo.enabled && app.isPackaged && portableModeInfo.portableLayout.hasPortableFlag) {
-    const packageRootDir = resolvePackagedPortableRootDir(process.platform);
+    const packageRootDir = process.platform === 'win32' && portableModeInfo.rootDir
+      ? portableModeInfo.rootDir
+      : resolvePackagedPortableRootDir(process.platform);
     // Windows portable verification must use the payload beside UClaw.exe.
     // A bootstrap probe can intentionally isolate mutable state, while
     // process.resourcesPath may still reflect that transient launch context.
