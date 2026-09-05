@@ -7,11 +7,15 @@ on:
         description: Stable version from package.json, for example 1.0.6
         required: true
         type: string
-      stage_disabled:
-        description: Upload the immutable candidates and create disabled zz-cn records after Environment approval
+      operation:
+        description: Select the single production operation to run
         required: false
-        default: false
-        type: boolean
+        default: build_candidates
+        type: choice
+        options:
+          - build_candidates
+          - verify_oss_upload
+          - stage_disabled
 
 permissions:
   actions: read
@@ -116,6 +120,7 @@ jobs:
   build-windows-usb:
     name: Build Windows USB candidate
     needs: preflight
+    if: ${{ inputs.operation != 'verify_oss_upload' }}
     runs-on: windows-latest
     timeout-minutes: 150
     env:
@@ -185,6 +190,7 @@ jobs:
   build-macos-usb:
     name: Build macOS USB candidates
     needs: preflight
+    if: ${{ inputs.operation != 'verify_oss_upload' }}
     runs-on: macos-latest
     timeout-minutes: 150
     env:
@@ -268,6 +274,7 @@ jobs:
       - preflight
       - build-windows-usb
       - build-macos-usb
+    if: ${{ inputs.operation != 'verify_oss_upload' }}
     runs-on: ubuntu-latest
     steps:
       - name: Write candidate summary
@@ -277,18 +284,62 @@ jobs:
 
           - Commit: `${{ needs.preflight.outputs.commit }}`
           - Windows x64 and macOS x64/arm64 USB candidates are stored as immutable Actions artifacts
-          - Disabled staging requested: `${{ inputs.stage_disabled }}`
+          - Selected operation: `${{ inputs.operation }}`
           - A requested disabled staging run requires the protected `uclaw-disabled-stage` Environment
           - No public production feed or GitHub Release is changed by this workflow
           EOF
+
+  verify-oss-upload:
+    name: Verify isolated OSS upload
+    needs: preflight
+    if: ${{ inputs.operation == 'verify_oss_upload' || inputs.operation == 'stage_disabled' }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    environment: uclaw-disabled-stage
+    env:
+      UCLAW_OSS_ACCESS_KEY_ID: ${{ secrets.UCLAW_OSS_ACCESS_KEY_ID }}
+      UCLAW_OSS_ACCESS_KEY_SECRET: ${{ secrets.UCLAW_OSS_ACCESS_KEY_SECRET }}
+    steps:
+      - name: Checkout locked OSS probe
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.commit }}
+
+      - name: Require protected OSS secrets
+        shell: pwsh
+        run: |
+          $names = @('UCLAW_OSS_ACCESS_KEY_ID', 'UCLAW_OSS_ACCESS_KEY_SECRET')
+          $missing = @($names | Where-Object { [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_)) })
+          if ($missing.Count -gt 0) { throw "Protected Environment is missing required OSS secrets: $($missing -join ', ')." }
+
+      - name: Download pinned OSS publisher
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'ossutil-2.3.0-windows-amd64.zip'
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri 'https://gosspublic.alicdn.com/ossutil/v2/2.3.0/ossutil-2.3.0-windows-amd64.zip' `
+            -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          $expected = '98209156987667b39fd12a0c7b940342900daef61a9306ea7f34acf17f287da2'
+          if ($actual -ne $expected) { throw 'ossutil archive SHA-256 mismatch.' }
+          Expand-Archive -LiteralPath $archive -DestinationPath (Join-Path $env:RUNNER_TEMP 'uclaw-ossutil') -Force
+
+      - name: Upload, verify, and remove isolated OSS probe
+        shell: pwsh
+        run: |
+          & scripts/windows-support/test-oss-release-access.ps1 `
+            -OssutilPath (Join-Path $env:RUNNER_TEMP 'uclaw-ossutil/ossutil-2.3.0-windows-amd64/ossutil.exe') `
+            -RequireEnvironmentCredentials
 
   stage-disabled:
     name: Upload candidates and stage disabled release
     needs:
       - preflight
+      - candidates-ready
+      - verify-oss-upload
       - sign-windows-usb
       - sign-macos-usb
-    if: ${{ inputs.stage_disabled == true }}
+    if: ${{ inputs.operation == 'stage_disabled' }}
     runs-on: windows-latest
     timeout-minutes: 120
     environment: uclaw-disabled-stage
@@ -364,7 +415,8 @@ jobs:
     needs:
       - preflight
       - build-windows-usb
-    if: ${{ inputs.stage_disabled == true }}
+      - verify-oss-upload
+    if: ${{ inputs.operation == 'stage_disabled' }}
     runs-on: windows-latest
     timeout-minutes: 120
     environment: uclaw-disabled-stage
@@ -461,8 +513,11 @@ jobs:
 
   sign-macos-usb:
     name: Sign and notarize macOS USB candidates
-    needs: preflight
-    if: ${{ inputs.stage_disabled == true }}
+    needs:
+      - preflight
+      - build-macos-usb
+      - verify-oss-upload
+    if: ${{ inputs.operation == 'stage_disabled' }}
     runs-on: macos-latest
     timeout-minutes: 180
     environment: uclaw-disabled-stage

@@ -135,9 +135,12 @@ test('production workflow can perform only explicitly approved disabled staging'
     'macOS workflow must provide a plugin-version base to the package command',
   );
   assert.match(workflow, /candidates-ready:/u);
-  assert.match(workflow, /stage_disabled:/u);
+  assert.match(workflow, /operation:/u);
+  assert.match(workflow, /- build_candidates/u);
+  assert.match(workflow, /- verify_oss_upload/u);
+  assert.match(workflow, /- stage_disabled/u);
   assert.match(workflow, /stage-disabled:/u);
-  assert.match(workflow, /if: \$\{\{ inputs\.stage_disabled == true \}\}/u);
+  assert.match(workflow, /if: \$\{\{ inputs\.operation == 'stage_disabled' \}\}/u);
   assert.match(workflow, /environment: uclaw-disabled-stage/u);
   assert.match(workflow, /scripts\/windows-support\/publish-disabled-release-stage\.ps1/u);
   assert.match(workflow, /UCLAW_OSS_ACCESS_KEY_SECRET: \$\{\{ secrets\.UCLAW_OSS_ACCESS_KEY_SECRET \}\}/u);
@@ -152,6 +155,15 @@ test('production workflow can perform only explicitly approved disabled staging'
   assert.match(workflow, /codesign --verify --deep --strict/u);
   assert.match(workflow, /spctl --assess --type execute/u);
   assert.match(workflow, /repack-portable-release\.mjs/u);
+  assert.match(workflow, /verify-oss-upload:/u);
+  assert.match(workflow, /inputs\.operation == 'verify_oss_upload'/u);
+  assert.match(workflow, /test-oss-release-access\.ps1/u);
+  assert.match(workflow, /Require protected OSS secrets/u);
+  assert.match(workflow, /-RequireEnvironmentCredentials/u);
+  assert.match(
+    workflow,
+    /stage-disabled:[\s\S]*?needs:[\s\S]*?- candidates-ready[\s\S]*?- verify-oss-upload/u,
+  );
   for (const forbidden of [
     '.dmg',
     '.blockmap',
@@ -176,11 +188,30 @@ test('legacy tag release workflow is inert after the portable ZIP migration', as
   assert.match(workflow, /Release Workflow \(retired\)/u);
   for (const job of ['validate-release', 'release', 'publish', 'upload-oss', 'finalize']) {
     const jobBlock = workflow.match(
-      new RegExp(`\\n  ${job}:\\n([\\s\\S]*?)(?=\\n  [A-Za-z0-9_-]+:|\\n?$)`, 'u'),
+      new RegExp(`\\r?\\n  ${job}:\\r?\\n([\\s\\S]*?)(?=\\r?\\n  [A-Za-z0-9_-]+:|\\r?\\n?$)`, 'u'),
     )?.[1] ?? '';
     assert.match(jobBlock, /if:\s*\$\{\{\s*false\s*\}\}/u, `${job} must remain disabled`);
   }
   assert.match(workflow, /uclaw-portable-production\.yml/u);
+});
+
+test('OSS access probe is isolated from release objects and production database state', async () => {
+  const probe = await readFile(
+    path.join(ROOT, 'scripts', 'windows-support', 'test-oss-release-access.ps1'),
+    'utf8',
+  );
+  assert.match(probe, /releases\/latest\/\.oss-probes\//u);
+  assert.match(probe, /OSS_PROBE_OK/u);
+  assert.match(probe, /Get-FileHash -Algorithm SHA256/u);
+  assert.match(probe, /\brm \$objectUri --force/u);
+  assert.match(probe, /\bstat \$objectUri --output-format json/u);
+  assert.match(probe, /\$uploadAttempted = \$true[\s\S]*?\bcp \$payloadPath \$objectUri/u);
+  assert.match(probe, /if \(\$uploadAttempted -and -not \$removed\)/u);
+  assert.match(probe, /\$statusAfter -ne 404/u);
+  assert.match(probe, /OSS_ACCESS_KEY_SECRET/u);
+  assert.equal(/accessKeySecret=\$accessKeySecret/u.test(probe), false);
+  assert.equal(/production-ssh|UCLAW_PRODUCTION|claw_x_releases|psql/iu.test(probe), false);
+  assert.equal(/UClaw-\$?\{?version|macos-production-candidate/iu.test(probe), false);
 });
 
 test('disabled stage publisher never enables a release row', async () => {
