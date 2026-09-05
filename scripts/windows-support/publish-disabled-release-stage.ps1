@@ -3,8 +3,9 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$WindowsCandidateDirectory,
 
-  [Parameter(Mandatory = $true)]
   [string]$MacosCandidateDirectory,
+
+  [switch]$WindowsOnly,
 
   [Parameter(Mandatory = $true)]
   [string]$Version,
@@ -179,6 +180,32 @@ function Assert-PortableMetadata {
   }
 }
 
+function Assert-SignedWindowsPortableCandidate {
+  param([Parameter(Mandatory = $true)][string]$ZipPath)
+  $temporaryRoot = Join-Path $env:TEMP ('uclaw-signed-windows-candidate-' + [guid]::NewGuid().ToString('N'))
+  try {
+    Expand-Archive -LiteralPath $ZipPath -DestinationPath $temporaryRoot -Force
+    $executables = @(
+      (Join-Path $temporaryRoot 'UClaw.exe'),
+      (Join-Path $temporaryRoot 'resources/resources/updater/win32-x64/uclaw-portable-updater.exe')
+    )
+    foreach ($executable in $executables) {
+      if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+        throw "Signed Windows candidate is missing expected executable: $executable"
+      }
+      $signature = Get-AuthenticodeSignature -FilePath $executable
+      if ($signature.Status -ne 'Valid') {
+        throw "Signed Windows candidate has invalid Authenticode signature: $($signature.Path): $($signature.Status)"
+      }
+    }
+  }
+  finally {
+    if (Test-Path -LiteralPath $temporaryRoot) {
+      Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+}
+
 function Assert-RemoteZip {
   param([string]$Uri, [int64]$ExpectedSize)
   $head = Get-HttpHead $Uri
@@ -349,12 +376,14 @@ if ($Commit -notmatch '^[0-9a-f]{40}$') { throw 'Commit must be a full Git SHA.'
 if ($ReleaseNotes.Length -gt 10000) { throw 'Release notes exceed 10000 characters.' }
 
 $windowsDir = (Resolve-Path -LiteralPath $WindowsCandidateDirectory).Path
-$macosDir = (Resolve-Path -LiteralPath $MacosCandidateDirectory).Path
+$macosDir = if ($WindowsOnly) { '' } else { (Resolve-Path -LiteralPath $MacosCandidateDirectory).Path }
 $windowsCandidate = Get-Content -Raw -LiteralPath (Join-Path $windowsDir 'candidate.json') | ConvertFrom-Json
-$macosCandidate = Get-Content -Raw -LiteralPath (Join-Path $macosDir 'candidate.json') | ConvertFrom-Json
 if ($windowsCandidate.version -ne $Version -or $windowsCandidate.commit -ne $Commit) { throw 'Windows candidate identity mismatch.' }
-if ($macosCandidate.version -ne $Version -or $macosCandidate.commit -ne $Commit) { throw 'macOS candidate identity mismatch.' }
-if (@($macosCandidate.artifacts).Count -ne 2) { throw 'macOS candidate must contain x64 and arm64 artifacts.' }
+if (-not $WindowsOnly) {
+  $macosCandidate = Get-Content -Raw -LiteralPath (Join-Path $macosDir 'candidate.json') | ConvertFrom-Json
+  if ($macosCandidate.version -ne $Version -or $macosCandidate.commit -ne $Commit) { throw 'macOS candidate identity mismatch.' }
+  if (@($macosCandidate.artifacts).Count -ne 2) { throw 'macOS candidate must contain x64 and arm64 artifacts.' }
+}
 
 $windowsZipName = "UClaw-$Version-win-x64-usb.zip"
 $windowsMetadataName = "UClaw-$Version-win-x64-usb.json"
@@ -372,6 +401,7 @@ $windowsBuildId = [string]$windowsCandidate.buildId
 if ([string]::IsNullOrWhiteSpace($windowsBuildId)) { throw 'Windows candidate build ID is missing.' }
 Assert-PortableMetadata -Metadata $windowsMetadata -Version $Version -Commit $Commit -Platform 'win' -Arch 'x64' `
   -FileName $windowsZipName -Size ([int64]$windowsZip.Length) -Sha512 $windowsSha -BuildId $windowsBuildId
+Assert-SignedWindowsPortableCandidate -ZipPath $windowsZipPath
 
 $objects = @(
   [pscustomobject]@{ LocalPath = $windowsZipPath; FileName = $windowsZipName; Size = [int64]$windowsZip.Length; Sha512Hex = $windowsSha },
@@ -382,6 +412,7 @@ $releaseRows = @(
 )
 
 $seenMacArchitectures = @{}
+if (-not $WindowsOnly) {
 foreach ($artifact in @($macosCandidate.artifacts)) {
   $arch = [string]$artifact.arch
   if (@('x64', 'arm64') -notcontains $arch -or $seenMacArchitectures.ContainsKey($arch)) { throw 'macOS candidate architectures are invalid or duplicated.' }
@@ -416,9 +447,11 @@ if ($seenMacArchitectures.Count -ne 2) { throw 'macOS candidate must contain x64
 $macosManifestName = "UClaw-$Version-mac.json"
 $macosManifestPath = Join-Path $macosDir 'candidate.json'
 $objects += [pscustomobject]@{ LocalPath = $macosManifestPath; FileName = $macosManifestName; Size = [int64](Get-Item $macosManifestPath).Length; Sha512Hex = (Get-Sha512Hex $macosManifestPath) }
+}
 
 if ($ValidateOnly) {
-  [pscustomobject]@{ status = 'VALIDATION_OK'; mode = 'stage_disabled'; version = $Version; commit = $Commit; objects = $objects.Count; releases = $releaseRows.Count } | ConvertTo-Json -Depth 4
+  $mode = if ($WindowsOnly) { 'stage_disabled_windows' } else { 'stage_disabled' }
+  [pscustomobject]@{ status = 'VALIDATION_OK'; mode = $mode; version = $Version; commit = $Commit; objects = $objects.Count; releases = $releaseRows.Count } | ConvertTo-Json -Depth 4
   return
 }
 
@@ -525,9 +558,11 @@ region=$($ossCredential.region)
     [string]$remoteWindowsMetadata.sha512 -cne $windowsSha -or [int64]$remoteWindowsMetadata.size -ne $windowsZip.Length) {
     throw 'Remote Windows metadata does not match the exact candidate.'
   }
-  $remoteMacosMetadata = Invoke-RestMethod -Uri "https://uclaw-ver.oss-cn-beijing.aliyuncs.com/releases/latest/$macosManifestName" -TimeoutSec 30
-  if ([string]$remoteMacosMetadata.version -ne $Version -or [string]$remoteMacosMetadata.commit -ne $Commit -or @($remoteMacosMetadata.artifacts).Count -ne 2) {
-    throw 'Remote macOS metadata does not match the exact candidate.'
+  if (-not $WindowsOnly) {
+    $remoteMacosMetadata = Invoke-RestMethod -Uri "https://uclaw-ver.oss-cn-beijing.aliyuncs.com/releases/latest/$macosManifestName" -TimeoutSec 30
+    if ([string]$remoteMacosMetadata.version -ne $Version -or [string]$remoteMacosMetadata.commit -ne $Commit -or @($remoteMacosMetadata.artifacts).Count -ne 2) {
+      throw 'Remote macOS metadata does not match the exact candidate.'
+    }
   }
 
   $script:AskpassPath = if ($usesActionSecrets) {
@@ -574,6 +609,11 @@ UPDATE claw_x_releases SET release_notes=$releaseNotes, mandatory=$mandatorySql,
 WHERE channel='latest' AND platform=$platform AND arch=$arch AND package_type=$packageType AND version=$versionLiteral AND enabled=false;
 "@
   }
+  $targetReleaseWhere = @(
+    foreach ($row in $releaseRows) {
+      "(platform=$(ConvertTo-SqlLiteral $row.Platform) AND arch=$(ConvertTo-SqlLiteral $row.Arch) AND package_type=$(ConvertTo-SqlLiteral $row.PackageType))"
+    }
+  ) -join ' OR '
   $sql = @"
 \set ON_ERROR_STOP on
 BEGIN;
@@ -596,14 +636,14 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'stage operation changed an enabled release';
   END IF;
-  IF (SELECT count(*) FROM claw_x_releases WHERE channel='latest' AND version=$(ConvertTo-SqlLiteral $Version) AND enabled=false AND package_type='portable_zip' AND ((platform='win' AND arch='x64') OR (platform='mac' AND arch IN ('x64','arm64')))) <> 3 THEN
-    RAISE EXCEPTION 'expected exactly three disabled stage rows for version %', $(ConvertTo-SqlLiteral $Version);
+  IF (SELECT count(*) FROM claw_x_releases WHERE channel='latest' AND version=$(ConvertTo-SqlLiteral $Version) AND enabled=false AND ($targetReleaseWhere)) <> $($releaseRows.Count) THEN
+    RAISE EXCEPTION 'expected exactly $($releaseRows.Count) disabled stage rows for version %', $(ConvertTo-SqlLiteral $Version);
   END IF;
 END;
 `$uclaw`$;
 COMMIT;
 SELECT coalesce(json_agg(json_build_object('id',id,'platform',platform,'arch',arch,'package_type',package_type,'version',version,'enabled',enabled,'file_url',file_url,'sha512',sha512,'size',size) ORDER BY platform,arch), '[]'::json)::text
-FROM claw_x_releases WHERE channel='latest' AND version=$(ConvertTo-SqlLiteral $Version) AND package_type='portable_zip' AND ((platform='win' AND arch='x64') OR (platform='mac' AND arch IN ('x64','arm64')));
+FROM claw_x_releases WHERE channel='latest' AND version=$(ConvertTo-SqlLiteral $Version) AND ($targetReleaseWhere);
 "@
   $databaseResult = Invoke-ProductionPsql -Container $postgres -Sql $sql
   $rowsLine = @($databaseResult.Stdout -split "`r?`n" | Where-Object { $_.Trim().StartsWith('[') })[-1]
@@ -621,7 +661,7 @@ FROM claw_x_releases WHERE channel='latest' AND version=$(ConvertTo-SqlLiteral $
 
   $receipt = [ordered]@{
     schemaVersion = 1
-    status = 'staged_disabled'
+    status = if ($WindowsOnly) { 'staged_disabled_windows' } else { 'staged_disabled' }
     stagedAt = (Get-Date).ToUniversalTime().ToString('o')
     version = $Version
     commit = $Commit

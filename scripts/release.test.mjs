@@ -139,7 +139,9 @@ test('production workflow can perform only explicitly approved disabled staging'
   assert.match(workflow, /- build_candidates/u);
   assert.match(workflow, /- verify_oss_upload/u);
   assert.match(workflow, /- stage_disabled/u);
+  assert.match(workflow, /- stage_disabled_windows/u);
   assert.match(workflow, /stage-disabled:/u);
+  assert.match(workflow, /stage-disabled-windows:/u);
   assert.match(workflow, /if: \$\{\{ inputs\.operation == 'stage_disabled' \}\}/u);
   assert.match(workflow, /environment: uclaw-disabled-stage/u);
   assert.match(workflow, /scripts\/windows-support\/publish-disabled-release-stage\.ps1/u);
@@ -226,6 +228,8 @@ test('disabled stage publisher never enables a release row', async () => {
   assert.match(publisher, /Get-RemoteSha512Hex/u);
   assert.match(publisher, /OSS SHA-512 mismatch/u);
   assert.match(publisher, /function Assert-PortableMetadata/u);
+  assert.match(publisher, /function Assert-SignedWindowsPortableCandidate/u);
+  assert.match(publisher, /\[switch\]\$WindowsOnly/u);
   assert.match(publisher, /Assert-PortableMetadata -Metadata \$windowsMetadata/u);
   assert.match(publisher, /companion metadata is missing/u);
   assert.match(publisher, /Assert-PortableMetadata -Metadata \$metadata/u);
