@@ -145,19 +145,21 @@ function isolatedChildEnvironment(baseEnvironment) {
 export function createBootstrapEnvironment({
   baseEnvironment,
   sandboxRoot,
+  portableRoot,
   cdpPort,
   hostApiPort,
   gatewayPort,
 }) {
+  if (!portableRoot) throw new Error('Bootstrap environment requires a portable root.');
   const homeDir = path.join(sandboxRoot, 'home');
   const appDataDir = path.join(homeDir, 'AppData', 'Roaming');
   const localAppDataDir = path.join(homeDir, 'AppData', 'Local');
   const tempDir = path.join(sandboxRoot, 'temp');
-  const portableRoot = path.join(sandboxRoot, 'portable');
+  const isolatedPortableDataRoot = path.join(sandboxRoot, 'portable');
   const runtimeRoot = path.join(sandboxRoot, 'runtime');
   const openClawHome = path.join(sandboxRoot, 'openclaw-home');
   const openClawState = path.join(sandboxRoot, 'openclaw-state');
-  const userDataDir = path.join(portableRoot, 'UClawData', 'clawx');
+  const userDataDir = path.join(isolatedPortableDataRoot, 'UClawData', 'clawx');
   const driveRoot = path.parse(homeDir).root.replace(/[\\/]$/u, '');
   const homePath = driveRoot && homeDir.toLowerCase().startsWith(driveRoot.toLowerCase())
     ? homeDir.slice(driveRoot.length)
@@ -416,6 +418,7 @@ export async function runPackagedBootstrapGate({
     const environment = createBootstrapEnvironment({
       baseEnvironment,
       sandboxRoot,
+      portableRoot,
       ...ports,
     });
     await Promise.all([
@@ -431,9 +434,8 @@ export async function runPackagedBootstrapGate({
       environment.XDG_DATA_HOME,
       environment.XDG_CACHE_HOME,
     ].map((directory) => fs.promises.mkdir(directory, { recursive: true })));
-    // The isolated bootstrap root intentionally starts with empty user data,
-    // but it still needs the portable marker so the main-process first-launch
-    // integrity gate exercises the same portable branch as the final ZIP.
+    // The packaged root must remain the real package so the first-launch gate
+    // can validate its immutable payload. Mutable state stays under sandboxRoot.
     await fs.promises.writeFile(
       path.join(environment.CLAWX_PORTABLE_ROOT, 'portable.flag'),
       'UClaw USB portable mode\n',

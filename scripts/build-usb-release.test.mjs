@@ -64,6 +64,7 @@ test('Bootstrap environment replaces real user state and strips inherited creden
       NODE_OPTIONS: '--require real-user-hook.js',
     },
     sandboxRoot: 'C:\\isolated-bootstrap',
+    portableRoot: 'C:\\release\\win-unpacked',
     cdpPort: 43_101,
     hostApiPort: 43_102,
     gatewayPort: 43_103,
@@ -80,6 +81,7 @@ test('Bootstrap environment replaces real user state and strips inherited creden
   assert.equal(environment.NODE_OPTIONS, undefined);
   assert.match(environment.OPENCLAW_CONFIG, /^C:\\isolated-bootstrap\\openclaw-state\\openclaw\.json$/u);
   assert.match(environment.CLAWX_USER_DATA_DIR, /^C:\\isolated-bootstrap\\portable\\UClawData\\clawx$/u);
+  assert.equal(environment.CLAWX_PORTABLE_ROOT, 'C:\\release\\win-unpacked');
 });
 
 test('Bootstrap gate uses distinct loopback ports and cleans the isolated tree after success', async () => {
@@ -122,9 +124,12 @@ test('Bootstrap gate uses distinct loopback ports and cleans the isolated tree a
     assert.match(launch.args[1], /^--user-data-dir=/u);
     assert.equal(launch.options.env.CLAWX_E2E, '1');
     assert.equal(launch.options.env.CLAWX_PORTABLE, '1');
-    const sandboxRoot = path.dirname(launch.options.env.CLAWX_PORTABLE_ROOT);
+    assert.equal(launch.options.env.CLAWX_PORTABLE_ROOT, root);
+    const sandboxRoot = path.dirname(launch.options.env.USERPROFILE);
     assert.equal(launch.options.env.OPENCLAW_CONFIG.startsWith(sandboxRoot), true);
     assert.equal(launch.options.env.USERPROFILE.startsWith(sandboxRoot), true);
+    assert.equal(launch.options.env.CLAWX_USER_DATA_DIR.startsWith(sandboxRoot), true);
+    assert.equal(launch.options.env.CLAWX_RUNTIME_CACHE_ROOT.startsWith(sandboxRoot), true);
     assert.equal(existsSync(sandboxRoot), false);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -180,7 +185,7 @@ test('Bootstrap gate reports MODULE_NOT_FOUND without leaking credentials or use
       },
     );
     assert.equal(spawned.length, 1);
-    assert.equal(existsSync(path.dirname(spawned[0].options.env.CLAWX_PORTABLE_ROOT)), false);
+    assert.equal(existsSync(path.dirname(spawned[0].options.env.USERPROFILE)), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
