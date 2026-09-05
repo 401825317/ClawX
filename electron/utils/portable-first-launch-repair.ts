@@ -43,6 +43,8 @@ export type PortableFirstLaunchRepairInput = {
   platform: string;
   arch: string;
   rootDir: string | null;
+  /** Mutable portable state root; defaults to rootDir/UClawData. */
+  dataDir?: string | null;
   /** Immutable application root; may differ from rootDir in isolated tests. */
   packageRootDir?: string | null;
   resourcesDir: string;
@@ -311,7 +313,8 @@ function inspectPackage(input: PortableFirstLaunchRepairInput): string[] {
     }
   }
 
-  if (platform === 'win32' && rootDir && !isDirectory(join(rootDir, 'UClawData'))) {
+  const dataDir = input.dataDir ?? (rootDir ? join(rootDir, 'UClawData') : null);
+  if (platform === 'win32' && dataDir && !isDirectory(dataDir)) {
     errors.push('portable data directory missing: UClawData');
   }
 

@@ -555,6 +555,7 @@ async function initialize(): Promise<void> {
       platform: process.platform,
       arch: process.arch,
       rootDir: portableModeInfo.rootDir,
+      dataDir: portableModeInfo.dataDir,
       packageRootDir: resolvePackagedPortableRootDir(process.platform),
       resourcesDir: process.resourcesPath,
       runtimeProfileDir: portableModeInfo.runtimeProfileDir,

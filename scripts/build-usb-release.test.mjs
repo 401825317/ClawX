@@ -82,6 +82,7 @@ test('Bootstrap environment replaces real user state and strips inherited creden
   assert.match(environment.OPENCLAW_CONFIG, /^C:\\isolated-bootstrap\\openclaw-state\\openclaw\.json$/u);
   assert.match(environment.CLAWX_USER_DATA_DIR, /^C:\\isolated-bootstrap\\portable\\UClawData\\clawx$/u);
   assert.equal(environment.CLAWX_PORTABLE_ROOT, 'C:\\release\\win-unpacked');
+  assert.match(environment.CLAWX_BOOTSTRAP_PORTABLE_DATA_ROOT, /^C:\\isolated-bootstrap\\portable\\UClawData$/u);
 });
 
 test('Bootstrap gate uses distinct loopback ports and cleans the isolated tree after success', async () => {
@@ -129,6 +130,7 @@ test('Bootstrap gate uses distinct loopback ports and cleans the isolated tree a
     assert.equal(launch.options.env.OPENCLAW_CONFIG.startsWith(sandboxRoot), true);
     assert.equal(launch.options.env.USERPROFILE.startsWith(sandboxRoot), true);
     assert.equal(launch.options.env.CLAWX_USER_DATA_DIR.startsWith(sandboxRoot), true);
+    assert.equal(launch.options.env.CLAWX_BOOTSTRAP_PORTABLE_DATA_ROOT.startsWith(sandboxRoot), true);
     assert.equal(launch.options.env.CLAWX_RUNTIME_CACHE_ROOT.startsWith(sandboxRoot), true);
     assert.equal(existsSync(sandboxRoot), false);
   } finally {

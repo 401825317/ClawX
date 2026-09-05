@@ -180,6 +180,20 @@ describe('portable first-launch integrity repair', () => {
     expect(result.markerPath).toBeUndefined();
   });
 
+  it('uses an isolated portable data root when the immutable package root is separate', () => {
+    const packageRoot = createPortablePackage();
+    const isolatedDataDir = mkdtempSync(join(tmpdir(), 'uclaw-first-launch-data-'));
+    temporaryRoots.push(isolatedDataDir);
+
+    const result = runPortableFirstLaunchRepair({
+      ...inputFor(packageRoot),
+      dataDir: isolatedDataDir,
+    });
+
+    expect(result.status).toBe('repaired');
+    expect(result.errors).toEqual([]);
+  });
+
   it('blocks startup when a packaged plugin dependency is incomplete', () => {
     const packageRoot = createPortablePackage();
     const packagePath = join(packageRoot.resourcesDir, 'openclaw-plugins', 'uclaw-blender', 'package.json');

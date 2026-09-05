@@ -194,6 +194,7 @@ function clearInheritedPortableEnvironment(): void {
     // the mode flags so an installed app cannot continue resolving a stale
     // USB root (and accidentally replace that unrelated app) after startup.
     'CLAWX_PORTABLE_ROOT',
+    'CLAWX_BOOTSTRAP_PORTABLE_DATA_ROOT',
     'CLAWX_PORTABLE_RUNTIME_ROOT',
     'CLAWX_RUNTIME_CACHE_ROOT',
     'CLAWX_PORTABLE_RUNTIME_STATE',
@@ -833,10 +834,24 @@ function resolveLocalRuntimeRootDir(): string {
   return pathApi().join(xdgCacheHome, RUNTIME_CACHE_DIR_NAME);
 }
 
+/**
+ * The packaged-bootstrap gate validates a real immutable app root while
+ * keeping all mutable portable state in its temporary sandbox. This selector
+ * is deliberately test-only so normal portable launches always keep state
+ * beside the app.
+ */
+function resolvePortableDataDir(rootDir: string, platform: string = process.platform): string {
+  const bootstrapDataRoot = process.env.CLAWX_BOOTSTRAP_PORTABLE_DATA_ROOT?.trim();
+  if (truthyEnv(process.env.CLAWX_E2E) && bootstrapDataRoot) {
+    return pathApi(platform, bootstrapDataRoot).resolve(bootstrapDataRoot);
+  }
+  return pathApi(platform, rootDir).join(rootDir, PORTABLE_DATA_DIR_NAME);
+}
+
 export function getPortableModeInfo(): PortableModeInfo {
   const rootDir = resolvePortableRootDir();
   const path = pathApi(process.platform, rootDir);
-  const dataDir = path.join(rootDir, PORTABLE_DATA_DIR_NAME);
+  const dataDir = resolvePortableDataDir(rootDir);
   const runtimeRootDir = resolveLocalRuntimeRootDir();
   const portableLayout = inspectPortableLayout({ rootDir });
   const forcedPortable = truthyEnv(process.env.CLAWX_PORTABLE);

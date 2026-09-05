@@ -184,6 +184,7 @@ export function createBootstrapEnvironment({
     CLAWX_MANAGED_PROVIDER: '0',
     CLAWX_PORTABLE: '1',
     CLAWX_PORTABLE_ROOT: portableRoot,
+    CLAWX_BOOTSTRAP_PORTABLE_DATA_ROOT: path.join(isolatedPortableDataRoot, 'UClawData'),
     CLAWX_PORTABLE_RUNTIME_ROOT: runtimeRoot,
     CLAWX_RUNTIME_CACHE_ROOT: runtimeRoot,
     CLAWX_USER_DATA_DIR: userDataDir,
