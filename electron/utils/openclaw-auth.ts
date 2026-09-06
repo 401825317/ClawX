@@ -2724,22 +2724,33 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** Disable only the exact Tool Search defaults previously written by ClawX. */
-function disableLegacyClawXToolSearchDefault(config: Record<string, unknown>): boolean {
-  if (!isPlainRecord(config.tools) || !isPlainRecord(config.tools.toolSearch)) return false;
+/**
+ * Keep the full tool catalog available while deferring heavyweight schemas.
+ * Preserve every explicit user choice, and only migrate the exact legacy
+ * defaults previously written by UClaw.
+ */
+function ensureManagedToolSearchDirectoryDefault(config: Record<string, unknown>): boolean {
+  const tools = isPlainRecord(config.tools) ? config.tools : {};
+  const current = tools.toolSearch;
 
-  const tools = config.tools;
-  const toolSearch = tools.toolSearch as Record<string, unknown>;
-  const keys = Object.keys(toolSearch);
-  const isDirectoryDefault = toolSearch.enabled === true && toolSearch.mode === 'directory';
+  if (current === undefined) {
+    tools.toolSearch = { mode: 'directory' };
+    config.tools = tools;
+    return true;
+  }
+  if (!isPlainRecord(current)) return false;
+
+  const keys = Object.keys(current);
+  const isDirectoryDefault = current.enabled === true && current.mode === 'directory';
   const isBasicDefault = isDirectoryDefault && keys.length === 2;
   const isLimitedDefault = isDirectoryDefault
     && keys.length === 4
-    && toolSearch.searchDefaultLimit === 8
-    && toolSearch.maxSearchLimit === 12;
+    && current.searchDefaultLimit === 8
+    && current.maxSearchLimit === 12;
   if (!isBasicDefault && !isLimitedDefault) return false;
 
-  tools.toolSearch = false;
+  tools.toolSearch = { mode: 'directory' };
+  config.tools = tools;
   return true;
 }
 
@@ -3503,10 +3514,10 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
       console.log('[batch-sync] Enabled key-free Parallel web search');
     }
 
-    // Remove the Tool Search directory defaults seeded by older ClawX builds.
-    if (disableLegacyClawXToolSearchDefault(config)) {
+    // Defer full tool schemas by default while preserving explicit user settings.
+    if (ensureManagedToolSearchDirectoryDefault(config)) {
       modified = true;
-      console.log('[batch-sync] Disabled legacy UClaw tools.toolSearch directory default');
+      console.log('[batch-sync] Enabled UClaw tools.toolSearch directory default');
     }
 
     // UClaw owns these bundled runtime plugins, so every Gateway launch must

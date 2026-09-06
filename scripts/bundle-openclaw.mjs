@@ -25,6 +25,8 @@ import {
 import { patchOpenClawAcpStreamingRuntime } from './openclaw-acp-streaming-patch.mjs';
 import { patchOpenClawAcpTerminalErrorRuntime } from './openclaw-acp-terminal-error-patch.mjs';
 import { patchOpenClawMediaGenerationRuntime } from './openclaw-media-generation-patch.mjs';
+import { patchOpenClawModelCatalogCacheRuntime } from './openclaw-model-catalog-cache-patch.mjs';
+import { patchOpenClawPreparationRuntime } from './openclaw-preparation-patch.mjs';
 import { patchOpenClawResponseRequestIdRuntime } from './openclaw-response-request-id-patch.mjs';
 import { patchExtensionOpenClawSelfImports } from './openclaw-self-import-patch.mjs';
 
@@ -1054,6 +1056,12 @@ echo`   🩹 Verified UClaw media generation patch (${mediaGenerationPatch.files
 // Persist the provider request ID so Main can join transcripts to settled usage logs.
 const responseRequestIdPatch = await patchOpenClawResponseRequestIdRuntime(OUTPUT);
 echo`   🩹 Verified UClaw Responses request ID patch (${responseRequestIdPatch.filesPatched} file(s) patched)`;
+
+// Bundled plugin manifests are immutable for the lifetime of one packaged runtime.
+const modelCatalogCachePatch = await patchOpenClawModelCatalogCacheRuntime(OUTPUT);
+const preparationPatch = await patchOpenClawPreparationRuntime(OUTPUT);
+console.log(`   Verified UClaw preparation patch (${preparationPatch.filesPatched} file(s) patched)`);
+echo`   🩹 Verified UClaw model catalog cache patch (${modelCatalogCachePatch.filesPatched} file(s) patched)`;
 
 const openclawSelfImportPatch = patchExtensionOpenClawSelfImports(OUTPUT);
 if (openclawSelfImportPatch.specifiersPatched > 0) {

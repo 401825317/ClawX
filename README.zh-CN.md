@@ -140,6 +140,11 @@ UClaw 不再单独预装 `pdf`、`xlsx`、`docx`、`pptx` 技能。启动时只�
 Skills 页面可展示来自多个 OpenClaw 来源的技能（托管目录、workspace、额外技能目录），并显示每个技能的实际路径，便于直接打开真实安装位置。开发模式和打包产物都会完整保留 OpenClaw 自带的 bundled skills，并通过本地优先扫描全部展示。
 UClaw 另外提供 `presentation-maker`、`spreadsheet-maker`、`document-maker` 和 `blender-maker` 四个兼容技能，仍由模型在正常 OpenClaw Agent 循环中选择。Office 文件由本地 artifact runtime 写入，不挂接 prompt 或 transcript；Blender 只通过私有回环桥接接收校验后的声明式 SceneSpec。安装包不包含 Blender 本体，本机未安装时工具会明确返回能力不可用，不会把未生成的任务当成完成。
 
+### 文本运行时效率
+准备阶段将 `pi` 正确识别为内置运行时别名，不再为它扫描外部 CLI。MCP/LSP 配置按当前插件索引只读取 bundle 插件清单；插件启停、配置更新、凭据解析和每轮工具状态仍按原规则处理，不通过缓存或跳过检查削减能力。
+
+Tool Search 默认采用 `directory` 模式：工具仍可搜索、查看说明并执行，不必每轮重新发送全部工具的完整 schema；显式设置保持不变。OpenClaw 2026.6.10 同时复用不可变的内置模型目录，不缓存凭据，也不把 `smart-latest` 等动态别名固定到某个上游模型。Provider 生成耗时与本地准备耗时需要分别测量。
+
 ### 确定性产物任务
 在托管 UClaw 分发中，Electron Main 会在发送前识别演示文稿、文档、表格、网页、CAD 图纸和电商主图的明确新建或修改请求。空会话原地执行；存在无关历史时会创建一个独立且可见的产物会话。只有 Agent、工作空间和已知目标文件都一致的修改任务才会复用先前产物会话。服务端下发的 `features.artifacts` 开关按稳定安装 ID 分桶生效，并由中转服务再次核验。`uclaw-artifact-v1` 等版本化模型别名可供运行时使用，但通过 `visible: false` 从普通模型选择器中隐藏。
 

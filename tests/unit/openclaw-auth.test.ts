@@ -4323,7 +4323,7 @@ describe('batchSyncConfigFields', () => {
         maxSearchLimit: 12,
       },
     ],
-  ])('disables the legacy ClawX Tool Search %s', async (_label, toolSearch) => {
+  ])('migrates the legacy ClawX Tool Search %s', async (_label, toolSearch) => {
     await writeOpenClawJson({
       gateway: { auth: { mode: 'token', token: 'old' } },
       tools: {
@@ -4337,7 +4337,22 @@ describe('batchSyncConfigFields', () => {
 
     const config = await readOpenClawJson();
     const tools = config.tools as Record<string, unknown>;
-    expect(tools.toolSearch).toBe(false);
+    expect(tools.toolSearch).toEqual({ mode: 'directory' });
+    expect(tools.allow).toEqual(['read']);
+  });
+
+  it('seeds the Tool Search directory default when it is unset', async () => {
+    await writeOpenClawJson({
+      gateway: { auth: { mode: 'token', token: 'old' } },
+      tools: { allow: ['read'] },
+    });
+
+    const { batchSyncConfigFields } = await import('@electron/utils/openclaw-auth');
+    await batchSyncConfigFields('new-token');
+
+    const config = await readOpenClawJson();
+    const tools = config.tools as Record<string, unknown>;
+    expect(tools.toolSearch).toEqual({ mode: 'directory' });
     expect(tools.allow).toEqual(['read']);
   });
 
