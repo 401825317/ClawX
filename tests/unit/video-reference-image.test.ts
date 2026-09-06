@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   ACP_CHAT_IMAGE_MAX_BYTES,
   AcpChatImageTooLargeError,
+  IMAGE_SOURCE_MAX_BYTES,
   prepareAcpChatImage,
   prepareVideoReferenceImage,
 } from '../../electron/utils/video-reference-image';
@@ -90,6 +91,38 @@ describe('video reference image preparation', () => {
       filePath,
       fileName: 'tiny-limit.png',
       mimeType: 'image/png',
+      maxBytes: 32,
+    })).rejects.toThrow('could not be compressed below 32 bytes');
+  });
+
+  it('rejects a source beyond the local safety cap without reading it into memory', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'uclaw-video-reference-'));
+    temporaryDirectories.push(directory);
+    const filePath = join(directory, 'sparse-over-cap.bin');
+    await writeFile(filePath, Buffer.alloc(1));
+    await truncate(filePath, IMAGE_SOURCE_MAX_BYTES + 1);
+
+    await expect(prepareVideoReferenceImage({
+      filePath,
+      fileName: 'sparse-over-cap.bin',
+      mimeType: 'application/octet-stream',
+      maxBytes: 1024 * 1024,
+    })).rejects.toThrow('could not be compressed below 1024 KB');
+  });
+
+  it('rejects decompression-bomb dimensions before sharp allocates a huge frame', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'uclaw-video-reference-'));
+    temporaryDirectories.push(directory);
+    const filePath = join(directory, 'huge-svg.svg');
+    await writeFile(
+      filePath,
+      '<svg xmlns="http://www.w3.org/2000/svg" width="100000" height="100000"><rect width="100000" height="100000" fill="red"/></svg>',
+    );
+
+    await expect(prepareVideoReferenceImage({
+      filePath,
+      fileName: 'huge-svg.svg',
+      mimeType: 'image/svg+xml',
       maxBytes: 32,
     })).rejects.toThrow('could not be compressed below 32 bytes');
   });

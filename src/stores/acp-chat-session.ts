@@ -50,7 +50,9 @@ import { restoreBackgroundMediaProjections } from '@/lib/acp/background-media-pr
 import {
   appendSyntheticAssistantMessage,
   applyAcpSessionUpdate,
+  boundAcpTimelineItem,
   createEmptyAcpTimeline,
+  enforceAcpTimelineBounds,
   upsertSyntheticTurnAttachments,
 } from '@/lib/acp/reducer';
 import {
@@ -78,6 +80,10 @@ import type {
   RenderPart,
   TimelineItem,
 } from '@/lib/acp/timeline-types';
+import {
+  BoundedEventQueue,
+  estimateValueBytes,
+} from '@shared/acp-chat/bounded-event-queue';
 
 const EMPTY_SESSION_ID = '';
 const CANCEL_PERMISSION_OPTION_ID = '__cancelled__';
@@ -88,6 +94,11 @@ const VIDEO_GENERATION_PENDING_TIMEOUT_MS = UCLAW_VIDEO_GENERATION_TIMEOUT_MS + 
 const VIDEO_GENERATION_TRANSCRIPT_RETRY_DELAYS_MS = [500, 1500, 3000, 5000, 8000];
 const LIVE_TEXT_BATCH_WINDOW_MS = 32;
 const LIVE_TEXT_BATCH_MAX_UPDATES = 128;
+/** Bound notifications retained while Main is replaying a session. */
+// Match the bounded OpenClaw replay plus per-message stream notifications;
+// the 8 MiB byte ceiling remains the primary memory guard.
+const MAX_PENDING_LOAD_UPDATE_COUNT = 4_096;
+const MAX_PENDING_LOAD_UPDATE_BYTES = 8 * 1024 * 1024;
 const MAX_SETTLED_BACKGROUND_SNAPSHOTS = 3;
 const MAX_CACHED_TURN_TIMING_SESSIONS = 32;
 
@@ -109,7 +120,43 @@ type ImageGenerationCompatSession = {
 };
 
 const imageGenerationCompatSessions = new Map<string, ImageGenerationCompatSession>();
-const pendingLoadUpdates = new Map<number, AcpSessionUpdateEnvelope[]>();
+type PendingLoadUpdateQueue = BoundedEventQueue<AcpSessionUpdateEnvelope>;
+
+function isProtectedAcpLoadUpdate(event: AcpSessionUpdateEnvelope): boolean {
+  const update = event.notification?.update as unknown as Record<string, unknown> | undefined;
+  const updateType = typeof update?.sessionUpdate === 'string' ? update.sessionUpdate : '';
+  if (updateType === 'uclaw_turn_failure' || updateType === 'plan') return true;
+  if (updateType === 'tool_call' || updateType === 'tool_call_update') {
+    const status = typeof update?.status === 'string' ? update.status : '';
+    return status === 'completed' || status === 'failed' || status === 'cancelled'
+      || typeof update?.error === 'string';
+  }
+  // Preserve state/permission/config updates.  Intermediate text chunks are
+  // the only records safe to shed when a load exceeds its memory budget.
+  return !updateType.endsWith('_chunk');
+}
+
+function createPendingLoadUpdateQueue(): PendingLoadUpdateQueue {
+  return new BoundedEventQueue<AcpSessionUpdateEnvelope>({
+    maxEntries: MAX_PENDING_LOAD_UPDATE_COUNT,
+    maxBytes: MAX_PENDING_LOAD_UPDATE_BYTES,
+    estimateBytes: (event, budget) => estimateValueBytes(event, budget),
+    isProtected: isProtectedAcpLoadUpdate,
+  });
+}
+
+const pendingLoadUpdates = new Map<number, PendingLoadUpdateQueue>();
+
+function appendPendingLoadUpdates(generation: number, events: readonly AcpSessionUpdateEnvelope[]): void {
+  if (events.length === 0) return;
+  const queue = pendingLoadUpdates.get(generation) ?? createPendingLoadUpdateQueue();
+  queue.pushMany(events);
+  pendingLoadUpdates.set(generation, queue);
+}
+
+function readPendingLoadUpdates(generation: number): AcpSessionUpdateEnvelope[] {
+  return pendingLoadUpdates.get(generation)?.toArray() ?? [];
+}
 const browserFailureCancelOperationIds = new Set<number>();
 const browserFailureCancelPromises = new Map<string, Promise<boolean>>();
 type LiveSessionSnapshot = {
@@ -266,25 +313,25 @@ function applyPermissionRequestToTimeline(
 ): AcpTimelineSnapshot {
   const toolCallId = event.request.toolCall?.toolCallId;
   const id = `permission:${event.requestId}`;
-  const item: PermissionItem = {
+  const item = boundAcpTimelineItem({
     kind: 'permission',
     id,
     requestId: event.requestId,
     toolCallId,
     title: event.request.toolCall?.title ?? toolCallId ?? 'Permission request',
-    options: event.request.options.map((option) => ({
+    options: event.request.options.slice(-64).map((option) => ({
       optionId: option.optionId,
       name: option.name,
       kind: option.kind,
     })),
     status: 'pending',
-  };
-  return {
+  }) as PermissionItem;
+  return enforceAcpTimelineBounds({
     ...timeline,
     itemOrder: timeline.itemOrder.includes(id) ? timeline.itemOrder : [...timeline.itemOrder, id],
     itemsById: { ...timeline.itemsById, [id]: item },
     openMessageSegments: {},
-  };
+  });
 }
 
 function sessionIdentity(sessionKey: string, generation: number): SessionTimelineIdentity {
@@ -1041,13 +1088,13 @@ function replaceSyntheticImageCaptionAtItem(
     : item.parts.map((part, index) => (
         index === markdownIndex ? { kind: 'markdown' as const, text: caption } : part
       ));
-  return {
+  return enforceAcpTimelineBounds({
     ...timeline,
     itemsById: {
       ...timeline.itemsById,
       [itemId]: { ...item, parts },
     },
-  };
+  });
 }
 
 function replaceSyntheticImageCaption(
@@ -1717,8 +1764,7 @@ function applyLiveTextUpdateBatch(events: AcpSessionUpdateEnvelope[]): void {
   const state = useAcpChatSessionStore.getState();
   if (state.loading) {
     if (first.sessionKey === state.activeSessionKey) {
-      const updates = pendingLoadUpdates.get(first.generation) ?? [];
-      pendingLoadUpdates.set(first.generation, [...updates, ...events]);
+      appendPendingLoadUpdates(first.generation, events);
       return;
     }
     const liveSnapshot = liveSessionSnapshots.get(first.sessionKey);
@@ -1803,7 +1849,9 @@ function commitSessionTimeline(
       cwd: state.cwd,
       timeline: state.timeline,
     });
-    const updated = sessionTimelineCoordinator.update(identity, reduce);
+    const updated = sessionTimelineCoordinator.update(identity, (timeline) => (
+      enforceAcpTimelineBounds(reduce(timeline))
+    ));
     if (!updated) return undefined;
     if (updated.timeline !== state.timeline) {
       useAcpChatSessionStore.setState((current) => (
@@ -1821,7 +1869,9 @@ function commitSessionTimeline(
 
   const snapshot = liveSessionSnapshots.get(sessionKey);
   if (snapshot?.generation === generation) syncTimelineRecord(snapshot);
-  const updated = sessionTimelineCoordinator.update(identity, reduce);
+  const updated = sessionTimelineCoordinator.update(identity, (timeline) => (
+    enforceAcpTimelineBounds(reduce(timeline))
+  ));
   if (!updated) return undefined;
   if (snapshot?.generation === generation) {
     storeLiveSessionSnapshot({
@@ -2486,13 +2536,13 @@ function updatePermissionStatus(
   const item = timeline.itemsById[id];
   if (item?.kind !== 'permission') return timeline;
 
-  return {
+  return enforceAcpTimelineBounds({
     ...timeline,
     itemsById: {
       ...timeline.itemsById,
       [id]: { ...item, status },
     },
-  };
+  });
 }
 
 function createOptimisticMessageId(): string {
@@ -2544,7 +2594,7 @@ function appendOptimisticUserSegment(
     return item?.kind === 'message-segment' && item.role === 'user' && item.messageId === messageId;
   });
   const id = existingId ?? `${messageId}:0`;
-  const item: MessageSegmentItem = {
+  const item = boundAcpTimelineItem({
     kind: 'message-segment',
     id,
     role: 'user',
@@ -2555,15 +2605,15 @@ function appendOptimisticUserSegment(
     userPromptTextBlocksOptimistic: true,
     blockCount: 0,
     optimistic: true,
-  };
+  }) as MessageSegmentItem;
 
-  return {
+  return enforceAcpTimelineBounds({
     ...timeline,
     itemOrder: timeline.itemOrder.includes(id) ? timeline.itemOrder : [...timeline.itemOrder, id],
     itemsById: { ...timeline.itemsById, [id]: item },
     openMessageSegments: { ...timeline.openMessageSegments, [messageId]: id },
     segmentCounts: { ...timeline.segmentCounts, [messageId]: Math.max(timeline.segmentCounts[messageId] ?? 0, 1) },
-  };
+  });
 }
 
 function settleOptimisticUserSegment(
@@ -2574,7 +2624,7 @@ function settleOptimisticUserSegment(
   const item = itemId ? timeline.itemsById[itemId] : undefined;
   if (item?.kind !== 'message-segment' || item.role !== 'user') return timeline;
   const { [messageId]: _closedSegment, ...openMessageSegments } = timeline.openMessageSegments;
-  return {
+  return enforceAcpTimelineBounds({
     ...timeline,
     itemsById: {
       ...timeline.itemsById,
@@ -2585,7 +2635,7 @@ function settleOptimisticUserSegment(
       },
     },
     openMessageSegments,
-  };
+  });
 }
 
 const KNOWN_ACP_CHAT_ERROR_CODES = new Set<AcpChatErrorCode>([
@@ -2620,14 +2670,14 @@ function appendPromptFailure(
   if (failure.code === 'CANCELLED') return settled;
   const id = `turn-failure:${messageId}`;
   if (settled.itemsById[id]?.kind === 'turn-failure') return settled;
-  return {
+  return enforceAcpTimelineBounds({
     ...settled,
     itemOrder: settled.itemOrder.includes(id) ? settled.itemOrder : [...settled.itemOrder, id],
     itemsById: {
       ...settled.itemsById,
       [id]: { kind: 'turn-failure', id, userMessageId: messageId, failure },
     },
-  };
+  });
 }
 
 function settledPromptTurnTimings(
@@ -2955,10 +3005,13 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       const replayUpdates = (result.sessionUpdates ?? []).filter((event) => (
         event.sessionKey === input.sessionKey && event.generation === generation
       ));
-      const concurrentUpdates = (pendingLoadUpdates.get(generation) ?? []).filter((event) => (
+      const concurrentUpdates = readPendingLoadUpdates(generation).filter((event) => (
         event.sessionKey === input.sessionKey && event.generation === generation
       ));
-      pendingLoadUpdates.clear();
+      // A newer load may already be buffering a different generation.  Consume
+      // only the generation that just completed; clearing the whole map can
+      // silently discard notifications for that concurrent load.
+      pendingLoadUpdates.delete(generation);
       const currentResumedSnapshot = result.resumedActivePrompt
         ? liveSessionSnapshots.get(input.sessionKey)
         : undefined;
@@ -3885,8 +3938,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
     const state = get();
     if (state.loading) {
       if (event.sessionKey === state.activeSessionKey) {
-        const updates = pendingLoadUpdates.get(event.generation) ?? [];
-        pendingLoadUpdates.set(event.generation, [...updates, event]);
+        appendPendingLoadUpdates(event.generation, [event]);
       } else {
         const liveSnapshot = liveSessionSnapshots.get(event.sessionKey);
         if (liveSnapshot?.generation === event.generation) {

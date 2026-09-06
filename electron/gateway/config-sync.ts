@@ -71,6 +71,7 @@ import { getBlenderBridgeEnvironment } from '../services/blender/bridge-server';
 import {
   buildManagedOpenAiProviderEnv,
   shouldInjectProviderEnv,
+  stripEnvironmentKeys,
   stripManagedProviderEnv,
   stripSystemdSupervisorEnv,
 } from './config-sync-env';
@@ -1008,7 +1009,10 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
     ? `http=${resolvedProxy.httpProxy || '-'}, https=${resolvedProxy.httpsProxy || '-'}, all=${resolvedProxy.allProxy || '-'}`
     : 'disabled';
 
-  const { NODE_OPTIONS: _nodeOptions, ...baseEnv } = process.env;
+  // Windows environment variable names are case-insensitive.  Destructuring
+  // only the canonical spelling would allow `node_options`/mixed-case values
+  // to leak host V8 flags into the Gateway child process.
+  const baseEnv = stripEnvironmentKeys(process.env, ['NODE_OPTIONS']);
   const baseEnvRecord = baseEnv as Record<string, string | undefined>;
   const baseEnvPatched = binPathExists
     ? prependPathEntry(baseEnvRecord, binPath).env

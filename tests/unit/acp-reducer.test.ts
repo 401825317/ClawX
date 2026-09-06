@@ -1,7 +1,29 @@
 import { describe, expect, it } from 'vitest';
 import { applyAttachmentResolution, attachmentRequestFingerprint } from '@/lib/acp/attachments';
-import { contentBlockToRenderPart, toolContentToRenderPart } from '@/lib/acp/content-blocks';
-import { appendSyntheticAssistantMessage, applyAcpSessionUpdate, createEmptyAcpTimeline } from '@/lib/acp/reducer';
+import {
+  ACP_RENDER_CONTENT_MAX_BLOCKS,
+  contentBlockToRenderPart,
+  contentBlocksToRenderParts,
+  toolContentToRenderPart,
+  toolContentToRenderParts,
+} from '@/lib/acp/content-blocks';
+import {
+  ACP_RENDER_PART_MAX_CHARS,
+  ACP_TIMELINE_MAX_BYTES,
+  ACP_TOOL_OUTPUT_MAX_BYTES,
+  appendSyntheticAssistantMessage,
+  applyAcpSessionUpdate,
+  createEmptyAcpTimeline,
+  enforceAcpTimelineBounds,
+} from '@/lib/acp/reducer';
+import { estimateValueBytes } from '@shared/acp-chat/bounded-event-queue';
+import type { RenderPart } from '@/lib/acp/timeline-types';
+import {
+  OPENCLAW_PROMPT_TEXT_MAX_BLOCKS,
+  OPENCLAW_PROMPT_TEXT_MAX_BYTES,
+  OPENCLAW_PROMPT_TEXT_MAX_CHARS,
+  openClawPromptTextBlocks,
+} from '@/lib/acp/openclaw-prompt-compat';
 
 const assistantBlockContext = {
   role: 'assistant' as const,
@@ -984,6 +1006,234 @@ describe('ACP timeline reducer', () => {
     }, assistantBlockContext)).toEqual({ kind: 'image', source: 'data:image/png;base64,abc123', mimeType: 'image/png' });
   });
 
+  it('does not materialize an oversized inline image data URI in renderer state', () => {
+    const oversizedData = 'A'.repeat(512 * 1024 + 1);
+    expect(contentBlockToRenderPart({
+      type: 'image',
+      data: oversizedData,
+      mimeType: 'image/png',
+    }, assistantBlockContext)).toEqual({
+      kind: 'error',
+      message: 'ACP inline image exceeded the renderer memory safety limit.',
+    });
+  });
+
+  it('keeps only the newest ACP content blocks when projecting a huge array', () => {
+    const blocks = Array.from({ length: 10_000 }, (_, index) => ({
+      type: 'text' as const,
+      text: `block-${index}`,
+    }));
+    const parts = contentBlocksToRenderParts(blocks, assistantBlockContext);
+
+    expect(parts).toHaveLength(ACP_RENDER_CONTENT_MAX_BLOCKS);
+    expect(parts[0]).toEqual({ kind: 'markdown', text: 'block-9488' });
+    expect(parts.at(-1)).toEqual({ kind: 'markdown', text: 'block-9999' });
+  });
+
+  it('keeps only the newest tool content entries when projecting a huge array', () => {
+    const content = Array.from({ length: 10_000 }, (_, index) => ({
+      type: 'terminal' as const,
+      terminalId: `terminal-${index}`,
+    }));
+    const parts = toolContentToRenderParts(content, {
+      role: 'assistant',
+      messageId: 'tool:bounded',
+      segmentIndex: 0,
+    });
+
+    expect(parts).toHaveLength(ACP_RENDER_CONTENT_MAX_BLOCKS);
+    expect(parts[0]).toEqual({ kind: 'markdown', text: 'Terminal: terminal-9488' });
+    expect(parts.at(-1)).toEqual({ kind: 'markdown', text: 'Terminal: terminal-9999' });
+  });
+
+  it('bounds OpenClaw prompt text blocks and retains the newest content', () => {
+    const blocks = Array.from({ length: 10_000 }, (_, index) => ({
+      type: 'text' as const,
+      text: `prompt-${index}`,
+    }));
+    const projected = openClawPromptTextBlocks(blocks);
+
+    expect(projected.length).toBeLessThanOrEqual(OPENCLAW_PROMPT_TEXT_MAX_BLOCKS);
+    expect(projected[0]).toBe('prompt-9872');
+    expect(projected.at(-1)).toBe('prompt-9999');
+    expect(projected.reduce((total, value) => total + value.length * 2 + 8, 0))
+      .toBeLessThanOrEqual(OPENCLAW_PROMPT_TEXT_MAX_BYTES);
+
+    const oversized = openClawPromptTextBlocks([{
+      type: 'text',
+      text: 'x'.repeat(OPENCLAW_PROMPT_TEXT_MAX_CHARS * 2),
+    }]);
+    expect(oversized).toHaveLength(1);
+    expect(oversized[0]!.length).toBeLessThanOrEqual(OPENCLAW_PROMPT_TEXT_MAX_CHARS);
+    expect(oversized[0]).toContain('[UClaw: content truncated for memory safety]');
+  });
+
+  it('evicts older OpenClaw prompt blocks when the aggregate text budget is full', () => {
+    const blocks = Array.from({ length: 12 }, (_, index) => ({
+      type: 'text' as const,
+      text: `${index}-${'x'.repeat(256 * 1024)}`,
+    }));
+    const projected = openClawPromptTextBlocks(blocks);
+
+    expect(projected.at(-1)).toMatch(/^11-/);
+    expect(projected.some((value) => value.startsWith('0-'))).toBe(false);
+    expect(projected.reduce((total, value) => total + value.length * 2 + 8, 0))
+      .toBeLessThanOrEqual(OPENCLAW_PROMPT_TEXT_MAX_BYTES);
+  });
+
+  it('evicts the oldest timeline items after the 1,000 item memory-safety limit', () => {
+    let state = createEmptyAcpTimeline('agent:pi:s1', 1);
+    for (let index = 0; index < 1_005; index += 1) {
+      state = applyAcpSessionUpdate(state, {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'user_message',
+          messageId: `bounded-user-${index}`,
+          content: [{ type: 'text', text: `message ${index}` }],
+        },
+      });
+    }
+
+    expect(state.itemOrder).toHaveLength(1_000);
+    expect(state.itemOrder[0]).toBe('bounded-user-5:0');
+    expect(state.itemOrder.at(-1)).toBe('bounded-user-1004:0');
+    expect(state.itemsById).not.toHaveProperty('bounded-user-0:0');
+  });
+
+  it('bounds one tool result before retaining it in the timeline', () => {
+    const state = applyAcpSessionUpdate(createEmptyAcpTimeline('agent:pi:s1', 1), {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'oversized-tool-output',
+        title: 'Large tool',
+        status: 'completed',
+        rawOutput: { body: 'x'.repeat(1024 * 1024) },
+      },
+    });
+
+    expect(state.itemsById['tool:oversized-tool-output']).toMatchObject({
+      kind: 'tool-call',
+      output: {
+        __uclawTruncated: true,
+      },
+    });
+  });
+
+  it('keeps terminal render parts inside both count and byte limits', () => {
+    const parts: RenderPart[] = Array.from({ length: 600 }, (_, index) => (
+      index % 2 === 0
+        ? { kind: 'error', message: `error-${index}-${'x'.repeat(2_048)}` }
+        : {
+            kind: 'attachment',
+            attachmentId: `attachment-${index}`,
+            reference: { uri: `file:///tmp/${index}.txt`, name: `${index}.txt` },
+            source: 'acp-resource',
+            access: { status: 'pending' },
+          }
+    ));
+    const state = appendSyntheticAssistantMessage(createEmptyAcpTimeline('agent:pi:s1', 1), {
+      messageId: 'bounded-terminal-parts',
+      evidenceId: 'evidence-bounded-terminal-parts',
+      parts,
+    });
+    const item = state.itemsById['bounded-terminal-parts:0'];
+    expect(item?.kind).toBe('message-segment');
+    if (item?.kind !== 'message-segment') throw new Error('expected bounded message segment');
+    expect(item.parts.length).toBeLessThanOrEqual(512);
+    expect(estimateValueBytes(item.parts, ACP_TOOL_OUTPUT_MAX_BYTES + 1))
+      .toBeLessThanOrEqual(ACP_TOOL_OUTPUT_MAX_BYTES);
+  });
+
+  it('bounds metadata and never returns one oversized protected timeline item', () => {
+    let state = applyAcpSessionUpdate(createEmptyAcpTimeline('agent:pi:s1', 1), {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'usage_update',
+        details: 'x'.repeat(5 * 1024 * 1024),
+      },
+    });
+    expect(estimateValueBytes(state.metadata, ACP_TIMELINE_MAX_BYTES + 1))
+      .toBeLessThanOrEqual(ACP_TIMELINE_MAX_BYTES);
+
+    state = enforceAcpTimelineBounds({
+      ...state,
+      itemOrder: ['permission:huge'],
+      itemsById: {
+        'permission:huge': {
+          kind: 'permission',
+          id: 'permission:huge',
+          requestId: 'huge',
+          title: 'x'.repeat(5 * 1024 * 1024),
+          options: [],
+          status: 'pending',
+        },
+      },
+    });
+
+    const retainedBytes = estimateValueBytes(state.metadata, ACP_TIMELINE_MAX_BYTES + 1)
+      + state.itemOrder.reduce((total, id) => total + estimateValueBytes(state.itemsById[id], ACP_TIMELINE_MAX_BYTES + 1), 0);
+    expect(retainedBytes).toBeLessThanOrEqual(ACP_TIMELINE_MAX_BYTES);
+  });
+
+  it('normalizes unmarked snapshots even when each oversized field fits below the aggregate limit', () => {
+    const base = createEmptyAcpTimeline('agent:pi:s1', 1);
+    const oversizedToolSnapshot = {
+      ...base,
+      itemOrder: ['tool:moderate'],
+      itemsById: {
+        'tool:moderate': {
+          kind: 'tool-call' as const,
+          id: 'tool:moderate',
+          toolCallId: 'moderate',
+          title: 'Moderate tool output',
+          status: 'completed' as const,
+          output: 'x'.repeat(2 * 1024 * 1024),
+          outputParts: [],
+          locations: [],
+        },
+      },
+    };
+    const boundedToolSnapshot = enforceAcpTimelineBounds(oversizedToolSnapshot);
+    const boundedTool = boundedToolSnapshot.itemsById['tool:moderate'];
+    expect(boundedTool?.kind).toBe('tool-call');
+    if (boundedTool?.kind !== 'tool-call') throw new Error('expected bounded tool call');
+    expect(typeof boundedTool.output).toBe('string');
+    expect((boundedTool.output as string).length).toBeLessThan(2 * 1024 * 1024);
+
+    const oversizedMessageSnapshot = {
+      ...base,
+      itemOrder: ['message:moderate:0'],
+      itemsById: {
+        'message:moderate:0': {
+          kind: 'message-segment' as const,
+          id: 'message:moderate:0',
+          role: 'assistant' as const,
+          messageId: 'moderate',
+          segmentIndex: 0,
+          blockCount: 1,
+          parts: [{ kind: 'markdown' as const, text: 'm'.repeat(ACP_RENDER_PART_MAX_CHARS * 2) }],
+        },
+      },
+    };
+    const boundedMessageSnapshot = enforceAcpTimelineBounds(oversizedMessageSnapshot);
+    const message = boundedMessageSnapshot.itemsById['message:moderate:0'];
+    expect(message?.kind).toBe('message-segment');
+    if (message?.kind !== 'message-segment') throw new Error('expected bounded message segment');
+    expect(message.parts[0]).toMatchObject({ kind: 'markdown' });
+    if (message.parts[0]?.kind !== 'markdown') throw new Error('expected markdown part');
+    expect(message.parts[0].text.length).toBeLessThanOrEqual(ACP_RENDER_PART_MAX_CHARS);
+
+    const oversizedMetadataSnapshot = {
+      ...base,
+      metadata: { title: 't'.repeat(64 * 1024), usage: { value: 'u'.repeat(64 * 1024) } },
+    };
+    const boundedMetadataSnapshot = enforceAcpTimelineBounds(oversizedMetadataSnapshot);
+    expect(boundedMetadataSnapshot.metadata.title?.length).toBeLessThan(64 * 1024);
+    expect(estimateValueBytes(boundedMetadataSnapshot.metadata, ACP_TIMELINE_MAX_BYTES + 1))
+      .toBeLessThanOrEqual(256 * 1024);
+  });
+
   it('returns an unavailable attachment for embedded resources without a usable uri', () => {
     expect(contentBlockToRenderPart({
       type: 'resource',
@@ -1187,6 +1437,93 @@ describe('ACP timeline reducer', () => {
     });
 
     expect(state.metadata.configOptions).toEqual(configOptions);
+  });
+
+  it('keeps currentModeId while bounding metadata and nested config options', () => {
+    let nested: Record<string, unknown> = { value: 'leaf', name: 'leaf' };
+    for (let index = 0; index < 24; index += 1) {
+      nested = {
+        group: `group-${index}`,
+        name: `group-${index}`,
+        options: [nested],
+      };
+    }
+    let state = applyAcpSessionUpdate(createEmptyAcpTimeline('agent:pi:s1', 1), {
+      sessionId: 'agent:pi:s1',
+      update: { sessionUpdate: 'current_mode_update', currentModeId: 'safe-mode' },
+    });
+    state = applyAcpSessionUpdate(state, {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'config_option_update',
+        configOptions: [{
+          type: 'select', id: 'deep', name: 'Deep', currentValue: 'leaf', options: [nested],
+        }],
+      },
+    } as never);
+    state = applyAcpSessionUpdate(state, {
+      sessionId: 'agent:pi:s1',
+      update: { sessionUpdate: 'usage_update', details: 'x'.repeat(512 * 1024) },
+    });
+
+    expect(state.metadata.currentModeId).toBe('safe-mode');
+    const option = state.metadata.configOptions?.[0];
+    expect(option?.type).toBe('select');
+    if (option?.type !== 'select') throw new Error('expected bounded select option');
+    let depth = 0;
+    let cursor: unknown = option.options;
+    while (Array.isArray(cursor) && cursor.length > 0) {
+      depth += 1;
+      cursor = (cursor[0] as Record<string, unknown>).options;
+    }
+    expect(depth).toBeLessThanOrEqual(8);
+  });
+
+  it('bounds tool location paths and metadata before retaining a tool call', () => {
+    const state = applyAcpSessionUpdate(createEmptyAcpTimeline('agent:pi:s1', 1), {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'bounded-location',
+        status: 'completed',
+        locations: [{
+          path: 'p'.repeat(64 * 1024),
+          line: -4.9,
+          _meta: {
+            source: 's'.repeat(64 * 1024),
+            nested: { should: 'be omitted' },
+          },
+        }],
+      },
+    } as never);
+    const item = state.itemsById['tool:bounded-location'];
+    expect(item?.kind).toBe('tool-call');
+    if (item?.kind !== 'tool-call') throw new Error('expected bounded tool call');
+    expect(item.locations).toHaveLength(1);
+    expect(item.locations[0]!.path.length).toBeLessThanOrEqual(8 * 1024);
+    expect(item.locations[0]!.line).toBe(0);
+    expect(item.locations[0]!._meta).toMatchObject({
+      nested: { __uclawTruncated: true },
+    });
+    expect(JSON.stringify(item.locations[0]!._meta)).not.toContain('s'.repeat(64 * 1024));
+  });
+
+  it('drops segment counters for timeline messages evicted by the item bound', () => {
+    let state = createEmptyAcpTimeline('agent:pi:s1', 1);
+    for (let index = 0; index < 1_005; index += 1) {
+      state = applyAcpSessionUpdate(state, {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'user_message',
+          messageId: `segment-count-${index}`,
+          content: [{ type: 'text', text: `message-${index}` }],
+        },
+      });
+    }
+
+    expect(state.segmentCounts).not.toHaveProperty('segment-count-0');
+    expect(state.segmentCounts).toHaveProperty('segment-count-1004', 1);
+    expect(Object.keys(state.segmentCounts).length).toBeLessThanOrEqual(1_000);
   });
 
   it('rebuilds a persisted terminal failure against the latest replayed user turn', () => {

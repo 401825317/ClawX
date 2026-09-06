@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, ftruncateSync, mkdirSync, openSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as ts from 'typescript';
@@ -158,6 +158,7 @@ vi.mock('@electron/utils/logger', async (importOriginal) => {
     logger: {
       info: vi.fn(),
       warn: vi.fn(),
+      error: vi.fn(),
       getLogDir: () => logDir,
       getLogFilePath: () => join(logDir, 'clawx-current.log'),
       getRecentLogs: vi.fn(),
@@ -1869,6 +1870,61 @@ describe('host services', () => {
       },
       120000,
     );
+  });
+
+  it('rejects too many staged media entries before calling the gateway', async () => {
+    const gatewayManager = {
+      rpc: vi.fn().mockResolvedValue({ runId: 'unexpected-run' }),
+    };
+    const { createChatApi } = await import('@electron/services/chat-api');
+
+    await expect(createChatApi({
+      gatewayManager: gatewayManager as never,
+      mainWindow: {} as never,
+    }).sendWithMedia({
+      sessionKey: 'agent:main:main',
+      message: 'inspect these',
+      idempotencyKey: 'idem-too-many',
+      media: Array.from({ length: 9 }, (_, index) => ({
+        filePath: join(tmpdir(), `missing-${index}.png`),
+        mimeType: 'image/png',
+      })),
+    })).resolves.toEqual({
+      success: false,
+      error: 'Error: A message can include at most 8 media attachments.',
+    });
+
+    expect(gatewayManager.rpc).not.toHaveBeenCalled();
+  });
+
+  it('rejects an oversized vision file before allocating its base64 payload', async () => {
+    const mediaPath = join(tmpdir(), `clawx-host-services-large-${Date.now()}.png`);
+    const descriptor = openSync(mediaPath, 'w');
+    try {
+      ftruncateSync(descriptor, 25 * 1024 * 1024);
+    } finally {
+      closeSync(descriptor);
+    }
+
+    const gatewayManager = { rpc: vi.fn() };
+    const { createChatApi } = await import('@electron/services/chat-api');
+    try {
+      await expect(createChatApi({
+        gatewayManager: gatewayManager as never,
+        mainWindow: {} as never,
+      }).sendWithMedia({
+        sessionKey: 'agent:main:main',
+        message: 'inspect this',
+        idempotencyKey: 'idem-too-large',
+        media: [{ filePath: mediaPath, mimeType: 'image/png', fileName: 'large.png' }],
+      })).resolves.toEqual({
+        success: false,
+        error: 'Error: Attached images exceed the 24 MiB combined memory safety limit.',
+      });
+      expect(gatewayManager.rpc).not.toHaveBeenCalled();
+    } finally {
+      rmSync(mediaPath, { force: true });
+    }
   });
 
   it('loads session summaries and transcript history through the typed sessions service', async () => {

@@ -24,6 +24,7 @@ import {
 } from './install-openclaw-skill-shims.mjs';
 import { patchOpenClawAcpStreamingRuntime } from './openclaw-acp-streaming-patch.mjs';
 import { patchOpenClawAcpTerminalErrorRuntime } from './openclaw-acp-terminal-error-patch.mjs';
+import { patchOpenClawAcpSessionReplayRuntime } from './openclaw-acp-session-replay-guard-patch.mjs';
 import { patchOpenClawMediaGenerationRuntime } from './openclaw-media-generation-patch.mjs';
 import { patchOpenClawModelCatalogCacheRuntime } from './openclaw-model-catalog-cache-patch.mjs';
 import { patchOpenClawPreparationRuntime } from './openclaw-preparation-patch.mjs';
@@ -1047,6 +1048,12 @@ echo`   🩹 Verified UClaw ACP streaming patch (${acpStreamingPatch.filesPatche
 // attach the correct recovery message to the originating user turn.
 const acpTerminalErrorPatch = await patchOpenClawAcpTerminalErrorRuntime(OUTPUT);
 echo`   🩹 Verified UClaw ACP terminal error patch (${acpTerminalErrorPatch.filesPatched} file(s) patched)`;
+
+// Session/load must never ask the gateway for an unbounded million-message
+// transcript. Keep the packaged runtime on the same guarded 6.10 layout as
+// the postinstall copy, and fail the bundle if OpenClaw's generated layout drifts.
+const acpSessionReplayGuardPatch = await patchOpenClawAcpSessionReplayRuntime(OUTPUT);
+echo`   🩹 Verified UClaw ACP session replay guard (${acpSessionReplayGuardPatch.filesPatched} file(s) patched)`;
 
 // Media must complete inside the active UClaw chat turn. Reapply after copying
 // so a manual bundle build cannot omit the postinstall runtime patch.

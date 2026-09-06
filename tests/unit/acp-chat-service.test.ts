@@ -127,9 +127,10 @@ function createFakeChild() {
 async function createSpawnedService(
   connection = createConnection(),
   gateway?: { getStatus: () => { port?: number }; getGatewayToken?: () => Promise<string> },
+  childOverride?: ReturnType<typeof createFakeChild>,
 ) {
   const send = vi.fn();
-  const child = createFakeChild();
+  const child = childOverride ?? createFakeChild();
   acpSdkMock.state.connectionForSpawn = connection;
   childProcessMock.state.child = child;
   const { AcpChatService } = await import('../../electron/services/acp-chat-service');
@@ -1407,6 +1408,287 @@ describe('AcpChatService', () => {
     await service.loadSession({ sessionKey: 'agent:pi:s2', workspaceRoot: '/repo', cwd: '/repo' });
     expect(childProcessMock.fork).toHaveBeenCalledTimes(2);
     expect(secondConnection.initialize).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a prompt with too many media entries before touching attachment files', async () => {
+    const { service, connection } = await createService();
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+
+    await expect(service.sendPrompt({
+      sessionKey: 'agent:pi:s1',
+      cwd: '/repo',
+      message: 'Inspect these files.',
+      media: Array.from({ length: 9 }, (_, index) => ({
+        filePath: `/does/not/exist/${index}.txt`,
+        mimeType: 'text/plain',
+      })),
+    })).resolves.toEqual({
+      success: false,
+      error: 'A message can include at most 8 media attachments.',
+    });
+
+    expect(connection.prompt).not.toHaveBeenCalled();
+  });
+
+  it('rejects an oversized prompt before creating ACP content blocks', async () => {
+    const { service, connection } = await createService();
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+
+    await expect(service.sendPrompt({
+      sessionKey: 'agent:pi:s1',
+      cwd: '/repo',
+      message: 'x'.repeat(2 * 1024 * 1024 + 1),
+    })).resolves.toEqual({
+      success: false,
+      error: 'Message exceeds the 2 MiB UTF-8 memory safety limit.',
+    });
+
+    expect(connection.prompt).not.toHaveBeenCalled();
+  });
+
+  it('waits before the one bounded ACP restart after a resource exhaustion exit', async () => {
+    vi.useFakeTimers();
+    const connection = createConnection();
+    const firstInitialization = createDeferred<ReturnType<typeof createInitResponse>>();
+    connection.initialize
+      .mockReturnValueOnce(firstInitialization.promise)
+      .mockResolvedValueOnce(createInitResponse());
+    const firstChild = createFakeChild();
+    const secondChild = createFakeChild();
+    Object.assign(firstChild, { exitCode: null, signalCode: null, pid: 1001 });
+    Object.assign(secondChild, { exitCode: null, signalCode: null, pid: 1002 });
+    acpSdkMock.state.connectionForSpawn = connection;
+    childProcessMock.state.child = firstChild;
+    const send = vi.fn();
+    const { AcpChatService } = await import('../../electron/services/acp-chat-service');
+    const service = new AcpChatService(
+      { webContents: { send } } as never,
+      createPassthroughAccessRegistry() as never,
+      undefined,
+      undefined,
+    );
+
+    try {
+      const load = service.loadSession({ sessionKey: 'agent:pi:resource', workspaceRoot: '/repo', cwd: '/repo' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(childProcessMock.fork).toHaveBeenCalledTimes(1);
+
+      firstChild.stderr.emit('data', 'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory');
+      Object.assign(firstChild, { exitCode: 3221226505 });
+      firstChild.emit('exit', 3221226505);
+      childProcessMock.state.child = secondChild;
+
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(249);
+      expect(childProcessMock.fork).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(751);
+      await expect(load).resolves.toMatchObject({ success: true, generation: 1 });
+      expect(childProcessMock.fork).toHaveBeenCalledTimes(2);
+      expect(connection.initialize).toHaveBeenCalledTimes(2);
+      expect(loggerMock.info).toHaveBeenCalledWith(expect.stringContaining('after 1000ms (resource)'));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries when ACP emits spawn error without exit or close', async () => {
+    vi.useFakeTimers();
+    const firstConnection = createConnection();
+    const firstInitialization = createDeferred<ReturnType<typeof createInitResponse>>();
+    firstConnection.initialize
+      .mockReturnValueOnce(firstInitialization.promise)
+      .mockResolvedValueOnce(createInitResponse());
+    const secondConnection = createConnection();
+    const firstChild = createFakeChild();
+    const secondChild = createFakeChild();
+    Object.assign(firstChild, { exitCode: null, signalCode: null, pid: 1201 });
+    Object.assign(secondChild, { exitCode: null, signalCode: null, pid: 1202 });
+    acpSdkMock.state.connectionForSpawn = firstConnection;
+    childProcessMock.state.child = firstChild;
+    const { service } = await createSpawnedService(firstConnection, undefined, firstChild);
+
+    try {
+      const load = service.loadSession({ sessionKey: 'agent:pi:spawn-error', workspaceRoot: '/repo', cwd: '/repo' });
+      await vi.waitFor(() => expect(childProcessMock.fork).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(firstChild.listenerCount('error')).toBeGreaterThan(0));
+
+      // ChildProcess may emit only error for ENOENT/ENOMEM. The old
+      // exit-only watcher left `load` pending forever in this case.
+      firstChild.emit('error', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }));
+      firstChild.emit('exit', 1);
+      firstChild.emit('close', 1, null);
+      firstInitialization.resolve(createInitResponse());
+      acpSdkMock.state.connectionForSpawn = secondConnection;
+      childProcessMock.state.child = secondChild;
+
+      await vi.advanceTimersByTimeAsync(249);
+      expect(childProcessMock.fork).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(load).resolves.toMatchObject({ success: true, generation: 1 });
+      expect(childProcessMock.fork).toHaveBeenCalledTimes(2);
+      expect(secondConnection.initialize).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not lose a spawn error emitted before the spawn await continuation', async () => {
+    vi.useFakeTimers();
+    const firstConnection = createConnection();
+    const firstInitialization = createDeferred<ReturnType<typeof createInitResponse>>();
+    firstConnection.initialize.mockReturnValueOnce(firstInitialization.promise);
+    const secondConnection = createConnection();
+    const firstChild = createFakeChild();
+    const secondChild = createFakeChild();
+    Object.assign(firstChild, { exitCode: null, signalCode: null, pid: 1231 });
+    Object.assign(secondChild, { exitCode: null, signalCode: null, pid: 1232 });
+    acpSdkMock.state.connectionForSpawn = firstConnection;
+    childProcessMock.state.child = firstChild;
+    // ChildProcess emits ENOENT/ENOMEM on nextTick. That callback can run
+    // before an async function resumes after `await spawnConnection()`.
+    childProcessMock.fork.mockImplementationOnce(() => {
+      process.nextTick(() => {
+        firstChild.emit('error', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }));
+      });
+      return firstChild;
+    });
+    const { service } = await createSpawnedService(firstConnection, undefined, firstChild);
+
+    try {
+      const load = service.loadSession({ sessionKey: 'agent:pi:spawn-next-tick', workspaceRoot: '/repo', cwd: '/repo' });
+      await vi.runAllTicks();
+      await vi.advanceTimersByTimeAsync(0);
+      firstInitialization.resolve(createInitResponse());
+      acpSdkMock.state.connectionForSpawn = secondConnection;
+      childProcessMock.state.child = secondChild;
+      await vi.advanceTimersByTimeAsync(249);
+      expect(childProcessMock.fork).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(load).resolves.toMatchObject({ success: true, generation: 1 });
+      expect(childProcessMock.fork).toHaveBeenCalledTimes(2);
+      expect(secondConnection.initialize).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('treats close without exit as a terminal ACP startup failure', async () => {
+    vi.useFakeTimers();
+    const firstConnection = createConnection();
+    const firstInitialization = createDeferred<ReturnType<typeof createInitResponse>>();
+    firstConnection.initialize.mockReturnValueOnce(firstInitialization.promise);
+    const secondConnection = createConnection();
+    const firstChild = createFakeChild();
+    const secondChild = createFakeChild();
+    Object.assign(firstChild, { exitCode: null, signalCode: null, pid: 1211 });
+    Object.assign(secondChild, { exitCode: null, signalCode: null, pid: 1212 });
+    acpSdkMock.state.connectionForSpawn = firstConnection;
+    childProcessMock.state.child = firstChild;
+    const { service } = await createSpawnedService(firstConnection, undefined, firstChild);
+
+    try {
+      const load = service.loadSession({ sessionKey: 'agent:pi:close-only', workspaceRoot: '/repo', cwd: '/repo' });
+      await vi.waitFor(() => expect(childProcessMock.fork).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(firstChild.listenerCount('close')).toBeGreaterThan(0));
+      firstChild.emit('close', 1, null);
+      firstInitialization.resolve(createInitResponse());
+      acpSdkMock.state.connectionForSpawn = secondConnection;
+      childProcessMock.state.child = secondChild;
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(childProcessMock.fork).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(load).resolves.toMatchObject({ success: true, generation: 1 });
+      expect(childProcessMock.fork).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds a child that emits no terminal event and cleans up its watcher', async () => {
+    vi.useFakeTimers();
+    const firstConnection = createConnection();
+    const firstInitialization = createDeferred<ReturnType<typeof createInitResponse>>();
+    firstConnection.initialize.mockReturnValue(firstInitialization.promise);
+    const secondConnection = createConnection();
+    const secondInitialization = createDeferred<ReturnType<typeof createInitResponse>>();
+    secondConnection.initialize.mockReturnValue(secondInitialization.promise);
+    const firstChild = createFakeChild();
+    const secondChild = createFakeChild();
+    Object.assign(firstChild, { exitCode: null, signalCode: null, pid: 1221 });
+    Object.assign(secondChild, { exitCode: null, signalCode: null, pid: 1222 });
+    acpSdkMock.state.connectionForSpawn = firstConnection;
+    childProcessMock.state.child = firstChild;
+    const { AcpChatService, ACP_CHILD_TERMINATION_TIMEOUT_MS } = await import('../../electron/services/acp-chat-service');
+    const service = new AcpChatService(
+      { webContents: { send: vi.fn() } } as never,
+      createPassthroughAccessRegistry() as never,
+      undefined,
+      undefined,
+    );
+
+    try {
+      const load = service.loadSession({ sessionKey: 'agent:pi:timeout', workspaceRoot: '/repo', cwd: '/repo' });
+      await vi.waitFor(() => expect(firstChild.listenerCount('exit')).toBeGreaterThan(0));
+      // No error/exit/close is emitted. The bounded timer must release the
+      // initialization and remove its three temporary listeners.
+      await vi.advanceTimersByTimeAsync(ACP_CHILD_TERMINATION_TIMEOUT_MS);
+      expect(firstChild.listenerCount('close')).toBe(1); // spawnConnection's permanent state listener only
+      acpSdkMock.state.connectionForSpawn = secondConnection;
+      childProcessMock.state.child = secondChild;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(childProcessMock.fork).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(ACP_CHILD_TERMINATION_TIMEOUT_MS);
+      await expect(load).resolves.toMatchObject({ success: false });
+      firstInitialization.resolve(createInitResponse());
+      secondInitialization.resolve(createInitResponse());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not let a concurrent warmup bypass the delayed ACP restart', async () => {
+    vi.useFakeTimers();
+    const connection = createConnection();
+    const firstInitialization = createDeferred<ReturnType<typeof createInitResponse>>();
+    connection.initialize
+      .mockReturnValueOnce(firstInitialization.promise)
+      .mockResolvedValueOnce(createInitResponse());
+    const firstChild = createFakeChild();
+    const secondChild = createFakeChild();
+    Object.assign(firstChild, { exitCode: null, signalCode: null, pid: 1101 });
+    Object.assign(secondChild, { exitCode: null, signalCode: null, pid: 1102 });
+    acpSdkMock.state.connectionForSpawn = connection;
+    childProcessMock.state.child = firstChild;
+    const { service } = await createSpawnedService(connection);
+    childProcessMock.state.child = firstChild;
+
+    try {
+      const firstWarmup = service.warmupConnection();
+      await vi.waitFor(() => expect(childProcessMock.fork).toHaveBeenCalledTimes(1));
+      expect(childProcessMock.fork).toHaveBeenCalledTimes(1);
+
+      firstChild.stderr.emit('data', 'Fatal process out of memory: Zone');
+      Object.assign(firstChild, { exitCode: 3221226505 });
+      firstChild.emit('exit', 3221226505);
+      childProcessMock.state.child = secondChild;
+      await Promise.resolve();
+
+      // The first warmup is waiting for its bounded 1s retry. A second caller
+      // must join that Promise instead of spawning another child immediately.
+      const secondWarmup = service.warmupConnection();
+      await Promise.resolve();
+      expect(childProcessMock.fork).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(childProcessMock.fork).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(Promise.all([firstWarmup, secondWarmup])).resolves.toEqual([undefined, undefined]);
+      expect(childProcessMock.fork).toHaveBeenCalledTimes(2);
+      expect(connection.initialize).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('cancels pending permission requests and drops the connection when the ACP child errors', async () => {

@@ -14,6 +14,14 @@ import {
 } from '@agentclientprotocol/sdk';
 import { HOST_EVENT_CHANNELS } from '@shared/host-events/contract';
 import { UCLAW_VIDEO_GENERATION_MAX_INPUT_IMAGE_BYTES } from '@shared/junfeiai-endpoints';
+import {
+  addChatMediaImageToBudget,
+  CHAT_MEDIA_MAX_ITEMS,
+  CHAT_PROMPT_MAX_UTF8_BYTES,
+  EMPTY_CHAT_MEDIA_IMAGE_BUDGET,
+  chatMediaCountLimitError,
+  chatPromptByteLimitError,
+} from '@shared/chat/media-limits';
 import type {
   AcpChatCancelPayload,
   AcpChatLoadPayload,
@@ -28,7 +36,16 @@ import {
   normalizeAcpChatError,
   type AcpChatErrorCode,
 } from '@shared/acp-chat/errors';
+import {
+  BoundedEventQueue,
+  estimateValueBytes,
+} from '@shared/acp-chat/bounded-event-queue';
 import { getOpenClawEmbeddedForkSpec } from '../utils/openclaw-cli';
+import {
+  acpProcessRetryDelayMs,
+  classifyAcpProcessFailure,
+  type AcpProcessFailureKind,
+} from '../utils/acp-process-failure';
 import {
   approvePendingLocalDeviceRequests,
   type GatewayPairingRpcClient,
@@ -66,13 +83,15 @@ type PermissionWaiter = {
   generation: number;
   resolve: (response: RequestPermissionResponse) => void;
 };
+type AcpSessionLoadEntry = {
+  acpSessionId: string;
+  envelope: AcpSessionUpdateEnvelope;
+};
+
 type AcpSessionLoadBatch = {
   sessionKey: string;
   generation: number;
-  sessionUpdates: Array<{
-    acpSessionId: string;
-    envelope: AcpSessionUpdateEnvelope;
-  }>;
+  sessionUpdates: BoundedEventQueue<AcpSessionLoadEntry>;
 };
 type AcpLivePromptContext = {
   sessionKey: string;
@@ -93,6 +112,25 @@ type AcpChildProcess = ChildProcess & {
   stdout: NonNullable<ChildProcess['stdout']>;
   stderr: NonNullable<ChildProcess['stderr']>;
 };
+type AcpChildDiagnostics = {
+  resourceFailure: boolean;
+  stderrTail: string;
+  termination?: AcpChildTermination;
+};
+type AcpChildTermination = {
+  event: 'error' | 'exit' | 'close' | 'timeout';
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  error?: unknown;
+};
+type AcpChildTerminationWaiter = {
+  promise: Promise<AcpChildTermination>;
+  cancel: () => void;
+};
+type SpawnedAcpConnection = {
+  connection: ClientSideConnection;
+  child: AcpChildProcess;
+};
 type AcpPromptBuildResult = {
   blocks: ContentBlock[];
   videoReferenceImage?: {
@@ -104,11 +142,19 @@ type AcpPromptBuildResult = {
 
 const ACP_GATEWAY_READY_WAIT_TIMEOUT_MS = 90_000;
 const ACP_GATEWAY_READY_POLL_INTERVAL_MS = 250;
+const ACP_CONNECTION_RETRY_BASE_DELAY_MS = 250;
+const ACP_CONNECTION_RETRY_MAX_DELAY_MS = 2_000;
+/** A child that neither initializes nor reports a terminal event must not pin a load forever. */
+export const ACP_CHILD_TERMINATION_TIMEOUT_MS = 15_000;
 const ACP_PROMPT_RETRY_BASE_DELAY_MS = 500;
 const ACP_PROMPT_RETRY_MAX_DELAY_MS = 4_000;
 const ACP_PROMPT_TRANSIENT_MAX_ATTEMPTS = 3;
 const ACP_PROMPT_CONTEXT_RECOVERY_MAX_ATTEMPTS = 2;
 const ACP_RECOVERY_SUMMARY_MAX_CHARS = 12_000;
+// OpenClaw replay is bounded to 1,000 messages. Leave room for more than one
+// notification per message while keeping the byte budget as the hard limit.
+const ACP_SESSION_LOAD_MAX_UPDATES = 4_096;
+const ACP_SESSION_LOAD_MAX_BYTES = 8 * 1024 * 1024;
 const ACP_RECOVERY_SUMMARY_HEADINGS = [
   '## Decisions',
   '## Open TODOs',
@@ -129,6 +175,27 @@ function waitForDelay(delayMs: number): Promise<void> {
 }
 
 const GATEWAY_TRANSITION_ERROR = 'Gateway is starting or reconnecting. Please wait and try again.';
+
+function childTerminationMessage(
+  termination: AcpChildTermination,
+  resourceFailure: boolean,
+): string {
+  const suffix = resourceFailure ? ' (resource exhaustion)' : '';
+  switch (termination.event) {
+    case 'error': {
+      const detail = termination.error instanceof Error
+        ? termination.error.message
+        : String(termination.error ?? 'unknown spawn error');
+      return `ACP process failed before initialization: ${detail}${suffix}`;
+    }
+    case 'timeout':
+      return `ACP process did not initialize or exit within ${ACP_CHILD_TERMINATION_TIMEOUT_MS}ms${suffix}`;
+    case 'close':
+      return `ACP process exited with code ${String(termination.code)} (close event)${suffix}`;
+    case 'exit':
+      return `ACP process exited with code ${String(termination.code)}${suffix}`;
+  }
+}
 
 function ok(generation?: number, sessionUpdates?: AcpSessionUpdateEnvelope[]): AcpChatOperationResult {
   return {
@@ -163,6 +230,30 @@ function isValidSessionKey(value: unknown): value is string {
 function sessionUpdateType(notification: SessionNotification): string | undefined {
   const update = (notification as { update?: { sessionUpdate?: unknown } }).update;
   return typeof update?.sessionUpdate === 'string' ? update.sessionUpdate : undefined;
+}
+
+function isProtectedSessionLoadEntry(entry: AcpSessionLoadEntry): boolean {
+  const update = entry.envelope.notification as unknown as { update?: Record<string, unknown> };
+  const updateRecord = update.update;
+  const updateType = typeof updateRecord?.sessionUpdate === 'string' ? updateRecord.sessionUpdate : '';
+  if (updateType === 'uclaw_turn_failure' || updateType === 'plan') return true;
+  if (updateType === 'tool_call' || updateType === 'tool_call_update') {
+    const status = typeof updateRecord?.status === 'string' ? updateRecord.status : '';
+    return status === 'completed' || status === 'failed' || status === 'cancelled'
+      || typeof updateRecord?.error === 'string';
+  }
+  // Keep complete/state updates and shed only intermediate stream chunks when
+  // a load exceeds its budget.
+  return !updateType.endsWith('_chunk');
+}
+
+function createAcpSessionLoadQueue(): BoundedEventQueue<AcpSessionLoadEntry> {
+  return new BoundedEventQueue<AcpSessionLoadEntry>({
+    maxEntries: ACP_SESSION_LOAD_MAX_UPDATES,
+    maxBytes: ACP_SESSION_LOAD_MAX_BYTES,
+    estimateBytes: (entry, budget) => estimateValueBytes(entry, budget),
+    isProtected: isProtectedSessionLoadEntry,
+  });
 }
 
 function normalizedClientStartedAtMs(value: unknown, mainReceivedAtMs: number): number {
@@ -388,8 +479,16 @@ function filterAcpStdoutDiagnostics(output: ReadableStream<Uint8Array>): Readabl
 
 export class AcpChatService {
   private child: AcpChildProcess | null = null;
+  private readonly childDiagnostics = new WeakMap<AcpChildProcess, AcpChildDiagnostics>();
+  /** One bounded terminal-event watcher per child, even across init retries. */
+  private readonly childTerminationWaiters = new WeakMap<
+    AcpChildProcess,
+    AcpChildTerminationWaiter
+  >();
   private connection: AcpConnection | null;
   private initializing: Promise<AcpConnection> | null = null;
+  /** Invalidates an initialization only when the Gateway runtime changes. */
+  private initializationEpoch = 0;
   private initialized = false;
   private connectionRuntimeIdentity: string | null = null;
   private generation = 0;
@@ -569,7 +668,7 @@ export class AcpChatService {
       loadBatch = {
         sessionKey: payload.sessionKey,
         generation: nextGeneration,
-        sessionUpdates: [],
+        sessionUpdates: createAcpSessionLoadQueue(),
       };
       this.activeLoadBatch = loadBatch;
       stateAdvanced = true;
@@ -607,6 +706,7 @@ export class AcpChatService {
       return ok(
         nextGeneration,
         loadBatch.sessionUpdates
+          .toArray()
           .filter((entry) => entry.acpSessionId === acpSessionId)
           .map((entry) => entry.envelope),
       );
@@ -1018,6 +1118,7 @@ export class AcpChatService {
   }
 
   private invalidateConnectionForGatewayTransition(): void {
+    this.initializationEpoch += 1;
     const child = this.child;
     if (child) {
       try {
@@ -1029,7 +1130,6 @@ export class AcpChatService {
       return;
     }
     this.initialized = false;
-    this.initializing = null;
     this.connection = null;
     this.connectionRuntimeIdentity = null;
   }
@@ -1041,31 +1141,61 @@ export class AcpChatService {
     }
     if (this.initializing) return this.initializing;
 
-    this.initializing = this.initializeConnection(runtimeIdentity);
+    const initializationEpoch = ++this.initializationEpoch;
+    const initialization = this.initializeConnection(runtimeIdentity, initializationEpoch);
+    this.initializing = initialization;
     try {
-      return await this.initializing;
+      return await initialization;
     } finally {
-      this.initializing = null;
+      // A Gateway transition or a future implementation may replace the
+      // promise while this one is unwinding. Never clear the replacement.
+      if (this.initializing === initialization) this.initializing = null;
     }
   }
 
-  private async initializeConnection(runtimeIdentity: string | null): Promise<AcpConnection> {
+  private async initializeConnection(
+    runtimeIdentity: string | null,
+    initializationEpoch: number,
+  ): Promise<AcpConnection> {
+    if (this.initializationEpoch !== initializationEpoch) {
+      throw new Error(GATEWAY_TRANSITION_ERROR);
+    }
     this.requireSameGatewayRuntime(runtimeIdentity);
     await this.approveLocalDeviceRequests();
+    if (this.initializationEpoch !== initializationEpoch) {
+      throw new Error(GATEWAY_TRANSITION_ERROR);
+    }
 
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        const connection = await this.initializeConnectionOnce(attempt);
+        const connection = await this.initializeConnectionOnce(attempt, initializationEpoch);
         this.requireSameGatewayRuntime(runtimeIdentity);
         this.connectionRuntimeIdentity = runtimeIdentity;
         return connection;
       } catch (error) {
         if (attempt >= 2) throw error;
+        const failureKind: AcpProcessFailureKind = classifyAcpProcessFailure(error);
+        const delayMs = failureKind === 'resource' || failureKind === 'process-exit'
+          ? acpProcessRetryDelayMs(attempt)
+          : Math.min(
+            ACP_CONNECTION_RETRY_MAX_DELAY_MS,
+            ACP_CONNECTION_RETRY_BASE_DELAY_MS * (2 ** Math.max(0, attempt - 1)),
+          );
         logger.info(
-          `[acp-chat] ACP connect failed on attempt ${attempt}; auto-approving local device requests and retrying: ${
+          `[acp-chat] ACP connect failed on attempt ${attempt}; retrying after ${delayMs}ms (${failureKind}): ${
             error instanceof Error ? error.message : String(error)
           }`,
         );
+        this.trace('connection/initialize:retry', {
+          details: { attempt, nextAttempt: attempt + 1, delayMs, failureKind },
+        });
+        // A process that ran out of memory or crashed during startup must be
+        // given time to release native/V8 allocations before a replacement is
+        // spawned.  The loop is intentionally bounded to one retry.
+        await waitForDelay(delayMs);
+        if (this.initializationEpoch !== initializationEpoch) {
+          throw new Error(GATEWAY_TRANSITION_ERROR, { cause: error });
+        }
         await this.approveLocalDeviceRequests();
       }
     }
@@ -1073,10 +1203,28 @@ export class AcpChatService {
     throw new Error('ACP connection failed');
   }
 
-  private async initializeConnectionOnce(attempt: number): Promise<AcpConnection> {
-    if (!this.connection) this.connection = await this.spawnConnection();
-    const connection = this.connection;
-    const child = this.child;
+  private async initializeConnectionOnce(attempt: number, initializationEpoch: number): Promise<AcpConnection> {
+    if (this.initializationEpoch !== initializationEpoch) {
+      throw new Error(GATEWAY_TRANSITION_ERROR);
+    }
+    let connection = this.connection;
+    let child = this.child;
+    if (!connection) {
+      // Keep the child returned by spawnConnection in a local variable.  On
+      // Windows an ENOENT/ENOMEM spawn error can be emitted on the nextTick
+      // before the `await spawnConnection()` continuation runs; the
+      // permanent error listener then clears `this.child`.  Relying only on
+      // `this.child` here would turn that real failure into a never-settling
+      // waitForChildExit(null) branch.
+      const spawned = await this.spawnConnection();
+      connection = spawned.connection;
+      child = spawned.child;
+      if (this.initializationEpoch !== initializationEpoch) {
+        throw new Error(GATEWAY_TRANSITION_ERROR);
+      }
+      this.connection = connection;
+    }
+    if (!connection) throw new Error('ACP connection was not created');
 
     this.trace('connection/initialize:start', { details: { attempt } });
     const initOutcome = await Promise.race([
@@ -1084,16 +1232,51 @@ export class AcpChatService {
         protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: {},
       }).then((result) => ({ kind: 'initialized' as const, result })),
-      this.waitForChildExit(child).then((exitCode) => ({ kind: 'exited' as const, exitCode })),
-    ]);
+      this.waitForChildExit(child).then((termination) => ({ kind: 'terminated' as const, termination })),
+    ]).catch((error: unknown) => {
+      if (child) this.cancelWaitForChildExit(child);
+      throw error;
+    });
 
-    if (initOutcome.kind === 'exited') {
-      if (child) this.dropConnectionForChild(child);
-      throw new Error(`ACP process exited with code ${String(initOutcome.exitCode)}`);
+    if (initOutcome.kind === 'terminated') {
+      const diagnostics = child ? this.childDiagnostics.get(child) : undefined;
+      if (child && initOutcome.termination.event === 'timeout') {
+        try {
+          child.kill();
+        } catch {
+          // The child may already be exiting after the timeout was observed.
+        }
+      }
+      if (child) {
+        this.dropConnectionForChild(child);
+        // The permanent listener may have observed the terminal event before
+        // the spawn promise continuation assigned `this.connection`.  In
+        // that ordering dropConnectionForChild is intentionally a no-op
+        // (the current child is already null), so clear this stale reference
+        // explicitly before the bounded retry.
+        if (this.connection === connection && this.child !== child) this.connection = null;
+      }
+      const message = childTerminationMessage(initOutcome.termination, diagnostics?.resourceFailure === true);
+      const failure = new Error(
+        message,
+        initOutcome.termination.error instanceof Error
+          ? { cause: initOutcome.termination.error }
+          : undefined,
+      );
+      const resourceFailure = diagnostics?.resourceFailure === true
+        || classifyAcpProcessFailure(initOutcome.termination.error) === 'resource';
+      if (resourceFailure) {
+        Object.assign(failure, { code: 'ACP_RESOURCE_EXHAUSTED' });
+      }
+      throw failure;
     }
 
+    // The process survived initialization.  The termination watcher only
+    // exists to win this startup race; the permanent process listeners below
+    // continue to own lifecycle cleanup after this point.
+    if (child) this.cancelWaitForChildExit(child);
     const result = initOutcome.result;
-    if (this.connection !== connection) {
+    if (this.initializationEpoch !== initializationEpoch || this.connection !== connection) {
       throw new Error('ACP connection closed during initialization');
     }
     if (!result.agentCapabilities?.loadSession) {
@@ -1154,23 +1337,86 @@ export class AcpChatService {
     });
   }
 
-  private waitForChildExit(child: AcpChildProcess | null): Promise<number | null> {
+  private waitForChildExit(child: AcpChildProcess | null): Promise<AcpChildTermination> {
     // An injected connection has no child process to supervise. It must not win
     // the initialization race as a synthetic process-exit event.
-    if (!child) return new Promise<number | null>(() => {});
-    if (child.exitCode !== null) return Promise.resolve(child.exitCode);
-    if (child.signalCode) return Promise.resolve(child.exitCode);
+    if (!child) return new Promise<AcpChildTermination>(() => {});
+    const recordedTermination = this.childDiagnostics.get(child)?.termination;
+    if (recordedTermination) return Promise.resolve(recordedTermination);
+    if (child.exitCode != null || child.signalCode != null) {
+      return Promise.resolve({
+        event: 'exit',
+        code: child.exitCode ?? null,
+        signal: child.signalCode ?? null,
+      });
+    }
 
-    return new Promise((resolve) => {
-      const onExit = (code: number | null) => {
+    const existing = this.childTerminationWaiters.get(child);
+    if (existing) return existing.promise;
+
+    let cancel!: () => void;
+    let pending!: Promise<AcpChildTermination>;
+    pending = new Promise((resolve) => {
+      let settled = false;
+      const cleanup = () => {
+        child.off('error', onError);
         child.off('exit', onExit);
-        resolve(code);
+        child.off('close', onClose);
+        clearTimeout(timeout);
+        if (this.childTerminationWaiters.get(child)?.promise === pending) {
+          this.childTerminationWaiters.delete(child);
+        }
       };
+      const settle = (termination: AcpChildTermination) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(termination);
+      };
+      cancel = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+      };
+      const onError = (error: Error) => settle({
+        event: 'error',
+        code: child.exitCode ?? null,
+        signal: child.signalCode ?? null,
+        error,
+      });
+      const onExit = (code: number | null, signal: NodeJS.Signals | null) => settle({
+        event: 'exit',
+        code,
+        signal,
+      });
+      const onClose = (code: number | null, signal: NodeJS.Signals | null) => settle({
+        event: 'close',
+        code,
+        signal,
+      });
+      const timeout = setTimeout(() => settle({
+        event: 'timeout',
+        code: child.exitCode ?? null,
+        signal: child.signalCode ?? null,
+      }), ACP_CHILD_TERMINATION_TIMEOUT_MS);
+      timeout.unref?.();
+
+      // ChildProcess can emit `error` without ever emitting `exit` (for
+      // example, ENOENT/ENOMEM during spawn).  Listen to all terminal events,
+      // but clean up every listener on the first one to avoid duplicate work.
+      child.on('error', onError);
       child.on('exit', onExit);
+      child.on('close', onClose);
     });
+    this.childTerminationWaiters.set(child, { promise: pending, cancel });
+    return pending;
   }
 
-  private async spawnConnection(): Promise<ClientSideConnection> {
+  private cancelWaitForChildExit(child: AcpChildProcess): void {
+    this.childTerminationWaiters.get(child)?.cancel();
+  }
+
+  private async spawnConnection(): Promise<SpawnedAcpConnection> {
     const gatewayPort = this.gateway?.getStatus?.().port;
     const gatewayUrl = typeof gatewayPort === 'number'
       && Number.isInteger(gatewayPort)
@@ -1195,24 +1441,85 @@ export class AcpChatService {
     this.child = forked as AcpChildProcess;
 
     const child = this.child;
+    this.childDiagnostics.set(child, {
+      resourceFailure: false,
+      stderrTail: '',
+    });
+    this.trace('connection/process:spawned', {
+      details: {
+        pid: child.pid ?? null,
+        execPath: spec.options.execPath ?? null,
+        execArgv: spec.options.execArgv ?? [],
+      },
+    });
+    logger.info('[acp-chat] ACP process spawned', {
+      pid: child.pid ?? null,
+      execPath: spec.options.execPath ?? null,
+      execArgv: spec.options.execArgv ?? [],
+    });
 
     child.stderr.on('data', (chunk) => {
       const message = String(chunk).trimEnd();
-      if (message) logger.info(`[acp-chat] ${message}`);
+      if (message) {
+        const diagnostics = this.childDiagnostics.get(child);
+        if (diagnostics) {
+          // stderr chunk boundaries are arbitrary; keep a short in-memory tail
+          // so "out of memory" split across two chunks is still classified.
+          diagnostics.stderrTail = `${diagnostics.stderrTail}${message}`.slice(-2_048);
+          if (!diagnostics.resourceFailure && classifyAcpProcessFailure(diagnostics.stderrTail) === 'resource') {
+            diagnostics.resourceFailure = true;
+            this.trace('connection/process:resource-pressure', {
+              details: { pid: child.pid ?? null },
+            });
+          }
+        }
+        logger.info(`[acp-chat] ${message}`);
+      }
     });
     child.on('error', (error) => {
       logger.error(`[acp-chat] ACP process error: ${String(error)}`);
+      const diagnostics = this.childDiagnostics.get(child);
+      if (diagnostics) {
+        if (classifyAcpProcessFailure(error) === 'resource') diagnostics.resourceFailure = true;
+        diagnostics.termination ??= {
+          event: 'error',
+          code: child.exitCode ?? null,
+          signal: child.signalCode ?? null,
+          error,
+        };
+      }
       this.dropConnectionForChild(child);
     });
-    child.on('exit', (code) => {
+    child.on('exit', (code, signal) => {
       logger.info(`[acp-chat] ACP process exited with code ${String(code)}`);
+      const diagnostics = this.childDiagnostics.get(child);
+      if (diagnostics) {
+        diagnostics.termination ??= { event: 'exit', code, signal };
+      }
+      this.dropConnectionForChild(child);
+    });
+    child.on('close', (code, signal) => {
+      // Node normally emits close after exit, but an early spawn failure may
+      // only surface close/error. Keep the connection state from pointing at
+      // a child whose stdio has already gone away; dropConnection is idempotent
+      // when both events arrive for the same process.
+      logger.info(
+        `[acp-chat] ACP process stdio closed with code ${String(code)} signal ${String(signal)}`,
+      );
+      const diagnostics = this.childDiagnostics.get(child);
+      if (diagnostics) {
+        diagnostics.termination ??= { event: 'close', code, signal };
+      }
       this.dropConnectionForChild(child);
     });
 
     const input = Writable.toWeb(child.stdin) as WritableStream<Uint8Array>;
     const output = filterAcpStdoutDiagnostics(Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>);
     const stream = ndJsonStream(input, output);
-    return new ClientSideConnection(() => this.client, stream);
+    return {
+      connection: new ClientSideConnection(() => this.client, stream),
+      child,
+    };
   }
 
   private dropConnectionForChild(child: AcpChildProcess): void {
@@ -1220,7 +1527,11 @@ export class AcpChatService {
     this.trace('connection/dropped', { details: { pendingPermissionCount: this.permissionWaiters.size } });
     this.resolveAllPermissionWaiters(cancelledPermissionResponse());
     this.initialized = false;
-    this.initializing = null;
+    // Do not clear an in-flight initialization here.  If the child exits
+    // during its handshake, initializeConnection() owns the promise and will
+    // perform the single delayed retry. Clearing it would let a concurrent
+    // warmup/load spawn a second ACP child before that retry, briefly doubling
+    // the memory pressure that caused the exit.
     this.connection = null;
     this.connectionRuntimeIdentity = null;
     this.child = null;
@@ -1393,16 +1704,21 @@ export class AcpChatService {
   private async buildPromptBlocks(payload: AcpChatPromptPayload): Promise<AcpPromptBuildResult> {
     const blocks: ContentBlock[] = [];
     let videoReferenceImage: AcpPromptBuildResult['videoReferenceImage'];
+    if (payload.message && Buffer.byteLength(payload.message, 'utf8') > CHAT_PROMPT_MAX_UTF8_BYTES) {
+      throw chatPromptByteLimitError();
+    }
     const text = payload.message?.trim();
     if (text) blocks.push({ type: 'text', text });
 
     const media = payload.media ?? [];
     if (media.length > 0) {
+      if (media.length > CHAT_MEDIA_MAX_ITEMS) throw chatMediaCountLimitError();
       const imageCount = media.filter((item) => (item.mimeType || '').startsWith('image/')).length;
       if (payload.videoOptions && imageCount > 1) {
         throw new Error('Video generation supports at most one reference image.');
       }
 
+      let imageBudget = EMPTY_CHAT_MEDIA_IMAGE_BUDGET;
       for (const item of media) {
         const mimeType = item.mimeType || 'application/octet-stream';
         if (mimeType.startsWith('image/')) {
@@ -1418,6 +1734,7 @@ export class AcpChatService {
               fileName: item.fileName,
               mimeType,
             });
+          imageBudget = addChatMediaImageToBudget(imageBudget, prepared.buffer.byteLength);
           const data = prepared.buffer.toString('base64');
           if (prepared.compressed) {
             logger.info(

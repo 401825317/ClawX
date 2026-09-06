@@ -1,4 +1,14 @@
 import type { BrowserWindow } from 'electron';
+import {
+  addChatMediaImageToBudget,
+  CHAT_MEDIA_MAX_ITEMS,
+  CHAT_MEDIA_MAX_TOTAL_IMAGE_BYTES,
+  CHAT_PROMPT_MAX_UTF8_BYTES,
+  EMPTY_CHAT_MEDIA_IMAGE_BUDGET,
+  chatMediaCountLimitError,
+  chatMediaImageByteLimitError,
+  chatPromptByteLimitError,
+} from '@shared/chat/media-limits';
 import type { GatewayManager } from '../gateway/manager';
 import type { CompleteHostServiceRegistry } from '../main/ipc/host-contract';
 import { logger } from '../utils/logger';
@@ -41,6 +51,40 @@ function normalizeMedia(media: unknown): Array<{ filePath: string; mimeType: str
   });
 }
 
+function assertPromptWithinLimit(message: string): void {
+  if (Buffer.byteLength(message, 'utf8') > CHAT_PROMPT_MAX_UTF8_BYTES) throw chatPromptByteLimitError();
+}
+
+async function readImageFileWithinLimit(filePath: string, maxBytes: number): Promise<Buffer> {
+  const fsP = await import('node:fs/promises');
+  const handle = await fsP.open(filePath, 'r');
+  try {
+    const initialStat = await handle.stat();
+    if (!initialStat.isFile()) throw new Error('Attached image is not a regular file.');
+    if (!Number.isSafeInteger(initialStat.size) || initialStat.size > maxBytes) {
+      throw chatMediaImageByteLimitError();
+    }
+
+    // Read only the size observed on the open handle.  Unlike readFile(), this
+    // cannot follow an attachment that grows beyond the remaining request
+    // budget while it is being read.
+    const buffer = Buffer.allocUnsafe(initialStat.size);
+    let offset = 0;
+    while (offset < buffer.byteLength) {
+      const { bytesRead } = await handle.read(buffer, offset, buffer.byteLength - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    const finalStat = await handle.stat();
+    if (offset !== buffer.byteLength || finalStat.size !== initialStat.size) {
+      throw new Error('Attached image changed while it was being read. Try again.');
+    }
+    return buffer;
+  } finally {
+    await handle.close();
+  }
+}
+
 export function createChatApi({
   gatewayManager,
   mainWindow,
@@ -66,12 +110,15 @@ export function createChatApi({
 
       try {
         let message = typeof body.message === 'string' ? body.message : '';
+        assertPromptWithinLimit(message);
         const imageAttachments: Array<Record<string, unknown>> = [];
         const fileReferences: string[] = [];
         const media = normalizeMedia(body.media);
 
         if (media.length > 0) {
+          if (media.length > CHAT_MEDIA_MAX_ITEMS) throw chatMediaCountLimitError();
           const fsP = await import('node:fs/promises');
+          let imageBudget = EMPTY_CHAT_MEDIA_IMAGE_BUDGET;
           for (const item of media) {
             const exists = await fsP.access(item.filePath).then(() => true, () => false);
             logger.info(
@@ -83,7 +130,11 @@ export function createChatApi({
             );
 
             if (VISION_MIME_TYPES.has(item.mimeType)) {
-              const fileBuffer = await fsP.readFile(item.filePath);
+              const fileBuffer = await readImageFileWithinLimit(
+                item.filePath,
+                CHAT_MEDIA_MAX_TOTAL_IMAGE_BYTES - imageBudget.imageBytes,
+              );
+              imageBudget = addChatMediaImageToBudget(imageBudget, fileBuffer.byteLength);
               const base64Data = fileBuffer.toString('base64');
               logger.info(`[chat:sendWithMedia] Read ${fileBuffer.length} bytes, base64 length: ${base64Data.length}`);
               imageAttachments.push({
@@ -98,6 +149,7 @@ export function createChatApi({
         if (fileReferences.length > 0) {
           const refs = fileReferences.join('\n');
           message = message ? `${message}\n\n${refs}` : refs;
+          assertPromptWithinLimit(message);
         }
 
         const rpcParams: Record<string, unknown> = {

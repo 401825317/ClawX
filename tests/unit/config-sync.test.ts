@@ -2,10 +2,25 @@ import { describe, expect, it } from 'vitest';
 import {
   buildManagedOpenAiProviderEnv,
   shouldInjectProviderEnv,
+  stripEnvironmentKeys,
   stripManagedProviderEnv,
   stripSystemdSupervisorEnv,
   UCLAW_LOGIN_REQUIRED_PROVIDER_KEY,
 } from '@electron/gateway/config-sync-env';
+
+describe('stripEnvironmentKeys', () => {
+  it('removes every case-insensitive spelling without mutating the source', () => {
+    const env = {
+      NODE_OPTIONS: '--max-old-space-size=64',
+      node_options: '--require unsafe-hook.cjs',
+      Node_Options: '--trace-gc',
+      PATH: '/usr/bin',
+    };
+
+    expect(stripEnvironmentKeys(env, ['NODE_OPTIONS'])).toEqual({ PATH: '/usr/bin' });
+    expect(env).toHaveProperty('node_options');
+  });
+});
 
 describe('stripSystemdSupervisorEnv', () => {
   it('removes systemd supervisor marker env vars', () => {

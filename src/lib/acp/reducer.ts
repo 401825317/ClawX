@@ -8,11 +8,19 @@ import type {
   ToolCallStatus,
   ToolKind,
 } from '@agentclientprotocol/sdk';
-import { contentBlockToRenderPart, contentBlocksToRenderParts, toolContentToRenderPart, toolContentToRenderParts } from './content-blocks';
+import {
+  ACP_RENDER_CONTENT_MAX_BLOCKS,
+  contentBlockToRenderPart,
+  contentBlocksToRenderParts,
+  toolContentToRenderPart,
+  toolContentToRenderParts,
+} from './content-blocks';
 import { createPendingAttachment, dedupeTimelineAttachments, mergeMonotonicAttachment } from './attachments';
 import { parseOfficeArtifactToolResult } from './artifact-tool-result';
 import { openClawPromptTextBlocks } from './openclaw-prompt-compat';
 import { normalizeAcpChatError } from '@shared/acp-chat/errors';
+import { estimateValueBytes } from '@shared/acp-chat/bounded-event-queue';
+import { ACP_INLINE_IMAGE_MAX_DATA_URI_CHARS } from '@shared/chat/media-limits';
 import type { AcpTimelineSnapshot, AttachmentRenderPart, MessageSegmentItem, RenderPart, TimelineItem, ToolCallItem } from './timeline-types';
 
 type UpdateRecord = Record<string, unknown> & {
@@ -25,8 +33,503 @@ type ApplyUpdateOptions = {
 
 type Role = MessageSegmentItem['role'];
 
-export function createEmptyAcpTimeline(sessionId: string, loadGeneration: number): AcpTimelineSnapshot {
+/**
+ * Renderer-side safety rails.  These are deliberately conservative enough to
+ * preserve ordinary conversations while preventing one pathological stream
+ * from retaining an unbounded amount of text/tool output in React state.
+ */
+export const ACP_TIMELINE_MAX_ITEMS = 1_000;
+export const ACP_TIMELINE_MAX_BYTES = 4 * 1024 * 1024;
+export const ACP_RENDER_PART_MAX_CHARS = 256 * 1024;
+export const ACP_TOOL_OUTPUT_MAX_BYTES = 1 * 1024 * 1024;
+const ACP_METADATA_MAX_BYTES = 256 * 1024;
+const ACP_METADATA_MAX_ITEMS = 256;
+const ACP_PERMISSION_MAX_OPTIONS = 64;
+const ACP_PLAN_MAX_ENTRIES = 256;
+const ACP_PLAN_ENTRY_MAX_CHARS = 16 * 1024;
+const ACP_METADATA_STRING_MAX_CHARS = 32 * 1024;
+const ACP_IDENTIFIER_MAX_CHARS = 1_024;
+const ACP_PROMPT_TEXT_BLOCK_MAX_BYTES = 2 * 1024 * 1024;
+const ACP_RENDER_PART_MAX_COUNT = 512;
+const ACP_PROMPT_TEXT_BLOCK_MAX_COUNT = 128;
+const ACP_CONFIG_OPTION_MAX_DEPTH = 8;
+const ACP_TOOL_LOCATION_MAX_COUNT = 256;
+const ACP_TOOL_LOCATION_PATH_MAX_CHARS = 8 * 1024;
+const ACP_TOOL_LOCATION_META_MAX_BYTES = 16 * 1024;
+const ACP_TOOL_LOCATION_META_MAX_ITEMS = 32;
+const ACP_TOOL_LOCATION_META_KEY_MAX_CHARS = 256;
+const ACP_TOOL_LOCATION_META_STRING_MAX_CHARS = 4 * 1024;
+const ACP_TRUNCATION_MARKER = '\n\n[UClaw: content truncated for memory safety]';
+const ACP_OMITTED_VALUE_MARKER = '[UClaw: value omitted after exceeding the memory safety budget]';
+
+const timelineByteEstimates = new WeakMap<object, number>();
+/**
+ * A snapshot-level fast-path marker.  We must not use only the aggregate byte
+ * count as proof that a snapshot is safe: one tool result can be 2 MiB while
+ * the whole timeline is still below the 4 MiB aggregate limit.  The marker is
+ * propagated only from snapshots that have already passed the full projection
+ * (or from a mutation that bounds the newly-created item itself), so ordinary
+ * streaming updates stay O(1) while imported/legacy snapshots are normalized
+ * once before they can take the fast path.
+ */
+const boundedTimelineSnapshots = new WeakSet<object>();
+
+function truncateText(value: string, maxChars = ACP_RENDER_PART_MAX_CHARS): string {
+  if (value.length <= maxChars) return value;
+  const available = Math.max(0, maxChars - ACP_TRUNCATION_MARKER.length);
+  return `${value.slice(0, available)}${ACP_TRUNCATION_MARKER}`;
+}
+
+function boundRenderPart(part: RenderPart): RenderPart {
+  if (part.kind === 'markdown') return { ...part, text: truncateText(part.text) };
+  if (part.kind === 'error') return { ...part, message: truncateText(part.message, 64 * 1024) };
+  if (part.kind === 'image' && /^data:/i.test(part.source) && part.source.length > ACP_INLINE_IMAGE_MAX_DATA_URI_CHARS) {
+    return {
+      kind: 'error',
+      message: 'ACP inline image exceeded the renderer memory safety limit.',
+    };
+  }
+  return part;
+}
+
+function boundRenderParts(
+  parts: readonly RenderPart[],
+  maxBytes: number,
+  maxCount = ACP_RENDER_PART_MAX_COUNT,
+): RenderPart[] {
+  if (parts.length === 0) return [];
+  const result: RenderPart[] = [];
+  let bytes = 0;
+  for (const input of parts) {
+    const part = boundRenderPart(input);
+    const partBytes = estimateValueBytes(part, maxBytes + 1);
+    if (result.length < maxCount && bytes + partBytes <= maxBytes) {
+      result.push(part);
+      bytes += partBytes;
+      continue;
+    }
+    // Terminal/error and attachment records are useful, but they must obey
+    // the same count/byte limits.  A malformed attachment can itself contain
+    // unbounded metadata, so silently omit it when it does not fit.
+    // Intermediate markdown/image chunks are safe to omit because the
+    // complete source remains on disk.
+    if (part.kind === 'error' || part.kind === 'attachment') continue;
+    if (result.length > 0 && result.at(-1)?.kind === 'markdown' && part.kind === 'markdown') {
+      const previous = result.at(-1)!;
+      if (previous.kind === 'markdown') {
+        const previousBytes = estimateValueBytes(previous, maxBytes + 1);
+        const available = Math.max(0, maxBytes - (bytes - previousBytes));
+        const merged = {
+          ...previous,
+          text: truncateText(`${previous.text}${part.text}`, Math.min(
+            ACP_RENDER_PART_MAX_CHARS,
+            Math.max(1, Math.floor(available / 2)),
+          )),
+        };
+        const mergedBytes = estimateValueBytes(merged, maxBytes + 1);
+        if (mergedBytes <= available) {
+          result[result.length - 1] = merged;
+          bytes = bytes - previousBytes + mergedBytes;
+        }
+      }
+    }
+  }
+  return result;
+}
+
+function boundedToolValue(value: unknown, maxBytes: number): unknown {
+  if (estimateValueBytes(value, maxBytes + 1) <= maxBytes) return value;
+  if (typeof value === 'string') return truncateText(value, Math.floor(maxBytes / 2));
   return {
+    __uclawTruncated: true,
+    preview: ACP_OMITTED_VALUE_MARKER,
+  };
+}
+
+function boundedIdentifier(value: unknown, fallback: string): string {
+  return typeof value === 'string'
+    ? truncateText(value, ACP_IDENTIFIER_MAX_CHARS)
+    : fallback;
+}
+
+function boundedPromptTextBlocks(value: readonly unknown[]): string[] {
+  const result: string[] = [];
+  let bytes = 0;
+  const start = Math.max(0, value.length - ACP_PROMPT_TEXT_BLOCK_MAX_COUNT);
+  for (let index = start; index < value.length; index += 1) {
+    const raw = value[index];
+    if (typeof raw !== 'string') continue;
+    const maxChars = Math.min(
+      ACP_RENDER_PART_MAX_CHARS,
+      Math.max(1, Math.floor(Math.max(0, ACP_PROMPT_TEXT_BLOCK_MAX_BYTES - 8) / 2)),
+    );
+    const text = truncateText(raw, maxChars);
+    const textBytes = estimateValueBytes(text, ACP_PROMPT_TEXT_BLOCK_MAX_BYTES + 1);
+    if (textBytes > ACP_PROMPT_TEXT_BLOCK_MAX_BYTES) continue;
+    // Keep the newest blocks when the aggregate byte budget is crossed. The
+    // queue is capped at 128 entries, so shifting here remains bounded while
+    // avoiding a large slice/map temporary allocation.
+    while (result.length > 0 && bytes + textBytes > ACP_PROMPT_TEXT_BLOCK_MAX_BYTES) {
+      const removed = result.shift();
+      if (removed !== undefined) {
+        bytes = Math.max(0, bytes - estimateValueBytes(removed, ACP_PROMPT_TEXT_BLOCK_MAX_BYTES + 1));
+      }
+    }
+    if (bytes + textBytes > ACP_PROMPT_TEXT_BLOCK_MAX_BYTES) continue;
+    result.push(text);
+    bytes += textBytes;
+  }
+  return result;
+}
+
+function boundedPlanEntries(value: unknown): PlanEntry[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(-ACP_PLAN_MAX_ENTRIES).flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') return [];
+    const raw = entry as Record<string, unknown>;
+    const priority = raw.priority === 'high' || raw.priority === 'medium' || raw.priority === 'low'
+      ? raw.priority
+      : 'medium';
+    const status = raw.status === 'pending' || raw.status === 'in_progress' || raw.status === 'completed'
+      ? raw.status
+      : 'pending';
+    return [{
+      content: truncateText(typeof raw.content === 'string' ? raw.content : '', ACP_PLAN_ENTRY_MAX_CHARS),
+      priority,
+      status,
+    } as PlanEntry];
+  });
+}
+
+function boundedConfigSelectOptions(value: unknown, depth = 0): unknown[] {
+  if (!Array.isArray(value)) return [];
+  if (depth >= ACP_CONFIG_OPTION_MAX_DEPTH) return [];
+  const result: unknown[] = [];
+  const start = Math.max(0, value.length - ACP_METADATA_MAX_ITEMS);
+  for (let index = start; index < value.length; index += 1) {
+    const entry = value[index];
+    if (!entry || typeof entry !== 'object') continue;
+    const raw = entry as Record<string, unknown>;
+    const name = truncateText(typeof raw.name === 'string' ? raw.name : '', ACP_METADATA_STRING_MAX_CHARS);
+    const description = typeof raw.description === 'string'
+      ? truncateText(raw.description, ACP_METADATA_STRING_MAX_CHARS)
+      : raw.description === null ? null : undefined;
+    if (typeof raw.group === 'string' && Array.isArray(raw.options)) {
+      result.push({
+        group: boundedIdentifier(raw.group, ''),
+        name,
+        ...(description !== undefined ? { description } : {}),
+        options: boundedConfigSelectOptions(raw.options, depth + 1),
+      });
+      continue;
+    }
+    result.push({
+      value: boundedIdentifier(raw.value, ''),
+      name,
+      ...(description !== undefined ? { description } : {}),
+    });
+  }
+  return result;
+}
+
+function boundedConfigOptions(value: unknown): SessionConfigOption[] {
+  if (!Array.isArray(value)) return [];
+  const result: SessionConfigOption[] = [];
+  const start = Math.max(0, value.length - ACP_METADATA_MAX_ITEMS);
+  for (let index = start; index < value.length; index += 1) {
+    const option = value[index];
+    if (!option || typeof option !== 'object') continue;
+    const raw = option as Record<string, unknown>;
+    const type = raw.type === 'select' || raw.type === 'boolean' ? raw.type : undefined;
+    if (!type) continue;
+    const id = boundedIdentifier(raw.id, 'unknown');
+    const name = truncateText(typeof raw.name === 'string' ? raw.name : id, ACP_METADATA_STRING_MAX_CHARS);
+    const description = typeof raw.description === 'string'
+      ? truncateText(raw.description, ACP_METADATA_STRING_MAX_CHARS)
+      : raw.description === null ? null : undefined;
+    const category = typeof raw.category === 'string'
+      ? truncateText(raw.category, 256)
+      : raw.category === null ? null : undefined;
+    const base = {
+      type,
+      id,
+      name,
+      ...(description !== undefined ? { description } : {}),
+      ...(category !== undefined ? { category } : {}),
+    };
+    if (type === 'boolean') {
+      result.push({ ...base, currentValue: raw.currentValue === true } as SessionConfigOption);
+      continue;
+    }
+    result.push({
+      ...base,
+      currentValue: boundedIdentifier(raw.currentValue, ''),
+      options: boundedConfigSelectOptions(raw.options, 0),
+    } as SessionConfigOption);
+  }
+  return result;
+}
+
+function boundedMetadata(metadata: AcpTimelineSnapshot['metadata']): AcpTimelineSnapshot['metadata'] {
+  const boundedCommands = metadata.availableCommands
+    ? boundedToolValue(metadata.availableCommands.slice(-ACP_METADATA_MAX_ITEMS), ACP_METADATA_MAX_BYTES)
+    : undefined;
+  const next: AcpTimelineSnapshot['metadata'] = {
+    ...(typeof metadata.currentModeId === 'string'
+      ? { currentModeId: truncateText(metadata.currentModeId, ACP_IDENTIFIER_MAX_CHARS) }
+      : {}),
+    ...(typeof metadata.title === 'string'
+      ? { title: truncateText(metadata.title, ACP_METADATA_STRING_MAX_CHARS) }
+      : metadata.title === null ? { title: null } : {}),
+    ...(typeof metadata.updatedAt === 'string'
+      ? { updatedAt: truncateText(metadata.updatedAt, 2_048) }
+      : metadata.updatedAt === null ? { updatedAt: null } : {}),
+    ...(Array.isArray(boundedCommands) ? { availableCommands: boundedCommands } : {}),
+    ...(metadata.configOptions
+      ? { configOptions: boundedConfigOptions(metadata.configOptions) }
+      : {}),
+    ...(metadata.usage !== undefined
+      ? { usage: boundedToolValue(metadata.usage, ACP_METADATA_MAX_BYTES) }
+      : {}),
+  };
+  const bounded = estimateValueBytes(next, ACP_METADATA_MAX_BYTES + 1) <= ACP_METADATA_MAX_BYTES
+    ? next
+    : {
+        ...(next.currentModeId ? { currentModeId: next.currentModeId } : {}),
+        usage: { __uclawTruncated: true, preview: ACP_OMITTED_VALUE_MARKER },
+      };
+  return bounded;
+}
+
+function boundTimelineItem(item: TimelineItem): TimelineItem {
+  const projected: TimelineItem = (() => {
+    switch (item.kind) {
+    case 'message-segment':
+      return {
+        ...item,
+        parts: boundRenderParts(item.parts, ACP_TOOL_OUTPUT_MAX_BYTES),
+        ...(item.userPromptTextBlocks
+          ? {
+              userPromptTextBlocks: boundedPromptTextBlocks(item.userPromptTextBlocks),
+            }
+          : {}),
+      };
+    case 'thought':
+      return { ...item, parts: boundRenderParts(item.parts, ACP_TOOL_OUTPUT_MAX_BYTES) };
+    case 'tool-call':
+      return {
+        ...item,
+        input: boundedToolValue(item.input, ACP_TOOL_OUTPUT_MAX_BYTES),
+        output: boundedToolValue(item.output, ACP_TOOL_OUTPUT_MAX_BYTES),
+        outputParts: boundRenderParts(item.outputParts, ACP_TOOL_OUTPUT_MAX_BYTES),
+        error: item.error ? truncateText(item.error, 64 * 1024) : item.error,
+        locations: boundedToolLocations(item.locations),
+      };
+    case 'plan':
+      return { ...item, entries: boundedPlanEntries(item.entries) };
+    case 'permission':
+      return {
+        ...item,
+        title: truncateText(item.title, ACP_METADATA_STRING_MAX_CHARS),
+        options: item.options.slice(-ACP_PERMISSION_MAX_OPTIONS).map((option) => ({
+          optionId: boundedIdentifier(option.optionId, ''),
+          name: truncateText(option.name, ACP_METADATA_STRING_MAX_CHARS),
+          kind: truncateText(option.kind, 256),
+        })),
+      };
+    case 'turn-failure':
+      return {
+        ...item,
+        failure: {
+          ...item.failure,
+          message: truncateText(item.failure.message, 64 * 1024),
+          ...(item.failure.upstreamCode
+            ? { upstreamCode: truncateText(item.failure.upstreamCode, 4_096) }
+            : {}),
+        },
+      };
+    default:
+      return item;
+    }
+  })();
+
+  if (estimateValueBytes(projected, ACP_TIMELINE_MAX_BYTES + 1) <= ACP_TIMELINE_MAX_BYTES) {
+    return projected;
+  }
+
+  // A single malformed terminal record must not be allowed to defeat the
+  // timeline budget.  Keep only the identity/status needed for the UI and a
+  // short diagnostic marker; the complete protocol payload remains on disk.
+  const id = boundedIdentifier(projected.id, 'uclaw:bounded-item');
+  const compact: TimelineItem = (() => {
+    switch (projected.kind) {
+    case 'message-segment':
+      return {
+        kind: 'message-segment', id, role: projected.role,
+        messageId: boundedIdentifier(projected.messageId, 'message'),
+        segmentIndex: projected.segmentIndex, parts: [{ kind: 'error', message: ACP_OMITTED_VALUE_MARKER }],
+        blockCount: 0,
+      };
+    case 'thought':
+      return {
+        kind: 'thought', id, messageId: boundedIdentifier(projected.messageId, 'thought'),
+        parts: [{ kind: 'error', message: ACP_OMITTED_VALUE_MARKER }],
+      };
+    case 'tool-call':
+      return {
+        kind: 'tool-call', id, toolCallId: boundedIdentifier(projected.toolCallId, 'tool'),
+        title: 'Tool output omitted for memory safety', status: projected.status,
+        outputParts: [{ kind: 'error', message: ACP_OMITTED_VALUE_MARKER }], locations: [],
+      };
+    case 'permission':
+      return {
+        kind: 'permission', id, requestId: boundedIdentifier(projected.requestId, 'permission'),
+        title: 'Permission request omitted for memory safety', options: [], status: projected.status,
+      };
+    case 'plan':
+      return { kind: 'plan', id, entries: [] };
+    case 'turn-failure':
+      return {
+        kind: 'turn-failure', id,
+        userMessageId: boundedIdentifier(projected.userMessageId, 'message'),
+        failure: { code: 'UNKNOWN', message: ACP_OMITTED_VALUE_MARKER, retryable: false },
+      };
+    }
+  })();
+  return compact;
+}
+
+/** Bounds a timeline item created by a store-side event path. */
+export function boundAcpTimelineItem(item: TimelineItem): TimelineItem {
+  return boundTimelineItem(item);
+}
+
+function timelineBytes(snapshot: AcpTimelineSnapshot): number {
+  const cached = timelineByteEstimates.get(snapshot);
+  if (cached !== undefined) return cached;
+  // Estimate item-by-item so a value above the threshold does not collapse to
+  // a single sentinel and make later eviction arithmetic inaccurate.
+  // Use the raw metadata estimate here so an oversized metadata update cannot
+  // take the fast path merely because its bounded projection is small.  The
+  // projection is installed when the bounds are enforced below.
+  let estimated = estimateValueBytes(snapshot.metadata, ACP_TIMELINE_MAX_BYTES + 1);
+  for (const id of snapshot.itemOrder) {
+    const item = snapshot.itemsById[id];
+    if (item) {
+      estimated += estimateValueBytes(item, ACP_TIMELINE_MAX_BYTES + 1);
+    }
+  }
+  timelineByteEstimates.set(snapshot, estimated);
+  return estimated;
+}
+
+function rememberTimelineBytes(
+  snapshot: AcpTimelineSnapshot,
+  bytes: number,
+  source?: AcpTimelineSnapshot,
+): AcpTimelineSnapshot {
+  timelineByteEstimates.set(snapshot, Math.max(0, bytes));
+  if (source && boundedTimelineSnapshots.has(source)) boundedTimelineSnapshots.add(snapshot);
+  return snapshot;
+}
+
+function markTimelineAsBounded(snapshot: AcpTimelineSnapshot): AcpTimelineSnapshot {
+  boundedTimelineSnapshots.add(snapshot);
+  return snapshot;
+}
+
+function protectedTimelineItem(item: TimelineItem): boolean {
+  if (item.kind === 'turn-failure' || item.kind === 'permission') return true;
+  if (item.kind === 'tool-call') return item.status === 'completed' || item.status === 'failed';
+  return false;
+}
+
+function enforceTimelineBounds(snapshot: AcpTimelineSnapshot, knownBytes?: number): AcpTimelineSnapshot {
+  const bytes = knownBytes ?? timelineBytes(snapshot);
+  if (
+    boundedTimelineSnapshots.has(snapshot)
+    && snapshot.itemOrder.length <= ACP_TIMELINE_MAX_ITEMS
+    && bytes <= ACP_TIMELINE_MAX_BYTES
+  ) {
+    return rememberTimelineBytes(snapshot, bytes, snapshot);
+  }
+
+  const order: string[] = [];
+  const itemsById: Record<string, TimelineItem> = {};
+  let totalBytes = estimateValueBytes(boundedMetadata(snapshot.metadata), ACP_TIMELINE_MAX_BYTES + 1);
+  for (const id of snapshot.itemOrder) {
+    const item = snapshot.itemsById[id];
+    if (!item || id in itemsById) continue;
+    const bounded = boundTimelineItem(item);
+    order.push(id);
+    itemsById[id] = bounded;
+    totalBytes += estimateValueBytes(bounded, ACP_TIMELINE_MAX_BYTES + 1);
+  }
+  const removeAt = (index: number): void => {
+    const id = order[index];
+    if (!id) return;
+    const item = itemsById[id];
+    if (item) totalBytes = Math.max(0, totalBytes - estimateValueBytes(item, ACP_TIMELINE_MAX_BYTES + 1));
+    order.splice(index, 1);
+    delete itemsById[id];
+  };
+
+  while (order.length > ACP_TIMELINE_MAX_ITEMS || totalBytes > ACP_TIMELINE_MAX_BYTES) {
+    let index = order.findIndex((id) => {
+      const item = itemsById[id];
+      return item ? !protectedTimelineItem(item) : true;
+    });
+    if (index < 0) {
+      // A stream made entirely of terminal records is unusual, but still must
+      // have a hard bound.  If even the newest protected record cannot fit
+      // beside bounded metadata, drop it as the final safety valve.
+      if (order.length <= 1) {
+        if (order.length === 1) removeAt(0);
+        continue;
+      }
+      index = 0;
+    }
+    removeAt(index);
+  }
+
+  // Rebuild the identity indexes from retained items only. Besides removing
+  // references to evicted segments, this avoids iterating/materializing a
+  // potentially unbounded provider-supplied openMessageSegments map.
+  const retainedMessageIds = new Set<string>();
+  for (const id of order) {
+    const item = itemsById[id];
+    if (item?.kind === 'message-segment') retainedMessageIds.add(item.messageId);
+  }
+  const openMessageSegments: Record<string, string> = {};
+  const segmentCounts: Record<string, number> = {};
+  for (const messageId of retainedMessageIds) {
+    const openId = snapshot.openMessageSegments[messageId];
+    const openItem = openId ? itemsById[openId] : undefined;
+    if (openItem?.kind === 'message-segment' && openItem.messageId === messageId) {
+      openMessageSegments[messageId] = openId;
+    }
+    const count = snapshot.segmentCounts[messageId];
+    if (Number.isInteger(count) && count >= 0) segmentCounts[messageId] = count;
+  }
+  const boundedSnapshot = {
+    ...snapshot,
+    itemOrder: order,
+    itemsById,
+    metadata: boundedMetadata(snapshot.metadata),
+    openMessageSegments,
+    segmentCounts,
+  };
+  boundedTimelineSnapshots.add(boundedSnapshot);
+  return rememberTimelineBytes(boundedSnapshot, totalBytes, boundedSnapshot);
+}
+
+/** Applies the renderer timeline safety bounds to mutations outside the reducer. */
+export function enforceAcpTimelineBounds(snapshot: AcpTimelineSnapshot): AcpTimelineSnapshot {
+  return enforceTimelineBounds(snapshot);
+}
+
+export function createEmptyAcpTimeline(sessionId: string, loadGeneration: number): AcpTimelineSnapshot {
+  return markTimelineAsBounded({
     sessionId,
     loadGeneration,
     itemOrder: [],
@@ -35,21 +538,34 @@ export function createEmptyAcpTimeline(sessionId: string, loadGeneration: number
     openMessageSegments: {},
     segmentCounts: {},
     fallbackMessageCounts: { user: 0, assistant: 0 },
-  };
+  });
 }
 
 function appendItem(state: AcpTimelineSnapshot, item: TimelineItem): AcpTimelineSnapshot {
-  const hasItem = item.id in state.itemsById;
-  return {
+  const boundedItem = boundTimelineItem(item);
+  const previousItem = state.itemsById[boundedItem.id];
+  const hasItem = previousItem !== undefined;
+  const next = {
     ...state,
-    itemOrder: hasItem ? state.itemOrder : [...state.itemOrder, item.id],
-    itemsById: { ...state.itemsById, [item.id]: item },
+    itemOrder: hasItem ? state.itemOrder : [...state.itemOrder, boundedItem.id],
+    itemsById: { ...state.itemsById, [boundedItem.id]: boundedItem },
   };
+  const previousBytes = timelineBytes(state);
+  const nextBytes = Math.max(
+    0,
+    previousBytes
+      - (previousItem ? estimateValueBytes(previousItem, ACP_TIMELINE_MAX_BYTES + 1) : 0)
+      + estimateValueBytes(boundedItem, ACP_TIMELINE_MAX_BYTES + 1),
+  );
+  return next.itemOrder.length > ACP_TIMELINE_MAX_ITEMS || nextBytes > ACP_TIMELINE_MAX_BYTES
+    ? enforceTimelineBounds(next, nextBytes)
+    : rememberTimelineBytes(next, nextBytes, state);
 }
 
 function closeAllMessageSegments(state: AcpTimelineSnapshot): AcpTimelineSnapshot {
   if (Object.keys(state.openMessageSegments).length === 0) return state;
-  return { ...state, openMessageSegments: {} };
+  const next = { ...state, openMessageSegments: {} };
+  return boundedTimelineSnapshots.has(state) ? markTimelineAsBounded(next) : next;
 }
 
 function stringValue(value: unknown): string | undefined {
@@ -72,12 +588,72 @@ function toolContentArray(value: unknown): ToolCallContent[] {
   return Array.isArray(value) ? value as ToolCallContent[] : [];
 }
 
-function toolLocations(value: unknown): ToolCallLocation[] {
-  return Array.isArray(value) ? value as ToolCallLocation[] : [];
+function boundedToolLocationMeta(value: unknown): ToolCallLocation['_meta'] | undefined {
+  if (value === null) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+
+  const source = value as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  let bytes = estimateValueBytes(result, ACP_TOOL_LOCATION_META_MAX_BYTES + 1);
+  let count = 0;
+  // Iterate keys lazily. Object.keys(...) would first materialize every key of
+  // a provider-supplied metadata object, defeating the bound for a malformed
+  // location with millions of properties.
+  for (const key in source) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+    if (count >= ACP_TOOL_LOCATION_META_MAX_ITEMS) break;
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+    const safeKey = truncateText(key, ACP_TOOL_LOCATION_META_KEY_MAX_CHARS);
+    if (!safeKey || Object.prototype.hasOwnProperty.call(result, safeKey)) continue;
+    const raw = source[key];
+    let projected: unknown;
+    if (raw === null || typeof raw === 'boolean') {
+      projected = raw;
+    } else if (typeof raw === 'number' && Number.isFinite(raw)) {
+      projected = raw;
+    } else if (typeof raw === 'string') {
+      projected = truncateText(raw, ACP_TOOL_LOCATION_META_STRING_MAX_CHARS);
+    } else {
+      projected = {
+        __uclawTruncated: true,
+        preview: ACP_OMITTED_VALUE_MARKER,
+      };
+    }
+    const candidate = { ...result, [safeKey]: projected };
+    const candidateBytes = estimateValueBytes(candidate, ACP_TOOL_LOCATION_META_MAX_BYTES + 1);
+    if (candidateBytes > ACP_TOOL_LOCATION_META_MAX_BYTES) continue;
+    result[safeKey] = projected;
+    bytes = candidateBytes;
+    count += 1;
+  }
+  // Keep an explicit empty object distinct from an absent _meta field; ACP
+  // allows both and callers may use null as a deliberate reset signal.
+  return bytes <= ACP_TOOL_LOCATION_META_MAX_BYTES ? result : undefined;
 }
 
-function configOptions(value: unknown): SessionConfigOption[] {
-  return Array.isArray(value) ? value as SessionConfigOption[] : [];
+function boundedToolLocations(value: unknown): ToolCallLocation[] {
+  if (!Array.isArray(value)) return [];
+  const result: ToolCallLocation[] = [];
+  const start = Math.max(0, value.length - ACP_TOOL_LOCATION_MAX_COUNT);
+  for (let index = start; index < value.length; index += 1) {
+    const raw = value[index];
+    if (!raw || typeof raw !== 'object') continue;
+    const location = raw as Record<string, unknown>;
+    const path = typeof location.path === 'string'
+      ? truncateText(location.path, ACP_TOOL_LOCATION_PATH_MAX_CHARS)
+      : '';
+    if (!path) continue;
+    const line = typeof location.line === 'number' && Number.isFinite(location.line)
+      ? Math.max(0, Math.floor(location.line))
+      : undefined;
+    const meta = boundedToolLocationMeta(location._meta);
+    result.push({
+      path,
+      ...(line !== undefined ? { line } : {}),
+      ...(meta !== undefined ? { _meta: meta } : {}),
+    });
+  }
+  return result;
 }
 
 function propertyExists(record: UpdateRecord, property: string): boolean {
@@ -110,14 +686,15 @@ function fallbackMessageIdentity(
     sequence += 1;
     messageId = `${role}:message:${sequence}`;
   }
-  return {
-    state: {
-      ...state,
-      fallbackMessageCounts: {
-        ...state.fallbackMessageCounts,
-        [role]: sequence + 1,
-      },
+  const nextState = {
+    ...state,
+    fallbackMessageCounts: {
+      ...state.fallbackMessageCounts,
+      [role]: sequence + 1,
     },
+  };
+  return {
+    state: boundedTimelineSnapshots.has(state) ? markTimelineAsBounded(nextState) : nextState,
     messageId,
   };
 }
@@ -144,31 +721,39 @@ function nextMessageSegment(
 
   const segmentIndex = state.segmentCounts[messageId] ?? 0;
   const id = `${messageId}:${segmentIndex}`;
-  const item: MessageSegmentItem = {
+  const item = boundTimelineItem({
     kind: 'message-segment', id, role, messageId, segmentIndex, parts: [], blockCount: 0,
-  };
+  }) as MessageSegmentItem;
 
+  const nextState = {
+    ...state,
+    itemOrder: [...state.itemOrder, id],
+    itemsById: { ...state.itemsById, [id]: item },
+    openMessageSegments: { ...state.openMessageSegments, [messageId]: id },
+    segmentCounts: { ...state.segmentCounts, [messageId]: segmentIndex + 1 },
+  };
+  const nextBytes = timelineBytes(state) + estimateValueBytes(item, ACP_TIMELINE_MAX_BYTES + 1);
   return {
-    state: {
-      ...state,
-      itemOrder: [...state.itemOrder, id],
-      itemsById: { ...state.itemsById, [id]: item },
-      openMessageSegments: { ...state.openMessageSegments, [messageId]: id },
-      segmentCounts: { ...state.segmentCounts, [messageId]: segmentIndex + 1 },
-    },
+    state: rememberTimelineBytes(nextState, nextBytes, state),
     item,
   };
 }
 
 function appendRenderPart(parts: RenderPart[], nextPart: RenderPart): RenderPart[] {
+  const boundedNextPart = boundRenderPart(nextPart);
   const previous = parts[parts.length - 1];
-  if (previous?.kind === 'markdown' && nextPart.kind === 'markdown') {
+  if (previous?.kind === 'markdown' && boundedNextPart.kind === 'markdown') {
     return [
       ...parts.slice(0, -1),
-      { ...previous, text: previous.text + nextPart.text },
+      { ...previous, text: truncateText(`${previous.text}${boundedNextPart.text}`) },
     ];
   }
-  return [...parts, nextPart];
+  if (parts.length >= ACP_RENDER_PART_MAX_COUNT) {
+    // Preserve the existing preview and terminal/error content; callers still
+    // retain the complete protocol event on disk for later inspection.
+    return parts;
+  }
+  return [...parts, boundedNextPart];
 }
 
 function preserveAvailableAttachment(
@@ -207,7 +792,7 @@ function appendMessageRenderPart(role: Role, parts: RenderPart[], nextPart: Rend
     if (markdownIndex >= 0 && markdownIndex !== parts.length - 1) {
       return parts.map((part, index) => (
         index === markdownIndex && part.kind === 'markdown'
-          ? { ...part, text: part.text + nextPart.text }
+          ? { ...part, text: truncateText(`${part.text}${nextPart.text}`) }
           : part
       ));
     }
@@ -267,10 +852,11 @@ function appendMessageChunk(
     segmentIndex: result.item.segmentIndex,
     blockIndex,
   });
+  const safeNextPart = boundRenderPart(nextPart);
   const parts = result.item.optimistic && role === 'user'
-    ? mergeOptimisticUserEchoParts(result.item.parts, [nextPart])
-    : appendMessageRenderPart(role, result.item.parts, nextPart);
-  const nextItem: MessageSegmentItem = {
+    ? mergeOptimisticUserEchoParts(result.item.parts, [safeNextPart])
+    : appendMessageRenderPart(role, result.item.parts, safeNextPart);
+  const nextItem = boundTimelineItem({
     ...result.item,
     blockCount: blockIndex + 1,
     optimistic: false,
@@ -288,12 +874,22 @@ function appendMessageChunk(
             : {}),
         }
       : {}),
-  };
+  }) as MessageSegmentItem;
 
-  return {
+  const nextState = {
     ...result.state,
     itemsById: { ...result.state.itemsById, [nextItem.id]: nextItem },
   };
+  const previousBytes = timelineBytes(result.state);
+  const nextBytes = Math.max(
+    0,
+    previousBytes
+      - estimateValueBytes(result.item, ACP_TIMELINE_MAX_BYTES + 1)
+      + estimateValueBytes(nextItem, ACP_TIMELINE_MAX_BYTES + 1),
+  );
+  return nextState.itemOrder.length > ACP_TIMELINE_MAX_ITEMS || nextBytes > ACP_TIMELINE_MAX_BYTES
+    ? enforceTimelineBounds(nextState, nextBytes)
+    : rememberTimelineBytes(nextState, nextBytes, result.state);
 }
 
 function replacementMessageParts(
@@ -346,8 +942,8 @@ function replaceMessage(
         role,
         messageId,
         segmentIndex: existing.segmentIndex,
-      });
-      const item: MessageSegmentItem = {
+      }, { maxBlocks: ACP_RENDER_CONTENT_MAX_BLOCKS });
+      const item = boundTimelineItem({
         ...existing,
         blockCount: blocks.length,
         optimistic: false,
@@ -356,17 +952,27 @@ function replaceMessage(
           ? existing.userPromptTextBlocks
           : openClawPromptTextBlocks(blocks),
         userPromptTextBlocksOptimistic: undefined,
-      };
-      return {
+      }) as MessageSegmentItem;
+      const nextState = {
         ...state,
         itemsById: { ...state.itemsById, [item.id]: item },
       };
+      const previousBytes = timelineBytes(state);
+      const nextBytes = Math.max(
+        0,
+        previousBytes
+          - estimateValueBytes(existing, ACP_TIMELINE_MAX_BYTES + 1)
+          + estimateValueBytes(item, ACP_TIMELINE_MAX_BYTES + 1),
+      );
+      return nextState.itemOrder.length > ACP_TIMELINE_MAX_ITEMS || nextBytes > ACP_TIMELINE_MAX_BYTES
+        ? enforceTimelineBounds(nextState, nextBytes)
+        : rememberTimelineBytes(nextState, nextBytes, state);
     }
   }
 
   const result = nextMessageSegment(state, role, messageId);
   const blocks = contentArray(content);
-  const item: MessageSegmentItem = {
+  const item = boundTimelineItem({
     ...result.item,
     blockCount: blocks.length,
     optimistic: false,
@@ -376,15 +982,24 @@ function replaceMessage(
         role,
         messageId,
         segmentIndex: result.item.segmentIndex,
-      }),
+      }, { maxBlocks: ACP_RENDER_CONTENT_MAX_BLOCKS }),
     ),
     ...(role === 'user' ? { userPromptTextBlocks: openClawPromptTextBlocks(blocks) } : {}),
-  };
+  }) as MessageSegmentItem;
 
-  return {
+  const nextState = {
     ...result.state,
     itemsById: { ...result.state.itemsById, [item.id]: item },
   };
+  const previousBytes = timelineBytes(result.state);
+  const nextBytes = Math.max(
+    0,
+    previousBytes - estimateValueBytes(result.item, ACP_TIMELINE_MAX_BYTES + 1)
+      + estimateValueBytes(item, ACP_TIMELINE_MAX_BYTES + 1),
+  );
+  return nextState.itemOrder.length > ACP_TIMELINE_MAX_ITEMS || nextBytes > ACP_TIMELINE_MAX_BYTES
+    ? enforceTimelineBounds(nextState, nextBytes)
+    : rememberTimelineBytes(nextState, nextBytes, result.state);
 }
 
 export function appendSyntheticAssistantMessage(
@@ -398,16 +1013,16 @@ export function appendSyntheticAssistantMessage(
   },
 ): AcpTimelineSnapshot {
   const id = `${input.messageId}:0`;
-  const item: MessageSegmentItem = {
+  const item = boundTimelineItem({
     kind: 'message-segment',
     id,
     role: 'assistant',
     messageId: input.messageId,
     segmentIndex: 0,
     blockCount: 0,
-    parts: input.parts,
+    parts: boundRenderParts(input.parts, ACP_TOOL_OUTPUT_MAX_BYTES),
     compat: { source: input.source ?? 'image-generation', evidenceId: input.evidenceId },
-  };
+  }) as MessageSegmentItem;
 
   const nextOrder = (() => {
     if (snapshot.itemOrder.includes(id)) return snapshot.itemOrder;
@@ -420,12 +1035,13 @@ export function appendSyntheticAssistantMessage(
     ];
   })();
 
-  return dedupeTimelineAttachments({
+  const next = dedupeTimelineAttachments({
     ...snapshot,
     itemOrder: nextOrder,
     itemsById: { ...snapshot.itemsById, [id]: item },
     segmentCounts: { ...snapshot.segmentCounts, [input.messageId]: 1 },
   });
+  return enforceTimelineBounds(next);
 }
 
 export function upsertSyntheticTurnAttachments(
@@ -451,7 +1067,7 @@ export function upsertSyntheticTurnAttachments(
   });
   if (anchorIndex < 0) return snapshot;
 
-  const item: MessageSegmentItem = {
+  const item = boundTimelineItem({
     kind: 'message-segment',
     id,
     role: 'assistant',
@@ -468,7 +1084,7 @@ export function upsertSyntheticTurnAttachments(
       return mergeMonotonicAttachment(previous, attachment);
     }),
     compat: { source: input.source, evidenceId: input.evidenceId },
-  };
+  }) as MessageSegmentItem;
   const itemsById = { ...snapshot.itemsById };
   if (existingId && existingId !== id) delete itemsById[existingId];
   itemsById[id] = item;
@@ -482,12 +1098,13 @@ export function upsertSyntheticTurnAttachments(
   const insertionIndex = nextUserIndex < 0 ? itemOrder.length : nextUserIndex;
   itemOrder = [...itemOrder.slice(0, insertionIndex), id, ...itemOrder.slice(insertionIndex)];
 
-  return dedupeTimelineAttachments({
+  const next = dedupeTimelineAttachments({
     ...snapshot,
     itemOrder,
     itemsById,
     segmentCounts: { ...snapshot.segmentCounts, [messageId]: 1 },
   });
+  return enforceTimelineBounds(next);
 }
 
 function normalizeToolStatus(status: ToolCallStatus | null | undefined): ToolCallItem['status'] {
@@ -559,17 +1176,17 @@ function upsertToolCall(
   const status = propertyExists(update, 'status') ? normalizeToolStatus(rawStatus) : prev?.status ?? 'pending';
   const output = hasRawOutput ? update.rawOutput : prev?.output;
   const contentParts = hasContent
-    ? toolContentToRenderParts(toolContentArray(update.content), {
+    ? boundRenderParts(toolContentToRenderParts(toolContentArray(update.content), {
         role: 'assistant', messageId: `tool:${toolCallId}`, segmentIndex: 0,
-      })
+      }, { maxBlocks: ACP_RENDER_CONTENT_MAX_BLOCKS }), ACP_TOOL_OUTPUT_MAX_BYTES)
     : prev?.outputParts ?? [];
-  const outputParts = projectOfficeArtifactResult(
+  const outputParts = boundRenderParts(projectOfficeArtifactResult(
     toolCallId,
     status,
     output,
     contentParts,
     prev?.outputParts ?? [],
-  );
+  ), ACP_TOOL_OUTPUT_MAX_BYTES);
 
   return appendItem(closeAllMessageSegments(state), {
     kind: 'tool-call',
@@ -581,7 +1198,7 @@ function upsertToolCall(
     input: hasRawInput ? update.rawInput : prev?.input,
     output,
     outputParts,
-    locations: hasLocations ? toolLocations(update.locations) : prev?.locations ?? [],
+    locations: hasLocations ? boundedToolLocations(update.locations) : prev?.locations ?? [],
     error: rawError ?? prev?.error,
     historical: !!prev?.historical || !!options.historical,
   });
@@ -616,7 +1233,7 @@ function appendToolContentChunk(
     status: prev?.status ?? 'running',
     input: prev?.input,
     output: prev?.output,
-    outputParts: [...(prev?.outputParts ?? []), nextPart],
+    outputParts: boundRenderParts([...(prev?.outputParts ?? []), nextPart], ACP_TOOL_OUTPUT_MAX_BYTES),
     locations: prev?.locations ?? [],
     error: prev?.error,
     historical: !!prev?.historical || !!options.historical,
@@ -637,12 +1254,12 @@ function appendThoughtChunk(state: AcpTimelineSnapshot, update: UpdateRecord): A
     kind: 'thought',
     id,
     messageId,
-    parts: [...parts, contentBlockToRenderPart(content, {
+    parts: boundRenderParts([...parts, contentBlockToRenderPart(content, {
       role: 'assistant',
       messageId: `thought:${messageId}`,
       segmentIndex: 0,
       blockIndex: parts.length,
-    })],
+    })], ACP_TOOL_OUTPUT_MAX_BYTES),
   });
 }
 
@@ -677,19 +1294,19 @@ function appendTurnFailure(state: AcpTimelineSnapshot, update: UpdateRecord): Ac
 }
 
 function updateSessionInfoMetadata(state: AcpTimelineSnapshot, update: UpdateRecord): AcpTimelineSnapshot {
-  return {
+  return enforceTimelineBounds({
     ...state,
     metadata: {
       ...state.metadata,
       ...(propertyExists(update, 'title') ? { title: update.title as string | null | undefined } : {}),
       ...(propertyExists(update, 'updatedAt') ? { updatedAt: update.updatedAt as string | null | undefined } : {}),
     },
-  };
+  });
 }
 
 function usageMetadata(update: UpdateRecord): unknown {
   const { sessionUpdate: _sessionUpdate, ...usage } = update;
-  return usage;
+  return boundedToolValue(usage, ACP_METADATA_MAX_BYTES);
 }
 
 export function applyAcpSessionUpdate(
@@ -726,18 +1343,40 @@ export function applyAcpSessionUpdate(
       return appendItem(closeAllMessageSegments(snapshot), {
         kind: 'plan',
         id: 'plan:current',
-        entries: Array.isArray(update.entries) ? update.entries as PlanEntry[] : [],
+        entries: boundedPlanEntries(update.entries),
       });
     case 'available_commands_update':
-      return { ...snapshot, metadata: { ...snapshot.metadata, availableCommands: Array.isArray(update.availableCommands) ? update.availableCommands : [] } };
+      return enforceTimelineBounds({
+        ...snapshot,
+        metadata: {
+          ...snapshot.metadata,
+          availableCommands: Array.isArray(update.availableCommands)
+            ? update.availableCommands.slice(-ACP_METADATA_MAX_ITEMS)
+            : [],
+        },
+      });
     case 'config_option_update':
-      return { ...snapshot, metadata: { ...snapshot.metadata, configOptions: configOptions(update.configOptions) } };
+      return enforceTimelineBounds({
+        ...snapshot,
+        metadata: { ...snapshot.metadata, configOptions: boundedConfigOptions(update.configOptions) },
+      });
     case 'current_mode_update':
-      return { ...snapshot, metadata: { ...snapshot.metadata, currentModeId: stringValue(update.currentModeId) } };
+      return enforceTimelineBounds({
+        ...snapshot,
+        metadata: {
+          ...snapshot.metadata,
+          currentModeId: typeof update.currentModeId === 'string'
+            ? truncateText(update.currentModeId, ACP_IDENTIFIER_MAX_CHARS)
+            : undefined,
+        },
+      });
     case 'session_info_update':
       return updateSessionInfoMetadata(snapshot, update);
     case 'usage_update':
-      return { ...snapshot, metadata: { ...snapshot.metadata, usage: usageMetadata(update) } };
+      return enforceTimelineBounds({
+        ...snapshot,
+        metadata: { ...snapshot.metadata, usage: usageMetadata(update) },
+      });
     default:
       return snapshot;
   }

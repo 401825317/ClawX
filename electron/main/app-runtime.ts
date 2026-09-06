@@ -72,7 +72,16 @@ import { createSignalQuitHandler } from './signal-quit';
 import { acquireProcessInstanceFileLock } from './process-instance-lock';
 import { ensureBuiltinSkillsInstalled, removeRetiredPreinstalledSkills } from '../utils/skill-config';
 import { createFatalHandler } from './fatal-handler';
+import {
+  createRendererRecoveryGovernor,
+  type RendererRecoveryEvent,
+  type RendererRecoveryGovernor,
+} from './renderer-recovery';
 import { getUclawBackendOrigin } from '../utils/junfeiai-distribution';
+import {
+  collectRuntimeMemorySnapshot,
+  runtimeMemoryMetricProperties,
+} from '../utils/runtime-memory';
 import {
   getUclawDiagnosticHeaders,
   mergeUclawDiagnosticHeaders,
@@ -206,8 +215,8 @@ let unsubscribeManagedRuntimeConfig: (() => void) | null = null;
 let telemetryInitializationPromise: Promise<void> | null = null;
 let managedRuntimeShutdownRequested = false;
 let managedRuntimeShutdownPromise: Promise<void> | null = null;
-let mainRendererRecoveryTimer: NodeJS.Timeout | null = null;
-let mainRendererRecoveryInFlight: Promise<void> | null = null;
+const rendererRecoveryGovernors = new Set<RendererRecoveryGovernor>();
+let completionSetupTimer: ReturnType<typeof setTimeout> | null = null;
 const mainWindowFocusState = createMainWindowFocusState();
 const quitLifecycleState = createQuitLifecycleState();
 
@@ -443,6 +452,42 @@ function focusMainWindow(): void {
 function createMainWindow(): BrowserWindow {
   const win = createWindow();
 
+  const logRendererRecoveryEvent = (event: RendererRecoveryEvent): void => {
+    const details = {
+      event: event.type,
+      generation: event.generation,
+      reason: event.reason,
+      attempt: event.attempt,
+      delayMs: event.delayMs,
+      cause: event.cause,
+      ...(
+        event.type === 'recovery_executed' || event.type === 'circuit_open'
+          ? runtimeMemoryMetricProperties(collectRuntimeMemorySnapshot())
+          : {}
+      ),
+    };
+    if (event.type === 'recovery_suppressed' || event.type === 'circuit_open') {
+      logger.warn('Renderer recovery governor event', details);
+      return;
+    }
+    logger.info('Renderer recovery governor event', details);
+  };
+
+  const rendererRecovery = createRendererRecoveryGovernor({
+    canRecover: () => mainWindow === win && !win.isDestroyed() && !isQuitting(),
+    onEvent: logRendererRecoveryEvent,
+    reload: ({ generation, reason, attempt }) => {
+      if (mainWindow !== win || win.isDestroyed() || isQuitting()) return;
+      logger.warn('Reloading main renderer after process failure', {
+        generation,
+        reason,
+        attempt,
+      });
+      win.webContents.reload();
+    },
+  });
+  rendererRecoveryGovernors.add(rendererRecovery);
+
   win.once('ready-to-show', () => {
     if (mainWindow !== win) {
       return;
@@ -479,45 +524,32 @@ function createMainWindow(): BrowserWindow {
   });
 
   win.on('closed', () => {
-    if (mainRendererRecoveryTimer) {
-      clearTimeout(mainRendererRecoveryTimer);
-      mainRendererRecoveryTimer = null;
-    }
+    rendererRecovery.dispose();
+    rendererRecoveryGovernors.delete(rendererRecovery);
     if (mainWindow === win) {
       mainWindow = null;
     }
   });
-
-  const recoverRenderer = (reason: 'render-process-gone' | 'unresponsive'): void => {
-    if (mainWindow !== win || win.isDestroyed() || isQuitting()) return;
-    if (mainRendererRecoveryTimer) clearTimeout(mainRendererRecoveryTimer);
-    mainRendererRecoveryTimer = setTimeout(() => {
-      mainRendererRecoveryTimer = null;
-      if (mainRendererRecoveryInFlight || mainWindow !== win || win.isDestroyed() || isQuitting()) return;
-      mainRendererRecoveryInFlight = Promise.resolve().then(() => {
-        if (!win.isDestroyed()) win.webContents.reload();
-      }).catch(() => undefined).finally(() => {
-        mainRendererRecoveryInFlight = null;
-      });
-    }, reason === 'unresponsive' ? 5_000 : 0);
-  };
 
   win.webContents.on('render-process-gone', (_event, details) => {
     logger.warn('Main renderer process gone; recovering renderer in isolation', {
       reason: details.reason,
       exitCode: details.exitCode,
     });
-    recoverRenderer('render-process-gone');
+    rendererRecovery.onRenderProcessGone(details.reason);
   });
   win.webContents.on('unresponsive', () => {
     logger.warn('Main renderer became unresponsive; scheduling isolated recovery');
-    recoverRenderer('unresponsive');
+    rendererRecovery.onUnresponsive();
   });
   win.webContents.on('responsive', () => {
-    if (mainRendererRecoveryTimer) {
-      clearTimeout(mainRendererRecoveryTimer);
-      mainRendererRecoveryTimer = null;
-    }
+    rendererRecovery.onResponsive();
+  });
+  win.webContents.on('did-finish-load', () => {
+    rendererRecovery.onNavigation('did-finish-load');
+  });
+  win.webContents.on('did-fail-load', (_event, _errorCode, _errorDescription, _validatedUrl, isMainFrame) => {
+    if (isMainFrame) rendererRecovery.onNavigation('did-fail-load');
   });
 
   mainWindow = win;
@@ -910,13 +942,28 @@ async function initialize(): Promise<void> {
     });
   }
 
-  // Auto-install openclaw CLI and shell completions (non-blocking).
+  // Auto-install the CLI immediately, but defer the completion subprocess.
+  // Gateway/ACP startup already creates a short CPU and memory spike; running
+  // completion generation in the same window amplified the customer's stall.
   if (!isE2EMode) {
     void autoInstallCliIfNeeded((installedPath) => {
       mainWindow?.webContents.send('openclaw:cli-installed', installedPath);
     }).then(() => {
-      generateCompletionCache();
-      installCompletionToProfile();
+      // The asynchronous PATH/CLI check can finish after shutdown has begun.
+      // Do not create a new timer in that window; a late timer can keep the
+      // Electron process alive and race the quit cleanup.
+      if (isQuitting()) return;
+      if (completionSetupTimer) clearTimeout(completionSetupTimer);
+      completionSetupTimer = setTimeout(() => {
+        completionSetupTimer = null;
+        if (isQuitting()) return;
+        try {
+          generateCompletionCache();
+          installCompletionToProfile();
+        } catch (error) {
+          logger.warn('Deferred shell completion setup failed:', error);
+        }
+      }, 30_000);
     }).catch((error) => {
       logger.warn('CLI auto-install failed:', error);
     });
@@ -930,6 +977,12 @@ if (gotTheLock) {
   });
 
   process.on('exit', () => {
+    if (completionSetupTimer) {
+      clearTimeout(completionSetupTimer);
+      completionSetupTimer = null;
+    }
+    for (const rendererRecovery of rendererRecoveryGovernors) rendererRecovery.dispose();
+    rendererRecoveryGovernors.clear();
     releaseProcessInstanceFileLock();
   });
 
@@ -999,6 +1052,12 @@ if (gotTheLock) {
 
   app.on('before-quit', (event) => {
     setQuitting();
+    if (completionSetupTimer) {
+      clearTimeout(completionSetupTimer);
+      completionSetupTimer = null;
+    }
+    for (const rendererRecovery of rendererRecoveryGovernors) rendererRecovery.dispose();
+    rendererRecoveryGovernors.clear();
     const action = requestQuitLifecycleAction(quitLifecycleState);
 
     if (action === 'allow-quit') {

@@ -16,9 +16,25 @@ import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { getOpenClawDir, getOpenClawEntryPath } from './paths';
 import { logger } from './logger';
+import {
+  getAcpMemoryPolicy,
+  readAcpMemorySnapshot,
+  type AcpMemorySnapshot,
+  ACP_OLD_SPACE_MAX_MB,
+  ACP_OLD_SPACE_MIN_MB,
+} from './acp-memory-policy';
 
-const PACKAGED_WINDOWS_ACP_MAX_OLD_SPACE_MB = 1024;
+// Completion is intentionally kept separate from ACP.  It is a short-lived
+// helper and must not consume the memory budget reserved for the ACP session.
+const PACKAGED_WINDOWS_EMBEDDED_COMMAND_MAX_OLD_SPACE_MB = 1024;
 const PACKAGED_WINDOWS_COMPLETION_MAX_OLD_SPACE_MB = 512;
+
+export {
+  getAcpMemoryPolicy,
+  readAcpMemorySnapshot,
+  ACP_OLD_SPACE_MAX_MB,
+  ACP_OLD_SPACE_MIN_MB,
+};
 
 // ── Quoting helpers ──────────────────────────────────────────────────────────
 
@@ -215,9 +231,13 @@ function getOpenClawEmbeddedExecPath(): { execPath: string; electronRunAsNode: b
   return { execPath: process.execPath, electronRunAsNode: Boolean(process.versions?.electron) };
 }
 
-export function getOpenClawEmbeddedForkSpec(args: string[] = []): OpenClawEmbeddedForkSpec {
+export function getOpenClawEmbeddedForkSpec(
+  args: string[] = [],
+  memorySnapshot?: AcpMemorySnapshot,
+): OpenClawEmbeddedForkSpec {
   const { execPath, electronRunAsNode } = getOpenClawEmbeddedExecPath();
   const isPackagedWindows = app.isPackaged && process.platform === 'win32';
+  const isAcpProcess = args[0] === 'acp';
   const env: NodeJS.ProcessEnv = {
     ...(isPackagedWindows ? copyProcessEnvWithoutNodeOptions() : process.env),
     OPENCLAW_NO_RESPAWN: '1',
@@ -231,6 +251,21 @@ export function getOpenClawEmbeddedForkSpec(args: string[] = []): OpenClawEmbedd
     delete env.ELECTRON_RUN_AS_NODE;
   }
 
+  const acpMemoryPolicy = isPackagedWindows && isAcpProcess
+    ? getAcpMemoryPolicy(memorySnapshot ?? readAcpMemorySnapshot())
+    : null;
+  if (acpMemoryPolicy) {
+    // This is intentionally diagnostic-only: do not include environment data,
+    // prompts or credentials in the log line.
+    logger.info('[openclaw] ACP memory policy selected', {
+      oldSpaceMb: acpMemoryPolicy.oldSpaceMb,
+      source: acpMemoryPolicy.source,
+      totalMemoryBytes: acpMemoryPolicy.totalMemoryBytes,
+      availableMemoryBytes: acpMemoryPolicy.availableMemoryBytes,
+      commitUsageRatio: acpMemoryPolicy.commitUsageRatio,
+    });
+  }
+
   return {
     modulePath: getOpenClawEntryPath(),
     args,
@@ -239,7 +274,9 @@ export function getOpenClawEmbeddedForkSpec(args: string[] = []): OpenClawEmbedd
       env,
       execPath,
       execArgv: isPackagedWindows
-        ? [`--max-old-space-size=${PACKAGED_WINDOWS_ACP_MAX_OLD_SPACE_MB}`]
+        ? [`--max-old-space-size=${
+          acpMemoryPolicy?.oldSpaceMb ?? PACKAGED_WINDOWS_EMBEDDED_COMMAND_MAX_OLD_SPACE_MB
+        }`]
         : [],
       stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
       windowsHide: true,

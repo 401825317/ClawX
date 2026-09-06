@@ -8,6 +8,7 @@ const originalComSpec = process.env.ComSpec;
 const originalPath = process.env.PATH;
 const originalElectronRunAsNode = process.env.ELECTRON_RUN_AS_NODE;
 const originalNodeOptions = process.env.NODE_OPTIONS;
+const originalAcpMaxOldSpaceMb = process.env.UCLAW_ACP_MAX_OLD_SPACE_MB;
 const mockedEntryPath = 'C:\\Program Files\\ClawX\\resources\\openclaw\\openclaw.mjs';
 
 type ProcessExitListener = (code: number) => void;
@@ -134,10 +135,16 @@ function resetOpenClawCliMocks() {
   } else {
     process.env.ELECTRON_RUN_AS_NODE = originalElectronRunAsNode;
   }
-  if (originalNodeOptions === undefined) {
-    delete process.env.NODE_OPTIONS;
-  } else {
+  for (const key of Object.keys(process.env)) {
+    if (key.toLowerCase() === 'node_options') delete process.env[key];
+  }
+  if (originalNodeOptions !== undefined) {
     process.env.NODE_OPTIONS = originalNodeOptions;
+  }
+  if (originalAcpMaxOldSpaceMb === undefined) {
+    delete process.env.UCLAW_ACP_MAX_OLD_SPACE_MB;
+  } else {
+    process.env.UCLAW_ACP_MAX_OLD_SPACE_MB = originalAcpMaxOldSpaceMb;
   }
 }
 
@@ -388,11 +395,74 @@ describe('getOpenClawEmbeddedForkSpec', () => {
     mockExistsSync.mockImplementation((p: string) => /[\\/]bin[\\/]node\.exe$/i.test(p));
 
     const { getOpenClawEmbeddedForkSpec } = await import('@electron/utils/openclaw-cli');
-    const spec = getOpenClawEmbeddedForkSpec(['acp']);
+    const spec = getOpenClawEmbeddedForkSpec(['acp'], { totalMemoryBytes: 8 * 1024 * 1024 * 1024 });
 
     expect(spec.options.env).not.toHaveProperty('NODE_OPTIONS');
     expect(spec.options.execArgv).toEqual(['--max-old-space-size=1024']);
     expect(spec.options.execPath).toBe(join('C:\\Program Files\\ClawX\\resources', 'bin', 'node.exe'));
+  });
+
+  it('uses the 3072 MiB ACP tier on a 32 GiB Windows host', async () => {
+    setPlatform('win32');
+    mockIsPackagedGetter.value = true;
+    setResourcesPath('C:\\Program Files\\ClawX\\resources');
+    mockExistsSync.mockImplementation((p: string) => /[\\/]bin[\\/]node\.exe$/i.test(p));
+
+    const { getOpenClawEmbeddedForkSpec } = await import('@electron/utils/openclaw-cli');
+    const spec = getOpenClawEmbeddedForkSpec(['acp'], {
+      totalMemoryBytes: 32 * 1024 * 1024 * 1024,
+      availableMemoryBytes: 16 * 1024 * 1024 * 1024,
+    });
+
+    expect(spec.options.execArgv).toEqual(['--max-old-space-size=3072']);
+  });
+
+  it('removes lowercase host node_options on packaged Windows', async () => {
+    setPlatform('win32');
+    mockIsPackagedGetter.value = true;
+    setResourcesPath('C:\\Program Files\\ClawX\\resources');
+    for (const key of Object.keys(process.env)) {
+      if (key.toLowerCase() === 'node_options') delete process.env[key];
+    }
+    process.env.node_options = '--max-old-space-size=64 --require unsafe-hook.cjs';
+    mockExistsSync.mockImplementation((p: string) => /[\\/]bin[\\/]node\.exe$/i.test(p));
+
+    const { getOpenClawEmbeddedForkSpec } = await import('@electron/utils/openclaw-cli');
+    const spec = getOpenClawEmbeddedForkSpec(['acp'], { totalMemoryBytes: 8 * 1024 * 1024 * 1024 });
+
+    expect(Object.keys(spec.options.env ?? {}).some((key) => key.toLowerCase() === 'node_options')).toBe(false);
+    expect(spec.options.execArgv).toEqual(['--max-old-space-size=1024']);
+  });
+
+  it('keeps an ACP A/B override inside the 4096 MiB hard maximum', async () => {
+    setPlatform('win32');
+    mockIsPackagedGetter.value = true;
+    setResourcesPath('C:\\Program Files\\ClawX\\resources');
+    process.env.UCLAW_ACP_MAX_OLD_SPACE_MB = '999999';
+    mockExistsSync.mockImplementation((p: string) => /[\\/]bin[\\/]node\.exe$/i.test(p));
+
+    const { getOpenClawEmbeddedForkSpec } = await import('@electron/utils/openclaw-cli');
+    const spec = getOpenClawEmbeddedForkSpec(['acp'], {
+      totalMemoryBytes: 32 * 1024 * 1024 * 1024,
+      availableMemoryBytes: 16 * 1024 * 1024 * 1024,
+    });
+
+    expect(spec.options.execArgv).toEqual(['--max-old-space-size=4096']);
+  });
+
+  it('does not expand non-ACP embedded maintenance commands with the ACP tier', async () => {
+    setPlatform('win32');
+    mockIsPackagedGetter.value = true;
+    setResourcesPath('C:\\Program Files\\ClawX\\resources');
+    mockExistsSync.mockImplementation((p: string) => /[\\/]bin[\\/]node\.exe$/i.test(p));
+
+    const { getOpenClawEmbeddedForkSpec } = await import('@electron/utils/openclaw-cli');
+    const spec = getOpenClawEmbeddedForkSpec(['doctor', '--json'], {
+      totalMemoryBytes: 32 * 1024 * 1024 * 1024,
+      availableMemoryBytes: 16 * 1024 * 1024 * 1024,
+    });
+
+    expect(spec.options.execArgv).toEqual(['--max-old-space-size=1024']);
   });
 
   it('fails packaged macOS embedded launch when the Helper executable is missing', async () => {
