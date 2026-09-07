@@ -377,6 +377,74 @@ function Invoke-ProductionPsql {
   return Invoke-ProductionSsh -RemoteCommand $command -InputText $Sql
 }
 
+function Assert-ProductionDatabaseMatchesPublicFeed {
+  param(
+    [Parameter(Mandatory = $true)]$Container,
+    [Parameter(Mandatory = $true)]$PublicFeeds,
+    [Parameter(Mandatory = $true)]$ReleaseRows
+  )
+
+  # The SSH host can expose a valid PostgreSQL instance that is not the
+  # database used by the public aiwxxx.com application.  Before any write,
+  # compare the enabled rows in that database with the cache-busted public
+  # feed snapshot.  A mismatch is a hard stop: staging must never report
+  # success against an unrelated environment.
+  $targetWhere = @(
+    foreach ($row in $ReleaseRows) {
+      "(platform=$(ConvertTo-SqlLiteral $row.Platform) AND arch=$(ConvertTo-SqlLiteral $row.Arch) AND package_type=$(ConvertTo-SqlLiteral $row.PackageType))"
+    }
+  ) -join ' OR '
+  $sql = @"
+SELECT coalesce(json_agg(json_build_object(
+  'platform', platform,
+  'arch', arch,
+  'package_type', package_type,
+  'version', version,
+  'file_name', file_name,
+  'file_url', file_url,
+  'sha512', sha512,
+  'size', size,
+  'mandatory', mandatory
+) ORDER BY platform, arch), '[]'::json)::text
+FROM claw_x_releases
+WHERE channel='latest' AND enabled=true AND ($targetWhere);
+"@
+  $result = Invoke-ProductionPsql -Container $Container -Sql $sql
+  $line = @($result.Stdout -split "`r?`n" | Where-Object { $_.Trim().StartsWith('[') })[-1]
+  if (-not $line) { throw 'Production database target verification returned no evidence.' }
+  $databaseRows = @($line | ConvertFrom-Json)
+
+  foreach ($row in $ReleaseRows) {
+    $public = @($PublicFeeds | Where-Object {
+      $_.platform -eq $row.Platform -and $_.arch -eq $row.Arch -and $_.packageType -eq $row.PackageType
+    })
+    if ($public.Count -ne 1) { throw "Public feed snapshot is missing $($row.Platform)/$($row.Arch)/$($row.PackageType)." }
+    $public = $public[0]
+    $db = @($databaseRows | Where-Object {
+      $_.platform -eq $row.Platform -and $_.arch -eq $row.Arch -and $_.package_type -eq $row.PackageType
+    })
+    if ([string]::IsNullOrWhiteSpace([string]$public.version)) {
+      if ($db.Count -ne 0) { throw "Production database target mismatch for aiwxxx.com: unexpected enabled $($row.Platform)/$($row.Arch)/$($row.PackageType) row." }
+      continue
+    }
+    if ($db.Count -ne 1) {
+      throw "Production database target mismatch for aiwxxx.com: expected one enabled $($row.Platform)/$($row.Arch)/$($row.PackageType) row, found $($db.Count). Refusing to write."
+    }
+    $current = $db[0]
+    $url = if ($current.file_url) { [string]$current.file_url } else { '' }
+    $sha = ([string]$current.sha512).ToLowerInvariant()
+    $publicSha = ([string]$public.sha512).ToLowerInvariant()
+    if ([string]$current.version -ne [string]$public.version -or
+      [string]$current.file_name -ne [string]$public.fileName -or
+      $url -ne [string]$public.downloadUrl -or
+      $sha -ne $publicSha -or
+      [int64]$current.size -ne [int64]$public.size -or
+      [bool]$current.mandatory -ne [bool]$public.mandatory) {
+      throw "Production database target mismatch for aiwxxx.com at $($row.Platform)/$($row.Arch)/$($row.PackageType): enabled row does not match the public feed. Refusing to write."
+    }
+  }
+}
+
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Version must be a stable semantic version.' }
 if ($Commit -notmatch '^[0-9a-f]{40}$') { throw 'Commit must be a full Git SHA.' }
 if ($ReleaseNotes.Length -gt 10000) { throw 'Release notes exceed 10000 characters.' }
@@ -513,16 +581,28 @@ else {
 if (-not (Test-Path -LiteralPath $OssutilPath -PathType Leaf)) { throw "ossutil not found: $OssutilPath" }
 if ($ossCredential.bucket -ne 'uclaw-ver' -or $ossCredential.region -ne 'cn-beijing' -or $ossCredential.prefix -ne 'releases/latest/') { throw 'OSS credential metadata does not target the approved UClaw release location.' }
 
-$feedBefore = @(
+$feedBeforeObjects = @(
   Get-PublicFeedIdentity -Platform 'win' -Arch 'x64' -PackageType 'portable_zip'
   Get-PublicFeedIdentity -Platform 'mac' -Arch 'x64' -PackageType 'portable_zip'
   Get-PublicFeedIdentity -Platform 'mac' -Arch 'arm64' -PackageType 'portable_zip'
-) | ConvertTo-Json -Depth 5 -Compress
+)
+$feedBefore = $feedBeforeObjects | ConvertTo-Json -Depth 5 -Compress
 $temporaryConfig = Join-Path $env:TEMP ('uclaw-oss-' + [guid]::NewGuid().ToString('N') + '.ini')
 $askpassDirectory = Join-Path $env:TEMP ('uclaw-ssh-askpass-' + [guid]::NewGuid().ToString('N'))
 $secretPointer = [IntPtr]::Zero
 $secret = $null
 try {
+  # Validate the remote database target before touching OSS.  A reachable
+  # PostgreSQL pod is not sufficient evidence that it backs aiwxxx.com.
+  $script:AskpassPath = if ($usesActionSecrets) {
+    Initialize-SshAskpass -Directory $askpassDirectory -PasswordEnvironmentVariable 'UCLAW_PRODUCTION_SSH_PASSWORD'
+  }
+  else {
+    Initialize-SshAskpass -CredentialPath $resolvedSshCredentialPath -Directory $askpassDirectory
+  }
+  $postgres = Get-PostgresContainer
+  Assert-ProductionDatabaseMatchesPublicFeed -Container $postgres -PublicFeeds $feedBeforeObjects -ReleaseRows $releaseRows
+
   $pending = @()
   foreach ($object in $objects) {
     $uri = "https://uclaw-ver.oss-cn-beijing.aliyuncs.com/releases/latest/$($object.FileName)"
@@ -582,13 +662,6 @@ region=$($ossCredential.region)
     }
   }
 
-  $script:AskpassPath = if ($usesActionSecrets) {
-    Initialize-SshAskpass -Directory $askpassDirectory -PasswordEnvironmentVariable 'UCLAW_PRODUCTION_SSH_PASSWORD'
-  }
-  else {
-    Initialize-SshAskpass -CredentialPath $resolvedSshCredentialPath -Directory $askpassDirectory
-  }
-  $postgres = Get-PostgresContainer
   $notes = if ($ReleaseNotes) { $ReleaseNotes } else { "UClaw $Version staged pending activation." }
   $mandatorySql = if ($Mandatory) { 'true' } else { 'false' }
   $prechecks = ''

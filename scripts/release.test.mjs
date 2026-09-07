@@ -248,6 +248,12 @@ test('disabled stage publisher never enables a release row', async () => {
   assert.match(publisher, /Sha512Hex = Get-Sha512Hex \$metadataPath/u);
   assert.match(publisher, /objects = \$objects\.Count/u);
   assert.match(publisher, /function Get-SingleHttpHeaderValue/u);
+  assert.match(publisher, /function Assert-ProductionDatabaseMatchesPublicFeed/u);
+  assert.match(publisher, /Assert-ProductionDatabaseMatchesPublicFeed -Container \$postgres/u);
+  assert.ok(
+    publisher.indexOf('Assert-ProductionDatabaseMatchesPublicFeed -Container $postgres') < publisher.indexOf('  $pending = @()'),
+    'database target verification must run before any OSS upload',
+  );
   assert.match(publisher, /GitHub Actions release secrets are incomplete/u);
   assert.match(publisher, /UCLAW_OSS_ACCESS_KEY_SECRET/u);
   assert.match(publisher, /UCLAW_PRODUCTION_SSH_PASSWORD/u);

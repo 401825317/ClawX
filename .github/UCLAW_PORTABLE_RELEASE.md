@@ -71,6 +71,7 @@ uclaw-macos-production-candidate-<version>-<short-commit>
 
 - `oss-release.json` 的 `accessKeySecretDpapi` 是 PowerShell `ConvertFrom-SecureString` 输出。
 - `aiwxxx-production-ssh.json` 的 `passwordDpapi` 是 PowerShell `ConvertFrom-SecureString` 输出，且必须声明 `releaseOrigin: "https://aiwxxx.com"`。旧 `production-ssh.json` 不再是本机发布器的默认目标，避免误写入历史环境。
+- 发布器在取得 SSH/Kubernetes 数据库后，会先读取目标平台当前的 `enabled=true` 记录，并与无缓存的 `https://aiwxxx.com/api/clawx/updates/latest` 结果逐项比对（版本、文件名、OSS URL、SHA-512、大小和 mandatory）。任何不一致都会在 OSS/数据库写入前硬失败；这用于拦截“SSH 可连通但不是线上应用实际数据库”的错误目标，绝不会继续写入或生成成功回执。
 - `ossutil.exe` 固定为 `%TEMP%\uclaw-ossutil\ossutil-2.3.0-windows-amd64\ossutil.exe`。
 - DPAPI 文件必须由实际执行发布的同一机器、同一 Windows 用户创建。
 - 从其他电脑或 Windows 用户复制来的 DPAPI 文件无法解密，不能转换成 GitHub Secret。
