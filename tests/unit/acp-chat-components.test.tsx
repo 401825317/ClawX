@@ -2046,6 +2046,52 @@ describe('ACP chat timeline components', () => {
     expect(screen.queryByTestId('acp-attachment-icon')).not.toBeInTheDocument();
   });
 
+  it('renders a generated assistant image attachment inline from a bounded thumbnail', async () => {
+    const ref = {
+      sessionKey: 'agent:main:s1', generation: 1, uri: '/workspace/generated.png',
+    };
+    thumbnailsMock.mockResolvedValueOnce({
+      'opaque-generated.png': {
+        preview: 'data:image/png;base64,iVBORw0KGgo=',
+        fileSize: 25 * 1024 * 1024,
+      },
+    });
+    const part = availableAttachment({
+      name: 'generated.png',
+      mimeType: 'image/png',
+      size: 25 * 1024 * 1024,
+      ref,
+    });
+
+    render(<AcpAttachmentPart part={part} />);
+
+    const image = await screen.findByRole('img', { name: 'generated.png' });
+    expect(image).toHaveAttribute('src', 'data:image/png;base64,iVBORw0KGgo=');
+    expect(screen.getByTestId('acp-image-part')).toBeInTheDocument();
+    expect(screen.queryByTestId('acp-attachment-icon')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open generated.png with' })).not.toBeInTheDocument();
+    expect(thumbnailsMock).toHaveBeenCalledWith({
+      paths: [{ attachmentFileRef: ref, key: 'opaque-generated.png', mimeType: 'image/png' }],
+    });
+    expect(readAttachmentBinaryMock).not.toHaveBeenCalled();
+
+    fireEvent.doubleClick(image);
+    await waitFor(() => expect(readAttachmentBinaryMock).toHaveBeenCalledWith(expect.objectContaining({ ref })));
+  });
+
+  it('keeps the file-card fallback when an assistant image thumbnail is unavailable', async () => {
+    const part = availableAttachment({ name: 'missing-generated.png', mimeType: 'image/png' });
+    thumbnailsMock.mockResolvedValueOnce({
+      'opaque-missing-generated.png': { preview: null, fileSize: 1024 },
+    });
+
+    render(<AcpAttachmentPart part={part} />);
+
+    expect(await screen.findByTestId('chat-attached-file')).toHaveTextContent('missing-generated.png');
+    expect(screen.queryByTestId('acp-image-part')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open missing-generated.png with' })).toBeInTheDocument();
+  });
+
   it('shows a user file path after its name without MIME or size and keeps preview routing', () => {
     const ref = {
       sessionKey: 'agent:main:s1', generation: 1, uri: '/tmp/clawx-staging/notes.txt', stagingId: 'stage-notes',

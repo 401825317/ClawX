@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { Paperclip } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
@@ -10,6 +10,7 @@ import { basenameOf, extnameOf } from '@/lib/generated-files';
 import { hostApi } from '@/lib/host-api';
 import { useArtifactPanel } from '@/stores/artifact-panel';
 import { AcpFileCard } from './AcpFileCard';
+import { AcpImagePart } from './AcpImagePart';
 import { AcpVideoAttachment } from './AcpVideoAttachment';
 
 type AttachmentTone = 'assistant' | 'user';
@@ -98,6 +99,57 @@ function AcpUserImageAttachment({
         </span>
       </span>
     </button>
+  );
+}
+
+function AcpAssistantImageAttachment({
+  part,
+  name,
+  fallback,
+}: {
+  part: AttachmentRenderPart & { access: Extract<AttachmentRenderPart['access'], { status: 'available' }> };
+  name: string;
+  fallback: ReactNode;
+}) {
+  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (part.access.target.kind !== 'local') return;
+    let cancelled = false;
+
+    void hostApi.media
+      .thumbnails({
+        paths: [{
+          attachmentFileRef: part.access.target.ref,
+          key: part.access.identity,
+          mimeType: part.access.mimeType,
+        }],
+      })
+      .then((result) => {
+        if (cancelled) return;
+        setThumbnailUrl(result[part.access.identity]?.preview ?? null);
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [part.access]);
+
+  if (!thumbnailUrl) return <>{fallback}</>;
+
+  return (
+    <AcpImagePart
+      part={{
+        kind: 'image',
+        source: thumbnailUrl,
+        mimeType: part.access.mimeType,
+        alt: name,
+        attachmentFileRef: part.access.target.ref,
+        mediaIdentity: part.access.identity,
+      }}
+      className="self-start"
+    />
   );
 }
 
@@ -219,6 +271,45 @@ export function AcpAttachmentPart({
       )}
     </>
   );
+
+  if (
+    tone === 'assistant'
+    && part.access.status === 'available'
+    && part.access.target.kind === 'local'
+    && part.access.mimeType.startsWith('image/')
+  ) {
+    return (
+      <AcpAssistantImageAttachment
+        part={
+          part as AttachmentRenderPart & { access: Extract<AttachmentRenderPart['access'], { status: 'available' }> }
+        }
+        name={name}
+        fallback={(
+          <AcpFileCard
+            variant="standalone"
+            primaryAriaLabel={ariaLabel}
+            primaryTestId="chat-attached-file"
+            primaryDisabled={disabled}
+            onPrimary={() => void activate()}
+            openWith={openWithFileRef
+              ? {
+                  target: { kind: 'attachment', ref: openWithFileRef },
+                  name,
+                  ...(part.access.status === 'available'
+                    && part.access.target.kind === 'local'
+                    && part.access.target.scope === 'workspace'
+                    && workspaceRoot
+                    ? { workspaceRoot }
+                    : {}),
+                }
+              : undefined}
+          >
+            {attachmentContent}
+          </AcpFileCard>
+        )}
+      />
+    );
+  }
 
   return (
     <AcpFileCard
