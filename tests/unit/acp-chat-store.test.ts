@@ -2488,6 +2488,76 @@ describe('ACP Chat store', () => {
     expect(useAcpChatSessionStore.getState().cancelling).toBe(false);
   });
 
+  it('atomically replaces interrupted text when the retry first produces visible text', async () => {
+    const { useAcpChatSessionStore } = await importStore();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo',
+    });
+    const apply = (update: Record<string, unknown>, retryReplacement?: { userMessageId: string; attempt: number }) => {
+      useAcpChatSessionStore.getState().applyUpdateEnvelope({
+        sessionKey: 'agent:pi:s1',
+        generation: 1,
+        ...(retryReplacement ? { retryReplacement } : {}),
+        notification: { sessionId: 'agent:pi:s1', update } as never,
+      });
+    };
+    apply({ sessionUpdate: 'user_message_chunk', messageId: 'retry-user', content: { type: 'text', text: 'Explain' } });
+    apply({ sessionUpdate: 'agent_message_chunk', messageId: 'old-assistant', content: { type: 'text', text: 'Old partial' } });
+    apply({ sessionUpdate: 'uclaw_turn_retrying', userMessageId: 'retry-user', attempt: 2, maxAttempts: 3, delayMs: 500 });
+
+    const observed: Array<{ oldPresent: boolean; newPresent: boolean; retryPresent: boolean }> = [];
+    const unsubscribe = useAcpChatSessionStore.subscribe((state) => {
+      observed.push({
+        oldPresent: Boolean(state.timeline.itemsById['old-assistant:0']),
+        newPresent: Boolean(state.timeline.itemsById['new-assistant:0']),
+        retryPresent: Boolean(state.timeline.itemsById['turn-retry:retry-user']),
+      });
+    });
+
+    apply(
+      { sessionUpdate: 'agent_message_chunk', messageId: 'new-assistant', content: { type: 'text', text: 'Complete answer' } },
+      { userMessageId: 'retry-user', attempt: 2 },
+    );
+    unsubscribe();
+
+    expect(observed).toEqual([{ oldPresent: false, newPresent: true, retryPresent: false }]);
+    expect(useAcpChatSessionStore.getState().timeline.itemOrder).toEqual([
+      'retry-user:0',
+      'new-assistant:0',
+    ]);
+  });
+
+  it('collapses superseded partial attempts when ACP history replays an internal retry prompt', async () => {
+    const { useAcpChatSessionStore } = await importStore();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo',
+    });
+    const replay = (update: Record<string, unknown>) => {
+      useAcpChatSessionStore.getState().applyUpdateEnvelope({
+        sessionKey: 'agent:pi:s1',
+        generation: 1,
+        historical: true,
+        notification: { sessionId: 'agent:pi:s1', update } as never,
+      });
+    };
+    replay({ sessionUpdate: 'user_message_chunk', messageId: 'retry-user', content: { type: 'text', text: 'Explain' } });
+    replay({ sessionUpdate: 'agent_message_chunk', messageId: 'old-assistant', content: { type: 'text', text: 'Old partial' } });
+    replay({
+      sessionUpdate: 'user_message_chunk',
+      messageId: 'retry-user:upstream-retry:2',
+      content: {
+        type: 'text',
+        text: '[UClaw automatic upstream retry]\nRestart the complete answer from the beginning.',
+      },
+    });
+    replay({ sessionUpdate: 'agent_message_chunk', messageId: 'new-assistant', content: { type: 'text', text: 'Complete answer' } });
+
+    const timeline = useAcpChatSessionStore.getState().timeline;
+    expect(timeline.itemOrder).toEqual(['retry-user:0', 'new-assistant:0']);
+    expect(JSON.stringify(timeline)).not.toContain('Old partial');
+    expect(JSON.stringify(timeline)).not.toContain('automatic upstream retry');
+  });
+
   it('adds an optimistic user segment immediately before ACP echoes a user update', async () => {
     const prompt = createDeferred<{ success: boolean; error?: string; generation?: number }>();
     hostApiMock.sendAcpPrompt.mockReturnValueOnce(prompt.promise);

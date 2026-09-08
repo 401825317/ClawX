@@ -84,6 +84,7 @@
         "cancelled": "キャンセル済み",
         "loadFailed": "セッションの読み込みに失敗しました",
         "promptFailed": "プロンプトの送信に失敗しました",
+        "retrying": "接続が中断されました。自動再試行中（{{attempt}}/{{maxAttempts}}）...",
         "unsupportedContent": "未対応のコンテンツ",
         "dismiss": "閉じる",
         "failure": {

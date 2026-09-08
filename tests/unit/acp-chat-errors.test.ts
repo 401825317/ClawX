@@ -28,6 +28,8 @@ describe('ACP chat error classification', () => {
       true,
       502,
     ],
+    ['status_code=504, upstream request timed out', 'TIMEOUT', true, 504],
+    ['status_code=524, Cloudflare timeout', 'TIMEOUT', true, 524],
     [
       'status_code=400, The reasoning_text in the thinking mode must be passed back to the API',
       'CONVERSATION_INVALID',

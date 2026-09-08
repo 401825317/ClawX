@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { LoaderCircle } from 'lucide-react';
 import logoUclaw from '@/assets/logo-uclaw.png';
 import type { AcpAssistantTurnDisplayGroup } from '@/lib/acp/timeline-groups';
 import { AcpMessageSegment, AcpRenderPart } from './AcpMessageSegment';
@@ -83,7 +84,9 @@ export function AcpAssistantTurn({
   onPermissionSelect?: (requestId: string, optionId: string) => void;
   onRecharge?: () => void;
 }) {
+  const { t } = useTranslation('chat');
   const displayEntries = useMemo(() => groupConsecutiveToolCalls(group.items), [group.items]);
+  const retrying = group.items.some((item) => item.kind === 'turn-retry');
   const visibleTraceKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -156,7 +159,13 @@ export function AcpAssistantTurn({
               return <AcpMessageSegment key={item.id} item={item} workspaceRoot={workspaceRoot} />;
             }
             return (
-              <div key={item.id} data-acp-item-id={item.id} data-testid="acp-assistant-message" className="flex min-w-0 flex-col gap-2">
+              <div
+                key={item.id}
+                data-acp-item-id={item.id}
+                data-testid="acp-assistant-message"
+                data-interrupted={retrying ? 'true' : undefined}
+                className={`flex min-w-0 flex-col gap-2 transition-opacity ${retrying ? 'opacity-50' : ''}`}
+              >
                 {item.parts.map((part, index) => (
                   <AcpRenderPart
                     key={`${part.kind}:${index}`}
@@ -205,6 +214,22 @@ export function AcpAssistantTurn({
             return (
               <div key={item.id} data-acp-item-id={item.id} className="w-full">
                 <AcpTurnFailureCard item={item} onRecharge={onRecharge} />
+              </div>
+            );
+          }
+
+          if (item.kind === 'turn-retry') {
+            return (
+              <div
+                key={item.id}
+                data-acp-item-id={item.id}
+                data-testid="acp-turn-retrying"
+                role="status"
+                aria-live="polite"
+                className="flex items-center gap-2 text-sm text-muted-foreground"
+              >
+                <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" aria-hidden="true" />
+                <span>{t('acp.retrying', { attempt: item.attempt, maxAttempts: item.maxAttempts })}</span>
               </div>
             );
           }

@@ -121,7 +121,23 @@ export type TurnFailureItem = {
   failure: AcpChatErrorDetails;
 };
 
-export type TimelineItem = MessageSegmentItem | ThoughtItem | ToolCallItem | PermissionItem | PlanItem | TurnFailureItem;
+/** In-memory status for a bounded replay of the owning text-only turn. */
+export type TurnRetryItem = {
+  kind: 'turn-retry';
+  id: string;
+  userMessageId: string;
+  attempt: number;
+  maxAttempts: number;
+};
+
+export type TimelineItem =
+  | MessageSegmentItem
+  | ThoughtItem
+  | ToolCallItem
+  | PermissionItem
+  | PlanItem
+  | TurnFailureItem
+  | TurnRetryItem;
 
 export type AcpSessionMetadata = {
   currentModeId?: string;

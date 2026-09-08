@@ -84,6 +84,7 @@
         "cancelled": "已取消",
         "loadFailed": "会话加载失败",
         "promptFailed": "发送提示失败",
+        "retrying": "线路异常，正在自动重试（{{attempt}}/{{maxAttempts}}）...",
         "unsupportedContent": "不支持的内容",
         "dismiss": "关闭",
         "failure": {

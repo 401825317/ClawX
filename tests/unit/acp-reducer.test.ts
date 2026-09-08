@@ -15,6 +15,7 @@ import {
   applyAcpSessionUpdate,
   createEmptyAcpTimeline,
   enforceAcpTimelineBounds,
+  replaceRetryingTurn,
 } from '@/lib/acp/reducer';
 import { estimateValueBytes } from '@shared/acp-chat/bounded-event-queue';
 import type { RenderPart } from '@/lib/acp/timeline-types';
@@ -1555,5 +1556,109 @@ describe('ACP timeline reducer', () => {
         upstreamCode: 'insufficient_user_quota',
       },
     });
+  });
+
+  it('keeps interrupted text visible while marking its owning turn as retrying', () => {
+    let state = createEmptyAcpTimeline('agent:pi:s1', 1);
+    state = applyAcpSessionUpdate(state, {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'user_message_chunk',
+        messageId: 'retry-user',
+        content: { type: 'text', text: 'Explain the result' },
+      },
+    });
+    state = applyAcpSessionUpdate(state, {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'interrupted-assistant',
+        content: { type: 'text', text: 'The incomplete answer' },
+      },
+    });
+    state = applyAcpSessionUpdate(state, {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'uclaw_turn_retrying',
+        userMessageId: 'retry-user',
+        attempt: 2,
+        maxAttempts: 3,
+        delayMs: 500,
+      },
+    } as never);
+
+    expect(state.itemOrder).toEqual([
+      'retry-user:0',
+      'interrupted-assistant:0',
+      'turn-retry:retry-user',
+    ]);
+    expect(state.itemsById['interrupted-assistant:0']).toMatchObject({
+      kind: 'message-segment',
+      parts: [{ kind: 'markdown', text: 'The incomplete answer' }],
+    });
+    expect(state.itemsById['turn-retry:retry-user']).toMatchObject({
+      kind: 'turn-retry',
+      userMessageId: 'retry-user',
+      attempt: 2,
+      maxAttempts: 3,
+    });
+    expect(state.openMessageSegments).toEqual({});
+
+    state = applyAcpSessionUpdate(state, {
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'uclaw_turn_failure',
+        userMessageId: 'retry-user',
+        errorMessage: 'status_code=503, upstream unavailable',
+      },
+    } as never);
+    expect(state.itemsById['interrupted-assistant:0']).toBeDefined();
+    expect(state.itemsById['turn-retry:retry-user']).toBeUndefined();
+    expect(state.itemsById['turn-failure:retry-user']).toMatchObject({ kind: 'turn-failure' });
+  });
+
+  it('removes only the interrupted turn before applying replacement text', () => {
+    let state = createEmptyAcpTimeline('agent:pi:s1', 1);
+    const update = (sessionUpdate: Record<string, unknown>) => {
+      state = applyAcpSessionUpdate(state, {
+        sessionId: 'agent:pi:s1',
+        update: sessionUpdate,
+      } as never);
+    };
+    update({ sessionUpdate: 'user_message_chunk', messageId: 'earlier-user', content: { type: 'text', text: 'Earlier' } });
+    update({ sessionUpdate: 'agent_message_chunk', messageId: 'earlier-assistant', content: { type: 'text', text: 'Earlier answer' } });
+    update({ sessionUpdate: 'user_message_chunk', messageId: 'retry-user', content: { type: 'text', text: 'Current' } });
+    update({ sessionUpdate: 'agent_message_chunk', messageId: 'old-assistant', content: { type: 'text', text: 'Old partial' } });
+    update({ sessionUpdate: 'agent_thought_chunk', messageId: 'old-thought', content: { type: 'text', text: 'Old thought' } });
+    update({ sessionUpdate: 'uclaw_turn_retrying', userMessageId: 'retry-user', attempt: 2, maxAttempts: 3, delayMs: 500 });
+
+    state = replaceRetryingTurn(state, { userMessageId: 'retry-user', attempt: 2 });
+    update({ sessionUpdate: 'agent_message_chunk', messageId: 'new-assistant', content: { type: 'text', text: 'Complete answer' } });
+
+    expect(state.itemOrder).toEqual([
+      'earlier-user:0',
+      'earlier-assistant:0',
+      'retry-user:0',
+      'new-assistant:0',
+    ]);
+    expect(JSON.stringify(state)).not.toContain('Old partial');
+    expect(JSON.stringify(state)).not.toContain('Old thought');
+    expect(state.openMessageSegments).toEqual({ 'new-assistant': 'new-assistant:0' });
+    expect(state.segmentCounts).not.toHaveProperty('old-assistant');
+    expect(state.segmentCounts).not.toHaveProperty('old-thought');
+  });
+
+  it('does not erase a retrying turn if it contains replay-unsafe activity', () => {
+    let state = createEmptyAcpTimeline('agent:pi:s1', 1);
+    for (const update of [
+      { sessionUpdate: 'user_message_chunk', messageId: 'retry-user', content: { type: 'text', text: 'Edit it' } },
+      { sessionUpdate: 'agent_message_chunk', messageId: 'old-assistant', content: { type: 'text', text: 'Starting' } },
+      { sessionUpdate: 'uclaw_turn_retrying', userMessageId: 'retry-user', attempt: 2, maxAttempts: 3, delayMs: 500 },
+      { sessionUpdate: 'tool_call', toolCallId: 'unsafe-tool', title: 'Edit file', status: 'running' },
+    ]) {
+      state = applyAcpSessionUpdate(state, { sessionId: 'agent:pi:s1', update } as never);
+    }
+
+    expect(replaceRetryingTurn(state, { userMessageId: 'retry-user', attempt: 2 })).toBe(state);
   });
 });

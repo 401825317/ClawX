@@ -85,6 +85,8 @@ export type AcpSessionUpdateEnvelope = {
   generation: number;
   /** True for ACP updates emitted while session/load is replaying history. */
   historical?: boolean;
+  /** Renderer-only boundary that replaces an interrupted text attempt with this update atomically. */
+  retryReplacement?: AcpTurnRetryReplacement;
   notification: SessionNotification;
 };
 
@@ -106,4 +108,25 @@ export type AcpTurnFailureUpdate = {
   retryable?: boolean;
   httpStatus?: number;
   upstreamCode?: string;
+};
+
+/** Visible status emitted while Main waits to replay a side-effect-free turn. */
+export type AcpTurnRetryUpdate = {
+  sessionUpdate: 'uclaw_turn_retrying';
+  userMessageId: string;
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+  errorCode?: AcpChatErrorCode;
+};
+
+/** Removes a pending retry status when the user stops during backoff. */
+export type AcpTurnRetryCancelledUpdate = {
+  sessionUpdate: 'uclaw_turn_retry_cancelled';
+  userMessageId: string;
+};
+
+export type AcpTurnRetryReplacement = {
+  userMessageId: string;
+  attempt: number;
 };

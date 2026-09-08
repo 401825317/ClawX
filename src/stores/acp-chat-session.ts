@@ -53,6 +53,8 @@ import {
   boundAcpTimelineItem,
   createEmptyAcpTimeline,
   enforceAcpTimelineBounds,
+  replaceRetryingTurn,
+  supersedeRetryReplayTurn,
   upsertSyntheticTurnAttachments,
 } from '@/lib/acp/reducer';
 import {
@@ -123,6 +125,7 @@ const imageGenerationCompatSessions = new Map<string, ImageGenerationCompatSessi
 type PendingLoadUpdateQueue = BoundedEventQueue<AcpSessionUpdateEnvelope>;
 
 function isProtectedAcpLoadUpdate(event: AcpSessionUpdateEnvelope): boolean {
+  if (event.retryReplacement) return true;
   const update = event.notification?.update as unknown as Record<string, unknown> | undefined;
   const updateType = typeof update?.sessionUpdate === 'string' ? update.sessionUpdate : '';
   if (updateType === 'uclaw_turn_failure' || updateType === 'plan') return true;
@@ -1548,18 +1551,47 @@ function isLiveMessageUpdate(event: AcpSessionUpdateEnvelope): boolean {
     || update.sessionUpdate === 'user_message_chunk';
 }
 
+const UCLAW_UPSTREAM_RETRY_SENTINEL = '[UClaw automatic upstream retry]';
+
+/** Recognizes only Main-generated retry prompts; ordinary user text cannot trigger replay collapse. */
+function replayRetryOriginalUserMessageId(event: AcpSessionUpdateEnvelope): string | null {
+  if (!event.historical) return null;
+  const update = event.notification.update as unknown as Record<string, unknown>;
+  if (update.sessionUpdate !== 'user_message' && update.sessionUpdate !== 'user_message_chunk') return null;
+  const messageId = typeof update.messageId === 'string' ? update.messageId : '';
+  const match = /^(.*):upstream-retry:\d+$/u.exec(messageId);
+  if (!match?.[1]) return null;
+  const blocks = Array.isArray(update.content) ? update.content : [update.content];
+  const generatedRetryPrompt = blocks.some((block) => (
+    block != null
+    && typeof block === 'object'
+    && !Array.isArray(block)
+    && (block as Record<string, unknown>).type === 'text'
+    && typeof (block as Record<string, unknown>).text === 'string'
+    && ((block as Record<string, unknown>).text as string).startsWith(UCLAW_UPSTREAM_RETRY_SENTINEL)
+  ));
+  return generatedRetryPrompt ? match[1] : null;
+}
+
 /** Keeps OpenClaw's task-control envelope out of the user-visible Turn timeline. */
 function applyVisibleAcpSessionUpdate(
   timeline: AcpTimelineSnapshot,
   event: AcpSessionUpdateEnvelope,
 ): AcpTimelineSnapshot {
+  const replayOriginalUserMessageId = replayRetryOriginalUserMessageId(event);
+  if (replayOriginalUserMessageId) {
+    return supersedeRetryReplayTurn(timeline, replayOriginalUserMessageId);
+  }
+  const replacementBase = event.retryReplacement
+    ? replaceRetryingTurn(timeline, event.retryReplacement)
+    : timeline;
   const update = event.notification.update as unknown as Record<string, unknown>;
   const internalVideoTerminal = update.sessionUpdate === 'user_message_chunk'
     && (typeof update.messageId !== 'string' || !update.messageId)
     && Boolean(extractVideoGenerationTerminalFromAcpEnvelope(event));
   return internalVideoTerminal
-    ? timeline
-    : applyAcpSessionUpdate(timeline, event.notification, { historical: !!event.historical });
+    ? replacementBase
+    : applyAcpSessionUpdate(replacementBase, event.notification, { historical: !!event.historical });
 }
 
 function liveTextChunkBatchKey(event: AcpSessionUpdateEnvelope): string | null {

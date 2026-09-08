@@ -84,6 +84,7 @@
         "cancelled": "Cancelled",
         "loadFailed": "Failed to load session",
         "promptFailed": "Failed to send prompt",
+        "retrying": "Connection interrupted. Retrying automatically ({{attempt}}/{{maxAttempts}})...",
         "unsupportedContent": "Unsupported content",
         "dismiss": "Dismiss",
         "failure": {

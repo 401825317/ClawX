@@ -566,6 +566,7 @@ async function emitAcpSessionUpdates(
   app: ElectronApplication,
   updates: AcpSessionUpdate[],
   generation = 1,
+  retryReplacement?: { userMessageId: string; attempt: number },
 ) {
   await app.evaluate(
     async ({ app: _app }, payload) => {
@@ -575,6 +576,7 @@ async function emitAcpSessionUpdates(
           window.webContents.send('chat:acp-session-update', {
             sessionKey: payload.sessionKey,
             generation: payload.generation,
+            ...(payload.retryReplacement ? { retryReplacement: payload.retryReplacement } : {}),
             notification: {
               sessionId: payload.sessionKey,
               update,
@@ -583,7 +585,7 @@ async function emitAcpSessionUpdates(
         }
       }
     },
-    { sessionKey: MAIN_SESSION_KEY, generation, updates },
+    { sessionKey: MAIN_SESSION_KEY, generation, updates, retryReplacement },
   );
 }
 
@@ -627,6 +629,74 @@ async function openChat(app: ElectronApplication) {
 }
 
 test.describe('ClawX ACP inline timeline', () => {
+  test('keeps interrupted text until replacement text atomically takes over the turn', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installAcpChatMocks(app);
+      const page = await openChat(app);
+      await emitAcpSessionUpdates(app, [
+        {
+          sessionUpdate: 'user_message_chunk',
+          messageId: 'retry-user',
+          content: { type: 'text', text: 'Explain this result' },
+        },
+        {
+          sessionUpdate: 'agent_message_chunk',
+          messageId: 'old-assistant',
+          content: { type: 'text', text: 'Interrupted partial answer' },
+        },
+        {
+          sessionUpdate: 'uclaw_turn_retrying',
+          userMessageId: 'retry-user',
+          attempt: 2,
+          maxAttempts: 3,
+          delayMs: 500,
+        },
+      ]);
+
+      const assistant = page.getByTestId('acp-assistant-message');
+      await expect(assistant).toContainText('Interrupted partial answer');
+      await expect(assistant).toHaveAttribute('data-interrupted', 'true');
+      await expect(page.getByTestId('acp-turn-retrying')).toContainText('2/3');
+
+      await page.evaluate(() => {
+        const state = { blankObserved: false };
+        (window as unknown as { __retryReplacementObservation?: typeof state }).__retryReplacementObservation = state;
+        const timeline = document.querySelector('[data-testid="acp-chat-timeline"]');
+        if (!timeline) throw new Error('ACP timeline is unavailable');
+        const observer = new MutationObserver(() => {
+          const text = timeline.textContent ?? '';
+          if (!text.includes('Interrupted partial answer') && !text.includes('Complete replacement answer')) {
+            state.blankObserved = true;
+          }
+        });
+        observer.observe(timeline, { childList: true, subtree: true, characterData: true });
+        (window as unknown as { __retryReplacementObserver?: MutationObserver }).__retryReplacementObserver = observer;
+      });
+
+      await emitAcpSessionUpdates(app, [{
+        sessionUpdate: 'agent_message_chunk',
+        messageId: 'new-assistant',
+        content: { type: 'text', text: 'Complete replacement answer' },
+      }], 1, { userMessageId: 'retry-user', attempt: 2 });
+
+      await expect(assistant).toContainText('Complete replacement answer');
+      await expect(page.getByText('Interrupted partial answer')).toHaveCount(0);
+      await expect(page.getByTestId('acp-turn-retrying')).toHaveCount(0);
+      expect(await page.evaluate(() => {
+        const globals = window as unknown as {
+          __retryReplacementObservation?: { blankObserved: boolean };
+          __retryReplacementObserver?: MutationObserver;
+        };
+        globals.__retryReplacementObserver?.disconnect();
+        return globals.__retryReplacementObservation?.blankObserved ?? true;
+      })).toBe(false);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
   test('supplements an ACP-replayed assistant turn with historical duration', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 

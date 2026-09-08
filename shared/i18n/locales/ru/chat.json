@@ -84,6 +84,7 @@
         "cancelled": "Отменено",
         "loadFailed": "Не удалось загрузить сеанс",
         "promptFailed": "Не удалось отправить запрос",
+        "retrying": "Соединение прервано. Автоматическая повторная попытка ({{attempt}}/{{maxAttempts}})...",
         "unsupportedContent": "Неподдерживаемое содержимое",
         "dismiss": "Закрыть",
         "failure": {

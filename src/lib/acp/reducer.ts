@@ -19,6 +19,7 @@ import { createPendingAttachment, dedupeTimelineAttachments, mergeMonotonicAttac
 import { parseOfficeArtifactToolResult } from './artifact-tool-result';
 import { openClawPromptTextBlocks } from './openclaw-prompt-compat';
 import { normalizeAcpChatError } from '@shared/acp-chat/errors';
+import type { AcpTurnRetryReplacement } from '@shared/acp-chat/types';
 import { estimateValueBytes } from '@shared/acp-chat/bounded-event-queue';
 import { ACP_INLINE_IMAGE_MAX_DATA_URI_CHARS } from '@shared/chat/media-limits';
 import type { AcpTimelineSnapshot, AttachmentRenderPart, MessageSegmentItem, RenderPart, TimelineItem, ToolCallItem } from './timeline-types';
@@ -348,6 +349,13 @@ function boundTimelineItem(item: TimelineItem): TimelineItem {
             : {}),
         },
       };
+    case 'turn-retry':
+      return {
+        ...item,
+        userMessageId: boundedIdentifier(item.userMessageId, 'message'),
+        attempt: Math.max(1, Math.floor(item.attempt)),
+        maxAttempts: Math.max(1, Math.floor(item.maxAttempts)),
+      };
     default:
       return item;
     }
@@ -394,6 +402,13 @@ function boundTimelineItem(item: TimelineItem): TimelineItem {
         userMessageId: boundedIdentifier(projected.userMessageId, 'message'),
         failure: { code: 'UNKNOWN', message: ACP_OMITTED_VALUE_MARKER, retryable: false },
       };
+    case 'turn-retry':
+      return {
+        kind: 'turn-retry', id,
+        userMessageId: boundedIdentifier(projected.userMessageId, 'message'),
+        attempt: Math.max(1, Math.floor(projected.attempt)),
+        maxAttempts: Math.max(1, Math.floor(projected.maxAttempts)),
+      };
     }
   })();
   return compact;
@@ -439,7 +454,7 @@ function markTimelineAsBounded(snapshot: AcpTimelineSnapshot): AcpTimelineSnapsh
 }
 
 function protectedTimelineItem(item: TimelineItem): boolean {
-  if (item.kind === 'turn-failure' || item.kind === 'permission') return true;
+  if (item.kind === 'turn-failure' || item.kind === 'turn-retry' || item.kind === 'permission') return true;
   if (item.kind === 'tool-call') return item.status === 'completed' || item.status === 'failed';
   return false;
 }
@@ -1263,8 +1278,11 @@ function appendThoughtChunk(state: AcpTimelineSnapshot, update: UpdateRecord): A
   });
 }
 
-function appendTurnFailure(state: AcpTimelineSnapshot, update: UpdateRecord): AcpTimelineSnapshot {
-  const requestedUserMessageId = stringValue(update.userMessageId);
+function resolvedTurnUserMessageId(
+  state: AcpTimelineSnapshot,
+  requestedUserMessageId: string | undefined,
+  fallbackToLatest = true,
+): string | undefined {
   const requestedExists = requestedUserMessageId && state.itemOrder.some((itemId) => {
     const item = state.itemsById[itemId];
     return item?.kind === 'message-segment'
@@ -1275,13 +1293,110 @@ function appendTurnFailure(state: AcpTimelineSnapshot, update: UpdateRecord): Ac
     .reverse()
     .map((itemId) => state.itemsById[itemId])
     .find((item) => item?.kind === 'message-segment' && item.role === 'user');
-  const userMessageId = requestedExists
-    ? requestedUserMessageId
-    : latestUserMessage?.kind === 'message-segment' ? latestUserMessage.messageId : undefined;
+  if (requestedExists) return requestedUserMessageId;
+  return fallbackToLatest && latestUserMessage?.kind === 'message-segment'
+    ? latestUserMessage.messageId
+    : undefined;
+}
+
+function removeTimelineItemIds(state: AcpTimelineSnapshot, removedIds: ReadonlySet<string>): AcpTimelineSnapshot {
+  if (removedIds.size === 0) return state;
+  const itemOrder = state.itemOrder.filter((itemId) => !removedIds.has(itemId));
+  const itemsById = Object.fromEntries(itemOrder.flatMap((itemId) => {
+    const item = state.itemsById[itemId];
+    return item ? [[itemId, item]] : [];
+  }));
+  const remainingMessageIds = new Set(itemOrder.flatMap((itemId) => {
+    const item = itemsById[itemId];
+    return item?.kind === 'message-segment' ? [item.messageId] : [];
+  }));
+  const openMessageSegments = Object.fromEntries(Object.entries(state.openMessageSegments)
+    .filter(([messageId, itemId]) => remainingMessageIds.has(messageId) && !removedIds.has(itemId)));
+  const segmentCounts = Object.fromEntries(Object.entries(state.segmentCounts)
+    .filter(([messageId]) => remainingMessageIds.has(messageId)));
+  return enforceTimelineBounds({
+    ...state,
+    itemOrder,
+    itemsById,
+    openMessageSegments,
+    segmentCounts,
+  });
+}
+
+function removeTurnRetry(state: AcpTimelineSnapshot, userMessageId: string): AcpTimelineSnapshot {
+  return removeTimelineItemIds(state, new Set([`turn-retry:${userMessageId}`]));
+}
+
+function appendTurnRetry(state: AcpTimelineSnapshot, update: UpdateRecord): AcpTimelineSnapshot {
+  const userMessageId = resolvedTurnUserMessageId(state, stringValue(update.userMessageId), false);
+  if (!userMessageId) return state;
+
+  return appendItem(closeAllMessageSegments(state), {
+    kind: 'turn-retry',
+    id: `turn-retry:${userMessageId}`,
+    userMessageId,
+    attempt: Math.max(1, Number(update.attempt) || 1),
+    maxAttempts: Math.max(1, Number(update.maxAttempts) || 1),
+  });
+}
+
+function cancelTurnRetry(state: AcpTimelineSnapshot, update: UpdateRecord): AcpTimelineSnapshot {
+  const userMessageId = resolvedTurnUserMessageId(state, stringValue(update.userMessageId), false);
+  return userMessageId ? removeTurnRetry(state, userMessageId) : state;
+}
+
+/**
+ * Drops only the interrupted, side-effect-free assistant projection. The new
+ * visible update is applied by the Store in the same commit, so the user never
+ * sees an empty turn between the old and replacement text.
+ */
+export function replaceRetryingTurn(
+  state: AcpTimelineSnapshot,
+  replacement: AcpTurnRetryReplacement,
+): AcpTimelineSnapshot {
+  const retryId = `turn-retry:${replacement.userMessageId}`;
+  if (state.itemsById[retryId]?.kind !== 'turn-retry') return state;
+  return supersedeRetryReplayTurn(state, replacement.userMessageId);
+}
+
+/** Collapses attempts identified by UClaw's own retry message id during ACP replay. */
+export function supersedeRetryReplayTurn(
+  state: AcpTimelineSnapshot,
+  userMessageId: string,
+): AcpTimelineSnapshot {
+  let anchorIndex = -1;
+  for (let index = state.itemOrder.length - 1; index >= 0; index -= 1) {
+    const itemId = state.itemOrder[index];
+    const item = state.itemsById[itemId];
+    if (item?.kind === 'message-segment'
+      && item.role === 'user'
+      && item.messageId === userMessageId) {
+      anchorIndex = index;
+      break;
+    }
+  }
+  if (anchorIndex < 0) return state;
+
+  const turnIds: string[] = [];
+  for (let index = anchorIndex + 1; index < state.itemOrder.length; index += 1) {
+    const itemId = state.itemOrder[index];
+    const item = state.itemsById[itemId];
+    if (item?.kind === 'message-segment' && item.role === 'user') break;
+    turnIds.push(itemId);
+  }
+  const containsReplayUnsafeItem = turnIds.some((itemId) => {
+    const item = state.itemsById[itemId];
+    return item?.kind === 'tool-call' || item?.kind === 'permission';
+  });
+  return containsReplayUnsafeItem ? state : removeTimelineItemIds(state, new Set(turnIds));
+}
+
+function appendTurnFailure(state: AcpTimelineSnapshot, update: UpdateRecord): AcpTimelineSnapshot {
+  const userMessageId = resolvedTurnUserMessageId(state, stringValue(update.userMessageId));
   if (!userMessageId) return state;
 
   const id = `turn-failure:${userMessageId}`;
-  return appendItem(closeAllMessageSegments(state), {
+  return appendItem(closeAllMessageSegments(removeTurnRetry(state, userMessageId)), {
     kind: 'turn-failure',
     id,
     userMessageId,
@@ -1334,6 +1449,10 @@ export function applyAcpSessionUpdate(
       return appendMessageChunk(snapshot, 'assistant', update);
     case 'agent_thought_chunk':
       return appendThoughtChunk(snapshot, update);
+    case 'uclaw_turn_retrying':
+      return appendTurnRetry(snapshot, update);
+    case 'uclaw_turn_retry_cancelled':
+      return cancelTurnRetry(snapshot, update);
     case 'uclaw_turn_failure':
       return appendTurnFailure(snapshot, update);
     case 'tool_call':

@@ -512,6 +512,10 @@ describe('AcpChatService', () => {
 
   it.each([
     [{ status: 429, type: 'rate_limit_error', message: 'Too many requests.' }, 'RATE_LIMIT'],
+    [{ status: 502, type: 'upstream_error', message: 'Bad gateway.' }, 'SERVICE_UNAVAILABLE'],
+    [{ status: 504, type: 'upstream_timeout', message: 'Gateway timed out.' }, 'TIMEOUT'],
+    [{ status: 524, type: 'upstream_timeout', message: 'Cloudflare timeout.' }, 'TIMEOUT'],
+    [{ status: 500, type: 'upstream_error', message: 'responses stream error: context canceled' }, 'NETWORK'],
     [{ type: 'service_unavailable', message: 'The provider is unavailable.' }, 'SERVICE_UNAVAILABLE'],
     [{ type: 'upstream_error', message: 'The upstream failed.' }, 'SERVICE_UNAVAILABLE'],
   ] as const)('retries Responses upstream failure shape %j', async (upstreamError, expectedCode) => {
@@ -559,7 +563,6 @@ describe('AcpChatService', () => {
         retryable: true,
       });
       expect(connection.prompt).toHaveBeenCalledTimes(3);
-      expect(send).toHaveBeenCalledTimes(1);
       expect(send).toHaveBeenCalledWith(HOST_EVENT_CHANNELS.chat.acpSessionUpdate, expect.objectContaining({
         notification: expect.objectContaining({
           sessionId: 'agent:pi:s1',
@@ -571,6 +574,119 @@ describe('AcpChatService', () => {
           }),
         }),
       }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries after partial text and marks the first replacement text atomically', async () => {
+    const connection = createConnection();
+    const firstPrompt = createDeferred<unknown>();
+    const replacementPrompt = createDeferred<unknown>();
+    connection.prompt
+      .mockReturnValueOnce(firstPrompt.promise)
+      .mockReturnValueOnce(replacementPrompt.promise);
+    const { service, send } = await createService(connection);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    vi.useFakeTimers();
+
+    try {
+      const result = service.sendPrompt({
+        sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'explain this', messageId: 'msg-partial-retry',
+      });
+      await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(1));
+      await service.client.sessionUpdate({
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          messageId: 'old-assistant',
+          content: { type: 'text', text: 'Interrupted answer' },
+        },
+      } as never);
+      firstPrompt.reject({ status: 503, type: 'upstream_error', message: 'Upstream service temporarily unavailable.' });
+      await vi.waitFor(() => expect(send).toHaveBeenCalledWith(
+        HOST_EVENT_CHANNELS.chat.acpSessionUpdate,
+        expect.objectContaining({
+          notification: expect.objectContaining({
+            update: expect.objectContaining({
+              sessionUpdate: 'uclaw_turn_retrying',
+              userMessageId: 'msg-partial-retry',
+              attempt: 2,
+              maxAttempts: 3,
+            }),
+          }),
+        }),
+      ));
+
+      await vi.advanceTimersByTimeAsync(500);
+      await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(2));
+      expect(connection.prompt.mock.calls[1]?.[0]).toMatchObject({
+        messageId: 'msg-partial-retry:upstream-retry:2',
+        prompt: [{ type: 'text', text: expect.stringContaining('Restart the complete answer from the beginning') }],
+      });
+
+      await service.client.sessionUpdate({
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          messageId: 'new-assistant',
+          content: { type: 'text', text: 'Complete answer' },
+        },
+      } as never);
+      expect(send).toHaveBeenLastCalledWith(
+        HOST_EVENT_CHANNELS.chat.acpSessionUpdate,
+        expect.objectContaining({
+          retryReplacement: { userMessageId: 'msg-partial-retry', attempt: 2 },
+          notification: expect.objectContaining({
+            update: expect.objectContaining({ messageId: 'new-assistant' }),
+          }),
+        }),
+      );
+
+      replacementPrompt.resolve({ stopReason: 'end_turn' });
+      await expect(result).resolves.toEqual({ success: true, generation: 1 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not dispatch another retry after the user stops during backoff', async () => {
+    const connection = createConnection();
+    connection.prompt.mockRejectedValueOnce({
+      status: 503, type: 'upstream_error', message: 'Upstream service temporarily unavailable.',
+    });
+    const { service, send } = await createService(connection);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    vi.useFakeTimers();
+
+    try {
+      const result = service.sendPrompt({
+        sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'continue', messageId: 'msg-stop-backoff',
+      });
+      await vi.waitFor(() => expect(send).toHaveBeenCalledWith(
+        HOST_EVENT_CHANNELS.chat.acpSessionUpdate,
+        expect.objectContaining({
+          notification: expect.objectContaining({
+            update: expect.objectContaining({ sessionUpdate: 'uclaw_turn_retrying' }),
+          }),
+        }),
+      ));
+
+      await expect(service.cancelSession({ sessionKey: 'agent:pi:s1' })).resolves.toEqual({
+        success: true,
+        generation: 1,
+      });
+      await expect(result).resolves.toEqual({ success: true, generation: 1 });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(connection.prompt).toHaveBeenCalledTimes(1);
+      expect(send).toHaveBeenCalledWith(
+        HOST_EVENT_CHANNELS.chat.acpSessionUpdate,
+        expect.objectContaining({
+          notification: expect.objectContaining({
+            update: expect.objectContaining({ sessionUpdate: 'uclaw_turn_retry_cancelled' }),
+          }),
+        }),
+      );
     } finally {
       vi.useRealTimers();
     }

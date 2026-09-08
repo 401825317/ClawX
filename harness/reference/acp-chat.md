@@ -51,7 +51,9 @@ type TimelineItem =
   | ThoughtItem
   | ToolCallItem
   | PermissionItem
-  | PlanItem;
+  | PlanItem
+  | TurnFailureItem
+  | TurnRetryItem;
 
 type MessageSegmentItem = {
   kind: 'message-segment';
@@ -66,6 +68,8 @@ type MessageSegmentItem = {
 The reducer preserves first-seen ACP receive order and patches existing items in place; it never timestamp-sorts live content. Interleaving a process block with assistant text closes the current segment; later text for that message creates another segment. A compatibility media overlay does not close that segment, and a complete Assistant message replaces authoritative ACP content while preserving already resolved overlay media. Replay and live updates use the same reducer path. Optimistic user segments are allowed and are coalesced with the ACP user echo.
 
 The event ingress publishes the first live text chunk immediately and batches only later adjacent pure-text chunks belonging to the same session, generation, update role, and message for at most `32 ms` or 128 updates. Any tool, permission, media, completion, terminal, send, cancel, or navigation event flushes pending text before it is applied. This bounds React publication work without hiding process boundaries or changing event order.
+
+For HTTP 429, retryable upstream 5xx/timeout failures, and interrupted upstream connections, Main may retry a Turn after partial text only if it has observed no tool call, permission request, or non-text assistant content. Main first emits a generation-scoped retry status, leaving the interrupted text visible but muted. The first non-empty text event from the next attempt carries a Renderer-only replacement boundary. Renderer removes the prior assistant items for that exact user Turn and applies the new event through one coordinator commit, so there is no blank frame. Retry exhaustion keeps the last partial answer next to an explicit terminal failure. Stop aborts the backoff timer before Main can dispatch another attempt. ACP history replay removes older attempts only when a user update carries both UClaw's exact `:upstream-retry:N` message-id suffix and fixed internal retry sentinel, preventing the private recovery prompt and superseded partial text from reappearing after navigation.
 
 UI-only state such as card expansion, scroll position, selected artifact, composer draft, copy feedback, and lightbox state stays outside the reducer. Consecutive tool calls are grouped only in the display projection and keep their flat ACP order and identities.
 

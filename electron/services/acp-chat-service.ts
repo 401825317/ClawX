@@ -31,6 +31,9 @@ import type {
   AcpPermissionRequestEnvelope,
   AcpSessionUpdateEnvelope,
   AcpTurnFailureUpdate,
+  AcpTurnRetryCancelledUpdate,
+  AcpTurnRetryReplacement,
+  AcpTurnRetryUpdate,
 } from '@shared/acp-chat/types';
 import {
   normalizeAcpChatError,
@@ -96,13 +99,18 @@ type AcpSessionLoadBatch = {
 type AcpLivePromptContext = {
   sessionKey: string;
   acpSessionId: string;
+  userMessageId: string;
   generation: number;
   accessGrant: AcpSessionAccessContext;
   clientStartedAtMs: number;
   mainReceivedAtMs: number;
   dispatchedAtMs: number | null;
   firstTextAtMs: number | null;
+  attempt: number;
+  retryReplacementPending: boolean;
   toolCallObserved: boolean;
+  replayUnsafeObserved: boolean;
+  retryAbortController: AbortController;
   pendingTerminalFailure: SessionNotification | null;
   /** Rejects the current prompt wait when ACP has already emitted a terminal failure. */
   terminalFailureReject: ((reason?: unknown) => void) | null;
@@ -170,8 +178,19 @@ function gatewayNeedsReadinessWait(status: ReturnType<NonNullable<GatewayPairing
     || (status?.state === 'running' && status.gatewayReady === false);
 }
 
-function waitForDelay(delayMs: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, delayMs));
+function waitForDelay(delayMs: number, signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', abort);
+      resolve(true);
+    }, delayMs);
+    const abort = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+  });
 }
 
 const GATEWAY_TRANSITION_ERROR = 'Gateway is starting or reconnecting. Please wait and try again.';
@@ -233,6 +252,7 @@ function sessionUpdateType(notification: SessionNotification): string | undefine
 }
 
 function isProtectedSessionLoadEntry(entry: AcpSessionLoadEntry): boolean {
+  if (entry.envelope.retryReplacement) return true;
   const update = entry.envelope.notification as unknown as { update?: Record<string, unknown> };
   const updateRecord = update.update;
   const updateType = typeof updateRecord?.sessionUpdate === 'string' ? updateRecord.sessionUpdate : '';
@@ -273,13 +293,26 @@ function isVisibleAgentText(notification: SessionNotification): boolean {
   const update = (notification as {
     update?: {
       sessionUpdate?: unknown;
-      content?: { type?: unknown; text?: unknown };
+      content?: unknown;
     };
   }).update;
-  return update?.sessionUpdate === 'agent_message_chunk'
-    && update.content?.type === 'text'
-    && typeof update.content.text === 'string'
-    && update.content.text.trim().length > 0;
+  if (update?.sessionUpdate !== 'agent_message_chunk' && update?.sessionUpdate !== 'agent_message') return false;
+  const content = Array.isArray(update.content) ? update.content : [update.content];
+  return content.some((block) => {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) return false;
+    const record = block as { type?: unknown; text?: unknown };
+    return record.type === 'text' && typeof record.text === 'string' && record.text.trim().length > 0;
+  });
+}
+
+function hasReplayUnsafeAgentContent(notification: SessionNotification): boolean {
+  const update = (notification as { update?: { sessionUpdate?: unknown; content?: unknown } }).update;
+  if (update?.sessionUpdate !== 'agent_message_chunk' && update?.sessionUpdate !== 'agent_message') return false;
+  const content = Array.isArray(update.content) ? update.content : [update.content];
+  return content.some((block) => {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) return false;
+    return (block as { type?: unknown }).type !== 'text';
+  });
 }
 
 function artifactToolUpdate(notification: SessionNotification): {
@@ -303,7 +336,10 @@ function isTerminalPromptFailure(notification: SessionNotification): boolean {
 }
 
 function isPromptRetryableUpstreamError(code: AcpChatErrorCode): boolean {
-  return code === 'RATE_LIMIT' || code === 'SERVICE_UNAVAILABLE';
+  return code === 'RATE_LIMIT'
+    || code === 'SERVICE_UNAVAILABLE'
+    || code === 'TIMEOUT'
+    || code === 'NETWORK';
 }
 
 function errorRecord(value: unknown): Record<string, unknown> | null {
@@ -370,14 +406,20 @@ function buildContextRecoveryPrompt(error: unknown): ContentBlock[] {
   }];
 }
 
-function buildTransientRetryPrompt(): ContentBlock[] {
+function buildTransientRetryPrompt(replacingPartialText: boolean): ContentBlock[] {
   return [{
     type: 'text',
-    text: [
+    text: (replacingPartialText ? [
+      '[UClaw automatic upstream retry]',
+      'The previous attempt was interrupted after visible assistant text.',
+      'Restart the complete answer from the beginning without mentioning this retry.',
+      'Return text only and do not call tools or repeat any side effect.',
+      'Use the latest unresolved user request already recorded in this session.',
+    ] : [
       '[UClaw automatic upstream retry]',
       'Continue the latest unresolved user request already recorded in this session.',
       'The previous attempt stopped before any tool call or visible assistant reply.',
-    ].join('\n'),
+    ]).join('\n'),
   }];
 }
 
@@ -405,6 +447,33 @@ function terminalFailureNotification(
     retryable: failure.retryable,
     ...(failure.httpStatus != null ? { httpStatus: failure.httpStatus } : {}),
     ...(failure.upstreamCode ? { upstreamCode: failure.upstreamCode } : {}),
+  };
+  return { sessionId, update } as unknown as SessionNotification;
+}
+
+function retryingNotification(
+  sessionId: string,
+  userMessageId: string,
+  attempt: number,
+  maxAttempts: number,
+  delayMs: number,
+  errorCode: AcpChatErrorCode,
+): SessionNotification {
+  const update: AcpTurnRetryUpdate = {
+    sessionUpdate: 'uclaw_turn_retrying',
+    userMessageId,
+    attempt,
+    maxAttempts,
+    delayMs,
+    errorCode,
+  };
+  return { sessionId, update } as unknown as SessionNotification;
+}
+
+function retryCancelledNotification(sessionId: string, userMessageId: string): SessionNotification {
+  const update: AcpTurnRetryCancelledUpdate = {
+    sessionUpdate: 'uclaw_turn_retry_cancelled',
+    userMessageId,
   };
   return { sessionId, update } as unknown as SessionNotification;
 }
@@ -749,24 +818,29 @@ export class AcpChatService {
     if (this.livePrompts.has(payload.sessionKey)) return fail('ACP prompt is already active');
     const generation = this.generation;
     const acpSessionId = this.loadedAcpSessionId;
+    const userMessageId = payload.messageId ?? randomUUID();
     const accessGrant = this.accessRegistry.get(payload.sessionKey, generation);
     if (!accessGrant) return fail('ACP session access grant is not active');
     const clientStartedAtMs = normalizedClientStartedAtMs(payload.clientStartedAtMs, mainReceivedAtMs);
     const promptContext: AcpLivePromptContext = {
       sessionKey: payload.sessionKey,
       acpSessionId,
+      userMessageId,
       generation,
       accessGrant,
       clientStartedAtMs,
       mainReceivedAtMs,
       dispatchedAtMs: null,
       firstTextAtMs: null,
+      attempt: 1,
+      retryReplacementPending: false,
       toolCallObserved: false,
+      replayUnsafeObserved: false,
+      retryAbortController: new AbortController(),
       pendingTerminalFailure: null,
       terminalFailureReject: null,
     };
     this.livePrompts.set(payload.sessionKey, promptContext);
-    const userMessageId = payload.messageId ?? randomUUID();
     let imagePreferenceId: string | undefined;
     let videoPreferenceId: string | undefined;
     try {
@@ -879,6 +953,7 @@ export class AcpChatService {
       let attemptMessageId = originalMessageId;
       let contextRecoveryAttempted = false;
       while (true) {
+        promptContext.attempt = attempt;
         promptContext.pendingTerminalFailure = null;
         let rejectTerminalFailure: ((reason?: unknown) => void) | null = null;
         const terminalFailureWait = new Promise<never>((_, reject) => {
@@ -911,18 +986,19 @@ export class AcpChatService {
           connectionPromptWaitMs += Date.now() - promptAttemptStartedAtMs;
           this.requireSameGatewayRuntime(runtimeIdentity);
           const failure = normalizeAcpChatError(attemptError);
-          const replaySafe = !promptContext.toolCallObserved && promptContext.firstTextAtMs == null;
+          const replaySafe = !promptContext.toolCallObserved && !promptContext.replayUnsafeObserved;
           const isContextRecovery = failure.code === 'CONTEXT_OVERFLOW';
           const isTransientUpstream = isPromptRetryableUpstreamError(failure.code);
           const maxAttempts = isContextRecovery
             ? ACP_PROMPT_CONTEXT_RECOVERY_MAX_ATTEMPTS
             : ACP_PROMPT_TRANSIENT_MAX_ATTEMPTS;
 
-          if (!replaySafe && (isContextRecovery || isTransientUpstream)) {
+          const contextRecoverySafe = replaySafe && promptContext.firstTextAtMs == null;
+          if ((!replaySafe && isTransientUpstream) || (!contextRecoverySafe && isContextRecovery)) {
             throw promptRecoveryError(
               promptContext.toolCallObserved
                 ? 'The upstream request failed after a tool started. UClaw did not replay the turn to avoid repeating side effects.'
-                : 'The upstream request failed after assistant output started. UClaw did not replay the turn to avoid duplicate output.',
+                : 'The upstream request failed after non-text output started. UClaw did not replay the turn to avoid repeating side effects.',
               attemptError,
             );
           }
@@ -939,23 +1015,35 @@ export class AcpChatService {
               details: { requestId: userMessageId, attempt, delayMs, reason: failure.code, recovery: 'structured-summary' },
             });
             logger.warn(`[acp-chat] Context recovery retry ${attempt}/${maxAttempts} scheduled after ${delayMs}ms`);
-            await waitForDelay(delayMs);
+            const continueRetry = await waitForDelay(delayMs, promptContext.retryAbortController.signal);
+            if (!continueRetry) break;
             this.requireSameGatewayRuntime(runtimeIdentity);
             continue;
           }
 
           if (isTransientUpstream && attempt < maxAttempts) {
+            const replacingPartialText = promptContext.firstTextAtMs != null;
             attempt += 1;
-            attemptPrompt = buildTransientRetryPrompt();
+            attemptPrompt = buildTransientRetryPrompt(replacingPartialText);
             attemptMessageId = `${originalMessageId}:upstream-retry:${attempt}`;
             const delayMs = promptRetryDelay(attempt);
+            promptContext.retryReplacementPending = true;
+            this.emitSessionUpdate(retryingNotification(
+              acpSessionId,
+              userMessageId,
+              attempt,
+              maxAttempts,
+              delayMs,
+              failure.code,
+            ));
             this.trace('session/prompt:retry', {
               sessionKey: payload.sessionKey,
               generation,
               details: { requestId: userMessageId, attempt, delayMs, reason: failure.code, recovery: 'continue-recorded-request' },
             });
             logger.warn(`[acp-chat] Replay-safe upstream retry ${attempt}/${maxAttempts} scheduled after ${delayMs}ms`);
-            await waitForDelay(delayMs);
+            const continueRetry = await waitForDelay(delayMs, promptContext.retryAbortController.signal);
+            if (!continueRetry) break;
             this.requireSameGatewayRuntime(runtimeIdentity);
             continue;
           }
@@ -978,6 +1066,10 @@ export class AcpChatService {
             promptContext.terminalFailureReject = null;
           }
         }
+      }
+      if (promptContext.retryReplacementPending) {
+        promptContext.retryReplacementPending = false;
+        this.emitSessionUpdate(retryCancelledNotification(acpSessionId, userMessageId));
       }
       this.requireSameGatewayRuntime(runtimeIdentity);
       const completedAtMs = Date.now();
@@ -1009,7 +1101,7 @@ export class AcpChatService {
         ?? terminalFailureNotification(acpSessionId, userMessageId, failure);
       promptContext.pendingTerminalFailure = null;
       if (terminalFailure.update && typeof (terminalFailure.update as { userMessageId?: unknown }).userMessageId === 'string') {
-        this.emitSessionUpdate(terminalFailure, true);
+        this.emitSessionUpdate(terminalFailure, { forwardTerminalFailure: true });
       }
       if (imagePreferenceId) {
         await this.turnImagePreferenceStore.discard(imagePreferenceId).catch((discardError) => {
@@ -1058,6 +1150,14 @@ export class AcpChatService {
 
     try {
       this.trace('session/cancel:start', { sessionKey: payload.sessionKey });
+      const livePrompt = this.livePrompts.get(payload.sessionKey);
+      if (livePrompt) {
+        livePrompt.retryAbortController.abort();
+        if (livePrompt.retryReplacementPending) {
+          livePrompt.retryReplacementPending = false;
+          this.emitSessionUpdate(retryCancelledNotification(livePrompt.acpSessionId, livePrompt.userMessageId));
+        }
+      }
       const runtimeIdentity = await this.requireReadyGatewayRuntime();
       const connection = await this.ensureConnection(runtimeIdentity);
       this.requireSameGatewayRuntime(runtimeIdentity);
@@ -1543,7 +1643,10 @@ export class AcpChatService {
     this.livePrompts.clear();
   }
 
-  private emitSessionUpdate(notification: SessionNotification, forwardTerminalFailure = false): void {
+  private emitSessionUpdate(
+    notification: SessionNotification,
+    options: { forwardTerminalFailure?: boolean } = {},
+  ): void {
     const acpSessionId = notification.sessionId;
     const livePrompt = [...this.livePrompts.values()].find((context) => context.acpSessionId === acpSessionId);
     const sessionKey = livePrompt?.sessionKey ?? this.activeSessionKey;
@@ -1570,7 +1673,7 @@ export class AcpChatService {
       });
       return;
     }
-    if (livePrompt && isTerminalPromptFailure(notification) && !forwardTerminalFailure) {
+    if (livePrompt && isTerminalPromptFailure(notification) && !options.forwardTerminalFailure) {
       livePrompt.pendingTerminalFailure = notification;
       livePrompt.terminalFailureReject?.(terminalFailureError(notification));
       this.trace('session-update:buffered', {
@@ -1581,12 +1684,34 @@ export class AcpChatService {
       return;
     }
 
+    const toolUpdate = artifactToolUpdate(notification);
+    if (livePrompt && toolUpdate) {
+      livePrompt.toolCallObserved = true;
+      livePrompt.replayUnsafeObserved = true;
+      artifactTaskService.recordTool(sessionKey, toolUpdate);
+    }
+    if (livePrompt && hasReplayUnsafeAgentContent(notification)) {
+      livePrompt.replayUnsafeObserved = true;
+    }
+    const visibleAgentText = livePrompt ? isVisibleAgentText(notification) : false;
+    let retryReplacement: AcpTurnRetryReplacement | undefined;
+    if (livePrompt && visibleAgentText) {
+      if (livePrompt.retryReplacementPending && livePrompt.attempt > 1) {
+        retryReplacement = {
+          userMessageId: livePrompt.userMessageId,
+          attempt: livePrompt.attempt,
+        };
+        livePrompt.retryReplacementPending = false;
+      }
+    }
+
     const envelope: AcpSessionUpdateEnvelope = {
       sessionKey,
       generation,
       ...(!livePrompt && this.historicalSessionKey === sessionKey && this.historicalGeneration === generation
         ? { historical: true }
         : {}),
+      ...(retryReplacement ? { retryReplacement } : {}),
       notification: { ...notification, sessionId: sessionKey },
     };
     const loadBatch = this.activeLoadBatch;
@@ -1600,16 +1725,11 @@ export class AcpChatService {
       return;
     }
     this.mainWindow.webContents.send(HOST_EVENT_CHANNELS.chat.acpSessionUpdate, envelope);
-    const toolUpdate = artifactToolUpdate(notification);
-    if (livePrompt && toolUpdate) {
-      livePrompt.toolCallObserved = true;
-      artifactTaskService.recordTool(sessionKey, toolUpdate);
-    }
     if (
       livePrompt
       && livePrompt.dispatchedAtMs != null
       && livePrompt.firstTextAtMs == null
-      && isVisibleAgentText(notification)
+      && visibleAgentText
     ) {
       const firstTextAtMs = Date.now();
       livePrompt.firstTextAtMs = firstTextAtMs;
@@ -1638,6 +1758,7 @@ export class AcpChatService {
     const livePrompt = [...this.livePrompts.values()].find((context) => context.acpSessionId === acpSessionId);
     const sessionKey = livePrompt?.sessionKey ?? this.activeSessionKey;
     const generation = livePrompt?.generation ?? this.generation;
+    if (livePrompt) livePrompt.replayUnsafeObserved = true;
     if (!livePrompt && !this.permissionsEnabled) {
       this.trace('permission:ignored', {
         direction: 'upstream',

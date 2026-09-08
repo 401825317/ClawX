@@ -23,6 +23,7 @@ const openWorkspaceWithMock = vi.hoisted(() => vi.fn());
 const revealWorkspaceFileMock = vi.hoisted(() => vi.fn());
 const validateWebpageMock = vi.hoisted(() => vi.fn());
 const thumbnailsMock = vi.hoisted(() => vi.fn());
+const recordAcpTraceMock = vi.hoisted(() => vi.fn());
 const toastErrorMock = vi.hoisted(() => vi.fn());
 const i18nLanguage = vi.hoisted(() => ({ value: 'en' }));
 
@@ -45,6 +46,9 @@ vi.mock('@/lib/host-api', () => ({
     },
     media: {
       thumbnails: thumbnailsMock,
+    },
+    diagnostics: {
+      recordAcpTrace: recordAcpTraceMock,
     },
   },
 }));
@@ -92,6 +96,7 @@ vi.mock('react-i18next', () => ({
         'acp.toolGroup.subagentCompleted': 'Completed {{total}} parallel tasks',
         'acp.loadFailed': 'Load failed',
         'acp.promptFailed': 'Prompt failed',
+        'acp.retrying': 'Connection interrupted. Retrying automatically ({{attempt}}/{{maxAttempts}})...',
         'acp.unsupportedContent': 'Unsupported content',
         'acp.image': 'Image',
         'acp.imageLoading': 'Loading image',
@@ -239,6 +244,7 @@ describe('ACP chat timeline components', () => {
       browserUrl: `http://127.0.0.1:49152/${'A'.repeat(43)}/index.html`,
     });
     thumbnailsMock.mockResolvedValue({});
+    recordAcpTraceMock.mockResolvedValue({ recorded: true });
     Object.defineProperty(URL, 'createObjectURL', {
       configurable: true,
       value: vi.fn(() => 'blob:generated-image-full-size'),
@@ -296,6 +302,35 @@ describe('ACP chat timeline components', () => {
 
     expect(screen.getByText('Model service unavailable')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Recharge' })).not.toBeInTheDocument();
+  });
+
+  it('keeps interrupted text visible but muted while a retry is waiting', () => {
+    const state = snapshot({
+      itemOrder: ['retry-user:0', 'old-assistant:0', 'turn-retry:retry-user'],
+      itemsById: {
+        'retry-user:0': {
+          kind: 'message-segment', id: 'retry-user:0', role: 'user', messageId: 'retry-user',
+          segmentIndex: 0, parts: [{ kind: 'markdown', text: 'Explain' }],
+        },
+        'old-assistant:0': {
+          kind: 'message-segment', id: 'old-assistant:0', role: 'assistant', messageId: 'old-assistant',
+          segmentIndex: 0, parts: [{ kind: 'markdown', text: 'Old partial' }],
+        },
+        'turn-retry:retry-user': {
+          kind: 'turn-retry', id: 'turn-retry:retry-user', userMessageId: 'retry-user',
+          attempt: 2, maxAttempts: 3,
+        },
+      },
+    });
+
+    render(<AcpTimeline snapshot={state} />);
+
+    expect(screen.getByText('Old partial')).toBeVisible();
+    expect(screen.getByTestId('acp-assistant-message')).toHaveAttribute('data-interrupted', 'true');
+    expect(screen.getByTestId('acp-assistant-message')).toHaveClass('opacity-50');
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Connection interrupted. Retrying automatically (2/3)...',
+    );
   });
 
   it('renders an image-specific failure instead of a generic session error', () => {
