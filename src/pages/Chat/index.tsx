@@ -223,6 +223,7 @@ export function Chat() {
     executionCwd: string;
   } | null>(null);
   const [workspaceContextCheck, setWorkspaceContextCheck] = useState<WorkspaceContextCheck | null>(null);
+  const [workspaceValidationRevision, setWorkspaceValidationRevision] = useState(0);
   const autoOpenedHtmlToolCallsRef = useRef(new Set<string>());
   const autoOpenHtmlRequestSeqRef = useRef(0);
   const currentSession = useMemo(
@@ -334,6 +335,12 @@ export function Chat() {
     autoOpenHtmlRequestSeqRef.current += 1;
   }, [currentSessionKey, closeArtifactPanel]);
 
+  useEffect(() => {
+    const revalidateWorkspace = () => setWorkspaceValidationRevision((revision) => revision + 1);
+    window.addEventListener('focus', revalidateWorkspace);
+    return () => window.removeEventListener('focus', revalidateWorkspace);
+  }, []);
+
   const projectionExecutionCwd = acpActiveSessionKey === currentSessionKey && acpCwd ? acpCwd : cwd;
   const workspaceContextKey = currentSessionKey && cwd && projectionExecutionCwd
     ? `${currentSessionKey}\0${cwd}\0${projectionExecutionCwd}`
@@ -399,7 +406,14 @@ export function Chat() {
     return () => {
       stale = true;
     };
-  }, [currentSessionKey, cwd, projectionExecutionCwd, workspaceContextKey]);
+  }, [
+    currentSessionKey,
+    cwd,
+    gatewayRuntimeIdentity,
+    projectionExecutionCwd,
+    workspaceContextKey,
+    workspaceValidationRevision,
+  ]);
 
   useEffect(() => {
     if (

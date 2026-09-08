@@ -5,6 +5,22 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 describe('app runtime managed gate startup', () => {
+  it('seeds the managed default workspace before loading the main renderer', () => {
+    const source = readFileSync(join(process.cwd(), 'electron/main/app-runtime.ts'), 'utf8');
+    const initialize = source.slice(
+      source.indexOf('async function initialize()'),
+      source.indexOf('if (gotTheLock)'),
+    );
+    const preparePortableRuntime = initialize.indexOf('await prepareConfiguredPortableOpenClawRuntime()');
+    const seedDefaultWorkspace = initialize.indexOf('await ensureClawXDefaultIdentity()');
+    const loadRenderer = initialize.indexOf('loadMainWindow(window)');
+
+    expect(preparePortableRuntime).toBeGreaterThan(-1);
+    expect(seedDefaultWorkspace).toBeGreaterThan(preparePortableRuntime);
+    expect(loadRenderer).toBeGreaterThan(seedDefaultWorkspace);
+    expect(initialize).not.toContain('void ensureClawXDefaultIdentity()');
+  });
+
   it('checks a packaged portable payload before runtime preparation or Gateway startup', () => {
     const source = readFileSync(join(process.cwd(), 'electron/main/app-runtime.ts'), 'utf8');
     const initialize = source.slice(

@@ -114,6 +114,9 @@ vi.mock('@/lib/host-api', () => ({
   hostApi: {
     dialog: { open: openDialog },
     files: { resolveWorkspaceContext },
+    diagnostics: {
+      recordAcpTrace: vi.fn(async () => ({ recorded: true })),
+    },
     artifactTasks: {
       prepare: vi.fn(async ({ sessionKey }) => ({
         artifactTask: false,
@@ -616,6 +619,44 @@ describe('ACP Chat page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Choose workspace' }));
     await waitFor(() => {
       expect(settingsState.setChatWorkspacePath).toHaveBeenCalledWith('D:\\projects\\next-workspace');
+    });
+  });
+
+  it('rechecks a transiently unavailable workspace after Gateway recovery and window focus', async () => {
+    const sessionKey = 'agent:main:session-recovering';
+    chatState.sessions = [{ key: sessionKey, workspacePath: '/workspace' }];
+    chatState.currentSessionKey = sessionKey;
+    acpState.activeSessionKey = null;
+    gatewayState.status = { state: 'starting', gatewayReady: false, port: 18789 };
+    resolveWorkspaceContext
+      .mockResolvedValueOnce({ ok: false, error: 'notFound' })
+      .mockResolvedValueOnce({ ok: false, error: 'notFound' })
+      .mockResolvedValue({
+        ok: true,
+        workspaceRoot: '/workspace',
+        executionCwd: '/workspace',
+      });
+
+    const { rerender } = render(<Chat />);
+
+    await expect(screen.findByTestId('workspace-unavailable-banner')).resolves.toBeVisible();
+    expect(resolveWorkspaceContext).toHaveBeenCalledTimes(1);
+
+    gatewayState.status = { state: 'running', gatewayReady: true, port: 18789 };
+    rerender(<Chat />);
+    await waitFor(() => expect(resolveWorkspaceContext).toHaveBeenCalledTimes(2));
+    await expect(screen.findByTestId('workspace-unavailable-banner')).resolves.toBeVisible();
+
+    fireEvent(window, new Event('focus'));
+
+    await waitFor(() => expect(resolveWorkspaceContext).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.queryByTestId('workspace-unavailable-banner')).not.toBeInTheDocument());
+    await waitFor(() => {
+      expect(acpState.loadSession).toHaveBeenCalledWith({
+        sessionKey,
+        workspaceRoot: '/workspace',
+        cwd: '/workspace',
+      });
     });
   });
 

@@ -743,6 +743,16 @@ async function initialize(): Promise<void> {
     }
   }
 
+  // The default workspace is owned by UClaw. Seed it after a portable runtime
+  // has published its local state, but before chat can validate the path.
+  if (!isE2EMode) {
+    try {
+      await ensureClawXDefaultIdentity();
+    } catch (error) {
+      logger.warn('Failed to seed default UClaw identity:', error);
+    }
+  }
+
   loadMainWindow(window);
 
   // Retire only UClaw-owned document skills before the first renderer load.
@@ -787,14 +797,6 @@ async function initialize(): Promise<void> {
 
   // Note: Auto-check for updates is driven by the renderer (update store init)
   // so it respects the user's "Auto-check for updates" setting.
-
-  // Seed a stable default IDENTITY.md before the Gateway initializes the
-  // workspace so ClawX desktop sessions skip OpenClaw's chat-first bootstrap.
-  if (!isE2EMode) {
-    void ensureClawXDefaultIdentity().catch((error) => {
-      logger.warn('Failed to seed default UClaw identity:', error);
-    });
-  }
 
   // Repair any bootstrap files that only contain ClawX markers (no OpenClaw
   // template content). This fixes a race condition where ensureClawXContext()

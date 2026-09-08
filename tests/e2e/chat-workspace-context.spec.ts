@@ -91,6 +91,52 @@ async function getWorkspaceTreeRequests(app: ElectronApplication) {
   });
 }
 
+async function installWorkspaceAvailabilityGate(app: ElectronApplication, workspacePath: string) {
+  await app.evaluate(async ({ app: _app }, input) => {
+    const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
+    type HostRequest = {
+      id?: string;
+      module?: string;
+      action?: string;
+      payload?: Record<string, unknown>;
+    };
+    type HostHandler = (event: unknown, request: HostRequest) => Promise<unknown>;
+    const globals = globalThis as unknown as {
+      __workspaceAvailabilityGateOpen?: boolean;
+    };
+    const originalHandler = (ipcMain as unknown as {
+      _invokeHandlers?: Map<string, HostHandler>;
+    })._invokeHandlers?.get('host:invoke');
+    if (!originalHandler) throw new Error('host:invoke handler is unavailable');
+
+    globals.__workspaceAvailabilityGateOpen = false;
+    ipcMain.removeHandler('host:invoke');
+    ipcMain.handle('host:invoke', async (event: unknown, request: HostRequest) => {
+      if (
+        !globals.__workspaceAvailabilityGateOpen
+        && request.module === 'files'
+        && request.action === 'resolveWorkspaceContext'
+        && request.payload?.workspaceRoot === input.workspacePath
+      ) {
+        return {
+          id: request.id,
+          ok: true,
+          data: { ok: false, error: 'notFound' },
+        };
+      }
+      return originalHandler(event, request);
+    });
+  }, { workspacePath });
+}
+
+async function openWorkspaceAvailabilityGate(app: ElectronApplication) {
+  await app.evaluate(async ({ app: _app }) => {
+    (globalThis as unknown as {
+      __workspaceAvailabilityGateOpen?: boolean;
+    }).__workspaceAvailabilityGateOpen = true;
+  });
+}
+
 type WorkspaceMockOptions = {
   chatWorkspacePath?: string;
   recentWorkspacePaths?: string[];
@@ -540,6 +586,41 @@ test.describe('ClawX chat workspace context', () => {
           && entry.payload?.cwd === SESSION_WORKSPACE
         )).length;
       }).toBe(0);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('transient workspace failure recovers when the window regains focus', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installWorkspaceMocks(app);
+      await installWorkspaceAvailabilityGate(app, SESSION_WORKSPACE);
+
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
+      }
+
+      const banner = page.getByTestId('workspace-unavailable-banner');
+      await expect(banner).toBeVisible({ timeout: 30_000 });
+      await expect(banner).toContainText(SESSION_WORKSPACE);
+
+      await openWorkspaceAvailabilityGate(app);
+      await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+
+      await expect(banner).toHaveCount(0);
+      await expect.poll(async () => {
+        const invocations = await getRecordedHostInvocations(app);
+        return invocations.filter((entry) => (
+          entry.module === 'chat'
+          && entry.action === 'loadAcpSession'
+          && entry.payload?.cwd === SESSION_WORKSPACE
+        )).length;
+      }).toBeGreaterThan(0);
     } finally {
       await closeElectronApp(app);
     }
