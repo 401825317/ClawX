@@ -15,8 +15,28 @@ function readPackageVersion() {
   return JSON.parse(raw).version;
 }
 
+function resolveReleaseRemote() {
+  const configured = process.env.UCLAW_RELEASE_REMOTE?.trim();
+  if (configured) return configured;
+
+  try {
+    const branch = execFileSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], {
+      encoding: 'utf8',
+    }).trim();
+    const upstream = execFileSync('git', ['config', '--get', `branch.${branch}.remote`], {
+      encoding: 'utf8',
+    }).trim();
+    if (upstream) return upstream;
+  } catch {
+    // Detached or untracked branches use the conventional Actions remote.
+  }
+
+  return 'origin';
+}
+
 const version = process.env.npm_package_version || readPackageVersion();
 const tag = `v${version}`;
+const releaseRemote = resolveReleaseRemote();
 
-execFileSync('git', ['push', '-u', 'origin', 'HEAD'], { stdio: 'inherit' });
-execFileSync('git', ['push', 'origin', `refs/tags/${tag}`], { stdio: 'inherit' });
+execFileSync('git', ['push', '-u', releaseRemote, 'HEAD'], { stdio: 'inherit' });
+execFileSync('git', ['push', releaseRemote, `refs/tags/${tag}`], { stdio: 'inherit' });

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * npm/pnpm `version` lifecycle hook: runs after package.json is bumped, before
- * `git tag`. Aborts if the target tag already exists locally or on origin so we
+ * `git tag`. Aborts if the target tag already exists locally or on the release
+ * remote so we
  * never fail late on `fatal: tag 'vX.Y.Z' already exists` or a rejected push.
  */
 import { readFileSync } from 'node:fs';
@@ -20,6 +21,25 @@ const version = process.env.npm_package_version || readPackageVersion();
 const tag = `v${version}`;
 const skipRemote = process.env.SKIP_RELEASE_REMOTE_CHECK === '1';
 
+function resolveReleaseRemote() {
+  const configured = process.env.UCLAW_RELEASE_REMOTE?.trim();
+  if (configured) return configured;
+
+  try {
+    const branch = execFileSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], {
+      encoding: 'utf8',
+    }).trim();
+    const upstream = execFileSync('git', ['config', '--get', `branch.${branch}.remote`], {
+      encoding: 'utf8',
+    }).trim();
+    if (upstream) return upstream;
+  } catch {
+    // Detached or untracked branches use the conventional Actions remote.
+  }
+
+  return 'origin';
+}
+
 function localTagExists(t) {
   try {
     execSync(`git rev-parse -q --verify refs/tags/${t}`, { stdio: 'pipe' });
@@ -29,9 +49,9 @@ function localTagExists(t) {
   }
 }
 
-function remoteTagExists(t) {
+function remoteTagExists(remote, t) {
   try {
-    const out = execFileSync('git', ['ls-remote', '--tags', 'origin', `refs/tags/${t}`], {
+    const out = execFileSync('git', ['ls-remote', '--tags', remote, `refs/tags/${t}`], {
       encoding: 'utf8',
     }).trim();
     return out.length > 0;
@@ -55,10 +75,11 @@ Typical fixes:
 }
 
 if (!skipRemote) {
-  const onRemote = remoteTagExists(tag);
+  const releaseRemote = resolveReleaseRemote();
+  const onRemote = remoteTagExists(releaseRemote, tag);
   if (onRemote === null) {
     console.error(`
-Release version check failed: could not query origin for refs/tags/${tag}.
+Release version check failed: could not query ${releaseRemote} for refs/tags/${tag}.
 
 Ensure \`origin\` exists and you can reach the network, run
 \`pnpm run preversion\` / \`git fetch origin --tags\`, then retry.
@@ -69,7 +90,7 @@ To skip this check (offline only): SKIP_RELEASE_REMOTE_CHECK=1
   }
   if (onRemote) {
     console.error(`
-Release version check failed: tag ${tag} already exists on origin.
+Release version check failed: tag ${tag} already exists on ${releaseRemote}.
 
 Bump to a version that is not on the remote yet (see \`git ls-remote --tags origin\`).
 `);
