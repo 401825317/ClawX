@@ -67,7 +67,7 @@ export type ManagedRuntimeVideoProviderEntry = {
 const UCLAW_RESPONSES_REASONING_COMPAT = {
   supportsPromptCacheKey: true,
   supportsReasoningEffort: true,
-  supportedReasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh'],
+  supportedReasoningEfforts: ['none', 'low', 'medium', 'high'],
 } as const;
 
 let atomicWriteSequence = 0;

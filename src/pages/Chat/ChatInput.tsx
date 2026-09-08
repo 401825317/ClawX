@@ -96,7 +96,7 @@ const ASPECT_RATIO_OPTIONS = [
   { ratio: '16:9', labelKey: 'composer.imageAspectWidescreen', previewClassName: 'h-[11px] w-5' },
 ] as const;
 const IMAGE_PRESET_STANDARD = 'standard';
-const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
+const FALLBACK_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high'] as const;
 const INHERIT_THINKING_VALUE = '__inherit__';
 
 type ThinkingChoice = { id: string; label?: string };
@@ -529,16 +529,51 @@ export function ChatInput({
       ? currentSession.thinkingLevel
       : typeof thinkingLevel === 'string' ? thinkingLevel : ''
   ).trim();
-  const thinkingOptions = useMemo(() => {
+  const hasSessionThinkingCapabilities = Array.isArray(currentSession?.thinkingLevels);
+  const thinkingOptions = useMemo<ThinkingChoice[]>(() => {
     const configured = normalizeThinkingOptions(currentSession?.thinkingLevels);
-    const options: ThinkingChoice[] = configured.length > 0
+    return hasSessionThinkingCapabilities
       ? configured
-      : THINKING_LEVELS.map((id) => ({ id }));
-    if (selectedThinkingLevel && !options.some((option) => option.id === selectedThinkingLevel)) {
-      return [...options, { id: selectedThinkingLevel }];
+      : FALLBACK_THINKING_LEVELS.map((id) => ({ id }));
+  }, [currentSession?.thinkingLevels, hasSessionThinkingCapabilities]);
+  const selectedThinkingLevelIsSupported = !selectedThinkingLevel
+    || thinkingOptions.some((option) => option.id === selectedThinkingLevel);
+  const displayedThinkingLevel = selectedThinkingLevelIsSupported ? selectedThinkingLevel : '';
+  const unsupportedThinkingRepairRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (
+      !hasSessionThinkingCapabilities
+      || !selectedThinkingLevel
+      || selectedThinkingLevelIsSupported
+    ) {
+      unsupportedThinkingRepairRef.current = null;
+      return;
     }
-    return options;
-  }, [currentSession?.thinkingLevels, selectedThinkingLevel]);
+    if (thinkingPersisting) return;
+
+    const repairKey = [
+      currentSessionKey,
+      selectedThinkingLevel,
+      thinkingOptions.map((option) => option.id).join(','),
+    ].join('\0');
+    if (unsupportedThinkingRepairRef.current === repairKey) return;
+    unsupportedThinkingRepairRef.current = repairKey;
+
+    // A model switch can leave an override that the new model rejects. Once the
+    // Gateway publishes authoritative capabilities, clear that stale override once.
+    void updateSessionThinking(currentSessionKey, null).catch((error) => {
+      console.warn('[ChatInput] Failed to clear unsupported reasoning level:', error);
+    });
+  }, [
+    currentSessionKey,
+    hasSessionThinkingCapabilities,
+    selectedThinkingLevel,
+    selectedThinkingLevelIsSupported,
+    thinkingOptions,
+    thinkingPersisting,
+    updateSessionThinking,
+  ]);
   const thinkingLevelLabel = useCallback((id: string, fallback?: string) => (
     t(`composer.thinkingLevels.${id}`, { defaultValue: fallback || id })
   ), [t]);
@@ -550,12 +585,12 @@ export function ChatInput({
     );
   }, [currentSession?.thinkingDefault, textModelPolicy.defaultThinkingLevel, thinkingLevelLabel, thinkingOptions]);
   const thinkingButtonLabel = useMemo(() => {
-    if (!selectedThinkingLevel) return inheritedThinkingLabel;
+    if (!displayedThinkingLevel) return inheritedThinkingLabel;
     return thinkingLevelLabel(
-      selectedThinkingLevel,
-      thinkingOptions.find((option) => option.id === selectedThinkingLevel)?.label,
+      displayedThinkingLevel,
+      thinkingOptions.find((option) => option.id === displayedThinkingLevel)?.label,
     );
-  }, [inheritedThinkingLabel, selectedThinkingLevel, thinkingLevelLabel, thinkingOptions]);
+  }, [displayedThinkingLevel, inheritedThinkingLabel, thinkingLevelLabel, thinkingOptions]);
   const requestedImageMode = sessionImageModes[currentSessionKey] === true;
   const requestedVideoMode = sessionVideoModes[currentSessionKey] === true;
   const imageComposerState = useMemo(
@@ -1851,7 +1886,7 @@ export function ChatInput({
                       data-testid="chat-thinking-picker-menu"
                     >
                       <DropdownMenuPrimitive.RadioGroup
-                        value={selectedThinkingLevel || INHERIT_THINKING_VALUE}
+                        value={displayedThinkingLevel || INHERIT_THINKING_VALUE}
                         onValueChange={(value) => handleSelectThinking(value === INHERIT_THINKING_VALUE ? '' : value)}
                       >
                         <DropdownMenuPrimitive.RadioItem

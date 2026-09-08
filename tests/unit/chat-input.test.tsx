@@ -804,6 +804,57 @@ describe('ChatInput agent targeting', () => {
     });
   });
 
+  it('does not expose xhigh when the Gateway has not published reasoning capabilities', () => {
+    configureAgentAndModelPickers();
+    chatState.sessions = [{
+      key: chatState.currentSessionKey,
+      model: 'openai/smart-latest',
+    }];
+
+    renderChatInput();
+    openThinkingSettingsPicker();
+
+    expect(screen.getByTestId('chat-thinking-option-high')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-thinking-option-xhigh')).not.toBeInTheDocument();
+  });
+
+  it('clears a stale reasoning override rejected by the current model capabilities', async () => {
+    configureAgentAndModelPickers();
+    chatState.sessions = [{
+      key: chatState.currentSessionKey,
+      model: 'openai/smart-latest',
+      thinkingLevel: 'xhigh',
+      thinkingDefault: 'off',
+      thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high'].map((id) => ({ id })),
+    }];
+
+    renderChatInput();
+
+    await waitFor(() => {
+      expect(chatState.updateSessionThinking).toHaveBeenCalledWith('agent:main:main', null);
+    });
+    openThinkingSettingsPicker();
+    expect(screen.queryByTestId('chat-thinking-option-xhigh')).not.toBeInTheDocument();
+    expect(screen.getByTestId('chat-thinking-option-inherit')).toHaveAttribute('data-state', 'checked');
+  });
+
+  it('keeps xhigh available when the Gateway declares it for the current model', () => {
+    configureAgentAndModelPickers();
+    chatState.sessions = [{
+      key: chatState.currentSessionKey,
+      model: 'custom/reasoning-model',
+      thinkingLevel: 'xhigh',
+      thinkingDefault: 'high',
+      thinkingLevels: ['low', 'medium', 'high', 'xhigh'].map((id) => ({ id })),
+    }];
+
+    renderChatInput();
+    openThinkingSettingsPicker();
+
+    expect(screen.getByTestId('chat-thinking-option-xhigh')).toHaveAttribute('data-state', 'checked');
+    expect(chatState.updateSessionThinking).not.toHaveBeenCalled();
+  });
+
   it('waits for pending thinking persistence before sending', async () => {
     const thinkingUpdate = createDeferred<void>();
     const onSend = vi.fn();

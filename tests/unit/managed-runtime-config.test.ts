@@ -206,7 +206,10 @@ describe('managed runtime config transaction', () => {
     ]);
     expect(providerEntry.models[0]).toEqual(expect.objectContaining({
       reasoning: true,
-      compat: expect.objectContaining({ supportsReasoningEffort: true }),
+      compat: expect.objectContaining({
+        supportsReasoningEffort: true,
+        supportedReasoningEfforts: ['none', 'low', 'medium', 'high'],
+      }),
     }));
     expect(providerEntry.models[1]).not.toHaveProperty('reasoning');
     expect(providerEntry.models[1]?.compat).toEqual({ supportsPromptCacheKey: true });
