@@ -26,9 +26,11 @@ requiredProfiles:
 requiredTests:
   - tests/unit/openclaw-auth.test.ts
   - tests/unit/channel-config.test.ts
+  - tests/unit/plugin-install.test.ts
 acceptance:
   - Recovery paths converge to a single diagnosable runtime state.
   - Stale plugin directories, entries, allowlist values, and install metadata are handled according to source type.
+  - Historical UClaw plugins installed before managed markers existed are retired only when their complete product metadata matches; unrelated same-name user plugins remain untouched.
   - Rollback or cleanup behavior has direct regression coverage for the affected plugin class.
 docs:
   required: false

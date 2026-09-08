@@ -634,6 +634,11 @@ describe('plugin installer diagnostics', () => {
     const { removeManagedPluginInstall } = await import('@electron/utils/plugin-install');
     await expect(removeManagedPluginInstall(pluginId, {
       candidateSources: [sourceDir],
+      legacyProductIdentity: {
+        packageName: 'uclaw-artifact-guard-plugin',
+        manifestName: 'UClaw Artifact Guard',
+        entry: 'index.mjs',
+      },
       operation: 'retired-id-cleanup',
     })).resolves.toMatchObject({
       removed: false,
@@ -646,6 +651,57 @@ describe('plugin installer diagnostics', () => {
     });
     await expect(actualFs.readFile(join(targetDir, 'package.json'), 'utf8'))
       .resolves.toContain('user-retired-id-plugin');
+  });
+
+  it('retires an unmarked historical UClaw plugin with exact product metadata', async () => {
+    const pluginId = 'uclaw-artifact-guard';
+    const targetDir = join(paths.stateDir, 'extensions', pluginId);
+    await actualFs.mkdir(targetDir, { recursive: true });
+    await Promise.all([
+      actualFs.writeFile(
+        join(targetDir, 'openclaw.plugin.json'),
+        `${JSON.stringify({
+          id: pluginId,
+          name: 'UClaw Artifact Guard',
+          version: '0.2.2',
+          entry: 'index.mjs',
+        }, null, 2)}\n`,
+        'utf8',
+      ),
+      actualFs.writeFile(
+        join(targetDir, 'package.json'),
+        `${JSON.stringify({
+          name: 'uclaw-artifact-guard-plugin',
+          version: '0.2.2',
+          private: true,
+          type: 'module',
+          main: 'index.mjs',
+          openclaw: { extensions: ['./index.mjs'] },
+        }, null, 2)}\n`,
+        'utf8',
+      ),
+      actualFs.writeFile(join(targetDir, 'index.mjs'), 'export default {};\n', 'utf8'),
+    ]);
+
+    const { removeManagedPluginInstall } = await import('@electron/utils/plugin-install');
+    await expect(removeManagedPluginInstall(pluginId, {
+      legacyProductIdentity: {
+        packageName: 'uclaw-artifact-guard-plugin',
+        manifestName: 'UClaw Artifact Guard',
+        entry: 'index.mjs',
+      },
+      operation: 'retire-legacy-uclaw-plugin',
+    })).resolves.toMatchObject({
+      removed: true,
+      preserved: false,
+      code: 'removed',
+      ownership: {
+        status: 'managed',
+        evidence: 'legacy-product-metadata',
+        code: 'legacy_product_metadata_match',
+      },
+    });
+    await expect(actualFs.access(targetDir)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it.each([

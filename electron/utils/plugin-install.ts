@@ -414,6 +414,7 @@ export type ManagedPluginOwnership = Readonly<{
   evidence:
     | 'none'
     | 'managed-marker'
+    | 'legacy-product-metadata'
     | 'trusted-install-record'
     | 'bundled-content-match'
     | 'clawx-managed-plugin-id'
@@ -458,6 +459,11 @@ type ManagedPluginMarker = Readonly<{
 type ManagedPluginOwnershipOptions = Readonly<{
   targetDir?: string;
   candidateSources?: string[];
+  legacyProductIdentity?: Readonly<{
+    packageName: string;
+    manifestName: string;
+    entry: string;
+  }>;
 }>;
 
 /**
@@ -724,6 +730,8 @@ type PluginPackageMetadata = {
   version?: string;
   main?: string;
   module?: string;
+  private?: boolean;
+  type?: string;
   dependencies?: Record<string, unknown>;
   openclaw?: {
     extensions?: string[];
@@ -733,6 +741,7 @@ type PluginPackageMetadata = {
 
 type PluginManifestMetadata = {
   id?: string;
+  name?: string;
   version?: string;
   entry?: string;
 };
@@ -757,6 +766,41 @@ async function readPluginMetadata(pluginDir: string): Promise<{
     pkg: pkg as PluginPackageMetadata,
     manifest: manifest as PluginManifestMetadata,
   };
+}
+
+/**
+ * Recognize pre-marker UClaw plugins by their complete declared product
+ * identity. The directory name alone is never sufficient because users may
+ * legitimately install an unrelated extension under a retired id.
+ */
+async function matchesLegacyProductIdentity(
+  pluginDir: string,
+  pluginDirName: string,
+  identity: NonNullable<ManagedPluginOwnershipOptions['legacyProductIdentity']>,
+): Promise<boolean> {
+  try {
+    const { pkg, manifest } = await readPluginMetadata(pluginDir);
+    if (
+      manifest.id !== pluginDirName
+      || manifest.name !== identity.manifestName
+      || manifest.entry !== identity.entry
+      || pkg.name !== identity.packageName
+      || pkg.main !== identity.entry
+      || pkg.private !== true
+      || pkg.type !== 'module'
+    ) {
+      return false;
+    }
+
+    const normalizedEntry = identity.entry.replace(/^\.\//u, '');
+    const declaredExtensions = pkg.openclaw?.extensions ?? [];
+    if (!declaredExtensions.some((entry) => entry.replace(/^\.\//u, '') === normalizedEntry)) {
+      return false;
+    }
+    return isRegularFile(join(pluginDir, normalizedEntry));
+  } catch {
+    return false;
+  }
 }
 
 function getDeclaredPluginEntries(pkg: PluginPackageMetadata, manifest: PluginManifestMetadata): string[] {
@@ -1540,6 +1584,17 @@ export async function inspectManagedPluginOwnership(
       code: 'managed_marker_valid',
       contentModified: currentFingerprint !== null
         && currentFingerprint !== markerResult.marker.contentFingerprint,
+    };
+  }
+
+  if (
+    options.legacyProductIdentity
+    && await matchesLegacyProductIdentity(targetDir, pluginDirName, options.legacyProductIdentity)
+  ) {
+    return {
+      status: 'managed',
+      evidence: 'legacy-product-metadata',
+      code: 'legacy_product_metadata_match',
     };
   }
 

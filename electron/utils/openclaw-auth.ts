@@ -79,6 +79,28 @@ const RETIRED_UCLAW_PLUGIN_IDS = [
   'uclaw-task-bridge',
   'uclaw-video-project',
 ] as const;
+const RETIRED_UCLAW_PLUGIN_IDENTITIES = {
+  'uclaw-artifact-guard': {
+    packageName: 'uclaw-artifact-guard-plugin',
+    manifestName: 'UClaw Artifact Guard',
+    entry: 'index.mjs',
+  },
+  'uclaw-desktop-control': {
+    packageName: 'uclaw-desktop-control-plugin',
+    manifestName: 'UClaw Desktop Control',
+    entry: 'index.mjs',
+  },
+  'uclaw-task-bridge': {
+    packageName: 'uclaw-task-bridge-plugin',
+    manifestName: 'UClaw Task Bridge',
+    entry: 'index.mjs',
+  },
+  'uclaw-video-project': {
+    packageName: 'uclaw-video-project-plugin',
+    manifestName: 'UClaw Video Project',
+    entry: 'index.mjs',
+  },
+} as const;
 
 interface BundledPluginManifest {
   id: string;
@@ -1519,6 +1541,7 @@ async function retireMasterOnlyUclawPlugins(config: Record<string, unknown>): Pr
   for (const pluginId of RETIRED_UCLAW_PLUGIN_IDS) {
     const result = await removeManagedPluginInstall(pluginId, {
       operation: 'retire-legacy-uclaw-plugin',
+      legacyProductIdentity: RETIRED_UCLAW_PLUGIN_IDENTITIES[pluginId],
     });
     if (!result.removed) continue;
     retiredManagedPluginIds.add(pluginId);

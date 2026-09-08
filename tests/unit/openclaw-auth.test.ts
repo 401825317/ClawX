@@ -115,6 +115,47 @@ async function writeManagedPluginMarker(pluginPath: string, pluginId: string): P
   );
 }
 
+const HISTORICAL_RETIRED_UCLAW_PLUGINS = [
+  ['uclaw-artifact-guard', 'uclaw-artifact-guard-plugin', 'UClaw Artifact Guard'],
+  ['uclaw-desktop-control', 'uclaw-desktop-control-plugin', 'UClaw Desktop Control'],
+  ['uclaw-task-bridge', 'uclaw-task-bridge-plugin', 'UClaw Task Bridge'],
+  ['uclaw-video-project', 'uclaw-video-project-plugin', 'UClaw Video Project'],
+] as const;
+
+async function writeHistoricalRetiredUclawPlugin(
+  pluginPath: string,
+  pluginId: string,
+  packageName: string,
+  manifestName: string,
+): Promise<void> {
+  await mkdir(pluginPath, { recursive: true });
+  await Promise.all([
+    writeFile(
+      join(pluginPath, 'openclaw.plugin.json'),
+      JSON.stringify({
+        id: pluginId,
+        name: manifestName,
+        version: '0.1.0',
+        entry: 'index.mjs',
+      }, null, 2),
+      'utf8',
+    ),
+    writeFile(
+      join(pluginPath, 'package.json'),
+      JSON.stringify({
+        name: packageName,
+        version: '0.1.0',
+        private: true,
+        type: 'module',
+        main: 'index.mjs',
+        openclaw: { extensions: ['./index.mjs'] },
+      }, null, 2),
+      'utf8',
+    ),
+    writeFile(join(pluginPath, 'index.mjs'), 'export default {};\n', 'utf8'),
+  ]);
+}
+
 async function readAuthProfiles(agentId: string): Promise<Record<string, unknown>> {
   const content = await readFile(getAgentAuthProfilesPath(agentId), 'utf8');
   return JSON.parse(content) as Record<string, unknown>;
@@ -1849,6 +1890,40 @@ describe('sanitizeOpenClawConfig', () => {
     expect((result.tools as Record<string, unknown>).web).toEqual({
       search: { provider: 'parallel-free' },
     });
+  });
+
+  it('retires historical UClaw plugins installed before managed markers existed', async () => {
+    const extensionsRoot = join(testHome, '.openclaw', 'extensions');
+    const retiredPluginPaths: string[] = [];
+    for (const [pluginId, packageName, manifestName] of HISTORICAL_RETIRED_UCLAW_PLUGINS) {
+      const pluginPath = join(extensionsRoot, pluginId);
+      retiredPluginPaths.push(pluginPath);
+      await writeHistoricalRetiredUclawPlugin(pluginPath, pluginId, packageName, manifestName);
+    }
+    await writeOpenClawJson({
+      plugins: {
+        allow: HISTORICAL_RETIRED_UCLAW_PLUGINS.map(([pluginId]) => pluginId),
+        entries: Object.fromEntries(
+          HISTORICAL_RETIRED_UCLAW_PLUGINS.map(([pluginId]) => [pluginId, { enabled: true }]),
+        ),
+        installs: Object.fromEntries(
+          HISTORICAL_RETIRED_UCLAW_PLUGINS.map(([pluginId]) => [pluginId, { source: 'legacy' }]),
+        ),
+        load: { paths: retiredPluginPaths },
+      },
+    });
+
+    const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
+    await sanitizeOpenClawConfig();
+
+    await Promise.all(retiredPluginPaths.map(async (pluginPath) => {
+      await expect(stat(pluginPath)).rejects.toThrow();
+    }));
+    const config = await readOpenClawJson();
+    const serializedConfig = JSON.stringify(config);
+    for (const [pluginId] of HISTORICAL_RETIRED_UCLAW_PLUGINS) {
+      expect(serializedConfig).not.toContain(pluginId);
+    }
   });
 
   it('preserves an unmarked user plugin that reuses a retired UClaw id', async () => {
