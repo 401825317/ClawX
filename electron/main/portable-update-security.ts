@@ -168,6 +168,9 @@ export async function verifyPortableUpdatePackage(
   filePath: string,
   info: Pick<PortableUpdatePackageMetadata, 'sha512' | 'size'>,
 ): Promise<{ size: number; sha512: string }> {
+  if (typeof filePath !== 'string' || filePath.trim().length === 0) {
+    throw new Error('Portable update package path is required');
+  }
   if (typeof info.size !== 'number' || !Number.isSafeInteger(info.size) || info.size <= 0) {
     throw new Error('Portable update size is required and must be a positive integer');
   }

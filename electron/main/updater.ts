@@ -431,6 +431,21 @@ function validatePortableUpdateArtifact(info: PortableUpdateInfo): PortableUpdat
  */
 export type UpdateDisposition = 'installer' | 'auto-replace' | 'manual-migration';
 
+/**
+ * Main-process capability created only after a managed ZIP has been downloaded
+ * and verified. Renderer-facing status is a projection of this artifact, not
+ * the authority used to install it.
+ */
+type DownloadedPortableArtifact = Readonly<{
+  filePath: string;
+  version: string;
+  sha512: string;
+  size: number;
+  platform: 'mac' | 'win' | 'linux';
+  arch: string;
+  disposition: UpdateDisposition;
+}>;
+
 function updateMetadata(): Pick<
   UpdateStatus,
   'mode' | 'packageType' | 'canAutoReplace' | 'requiresMigration' | 'migrationReason' | 'disposition'
@@ -491,6 +506,10 @@ export class AppUpdater extends EventEmitter {
   private managedChannel: string;
   private autoInstallTimer: NodeJS.Timeout | null = null;
   private autoInstallCountdown = 0;
+  private downloadedPortableArtifact: DownloadedPortableArtifact | null = null;
+  private portableArtifactEpoch = 0;
+  private portableDownloadPromise: Promise<{ downloadPath: string }> | null = null;
+  private portableInstallPromise: Promise<void> | null = null;
 
   /** Delay (in seconds) before auto-installing a downloaded update. */
   private static readonly AUTO_INSTALL_DELAY_SECONDS = 5;
@@ -567,6 +586,12 @@ export class AppUpdater extends EventEmitter {
     return this.status;
   }
 
+  /** Invalidate every not-yet-started install capability derived from an older operation. */
+  private invalidateDownloadedPortableArtifact(): number {
+    this.downloadedPortableArtifact = null;
+    return ++this.portableArtifactEpoch;
+  }
+
   private authorizedInstalledUpdate(allowedStatuses: UpdateStatus['status'][]): UpdateInfo {
     if (!allowedStatuses.includes(this.status.status)) {
       throw new Error(`Installed update is not authorized for status ${this.status.status}`);
@@ -588,6 +613,7 @@ export class AppUpdater extends EventEmitter {
 
   private rejectInstalledUpdate(error: Error): void {
     this.clearAutoInstallTimer();
+    this.invalidateDownloadedPortableArtifact();
     logger.error('[Updater] Installed update rejected:', error);
     this.updateStatus({
       status: 'error',
@@ -605,6 +631,7 @@ export class AppUpdater extends EventEmitter {
    */
   private setupListeners(): void {
     autoUpdater.on('checking-for-update', () => {
+      this.invalidateDownloadedPortableArtifact();
       this.updateStatus({
         status: 'checking',
         ...updateMetadata(),
@@ -617,6 +644,7 @@ export class AppUpdater extends EventEmitter {
     });
 
     autoUpdater.on('update-available', (info: UpdateInfo) => {
+      this.invalidateDownloadedPortableArtifact();
       const validationError = installedUpdateValidationError(info);
       if (validationError) {
         this.rejectInstalledUpdate(validationError);
@@ -634,6 +662,7 @@ export class AppUpdater extends EventEmitter {
     });
 
     autoUpdater.on('update-not-available', (info: UpdateInfo) => {
+      this.invalidateDownloadedPortableArtifact();
       const validationError = installedUpdateValidationError(info);
       this.updateStatus({
         status: 'not-available',
@@ -682,6 +711,7 @@ export class AppUpdater extends EventEmitter {
       // An updater error invalidates any in-flight artifact.  Do not leave a
       // previous downloaded path/info attached to an error status where a
       // delayed renderer install action could reuse it.
+      this.invalidateDownloadedPortableArtifact();
       this.updateStatus({
         status: 'error',
         ...updateMetadata(),
@@ -789,6 +819,7 @@ export class AppUpdater extends EventEmitter {
 
   /** Check the managed API for a verified portable ZIP update. */
   private async checkPortableForUpdates(): Promise<PortableUpdateInfo | null> {
+    this.invalidateDownloadedPortableArtifact();
     const timeout = createRequestTimeout(
       UCLAW_UPDATE_CHECK_TIMEOUT_MS,
       `Portable update check timed out after ${UCLAW_UPDATE_CHECK_TIMEOUT_MS}ms`,
@@ -878,7 +909,14 @@ export class AppUpdater extends EventEmitter {
    */
   async downloadUpdate(): Promise<{ downloadPath?: string }> {
     if (usesManagedPortablePackage()) {
-      return await this.downloadPortableUpdate();
+      if (this.portableDownloadPromise) return await this.portableDownloadPromise;
+      const download = this.downloadPortableUpdate();
+      this.portableDownloadPromise = download;
+      try {
+        return await download;
+      } finally {
+        if (this.portableDownloadPromise === download) this.portableDownloadPromise = null;
+      }
     }
 
     try {
@@ -902,6 +940,7 @@ export class AppUpdater extends EventEmitter {
   /** Download and verify a portable ZIP before making it installable. */
   private async downloadPortableUpdate(): Promise<{ downloadPath: string }> {
     let partialPathToCleanup: string | null = null;
+    let downloadEpoch: number | null = null;
     const timeout = createRequestTimeout(
       UCLAW_UPDATE_DOWNLOAD_TIMEOUT_MS,
       `Portable update download timed out after ${UCLAW_UPDATE_DOWNLOAD_TIMEOUT_MS}ms`,
@@ -927,6 +966,7 @@ export class AppUpdater extends EventEmitter {
       // filesystem even if the package family still says portable_zip.
       validatePortableUpdateIdentity(info, platformForUpdateApi(), process.arch);
       const artifact = validatePortableUpdateArtifact(info);
+      downloadEpoch = this.invalidateDownloadedPortableArtifact();
 
       const updatesDir = getPortableUpdatesDir();
       if (!updatesDir) {
@@ -1004,9 +1044,26 @@ export class AppUpdater extends EventEmitter {
       const verified = await verifyPortableUpdatePackage(partialPath, artifact);
       await replaceDownloadedUpdateAtomically(partialPath, targetPath);
       partialPathToCleanup = null;
+      if (downloadEpoch !== this.portableArtifactEpoch) {
+        throw new Error('Portable update download was superseded by a newer update operation');
+      }
+      const downloadedMetadata = updateMetadata();
+      if (!downloadedMetadata.disposition) {
+        throw new Error('Portable update disposition is not available');
+      }
+      const downloadedArtifact: DownloadedPortableArtifact = Object.freeze({
+        filePath: targetPath,
+        version: info.version,
+        sha512: artifact.sha512,
+        size: artifact.size,
+        platform: platformForUpdateApi(),
+        arch: process.arch,
+        disposition: downloadedMetadata.disposition,
+      });
+      this.downloadedPortableArtifact = downloadedArtifact;
       this.updateStatus({
         status: 'downloaded',
-        ...updateMetadata(),
+        ...downloadedMetadata,
         info,
         downloadPath: targetPath,
         progress: {
@@ -1026,14 +1083,19 @@ export class AppUpdater extends EventEmitter {
         ? timeout.controller.signal.reason
         : error;
       logger.error('[Updater] Portable update download failed:', failure);
-      this.updateStatus({
-        status: 'error',
-        ...updateMetadata(),
-        info: undefined,
-        progress: undefined,
-        downloadPath: undefined,
-        error: (failure as Error).message || String(failure),
-      });
+      // A superseded request must not erase the state committed by the newer
+      // check/download that replaced it.
+      if (downloadEpoch === null || downloadEpoch === this.portableArtifactEpoch) {
+        this.invalidateDownloadedPortableArtifact();
+        this.updateStatus({
+          status: 'error',
+          ...updateMetadata(),
+          info: undefined,
+          progress: undefined,
+          downloadPath: undefined,
+          error: (failure as Error).message || String(failure),
+        });
+      }
       throw failure;
     } finally {
       timeout.dispose();
@@ -1087,45 +1149,65 @@ export class AppUpdater extends EventEmitter {
 
   /** Launch the external helper so the running portable executable can be replaced safely. */
   private async installPortableUpdate(): Promise<void> {
+    if (this.portableInstallPromise) return await this.portableInstallPromise;
+    const install = this.installPortableUpdateOnce();
+    this.portableInstallPromise = install;
+    try {
+      await install;
+    } finally {
+      if (this.portableInstallPromise === install) this.portableInstallPromise = null;
+    }
+  }
+
+  /** Consume one immutable artifact snapshot for the complete verify/install operation. */
+  private async installPortableUpdateOnce(): Promise<void> {
     // Keep track of whether the package has passed the same integrity checks
     // used by the downloader.  A failed metadata/integrity check must not
     // reveal a potentially tampered ZIP from the cache in the error handler.
     let verifiedPackage = false;
+    let installArtifact: DownloadedPortableArtifact | null = null;
     try {
       if (this.status.status !== 'downloaded') {
         throw new Error(`Portable update is not ready to install (status: ${this.status.status})`);
       }
-      const offeredDisposition = this.status.disposition;
-      const info = this.status.info;
-      if (!isPortableUpdateInfo(info)) {
-        throw new Error('Portable update metadata is not available');
+      const downloadedArtifact = this.downloadedPortableArtifact;
+      if (!downloadedArtifact) {
+        throw new Error('Portable update has no verified main-process artifact');
       }
-      if (!this.status.downloadPath) {
-        throw new Error('Portable update package has not been downloaded');
-      }
+      installArtifact = downloadedArtifact;
+      const offeredDisposition = downloadedArtifact.disposition;
 
       // The autoUpdater event surface remains registered for compatibility,
       // even though packaged macOS builds do not use its feed.  Fail closed if
       // an unexpected/stale event populates a downloaded status with installer
       // metadata or an artifact for another platform/architecture.
-      validatePortableUpdateIdentity(info, platformForUpdateApi(), process.arch);
-      const artifact = validatePortableUpdateIntegrity(info);
+      if (
+        downloadedArtifact.platform !== platformForUpdateApi()
+        || downloadedArtifact.arch !== process.arch
+      ) {
+        throw new Error('Portable update artifact does not match the running platform and architecture');
+      }
       const currentVersion = app.getVersion();
-      if (comparePortableUpdateVersions(info.version, currentVersion) <= 0) {
-        throw new Error(`Portable update ${info.version} is not newer than the current version ${currentVersion}`);
+      if (comparePortableUpdateVersions(downloadedArtifact.version, currentVersion) <= 0) {
+        throw new Error(`Portable update ${downloadedArtifact.version} is not newer than the current version ${currentVersion}`);
       }
 
       // Manual migration does not invoke the Go helper, so re-verify the file
       // here before revealing it to the user.  The helper repeats this check
       // for the in-place replacement path.
-      await verifyPortableUpdatePackage(this.status.downloadPath, {
-        sha512: artifact.sha512,
-        size: artifact.size,
+      await verifyPortableUpdatePackage(downloadedArtifact.filePath, {
+        sha512: downloadedArtifact.sha512,
+        size: downloadedArtifact.size,
       });
       verifiedPackage = true;
 
       const metadata = updateMetadata();
-      this.updateStatus({ status: 'downloaded', ...metadata });
+      // Refresh renderer metadata only while this is still the active artifact.
+      // A concurrent update check may invalidate the projection, but it cannot
+      // alter the immutable snapshot already authorized for this installation.
+      if (this.downloadedPortableArtifact === downloadedArtifact && this.status.status === 'downloaded') {
+        this.updateStatus({ status: 'downloaded', ...metadata, downloadPath: downloadedArtifact.filePath });
+      }
 
       // A macOS app copied from a DMG or placed in /Applications still uses
       // the portable ZIP feed, but it has no safe in-place replacement root.
@@ -1146,7 +1228,7 @@ export class AppUpdater extends EventEmitter {
         || metadata.requiresMigration
       ) {
         logger.info('[Updater] Portable package requires manual migration; opening downloaded package');
-        await this.openDownloadedUpdate();
+        shell.showItemInFolder(downloadedArtifact.filePath);
         return;
       }
 
@@ -1163,38 +1245,45 @@ export class AppUpdater extends EventEmitter {
         }
       }
 
-      logger.info(`[Updater] Installing portable update v${info.version} from ${this.status.downloadPath}`);
-      await launchPortableUpdateInstaller(this.status.downloadPath, {
-        version: info.version,
-        sha512: artifact.sha512,
-        size: artifact.size,
+      logger.info(`[Updater] Installing portable update v${downloadedArtifact.version} from ${downloadedArtifact.filePath}`);
+      await launchPortableUpdateInstaller(downloadedArtifact.filePath, {
+        version: downloadedArtifact.version,
+        sha512: downloadedArtifact.sha512,
+        size: downloadedArtifact.size,
       });
     } catch (error) {
       logger.error('[Updater] Portable update install failed:', error);
-      this.updateStatus({
-        status: 'error',
-        ...updateMetadata(),
-        ...(verifiedPackage
-          ? {}
-          : {
-              info: undefined,
-              progress: undefined,
-              downloadPath: undefined,
-            }),
-        error: (error as Error).message || String(error),
-      });
-      if (verifiedPackage) {
-        await this.openDownloadedUpdate().catch((openError) => {
-          logger.warn('[Updater] Failed to open downloaded portable update after install error:', openError);
+      const isCurrentArtifact = installArtifact === null
+        || this.downloadedPortableArtifact === installArtifact;
+      if (isCurrentArtifact) {
+        if (!verifiedPackage) this.invalidateDownloadedPortableArtifact();
+        this.updateStatus({
+          status: 'error',
+          ...updateMetadata(),
+          ...(verifiedPackage && installArtifact
+            ? { downloadPath: installArtifact.filePath }
+            : {
+                info: undefined,
+                progress: undefined,
+                downloadPath: undefined,
+              }),
+          error: (error as Error).message || String(error),
         });
+      }
+      if (verifiedPackage && installArtifact) {
+        try {
+          shell.showItemInFolder(installArtifact.filePath);
+        } catch (openError) {
+          logger.warn('[Updater] Failed to open downloaded portable update after install error:', openError);
+        }
       }
       throw error;
     }
   }
 
   async openDownloadedUpdate(): Promise<void> {
-    if (this.status.downloadPath) {
-      shell.showItemInFolder(this.status.downloadPath);
+    if (this.downloadedPortableArtifact) {
+      shell.showItemInFolder(this.downloadedPortableArtifact.filePath);
       return;
     }
     const updatesDir = getPortableUpdatesDir();
@@ -1239,7 +1328,12 @@ export class AppUpdater extends EventEmitter {
     }
 
     if (this.status.packageType === 'portable_zip'
-      && (!this.status.downloadPath || !isPortableUpdateInfo(this.status.info))) {
+      && (
+        !this.downloadedPortableArtifact
+        || !this.status.downloadPath
+        || this.status.downloadPath !== this.downloadedPortableArtifact.filePath
+        || !isPortableUpdateInfo(this.status.info)
+      )) {
       logger.warn('[Updater] Ignoring portable auto-install countdown without a downloaded artifact');
       this.sendToRenderer('update:auto-install-countdown', {
         seconds: -1,
@@ -1332,6 +1426,7 @@ export class AppUpdater extends EventEmitter {
    * Set update channel (stable, beta, dev)
    */
   setChannel(channel: 'stable' | 'beta' | 'dev'): void {
+    this.invalidateDownloadedPortableArtifact();
     this.managedChannel = normalizeUpdateChannel(channel);
     autoUpdater.channel = channel;
     autoUpdater.allowDowngrade = false;

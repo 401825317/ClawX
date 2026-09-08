@@ -99,4 +99,11 @@ describe('portable update package security', () => {
     await expect(verifyPortableUpdatePackage(filePath, { size: bytes.length, sha512: 'not-a-digest' }))
       .rejects.toThrow(/sha512 is required/i);
   });
+
+  it.each([undefined, null, '', '   '])('rejects an invalid package path before filesystem access', async (filePath) => {
+    await expect(verifyPortableUpdatePackage(
+      filePath as unknown as string,
+      { size: 1, sha512: 'a'.repeat(128) },
+    )).rejects.toThrow(/package path is required/i);
+  });
 });

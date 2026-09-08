@@ -210,7 +210,16 @@ function makePortableResponse(
   } as unknown as Response;
 }
 
-function setDownloadedStatus(updater: unknown): void {
+function setDownloadedStatus(
+  updater: unknown,
+  overrides: Partial<{ filePath: string; version: string; sha512: string; size: number }> = {},
+): void {
+  const version = overrides.version ?? '2.0.4';
+  const filePath = overrides.filePath ?? '/tmp/uclaw-macos-updates/UClaw-2.0.4-mac-usb.zip';
+  const sha512 = overrides.sha512 ?? 'a'.repeat(128);
+  const size = overrides.size ?? 1;
+  const disposition = portableState.canAutoReplace ? 'auto-replace' : 'manual-migration';
+  const platform = process.platform === 'darwin' ? 'mac' : process.platform === 'win32' ? 'win' : 'linux';
   (updater as { status: UpdateStatus }).status = {
     status: 'downloaded',
     mode: 'installed',
@@ -218,17 +227,36 @@ function setDownloadedStatus(updater: unknown): void {
     canAutoReplace: portableState.canAutoReplace,
     requiresMigration: !portableState.canAutoReplace,
     migrationReason: portableState.canAutoReplace ? undefined : portableState.migrationReason,
-    disposition: portableState.canAutoReplace ? 'auto-replace' : 'manual-migration',
+    disposition,
     info: {
-      version: '2.0.4',
+      version,
       package_type: 'portable_zip',
-      platform: 'mac',
+      platform,
       arch: process.arch,
-      sha512: 'a'.repeat(128),
-      size: 1,
+      sha512,
+      size,
     },
-    downloadPath: '/tmp/uclaw-macos-updates/UClaw-2.0.4-mac-usb.zip',
+    downloadPath: filePath,
   };
+  (updater as {
+    downloadedPortableArtifact: Readonly<{
+      filePath: string;
+      version: string;
+      sha512: string;
+      size: number;
+      platform: 'mac' | 'win' | 'linux';
+      arch: string;
+      disposition: 'installer' | 'auto-replace' | 'manual-migration';
+    }>;
+  }).downloadedPortableArtifact = Object.freeze({
+    filePath,
+    version,
+    sha512,
+    size,
+    platform,
+    arch: process.arch,
+    disposition,
+  });
 }
 
 beforeEach(() => {
@@ -777,7 +805,7 @@ describe('macOS managed portable updater', () => {
     expect(updater.getStatus().migrationReason).toBeUndefined();
   });
 
-  it('fails closed to manual migration when a downloaded status lacks auto-replace authorization', async () => {
+  it('keeps private auto-replace authorization when renderer status loses its disposition', async () => {
     setPlatform('darwin');
     setArch('arm64');
     portableState.dataMode = 'portable';
@@ -786,17 +814,17 @@ describe('macOS managed portable updater', () => {
     const updater = new AppUpdater();
     setDownloadedStatus(updater);
     const status = (updater as { status: UpdateStatus }).status;
-    // Simulate an old/late IPC status that contains a verified-looking
-    // artifact but no explicit disposition. A writable layout alone must not
-    // authorize launching the replacement helper.
+    // Renderer-facing status is only a projection. Losing a display field must
+    // not rewrite the immutable authorization captured with the verified ZIP.
     delete status.disposition;
 
     await updater.installDownloadedUpdate();
 
-    expect(launchPortableUpdateInstallerMock).not.toHaveBeenCalled();
-    expect(shellMock.showItemInFolder).toHaveBeenCalledWith(
+    expect(launchPortableUpdateInstallerMock).toHaveBeenCalledWith(
       '/tmp/uclaw-macos-updates/UClaw-2.0.4-mac-usb.zip',
+      expect.objectContaining({ version: '2.0.4' }),
     );
+    expect(shellMock.showItemInFolder).not.toHaveBeenCalled();
     expect(updater.getStatus()).toMatchObject({
       status: 'downloaded',
       disposition: 'auto-replace',
@@ -835,7 +863,7 @@ describe('macOS managed portable updater', () => {
     expect(shellMock.showItemInFolder).not.toHaveBeenCalled();
   });
 
-  it('rejects unexpected installer metadata before revealing the cached package', async () => {
+  it('does not let mutable renderer status replace the main-process artifact identity', async () => {
     setPlatform('darwin');
     setArch('arm64');
     const { AppUpdater } = await import('@electron/main/updater');
@@ -847,10 +875,107 @@ describe('macOS managed portable updater', () => {
       package_type: 'installer',
     } as UpdateStatus['info'];
 
-    await expect(updater.installDownloadedUpdate()).rejects.toThrow(/package_type=portable_zip/i);
-    expect(verifyPortableUpdatePackageMock).not.toHaveBeenCalled();
-    expect(shellMock.showItemInFolder).not.toHaveBeenCalled();
+    await updater.installDownloadedUpdate();
+    expect(verifyPortableUpdatePackageMock).toHaveBeenCalledWith(
+      '/tmp/uclaw-macos-updates/UClaw-2.0.4-mac-usb.zip',
+      { sha512: 'a'.repeat(128), size: 1 },
+    );
+    expect(shellMock.showItemInFolder).toHaveBeenCalledWith(
+      '/tmp/uclaw-macos-updates/UClaw-2.0.4-mac-usb.zip',
+    );
     expect(launchPortableUpdateInstallerMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps one immutable install path when a refresh clears renderer status during verification', async () => {
+    setPlatform('win32');
+    setArch('x64');
+    portableState.dataMode = 'portable';
+    portableState.canAutoReplace = true;
+    const { AppUpdater } = await import('@electron/main/updater');
+    const updater = new AppUpdater();
+    const artifactPath = '/tmp/uclaw-macos-updates/UClaw-2.0.4-win-x64-usb.zip';
+    setDownloadedStatus(updater, { filePath: artifactPath });
+
+    let resolveVerification!: (value: { size: number; sha512: string }) => void;
+    verifyPortableUpdatePackageMock.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveVerification = resolve;
+    }));
+    const install = updater.installDownloadedUpdate();
+    await vi.waitFor(() => expect(verifyPortableUpdatePackageMock).toHaveBeenCalledWith(
+      artifactPath,
+      { sha512: 'a'.repeat(128), size: 1 },
+    ));
+
+    proxyAwareFetchMock.mockResolvedValueOnce(makePortableResponse('2.0.5', { platform: 'win' }));
+    await updater.checkForUpdates();
+    expect(updater.getStatus()).toMatchObject({ status: 'available', downloadPath: undefined });
+
+    resolveVerification({ size: 1, sha512: 'a'.repeat(128) });
+    await install;
+
+    expect(launchPortableUpdateInstallerMock).toHaveBeenCalledTimes(1);
+    expect(launchPortableUpdateInstallerMock).toHaveBeenCalledWith(
+      artifactPath,
+      expect.objectContaining({ version: '2.0.4' }),
+    );
+    expect(updater.getStatus()).toMatchObject({ status: 'available', info: { version: '2.0.5' } });
+  });
+
+  it('never verifies artifact A and launches a replacement artifact B', async () => {
+    setPlatform('win32');
+    setArch('x64');
+    portableState.dataMode = 'portable';
+    portableState.canAutoReplace = true;
+    const { AppUpdater } = await import('@electron/main/updater');
+    const updater = new AppUpdater();
+    const artifactA = '/tmp/uclaw-macos-updates/UClaw-2.0.4-win-x64-usb.zip';
+    const artifactB = '/tmp/uclaw-macos-updates/UClaw-2.0.5-win-x64-usb.zip';
+    setDownloadedStatus(updater, { filePath: artifactA, version: '2.0.4' });
+
+    let resolveVerification!: (value: { size: number; sha512: string }) => void;
+    verifyPortableUpdatePackageMock.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveVerification = resolve;
+    }));
+    const install = updater.installDownloadedUpdate();
+    await vi.waitFor(() => expect(verifyPortableUpdatePackageMock).toHaveBeenCalledWith(
+      artifactA,
+      expect.any(Object),
+    ));
+
+    setDownloadedStatus(updater, { filePath: artifactB, version: '2.0.5' });
+    resolveVerification({ size: 1, sha512: 'a'.repeat(128) });
+    await install;
+
+    expect(launchPortableUpdateInstallerMock).toHaveBeenCalledTimes(1);
+    expect(launchPortableUpdateInstallerMock).toHaveBeenCalledWith(
+      artifactA,
+      expect.objectContaining({ version: '2.0.4' }),
+    );
+    expect(launchPortableUpdateInstallerMock).not.toHaveBeenCalledWith(artifactB, expect.any(Object));
+  });
+
+  it('coalesces concurrent portable install requests into one helper launch', async () => {
+    setPlatform('win32');
+    setArch('x64');
+    portableState.dataMode = 'portable';
+    portableState.canAutoReplace = true;
+    const { AppUpdater } = await import('@electron/main/updater');
+    const updater = new AppUpdater();
+    setDownloadedStatus(updater);
+
+    let resolveVerification!: (value: { size: number; sha512: string }) => void;
+    verifyPortableUpdatePackageMock.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveVerification = resolve;
+    }));
+    const firstInstall = updater.installDownloadedUpdate();
+    const secondInstall = updater.installDownloadedUpdate();
+    await vi.waitFor(() => expect(verifyPortableUpdatePackageMock).toHaveBeenCalledTimes(1));
+
+    resolveVerification({ size: 1, sha512: 'a'.repeat(128) });
+    await Promise.all([firstInstall, secondInstall]);
+
+    expect(verifyPortableUpdatePackageMock).toHaveBeenCalledTimes(1);
+    expect(launchPortableUpdateInstallerMock).toHaveBeenCalledTimes(1);
   });
 
   it('does not reveal a downloaded package when its integrity check fails', async () => {
@@ -1103,7 +1228,7 @@ describe('macOS managed portable updater', () => {
     }
   });
 
-  it('fails closed when a portable downloaded status has no disposition', async () => {
+  it('does not authorize a portable countdown from renderer status alone', async () => {
     setPlatform('darwin');
     setArch('arm64');
     portableState.dataMode = 'portable';
@@ -1113,16 +1238,14 @@ describe('macOS managed portable updater', () => {
       const { AppUpdater } = await import('@electron/main/updater');
       const updater = new AppUpdater();
       setDownloadedStatus(updater);
-      delete (updater as { status: UpdateStatus }).status.disposition;
+      (updater as { downloadedPortableArtifact: unknown }).downloadedPortableArtifact = null;
       const installSpy = vi.spyOn(updater, 'quitAndInstall');
 
       updater.startAutoInstallCountdown();
       vi.advanceTimersByTime(6000);
 
       expect(installSpy).not.toHaveBeenCalled();
-      expect(shellMock.showItemInFolder).toHaveBeenCalledWith(
-        '/tmp/uclaw-macos-updates/UClaw-2.0.4-mac-usb.zip',
-      );
+      expect(shellMock.showItemInFolder).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }

@@ -68,6 +68,9 @@ export default defineConfig({
           resolve: { alias },
           build: {
             outDir: 'dist-electron/main',
+            // vite-plugin-electron defaults this to false, which otherwise
+            // leaves obsolete hashed Main chunks for electron-builder to pack.
+            emptyOutDir: true,
             sourcemap: 'hidden',
             rollupOptions: {
               external: isMainProcessExternal,
@@ -85,6 +88,7 @@ export default defineConfig({
           resolve: { alias },
           build: {
             outDir: 'dist-electron/preload',
+            emptyOutDir: true,
             sourcemap: 'hidden',
             rollupOptions: {
               external: ['electron'],
