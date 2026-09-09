@@ -249,6 +249,10 @@ test('disabled stage publisher never enables a release row', async () => {
   assert.match(publisher, /objects = \$objects\.Count/u);
   assert.match(publisher, /function Get-SingleHttpHeaderValue/u);
   assert.match(publisher, /function Assert-ProductionDatabaseMatchesPublicFeed/u);
+  assert.match(publisher, /function Assert-AiwxxxReleaseApiMatchesPublicFeed/u);
+  assert.match(publisher, /aiwxxx-release-api\.json/u);
+  assert.match(publisher, /created release did not return an ID for disabled-state repair/u);
+  assert.match(publisher, /if \(\$created\.enabled -ne \$false\)/u);
   assert.match(publisher, /Assert-ProductionDatabaseMatchesPublicFeed -Container \$postgres/u);
   assert.ok(
     publisher.indexOf('Assert-ProductionDatabaseMatchesPublicFeed -Container $postgres') < publisher.indexOf('  $pending = @()'),

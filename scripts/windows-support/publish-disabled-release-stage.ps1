@@ -21,6 +21,8 @@ param(
 
   [string]$SshCredentialPath = (Join-Path $env:APPDATA 'UClaw\release-credentials\aiwxxx-production-ssh.json'),
 
+  [string]$AiwxxxApiCredentialPath = (Join-Path $env:APPDATA 'UClaw\release-credentials\aiwxxx-release-api.json'),
+
   [string]$OssutilPath = (Join-Path $env:TEMP 'uclaw-ossutil\ossutil-2.3.0-windows-amd64\ossutil.exe'),
 
   [string]$OssProxy = '',
@@ -260,6 +262,148 @@ function Get-PublicFeedIdentity {
     releaseDate = $resolvedReleaseDate
     releaseNotes = $resolvedReleaseNotes
   }
+}
+
+function Invoke-AiwxxxReleaseApi {
+  param(
+    [Parameter(Mandatory = $true)][string]$AccessToken,
+    [Parameter(Mandatory = $true)][int]$UserId,
+    [Parameter(Mandatory = $true)][ValidateSet('Get', 'Post', 'Put')][string]$Method,
+    [Parameter(Mandatory = $true)][string]$Path,
+    [AllowNull()]$Body = $null
+  )
+
+  $headers = @{
+    Authorization = "Bearer $AccessToken"
+    'New-Api-User' = [string]$UserId
+    'Cache-Control' = 'no-cache'
+    Pragma = 'no-cache'
+  }
+  $uri = "https://aiwxxx.com$Path"
+  $parameters = @{ Uri = $uri; Method = $Method; Headers = $headers; TimeoutSec = 30 }
+  if ($null -ne $Body) {
+    $parameters.ContentType = 'application/json'
+    $parameters.Body = $Body | ConvertTo-Json -Depth 8 -Compress
+  }
+  $response = Invoke-RestMethod @parameters
+  if ($response.success -ne $true) { throw "aiwxxx.com release API failed for $Method $Path." }
+  return $response.data
+}
+
+function Get-AiwxxxReleaseRows {
+  param([string]$AccessToken, [int]$UserId)
+  $result = Invoke-AiwxxxReleaseApi -AccessToken $AccessToken -UserId $UserId -Method Get -Path '/api/clawx/admin/releases?p=1&page_size=100'
+  if ($null -eq $result.items) { throw 'aiwxxx.com release API returned no release items.' }
+  return @($result.items)
+}
+
+function Test-AiwxxxReleaseMatchesPublicFeed {
+  param($Release, $Public)
+  return [string]$Release.version -eq [string]$Public.version -and
+    [string]$Release.file_name -eq [string]$Public.fileName -and
+    [string]$Release.file_url -eq [string]$Public.downloadUrl -and
+    ([string]$Release.sha512).ToLowerInvariant() -eq ([string]$Public.sha512).ToLowerInvariant() -and
+    [int64]$Release.size -eq [int64]$Public.size -and
+    [bool]$Release.mandatory -eq [bool]$Public.mandatory
+}
+
+function Assert-AiwxxxReleaseApiMatchesPublicFeed {
+  param(
+    [Parameter(Mandatory = $true)]$TargetRows,
+    [Parameter(Mandatory = $true)]$ActualRows,
+    [Parameter(Mandatory = $true)]$PublicFeeds
+  )
+
+  foreach ($row in $TargetRows) {
+    $public = @($PublicFeeds | Where-Object {
+      $_.platform -eq $row.Platform -and $_.arch -eq $row.Arch -and $_.packageType -eq $row.PackageType
+    })
+    if ($public.Count -ne 1) { throw "Public feed snapshot is missing $($row.Platform)/$($row.Arch)/$($row.PackageType)." }
+    $public = $public[0]
+    $enabled = @($ActualRows | Where-Object {
+      $_.channel -eq 'latest' -and $_.platform -eq $row.Platform -and $_.arch -eq $row.Arch -and
+      $_.package_type -eq $row.PackageType -and $_.enabled -eq $true
+    })
+    $matches = @($enabled | Where-Object { Test-AiwxxxReleaseMatchesPublicFeed -Release $_ -Public $public })
+    if ($matches.Count -ne 1) {
+      throw "aiwxxx.com release API target mismatch for $($row.Platform)/$($row.Arch)/$($row.PackageType): public feed has no unique matching enabled release."
+    }
+    if ($enabled.Count -ne 1) {
+      Write-Warning "aiwxxx.com has $($enabled.Count) enabled $($row.Platform)/$($row.Arch)/$($row.PackageType) rows. Disabled staging will not alter enabled rows."
+    }
+  }
+}
+
+function Stage-AiwxxxDisabledReleaseRows {
+  param(
+    [Parameter(Mandatory = $true)]$ReleaseRows,
+    [Parameter(Mandatory = $true)][string]$Version,
+    [Parameter(Mandatory = $true)][string]$Notes,
+    [Parameter(Mandatory = $true)][bool]$Mandatory,
+    [Parameter(Mandatory = $true)][string]$AccessToken,
+    [Parameter(Mandatory = $true)][int]$UserId
+  )
+
+  $existing = Get-AiwxxxReleaseRows -AccessToken $AccessToken -UserId $UserId
+  foreach ($row in $ReleaseRows) {
+    $sameVersion = @($existing | Where-Object {
+      $_.channel -eq 'latest' -and $_.platform -eq $row.Platform -and $_.arch -eq $row.Arch -and
+      $_.package_type -eq $row.PackageType -and $_.version -eq $Version
+    })
+    if ($sameVersion.Count -gt 1) { throw "Duplicate aiwxxx.com staged rows for $Version $($row.Platform)/$($row.Arch)." }
+    if ($sameVersion.Count -eq 1 -and $sameVersion[0].enabled -eq $true) {
+      throw "Refusing to stage a release version already enabled on aiwxxx.com: $Version $($row.Platform)/$($row.Arch)."
+    }
+    $payload = [ordered]@{
+      channel = 'latest'
+      platform = $row.Platform
+      arch = $row.Arch
+      package_type = $row.PackageType
+      version = $Version
+      file_name = $row.FileName
+      file_url = "https://uclaw-ver.oss-cn-beijing.aliyuncs.com/releases/latest/$($row.FileName)"
+      sha512 = $row.Sha512
+      size = [int64]$row.Size
+      release_date = $row.ReleaseDate
+      release_notes = $Notes
+      enabled = $false
+      mandatory = $Mandatory
+    }
+    if ($sameVersion.Count -eq 0) {
+      $created = Invoke-AiwxxxReleaseApi -AccessToken $AccessToken -UserId $UserId -Method Post -Path '/api/clawx/admin/releases' -Body $payload
+      # Some deployed admin API revisions apply their UI create default
+      # (enabled=true) even when JSON explicitly supplies false.  Disabled
+      # staging must repair that response before it can be treated as staged.
+      if ($created.enabled -ne $false) {
+        if ($null -eq $created.id) { throw "aiwxxx.com created release did not return an ID for disabled-state repair: $Version $($row.Platform)/$($row.Arch)." }
+        [void](Invoke-AiwxxxReleaseApi -AccessToken $AccessToken -UserId $UserId -Method Put -Path "/api/clawx/admin/releases/$($created.id)" -Body $payload)
+      }
+      continue
+    }
+    $current = $sameVersion[0]
+    if ([string]$current.file_name -ne [string]$payload.file_name -or [string]$current.file_url -ne [string]$payload.file_url -or
+      ([string]$current.sha512).ToLowerInvariant() -ne ([string]$payload.sha512).ToLowerInvariant() -or [int64]$current.size -ne [int64]$payload.size -or
+      [string]$current.release_date -ne [string]$payload.release_date) {
+      throw "Staged aiwxxx.com release metadata is immutable and does not match the candidate: $Version $($row.Platform)/$($row.Arch)."
+    }
+    [void](Invoke-AiwxxxReleaseApi -AccessToken $AccessToken -UserId $UserId -Method Put -Path "/api/clawx/admin/releases/$($current.id)" -Body $payload)
+  }
+
+  $after = Get-AiwxxxReleaseRows -AccessToken $AccessToken -UserId $UserId
+  $staged = @(
+    foreach ($row in $ReleaseRows) {
+      $matches = @($after | Where-Object {
+        $_.channel -eq 'latest' -and $_.platform -eq $row.Platform -and $_.arch -eq $row.Arch -and
+        $_.package_type -eq $row.PackageType -and $_.version -eq $Version -and $_.enabled -eq $false -and
+        $_.file_name -eq $row.FileName -and $_.file_url -eq "https://uclaw-ver.oss-cn-beijing.aliyuncs.com/releases/latest/$($row.FileName)" -and
+        ([string]$_.sha512).ToLowerInvariant() -eq ([string]$row.Sha512).ToLowerInvariant() -and [int64]$_.size -eq [int64]$row.Size
+      })
+      if ($matches.Count -ne 1) { throw "Expected one disabled aiwxxx.com row for $Version $($row.Platform)/$($row.Arch)." }
+      $matches[0]
+    }
+  )
+  if ($staged.Count -ne $ReleaseRows.Count) { throw "Expected exactly $($ReleaseRows.Count) disabled aiwxxx.com rows for version $Version." }
+  return $staged
 }
 
 function Initialize-SshAskpass {
@@ -546,8 +690,32 @@ $actionSecrets = @{}
 foreach ($name in $actionSecretNames) { $actionSecrets[$name] = [Environment]::GetEnvironmentVariable($name) }
 $hasAnyActionSecret = @($actionSecrets.Values | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -gt 0
 $usesActionSecrets = $false
+$usesAiwxxxReleaseApi = $false
+$aiwxxxApiCredential = $null
+$resolvedAiwxxxApiCredentialPath = ''
+$resolvedOssCredentialPath = ''
 
-if ($hasAnyActionSecret) {
+if (Test-Path -LiteralPath $AiwxxxApiCredentialPath -PathType Leaf) {
+  $repoRoot = (Resolve-Path -LiteralPath (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) '..\..')).Path
+  $resolvedAiwxxxApiCredentialPath = (Resolve-Path -LiteralPath $AiwxxxApiCredentialPath).Path
+  if (Test-PathInside $resolvedAiwxxxApiCredentialPath $repoRoot) { throw 'aiwxxx.com API credentials must be stored outside the Git repository.' }
+  $aiwxxxApiCredential = Get-Content -Raw -LiteralPath $resolvedAiwxxxApiCredentialPath | ConvertFrom-Json
+  if ([int]$aiwxxxApiCredential.schemaVersion -ne 1 -or -not $aiwxxxApiCredential.accessTokenDpapi -or [int]$aiwxxxApiCredential.userId -le 0) {
+    throw 'Invalid aiwxxx.com release API credential metadata.'
+  }
+  if ([string]$aiwxxxApiCredential.releaseOrigin -ne 'https://aiwxxx.com') {
+    throw 'aiwxxx.com API credentials must declare releaseOrigin=https://aiwxxx.com.'
+  }
+  $usesAiwxxxReleaseApi = $true
+}
+
+if ($usesAiwxxxReleaseApi) {
+  $resolvedOssCredentialPath = (Resolve-Path -LiteralPath $OssCredentialPath).Path
+  $repoRoot = (Resolve-Path -LiteralPath (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) '..\..')).Path
+  if (Test-PathInside $resolvedOssCredentialPath $repoRoot) { throw 'OSS credentials must be stored outside the Git repository.' }
+  $ossCredential = Get-Content -Raw -LiteralPath $resolvedOssCredentialPath | ConvertFrom-Json
+}
+elseif ($hasAnyActionSecret) {
   $missingActionSecrets = @($actionSecretNames | Where-Object { [string]::IsNullOrWhiteSpace($actionSecrets[$_]) })
   if ($missingActionSecrets.Count -gt 0) {
     throw "GitHub Actions release secrets are incomplete: $($missingActionSecrets -join ', ')."
@@ -591,17 +759,28 @@ $temporaryConfig = Join-Path $env:TEMP ('uclaw-oss-' + [guid]::NewGuid().ToStrin
 $askpassDirectory = Join-Path $env:TEMP ('uclaw-ssh-askpass-' + [guid]::NewGuid().ToString('N'))
 $secretPointer = [IntPtr]::Zero
 $secret = $null
+$apiTokenPointer = [IntPtr]::Zero
+$apiToken = $null
 try {
-  # Validate the remote database target before touching OSS.  A reachable
-  # PostgreSQL pod is not sufficient evidence that it backs aiwxxx.com.
-  $script:AskpassPath = if ($usesActionSecrets) {
-    Initialize-SshAskpass -Directory $askpassDirectory -PasswordEnvironmentVariable 'UCLAW_PRODUCTION_SSH_PASSWORD'
+  # The aiwxxx.com admin API is the authoritative production target.  Legacy
+  # SSH credentials remain a compatibility fallback for older deployments.
+  if ($usesAiwxxxReleaseApi) {
+    $secureApiToken = ConvertTo-SecureString ([string]$aiwxxxApiCredential.accessTokenDpapi)
+    $apiTokenPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureApiToken)
+    $apiToken = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($apiTokenPointer)
+    $apiRowsBefore = Get-AiwxxxReleaseRows -AccessToken $apiToken -UserId ([int]$aiwxxxApiCredential.userId)
+    Assert-AiwxxxReleaseApiMatchesPublicFeed -TargetRows $releaseRows -ActualRows $apiRowsBefore -PublicFeeds $feedBeforeObjects
   }
   else {
-    Initialize-SshAskpass -CredentialPath $resolvedSshCredentialPath -Directory $askpassDirectory
+    $script:AskpassPath = if ($usesActionSecrets) {
+      Initialize-SshAskpass -Directory $askpassDirectory -PasswordEnvironmentVariable 'UCLAW_PRODUCTION_SSH_PASSWORD'
+    }
+    else {
+      Initialize-SshAskpass -CredentialPath $resolvedSshCredentialPath -Directory $askpassDirectory
+    }
+    $postgres = Get-PostgresContainer
+    Assert-ProductionDatabaseMatchesPublicFeed -Container $postgres -PublicFeeds $feedBeforeObjects -ReleaseRows $releaseRows
   }
-  $postgres = Get-PostgresContainer
-  Assert-ProductionDatabaseMatchesPublicFeed -Container $postgres -PublicFeeds $feedBeforeObjects -ReleaseRows $releaseRows
 
   $pending = @()
   foreach ($object in $objects) {
@@ -663,6 +842,11 @@ region=$($ossCredential.region)
   }
 
   $notes = if ($ReleaseNotes) { $ReleaseNotes } else { "UClaw $Version staged pending activation." }
+  if ($usesAiwxxxReleaseApi) {
+    $databaseRows = Stage-AiwxxxDisabledReleaseRows -ReleaseRows $releaseRows -Version $Version -Notes $notes -Mandatory $Mandatory `
+      -AccessToken $apiToken -UserId ([int]$aiwxxxApiCredential.userId)
+  }
+  else {
   $mandatorySql = if ($Mandatory) { 'true' } else { 'false' }
   $prechecks = ''
   $writes = ''
@@ -739,6 +923,7 @@ FROM claw_x_releases WHERE channel='latest' AND version=$(ConvertTo-SqlLiteral $
   $rowsLine = @($databaseResult.Stdout -split "`r?`n" | Where-Object { $_.Trim().StartsWith('[') })[-1]
   if (-not $rowsLine) { throw 'Production database did not return staged release evidence.' }
   $databaseRows = @($rowsLine | ConvertFrom-Json)
+  }
 
   $feedAfter = @(
     Get-PublicFeedIdentity -Platform 'win' -Arch 'x64' -PackageType 'portable_zip'
@@ -769,7 +954,9 @@ FROM claw_x_releases WHERE channel='latest' AND version=$(ConvertTo-SqlLiteral $
 finally {
   if (Test-Path -LiteralPath $temporaryConfig) { Remove-Item -LiteralPath $temporaryConfig -Force -ErrorAction SilentlyContinue }
   if ($secretPointer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($secretPointer) }
+  if ($apiTokenPointer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($apiTokenPointer) }
   $secret = $null
+  $apiToken = $null
   if (Test-Path -LiteralPath $askpassDirectory) {
     $resolvedTemp = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\') + '\'
     $resolvedAskpass = [IO.Path]::GetFullPath($askpassDirectory).TrimEnd('\') + '\'

@@ -66,12 +66,15 @@ uclaw-macos-production-candidate-<version>-<short-commit>
 ```text
 %APPDATA%\UClaw\release-credentials\
   oss-release.json
+  aiwxxx-release-api.json
   aiwxxx-production-ssh.json
 ```
 
 - `oss-release.json` 的 `accessKeySecretDpapi` 是 PowerShell `ConvertFrom-SecureString` 输出。
+- `aiwxxx-release-api.json` 是本机发布器的首选生产写入凭据：`schemaVersion: 1`、`releaseOrigin: "https://aiwxxx.com"`、正整数 `userId` 和 DPAPI 加密的 `accessTokenDpapi`。发布器只在内存中解密，并以 `Authorization: Bearer` 与 `New-Api-User` 调用同域 ClawX Releases 管理 API。
 - `aiwxxx-production-ssh.json` 的 `passwordDpapi` 是 PowerShell `ConvertFrom-SecureString` 输出，且必须声明 `releaseOrigin: "https://aiwxxx.com"`。旧 `production-ssh.json` 不再是本机发布器的默认目标，避免误写入历史环境。
-- 发布器在取得 SSH/Kubernetes 数据库后，会先读取目标平台当前的 `enabled=true` 记录，并与无缓存的 `https://aiwxxx.com/api/clawx/updates/latest` 结果逐项比对（版本、文件名、OSS URL、SHA-512、大小和 mandatory）。任何不一致都会在 OSS/数据库写入前硬失败；这用于拦截“SSH 可连通但不是线上应用实际数据库”的错误目标，绝不会继续写入或生成成功回执。
+- 发布器优先通过同域管理 API 读取当前 release 行，并与无缓存的 `https://aiwxxx.com/api/clawx/updates/latest` 结果逐项比对（版本、文件名、OSS URL、SHA-512、大小和 mandatory）。没有 API 凭据时才回退到 SSH/Kubernetes。任何无法确认目标与公网一致的情况都会在 OSS/数据库写入前硬失败；这用于拦截“SSH 可连通但不是线上应用实际数据库”的错误目标。
+- 禁用暂存创建后必须重新读取该行；如果部署中的管理 API 错误套用了 `enabled=true` 默认值，发布器会立刻用同一不可变元数据 PUT 回 `enabled=false`，再读取验证。未验证为 `enabled=false`、`mandatory=false` 时绝不生成成功回执。
 - `ossutil.exe` 固定为 `%TEMP%\uclaw-ossutil\ossutil-2.3.0-windows-amd64\ossutil.exe`。
 - DPAPI 文件必须由实际执行发布的同一机器、同一 Windows 用户创建。
 - 从其他电脑或 Windows 用户复制来的 DPAPI 文件无法解密，不能转换成 GitHub Secret。
