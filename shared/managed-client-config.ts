@@ -70,6 +70,8 @@ export type ManagedClientVideoModel = {
   defaultResolution: UclawVideoResolution;
   defaultDurationSeconds: number;
   requiresImage: boolean;
+  /** Whether this upstream model can synthesize an audio track. */
+  supportsAudio?: boolean;
 };
 
 export type ManagedClientVideoModelPolicy = {

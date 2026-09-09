@@ -158,6 +158,7 @@ describe('UClaw video plugin', () => {
             defaultResolution: 'cinema-ultra',
             defaultDurationSeconds: 21,
             requiresImage: false,
+            supportsAudio: true,
           }],
         },
         registerVideoGenerationProvider(nextProvider: typeof provider) {
@@ -173,6 +174,7 @@ describe('UClaw video plugin', () => {
         aspectRatio: '1024:429',
         resolution: 'cinema-ultra',
         durationSeconds: 21,
+        audio: true,
         cfg: {
           models: {
             providers: {
@@ -189,6 +191,7 @@ describe('UClaw video plugin', () => {
         generate: {
           aspectRatios: ['1024:429'],
           resolutions: ['cinema-ultra'],
+          supportsAudio: true,
         },
       });
       expect(requests).toEqual([{
@@ -199,6 +202,7 @@ describe('UClaw video plugin', () => {
         aspect_ratio: '1024:429',
         quality: 'cinema-ultra',
         resolution: 'cinema-ultra',
+        audio: true,
       }]);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -1139,11 +1143,11 @@ describe('UClaw video plugin', () => {
       await expect(provider?.generateVideo({ ...request, inputAudios: [{ buffer: Buffer.from('audio') }] }))
         .rejects.toThrow('does not support audio reference inputs');
       await expect(provider?.generateVideo({ ...request, audio: true }))
-        .rejects.toThrow('does not expose an output-audio toggle');
+        .rejects.toThrow('does not support generated audio');
       await expect(provider?.generateVideo({ ...request, watermark: true }))
         .rejects.toThrow('does not support watermarks');
       await expect(provider?.generateVideo({ ...request, audio: 'enabled' }))
-        .rejects.toThrow('does not expose an output-audio toggle');
+        .rejects.toThrow('audio must be a boolean');
       await expect(provider?.generateVideo({ ...request, watermark: 1 }))
         .rejects.toThrow('does not support watermarks');
       await expect(provider?.generateVideo({

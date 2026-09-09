@@ -690,6 +690,7 @@ function normalizeVideoModel(value: unknown): ManagedClientVideoModel | null {
     ),
     defaultDurationSeconds: selectAllowedInteger(durations, value.defaultDurationSeconds),
     requiresImage: value.requiresImage === true,
+    ...(value.supportsAudio === true ? { supportsAudio: true } : {}),
   };
 }
 

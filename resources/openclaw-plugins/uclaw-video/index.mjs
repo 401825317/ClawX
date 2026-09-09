@@ -314,6 +314,7 @@ function normalizeModelConfig(value) {
     defaultResolution,
     defaultDurationSeconds,
     requiresImage: value.requiresImage === true,
+    supportsAudio: value.supportsAudio === true,
   };
 }
 
@@ -1091,11 +1092,12 @@ function assertSupportedToolReferences(params) {
   }
 }
 
-function assertSupportedOutputOptions(params) {
-  if (params?.audio !== undefined && params.audio !== false) {
-    throw new Error(
-      'UClaw video generation does not expose an output-audio toggle; generated video may include provider-default audio',
-    );
+function assertSupportedOutputOptions(params, model) {
+  if (params?.audio !== undefined && typeof params.audio !== 'boolean') {
+    throw new Error('UClaw video generation audio must be a boolean');
+  }
+  if (params?.audio === true && !model.supportsAudio) {
+    throw new Error(`${model.id} does not support generated audio`);
   }
   assertSupportedWatermarkOption(params);
 }
@@ -1213,8 +1215,8 @@ async function resolveModelRequest(req, config) {
   if (inputAudios.length > 0) {
     throw new Error('UClaw video generation does not support audio reference inputs');
   }
-  assertSupportedOutputOptions(req);
   const { model, mode } = modelForInputImages(config, inputImages.length, req.model);
+  assertSupportedOutputOptions(req, model);
 
   const requested = {
     modelId: model.id,
@@ -1290,7 +1292,7 @@ function modeCapabilities(model) {
     aspectRatios: model.aspectRatios,
     supportsResolution: true,
     resolutions: model.resolutions,
-    supportsAudio: false,
+    supportsAudio: model.supportsAudio === true,
     supportsWatermark: false,
   };
   return {
@@ -1345,6 +1347,7 @@ function buildProvider(config, logger) {
           }
           : {}),
         ...(request.image ? { input_reference: request.image } : {}),
+        ...(req.audio === true ? { audio: true } : {}),
       };
       const submissionResponse = await fetchJson(
         `${baseUrl}/videos`,
