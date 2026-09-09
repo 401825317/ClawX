@@ -15,6 +15,9 @@ const ELECTRON_BUILDER_BIN = process.platform === 'win32'
 const passthroughArgs = process.argv.slice(2);
 const skipNsisPatch = passthroughArgs.includes('--skip-nsis-patch');
 const args = passthroughArgs.filter((arg) => arg !== '--skip-nsis-patch');
+if (process.env.CLAWX_SKIP_WINDOWS_SIGNING === '1' && process.platform === 'win32') {
+  args.push('-c.win.signAndEditExecutable=false');
+}
 const REQUIRED_WINDOWS_RUNTIME_BINARIES = ['node.exe', 'uv.exe', 'agent-browser.exe'];
 const endpointConfig = JSON.parse(
   fs.readFileSync(path.join(ROOT, 'shared', 'junfeiai-endpoints.json'), 'utf8'),

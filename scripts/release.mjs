@@ -63,6 +63,7 @@ export async function runLocalRelease({
       WIN_CSC_LINK: '',
       CSC_KEY_PASSWORD: '',
       WIN_CSC_KEY_PASSWORD: '',
+      CLAWX_SKIP_WINDOWS_SIGNING: '1',
     },
     shell: true,
     windowsHide: true,

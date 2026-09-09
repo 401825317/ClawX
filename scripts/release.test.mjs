@@ -382,6 +382,7 @@ test('builds only the Windows USB package and verifies its exact identity', asyn
       WIN_CSC_LINK: '',
       CSC_KEY_PASSWORD: '',
       WIN_CSC_KEY_PASSWORD: '',
+      CLAWX_SKIP_WINDOWS_SIGNING: '1',
     });
     assert.deepEqual(inspections, [{
       zipPath: path.join(root, 'release', 'UClaw-2.0.0-win-x64-usb.zip'),
