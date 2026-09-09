@@ -161,7 +161,7 @@ export function Sidebar() {
   const currentSessionKey = useChatStore((s) => s.currentSessionKey);
   const sessionLabels = useChatStore((s) => s.sessionLabels);
   const sessionLastActivity = useChatStore((s) => s.sessionLastActivity);
-  const switchSession = useChatStore((s) => s.switchSession);
+  const selectAcpSession = useChatStore((s) => s.selectAcpSession);
   const deleteSession = useChatStore((s) => s.deleteSession);
   const deleteSessions = useChatStore((s) => s.deleteSessions);
   const renameSession = useChatStore((s) => s.renameSession);
@@ -808,11 +808,7 @@ export function Sidebar() {
                                   aria-current={isCurrentSession ? 'page' : undefined}
                                   onClick={() => {
                                     markRead(s.key);
-                                    if (currentSessionKey === s.key) {
-                                      void loadHistory(false);
-                                    } else {
-                                      switchSession(s.key);
-                                    }
+                                    selectAcpSession(s.key, s.workspacePath);
                                     navigate('/');
                                   }}
                                   onDoubleClick={() => handleStartRename(s.key, sessionLabel)}

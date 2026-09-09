@@ -206,6 +206,7 @@ describe('managed runtime config transaction', () => {
     ]);
     expect(providerEntry.models[0]).toEqual(expect.objectContaining({
       reasoning: true,
+      thinkingLevelMap: { off: 'none' },
       compat: expect.objectContaining({
         supportsReasoningEffort: true,
         supportedReasoningEfforts: ['none', 'low', 'medium', 'high'],

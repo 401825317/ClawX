@@ -423,6 +423,22 @@ describe('ACP Chat page', () => {
     });
   });
 
+  it('hides the previous timeline while ACP switches to another session', () => {
+    chatState.currentSessionKey = 'agent:main:session-next';
+    chatState.sessions = [{ key: 'agent:main:session-next', workspacePath: '/workspace' }];
+    // This is the transient store state immediately after a sidebar selection:
+    // Chat selected the next session while ACP still owns the previous timeline.
+    acpState.activeSessionKey = 'agent:main:main';
+    acpState.timeline = populatedTimeline();
+
+    render(<Chat />);
+
+    expect(screen.getByTestId('acp-chat-loading')).toBeInTheDocument();
+    expect(screen.queryByTestId('acp-chat-timeline')).not.toBeInTheDocument();
+    expect(screen.queryByText('List project files')).not.toBeInTheDocument();
+    expect(screen.getByTestId('mock-chat-input')).toHaveAttribute('data-disabled', 'true');
+  });
+
   it('sends ready staged attachments and cancels through the ACP session store', async () => {
     acpState.workspaceRoot = '/workspace';
     acpState.cwd = '/workspace';

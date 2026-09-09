@@ -755,6 +755,7 @@ test.describe('ClawX ACP inline timeline', () => {
 
       await page.getByTestId(`sidebar-session-${TIMING_SECONDARY_SESSION_KEY}`).click();
       await expect(page.getByTestId('acp-chat-empty-state')).toBeVisible();
+      await expect(page.getByText('Working before the switch')).not.toBeVisible();
       await page.evaluate(() => {
         const clock = window as unknown as { __turnTimingNowMs: number };
         clock.__turnTimingNowMs += 60_000;

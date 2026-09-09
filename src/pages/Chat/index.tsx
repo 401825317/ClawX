@@ -483,10 +483,15 @@ export function Chat() {
   const platform = window.electron?.platform;
   const isMac = platform === 'darwin';
   const isWindows = platform === 'win32';
-  const composerBusy = acpSending || acpCancelling;
+  // Selection state and ACP history are separate stores. The active ACP owner
+  // is stable across live timeline generations, so use it to prevent a prior
+  // session's timeline from appearing during the handoff.
+  const acpSessionSwitching = acpActiveSessionKey !== currentSessionKey;
+  const acpSessionLoading = acpLoading || acpSessionSwitching;
+  const composerBusy = acpSending || acpCancelling || acpSessionSwitching;
   const composerDisabledPlaceholder = !gatewayReady
     ? t('composer.gatewayStartingPlaceholder')
-    : acpLoading
+    : acpSessionLoading
       ? t('composer.sessionLoadingPlaceholder')
     : acpCancelling
       ? t('composer.sessionCancellingPlaceholder')
@@ -495,7 +500,7 @@ export function Chat() {
         : !workspaceContextAvailable
           ? t('composer.workspacePreparingPlaceholder')
           : '';
-  const showScrollToLatest = acpTimeline.itemOrder.length > 0 && !isAtBottom;
+  const showScrollToLatest = !acpSessionSwitching && acpTimeline.itemOrder.length > 0 && !isAtBottom;
   const hasAttemptedAcpPromptForCurrentSession = lastPromptAttemptSessionKey === currentSessionKey;
   const visibleAcpError = !workspaceUnavailable && acpError
     && !(acpTimeline.itemOrder.length === 0 && !hasAttemptedAcpPromptForCurrentSession && isRecoverableInitialAcpLoadError(acpError))
@@ -581,7 +586,7 @@ export function Chat() {
                     />
                   )}
                   {visibleAcpError && <AcpErrorBanner message={visibleAcpError} onDismiss={clearAcpError} />}
-                  {acpLoading ? (
+                  {acpSessionLoading ? (
                     <div className="flex min-h-[40vh] items-center justify-center" data-testid="acp-chat-loading">
                       <LoadingSpinner size="md" />
                     </div>

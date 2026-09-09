@@ -70,6 +70,10 @@ const UCLAW_RESPONSES_REASONING_COMPAT = {
   supportedReasoningEfforts: ['none', 'low', 'medium', 'high'],
 } as const;
 
+const UCLAW_RESPONSES_THINKING_LEVEL_MAP = {
+  off: 'none',
+} as const;
+
 let atomicWriteSequence = 0;
 
 function generation(content: Buffer | null): FileGeneration {
@@ -127,6 +131,7 @@ function managedRuntimeModelEntry(
     contextWindow: UCLAW_DEFAULT_MODEL_CONTEXT_WINDOW,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     ...(supportsManagedReasoning ? { reasoning: true } : {}),
+    ...(supportsManagedReasoning ? { thinkingLevelMap: UCLAW_RESPONSES_THINKING_LEVEL_MAP } : {}),
     compat: supportsManagedReasoning
       ? { ...UCLAW_RESPONSES_REASONING_COMPAT }
       : { supportsPromptCacheKey: true },
