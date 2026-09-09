@@ -5,6 +5,7 @@ import type { CompleteHostServiceRegistry } from '../main/ipc/host-contract';
 import type { AttachmentFileRef } from '@shared/host-api/contract';
 import { resolveOutgoingMediaAttachment, type AttachmentAccess } from './attachment-access';
 import { resolveOpenClawStateDir } from '../utils/paths';
+import { ACP_INLINE_IMAGE_MAX_DATA_URI_CHARS, base64EncodedLength } from '@shared/chat/media-limits';
 import {
   CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
   CLAWX_OPENAI_IMAGE_PROVIDER_KEY,
@@ -32,6 +33,8 @@ type MediaApiDependencies = {
 };
 
 const OPAQUE_ATTACHMENT_KEY = /^[a-f0-9]{64}$/;
+const PREVIEW_DIMENSIONS = [512, 384, 256, 192] as const;
+const PREVIEW_JPEG_QUALITIES = [82, 70, 58] as const;
 
 type SaveImagePayload = {
   base64?: unknown;
@@ -48,47 +51,46 @@ type ImageGenerationSettingsPayload = {
   openAiRelayApiKey?: unknown;
 };
 
-async function generateImagePreview(filePath: string, mimeType: string): Promise<string | null> {
-  try {
-    const { readFile } = await import('node:fs/promises');
-    if (mimeType === 'image/svg+xml') {
-      const buf = await readFile(filePath);
-      return `data:${mimeType};base64,${buf.toString('base64')}`;
-    }
-
-    const img = nativeImage.createFromPath(filePath);
-    if (img.isEmpty()) return null;
-    const size = img.getSize();
-    const maxDim = 512;
-    if (size.width > maxDim || size.height > maxDim) {
-      const resized = size.width >= size.height
-        ? img.resize({ width: maxDim })
-        : img.resize({ height: maxDim });
-      return `data:image/png;base64,${resized.toPNG().toString('base64')}`;
-    }
-    const buf = await readFile(filePath);
-    return `data:${mimeType};base64,${buf.toString('base64')}`;
-  } catch {
-    return null;
-  }
+function asBoundedDataUri(mimeType: string, buffer: Buffer): string | null {
+  const prefix = `data:${mimeType};base64,`;
+  if (prefix.length + base64EncodedLength(buffer.length) > ACP_INLINE_IMAGE_MAX_DATA_URI_CHARS) return null;
+  return `${prefix}${buffer.toString('base64')}`;
 }
 
 function generateImagePreviewFromBuffer(buffer: Buffer, mimeType: string): string | null {
   try {
     if (mimeType === 'image/svg+xml') {
-      return `data:${mimeType};base64,${buffer.toString('base64')}`;
+      return asBoundedDataUri(mimeType, buffer);
     }
     const img = nativeImage.createFromBuffer(buffer);
     if (img.isEmpty()) return null;
     const size = img.getSize();
-    const maxDim = 512;
-    if (size.width > maxDim || size.height > maxDim) {
-      const resized = size.width >= size.height
-        ? img.resize({ width: maxDim })
-        : img.resize({ height: maxDim });
-      return `data:image/png;base64,${resized.toPNG().toString('base64')}`;
+    const original = asBoundedDataUri(mimeType, buffer);
+    if (original && size.width <= PREVIEW_DIMENSIONS[0] && size.height <= PREVIEW_DIMENSIONS[0]) {
+      return original;
     }
-    return `data:${mimeType};base64,${buffer.toString('base64')}`;
+    for (const maxDim of PREVIEW_DIMENSIONS) {
+      const resized = size.width > maxDim || size.height > maxDim
+        ? size.width >= size.height
+          ? img.resize({ width: maxDim })
+          : img.resize({ height: maxDim })
+        : img;
+      for (const quality of PREVIEW_JPEG_QUALITIES) {
+        const preview = asBoundedDataUri('image/jpeg', resized.toJPEG(quality));
+        if (preview) return preview;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function generateImagePreview(filePath: string, mimeType: string): Promise<string | null> {
+  try {
+    const { readFile } = await import('node:fs/promises');
+    const buffer = await readFile(filePath);
+    return generateImagePreviewFromBuffer(buffer, mimeType);
   } catch {
     return null;
   }

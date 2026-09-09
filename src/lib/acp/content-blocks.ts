@@ -88,15 +88,17 @@ function uriBasename(uri: string): string {
 function clawxUserMetadata(block: ContentBlock, role: ContentBlockRenderContext['role']): {
   stagingId?: string;
   fileName?: string;
+  transcriptMessageId?: string;
 } {
-  if (role !== 'user') return {};
   const meta = recordValue(block._meta);
   const clawx = recordValue(meta?.clawx);
   const stagingId = nonEmptyString(clawx?.stagingId);
   const fileName = nonEmptyString(clawx?.fileName);
+  const transcriptMessageId = nonEmptyString(clawx?.transcriptMessageId);
   return {
-    ...(stagingId ? { stagingId } : {}),
-    ...(fileName ? { fileName } : {}),
+    ...(role === 'user' && stagingId ? { stagingId } : {}),
+    ...(role === 'user' && fileName ? { fileName } : {}),
+    ...(transcriptMessageId ? { transcriptMessageId } : {}),
   };
 }
 
@@ -109,6 +111,7 @@ function attachmentPart(input: {
   mimeType?: string;
   size?: number;
   stagingId?: string;
+  transcriptMessageId?: string;
   unavailable?: boolean;
 }): RenderPart {
   const uri = boundedText(input.uri, ACP_ATTACHMENT_URI_MAX_CHARS);
@@ -121,6 +124,7 @@ function attachmentPart(input: {
     ...(input.mimeType ? { mimeType: boundedText(input.mimeType, 256) } : {}),
     ...(typeof input.size === 'number' ? { size: input.size } : {}),
     ...(input.stagingId ? { stagingId: boundedText(input.stagingId, ACP_ATTACHMENT_ID_MAX_CHARS) } : {}),
+    ...(input.transcriptMessageId ? { transcriptMessageId: boundedText(input.transcriptMessageId, ACP_ATTACHMENT_ID_MAX_CHARS) } : {}),
     ...(input.unavailable ? { unavailableReason: 'invalidReference' as const } : {}),
   });
 }
@@ -168,6 +172,7 @@ export function contentBlockToRenderPart(block: ContentBlock, context: ContentBl
         mimeType: block.mimeType ?? undefined,
         size: block.size ?? undefined,
         stagingId: clawx.stagingId,
+        transcriptMessageId: clawx.transcriptMessageId,
       });
     }
     case 'resource': {

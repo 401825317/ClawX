@@ -1,6 +1,8 @@
 import type { BrowserWindow } from 'electron';
 import { fork, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import {
   ClientSideConnection,
@@ -16,6 +18,7 @@ import { HOST_EVENT_CHANNELS } from '@shared/host-events/contract';
 import { UCLAW_VIDEO_GENERATION_MAX_INPUT_IMAGE_BYTES } from '@shared/junfeiai-endpoints';
 import {
   addChatMediaImageToBudget,
+  ACP_INLINE_IMAGE_MAX_DATA_URI_CHARS,
   CHAT_MEDIA_MAX_ITEMS,
   CHAT_PROMPT_MAX_UTF8_BYTES,
   EMPTY_CHAT_MEDIA_IMAGE_BUDGET,
@@ -64,7 +67,7 @@ import {
   acpTurnVideoPreferenceStore,
   type AcpTurnVideoPreferenceStore,
 } from './acp-turn-video-preference-store';
-import { resolveOpenClawWorkspacePath } from '../utils/paths';
+import { resolveOpenClawStateDir, resolveOpenClawWorkspacePath } from '../utils/paths';
 import { prepareAcpChatImage, prepareVideoReferenceImage } from '../utils/video-reference-image';
 import { artifactTaskService } from './artifact-task-service';
 
@@ -147,6 +150,9 @@ type AcpPromptBuildResult = {
     mimeType: string;
   };
 };
+type InlineImageMaterializationContext = {
+  materializedBytes: number;
+};
 
 const ACP_GATEWAY_READY_WAIT_TIMEOUT_MS = 90_000;
 const ACP_GATEWAY_READY_POLL_INTERVAL_MS = 250;
@@ -163,6 +169,15 @@ const ACP_RECOVERY_SUMMARY_MAX_CHARS = 12_000;
 // notification per message while keeping the byte budget as the hard limit.
 const ACP_SESSION_LOAD_MAX_UPDATES = 4_096;
 const ACP_SESSION_LOAD_MAX_BYTES = 8 * 1024 * 1024;
+const ACP_MANAGED_INLINE_IMAGE_MAX_BYTES = 24 * 1024 * 1024;
+const ACP_MANAGED_INLINE_IMAGE_MAX_PIXELS = 100 * 1024 * 1024;
+type ManagedInlineImageMimeType = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif';
+const ACP_MANAGED_INLINE_IMAGE_MIME_TYPES = new Map<ManagedInlineImageMimeType, string>([
+  ['image/png', 'png'],
+  ['image/jpeg', 'jpg'],
+  ['image/webp', 'webp'],
+  ['image/gif', 'gif'],
+] as const);
 const ACP_RECOVERY_SUMMARY_HEADINGS = [
   '## Decisions',
   '## Open TODOs',
@@ -333,6 +348,97 @@ function artifactToolUpdate(notification: SessionNotification): {
 
 function isTerminalPromptFailure(notification: SessionNotification): boolean {
   return sessionUpdateType(notification) === 'uclaw_turn_failure';
+}
+
+function inlineImagePayload(block: Record<string, unknown>): {
+  data: string;
+  mimeType: string;
+} | null {
+  const declaredMimeType = typeof block.mimeType === 'string'
+    ? block.mimeType.split(';', 1)[0]?.trim().toLowerCase()
+    : undefined;
+  if (typeof block.data === 'string') {
+    return declaredMimeType ? { data: block.data, mimeType: declaredMimeType } : null;
+  }
+  if (typeof block.uri !== 'string') return null;
+  const match = block.uri.match(/^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/]+=*)$/i);
+  if (!match?.[1] || !match[2]) return null;
+  return { data: match[2], mimeType: declaredMimeType ?? match[1].toLowerCase() };
+}
+
+function isManagedInlineImageMimeType(value: string): value is ManagedInlineImageMimeType {
+  return ACP_MANAGED_INLINE_IMAGE_MIME_TYPES.has(value as ManagedInlineImageMimeType);
+}
+
+function imageHeaderMatchesMime(buffer: Buffer, mimeType: ManagedInlineImageMimeType): boolean {
+  switch (mimeType) {
+    case 'image/png':
+      return buffer.length >= 24
+        && buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    case 'image/jpeg':
+      return buffer.length >= 4 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+    case 'image/webp':
+      return buffer.length >= 16 && buffer.subarray(0, 4).toString('ascii') === 'RIFF'
+        && buffer.subarray(8, 12).toString('ascii') === 'WEBP';
+    case 'image/gif':
+      return buffer.length >= 10 && (buffer.subarray(0, 6).toString('ascii') === 'GIF87a'
+        || buffer.subarray(0, 6).toString('ascii') === 'GIF89a');
+    default:
+      return false;
+  }
+}
+
+function imageDimensions(buffer: Buffer, mimeType: ManagedInlineImageMimeType): { width: number; height: number } | null {
+  if (mimeType === 'image/png' && buffer.length >= 24) {
+    return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+  }
+  if (mimeType === 'image/gif' && buffer.length >= 10) {
+    return { width: buffer.readUInt16LE(6), height: buffer.readUInt16LE(8) };
+  }
+  if (mimeType === 'image/jpeg') {
+    for (let offset = 2; offset + 9 < buffer.length;) {
+      if (buffer[offset] !== 0xff) return null;
+      while (buffer[offset] === 0xff) offset += 1;
+      const marker = buffer[offset] ?? 0;
+      offset += 1;
+      if (marker === 0xd8 || marker === 0xd9) continue;
+      if (offset + 2 > buffer.length) return null;
+      const length = buffer.readUInt16BE(offset);
+      if (length < 2 || offset + length > buffer.length) return null;
+      if ((marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7)
+        || (marker >= 0xc9 && marker <= 0xcb) || (marker >= 0xcd && marker <= 0xcf)) {
+        return { width: buffer.readUInt16BE(offset + 5), height: buffer.readUInt16BE(offset + 3) };
+      }
+      offset += length;
+    }
+  }
+  return null;
+}
+
+function isSafeInlineImageBuffer(buffer: Buffer, mimeType: ManagedInlineImageMimeType): boolean {
+  if (buffer.length === 0
+    || buffer.length > ACP_MANAGED_INLINE_IMAGE_MAX_BYTES || !imageHeaderMatchesMime(buffer, mimeType)) {
+    return false;
+  }
+  const dimensions = imageDimensions(buffer, mimeType);
+  return !dimensions || (dimensions.width > 0 && dimensions.height > 0
+    && dimensions.width * dimensions.height <= ACP_MANAGED_INLINE_IMAGE_MAX_PIXELS);
+}
+
+function hasOversizedInlineImage(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasOversizedInlineImage);
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  if (record.type === 'image') {
+    if (typeof record.data === 'string') {
+      const mimeType = typeof record.mimeType === 'string' ? record.mimeType : '';
+      return `data:${mimeType};base64,`.length + record.data.length > ACP_INLINE_IMAGE_MAX_DATA_URI_CHARS;
+    }
+    return typeof record.uri === 'string'
+      && /^data:image\//i.test(record.uri)
+      && record.uri.length > ACP_INLINE_IMAGE_MAX_DATA_URI_CHARS;
+  }
+  return Object.values(record).some(hasOversizedInlineImage);
 }
 
 function isPromptRetryableUpstreamError(code: AcpChatErrorCode): boolean {
@@ -1028,7 +1134,7 @@ export class AcpChatService {
             attemptMessageId = `${originalMessageId}:upstream-retry:${attempt}`;
             const delayMs = promptRetryDelay(attempt);
             promptContext.retryReplacementPending = true;
-            this.emitSessionUpdate(retryingNotification(
+            void this.emitSessionUpdate(retryingNotification(
               acpSessionId,
               userMessageId,
               attempt,
@@ -1069,7 +1175,7 @@ export class AcpChatService {
       }
       if (promptContext.retryReplacementPending) {
         promptContext.retryReplacementPending = false;
-        this.emitSessionUpdate(retryCancelledNotification(acpSessionId, userMessageId));
+        void this.emitSessionUpdate(retryCancelledNotification(acpSessionId, userMessageId));
       }
       this.requireSameGatewayRuntime(runtimeIdentity);
       const completedAtMs = Date.now();
@@ -1101,7 +1207,7 @@ export class AcpChatService {
         ?? terminalFailureNotification(acpSessionId, userMessageId, failure);
       promptContext.pendingTerminalFailure = null;
       if (terminalFailure.update && typeof (terminalFailure.update as { userMessageId?: unknown }).userMessageId === 'string') {
-        this.emitSessionUpdate(terminalFailure, { forwardTerminalFailure: true });
+        void this.emitSessionUpdate(terminalFailure, { forwardTerminalFailure: true });
       }
       if (imagePreferenceId) {
         await this.turnImagePreferenceStore.discard(imagePreferenceId).catch((discardError) => {
@@ -1155,7 +1261,7 @@ export class AcpChatService {
         livePrompt.retryAbortController.abort();
         if (livePrompt.retryReplacementPending) {
           livePrompt.retryReplacementPending = false;
-          this.emitSessionUpdate(retryCancelledNotification(livePrompt.acpSessionId, livePrompt.userMessageId));
+          void this.emitSessionUpdate(retryCancelledNotification(livePrompt.acpSessionId, livePrompt.userMessageId));
         }
       }
       const runtimeIdentity = await this.requireReadyGatewayRuntime();
@@ -1643,10 +1749,129 @@ export class AcpChatService {
     this.livePrompts.clear();
   }
 
-  private emitSessionUpdate(
+  private async materializeInlineImageBlock(
+    block: Record<string, unknown>,
+    sessionKey: string,
+    generation: number,
+    context: InlineImageMaterializationContext,
+    transcriptMessageId?: string,
+  ): Promise<Record<string, unknown>> {
+    const source = inlineImagePayload(block);
+    const declaredMimeType = typeof block.mimeType === 'string' ? block.mimeType : '';
+    const sourceLength = typeof block.data === 'string'
+      ? `data:${declaredMimeType};base64,`.length + block.data.length
+      : typeof block.uri === 'string' ? block.uri.length : 0;
+    if (sourceLength <= ACP_INLINE_IMAGE_MAX_DATA_URI_CHARS) return block;
+    if (!source || !/^[A-Za-z0-9+/]*={0,2}$/.test(source.data) || source.data.length % 4 !== 0) {
+      return { type: 'text', text: '[Image omitted: invalid inline image data.]' };
+    }
+
+    if (!isManagedInlineImageMimeType(source.mimeType)) {
+      return { type: 'text', text: '[Image omitted: unsupported inline image type.]' };
+    }
+    const extension = ACP_MANAGED_INLINE_IMAGE_MIME_TYPES.get(source.mimeType);
+    const buffer = Buffer.from(source.data, 'base64');
+    if (!extension || !isSafeInlineImageBuffer(buffer, source.mimeType)
+      || context.materializedBytes + buffer.length > ACP_MANAGED_INLINE_IMAGE_MAX_BYTES) {
+      return { type: 'text', text: '[Image omitted: inline image exceeds safe media limits.]' };
+    }
+    if (!this.accessRegistry.get(sessionKey, generation)) {
+      return { type: 'text', text: '[Image omitted: its session is no longer active.]' };
+    }
+
+    const attachmentId = `acp-inline-${randomUUID()}`;
+    const stateDir = resolveOpenClawStateDir();
+    const originalsDir = join(stateDir, 'media', 'outgoing', 'originals');
+    const recordsDir = join(stateDir, 'media', 'outgoing', 'records');
+    const originalPath = join(originalsDir, `${attachmentId}.${extension}`);
+    const recordPath = join(recordsDir, `${attachmentId}.json`);
+    const recordTempPath = join(recordsDir, `.${attachmentId}.json.tmp`);
+    let originalWritten = false;
+    let recordWritten = false;
+    context.materializedBytes += buffer.length;
+    try {
+      await Promise.all([
+        mkdir(originalsDir, { recursive: true }),
+        mkdir(recordsDir, { recursive: true }),
+      ]);
+      await writeFile(originalPath, buffer, { flag: 'wx' });
+      originalWritten = true;
+      if (!this.accessRegistry.get(sessionKey, generation)) throw new Error('stale ACP session generation');
+      await writeFile(recordTempPath, JSON.stringify({
+        attachmentId,
+        sessionKey,
+        ...(transcriptMessageId ? { messageId: transcriptMessageId } : {}),
+        original: {
+          path: originalPath,
+          contentType: source.mimeType,
+          sizeBytes: buffer.length,
+        },
+      }), { flag: 'wx' });
+      await rename(recordTempPath, recordPath);
+      recordWritten = true;
+      if (!this.accessRegistry.get(sessionKey, generation)) throw new Error('stale ACP session generation');
+      return {
+        type: 'resource_link',
+        uri: `/api/chat/media/outgoing/${encodeURIComponent(sessionKey)}/${attachmentId}/full`,
+        name: `generated-image.${extension}`,
+        mimeType: source.mimeType,
+        size: buffer.length,
+        _meta: { clawx: transcriptMessageId ? { transcriptMessageId } : {} },
+      };
+    } catch (error) {
+      context.materializedBytes -= buffer.length;
+      logger.warn(`[acp-chat] unable to materialize oversized inline image: ${String(error)}`);
+      await Promise.all([
+        ...(recordWritten ? [rm(recordPath, { force: true })] : []),
+        ...(originalWritten ? [rm(originalPath, { force: true })] : []),
+        rm(recordTempPath, { force: true }),
+      ]).catch(() => undefined);
+      return { type: 'text', text: '[Image omitted: unable to store its original safely.]' };
+    }
+  }
+
+  private async materializeInlineImages(
+    value: unknown,
+    sessionKey: string,
+    generation: number,
+    context: InlineImageMaterializationContext,
+    transcriptMessageId?: string,
+  ): Promise<unknown> {
+    if (Array.isArray(value)) {
+      const result: unknown[] = [];
+      for (const entry of value) {
+        result.push(await this.materializeInlineImages(entry, sessionKey, generation, context, transcriptMessageId));
+      }
+      return result;
+    }
+    if (!value || typeof value !== 'object') return value;
+    const record = value as Record<string, unknown>;
+    if (record.type === 'image') {
+      return this.materializeInlineImageBlock(record, sessionKey, generation, context, transcriptMessageId);
+    }
+    const result: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(record)) {
+      result[key] = await this.materializeInlineImages(entry, sessionKey, generation, context, transcriptMessageId);
+    }
+    return result;
+  }
+
+  private async materializeSessionNotification(
+    notification: SessionNotification,
+    sessionKey: string,
+    generation: number,
+  ): Promise<SessionNotification> {
+    const update = (notification as unknown as { update?: Record<string, unknown> }).update;
+    const transcriptMessageId = typeof update?.messageId === 'string' ? update.messageId : undefined;
+    return this.materializeInlineImages(notification, sessionKey, generation, {
+      materializedBytes: 0,
+    }, transcriptMessageId) as Promise<SessionNotification>;
+  }
+
+  private async emitSessionUpdate(
     notification: SessionNotification,
     options: { forwardTerminalFailure?: boolean } = {},
-  ): void {
+  ): Promise<void> {
     const acpSessionId = notification.sessionId;
     const livePrompt = [...this.livePrompts.values()].find((context) => context.acpSessionId === acpSessionId);
     const sessionKey = livePrompt?.sessionKey ?? this.activeSessionKey;
@@ -1705,6 +1930,18 @@ export class AcpChatService {
       }
     }
 
+    const materializedInlineImage = hasOversizedInlineImage(notification);
+    const safeNotification = materializedInlineImage
+      ? await this.materializeSessionNotification(notification, sessionKey, generation)
+      : notification;
+    if (materializedInlineImage && !this.accessRegistry.get(sessionKey, generation)) {
+      this.trace('session-update:ignored', {
+        direction: 'upstream',
+        sessionKey,
+        details: { reason: 'stale-generation-after-media-materialization', acpSessionId, updateType },
+      });
+      return;
+    }
     const envelope: AcpSessionUpdateEnvelope = {
       sessionKey,
       generation,
@@ -1712,7 +1949,7 @@ export class AcpChatService {
         ? { historical: true }
         : {}),
       ...(retryReplacement ? { retryReplacement } : {}),
-      notification: { ...notification, sessionId: sessionKey },
+      notification: { ...safeNotification, sessionId: sessionKey },
     };
     const loadBatch = this.activeLoadBatch;
     if (loadBatch?.sessionKey === sessionKey && loadBatch.generation === generation) {

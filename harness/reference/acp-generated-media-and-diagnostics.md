@@ -73,6 +73,10 @@ The provider always downloads a completed task from the authenticated `/videos/{
 
 For a resolved local `video/*` attachment, Renderer asks the typed Files Host API for an opaque `uclaw-media://attachment/<token>` URL and renders the native player with metadata preloading. Main reopens and reauthorizes the file for every `GET` or `HEAD`, implements single byte ranges for seeking, and never sends the complete video through IPC or a Renderer Blob. Tokens expose no filesystem path, use bounded capacity and idle lifetime, and are revoked when the component releases them, the active session generation changes, or the app exits. Open and reveal actions still pass through Main. Remote HTTP video attachments deliberately stay ordinary validated links and never become direct player sources.
 
+## Large Native ACP Images
+
+When a trusted ACP `image` block exceeds the Renderer inline-preview budget, Electron Main validates the Base64 payload, MIME type, byte size, and available dimensions before atomically writing the original under OpenClaw's managed outgoing-media directory. Main then replaces that block with a session-scoped `resource_link`; the Renderer never receives the original data URI or a filesystem path. The existing attachment resolver reauthorizes the record for the exact session and generation, and the assistant attachment renderer requests a budgeted thumbnail through the Host API. A thumbnail that cannot fit the budget falls back to the normal actionable image attachment rather than an unsupported-content error. Opening a rendered thumbnail reads the original only after the user acts.
+
 ## Historical Evidence
 
 After successful `loadSession` for an existing session, the store may call:

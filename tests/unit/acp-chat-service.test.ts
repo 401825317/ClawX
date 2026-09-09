@@ -2,7 +2,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { realpath } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import sharp from 'sharp';
@@ -1344,6 +1344,77 @@ describe('AcpChatService', () => {
     expect(send).toHaveBeenCalledWith(HOST_EVENT_CHANNELS.chat.acpSessionUpdate, expect.not.objectContaining({
       historical: true,
     }));
+  });
+
+  it('materializes oversized ACP image data into a session-scoped media record before forwarding', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'clawx-acp-inline-image-'));
+    const stateDir = join(parent, 'state');
+    const workspaceRoot = join(parent, 'workspace');
+    mkdirSync(workspaceRoot, { recursive: true });
+    vi.stubEnv('OPENCLAW_STATE_DIR', stateDir);
+
+    try {
+      const pixels = randomBytes(1024 * 1024 * 3);
+      const image = await sharp(pixels, { raw: { width: 1024, height: 1024, channels: 3 } }).png().toBuffer();
+      expect(image.toString('base64').length).toBeGreaterThan(1024 * 1024);
+      const { AcpSessionAccessRegistry } = await import('../../electron/services/acp-session-access-registry');
+      const accessRegistry = new AcpSessionAccessRegistry();
+      const { service, send } = await createService(createConnection(), accessRegistry);
+      await service.loadSession({ sessionKey: 'agent:pi:image', workspaceRoot, cwd: workspaceRoot });
+
+      await service.client.sessionUpdate({
+        sessionId: 'agent:pi:image',
+        update: {
+          sessionUpdate: 'agent_message',
+          messageId: 'image-message',
+          content: [{ type: 'image', mimeType: 'image/png', data: image.toString('base64') }],
+        },
+      } as never);
+
+      const envelope = send.mock.calls.at(-1)?.[1];
+      const content = envelope.notification.update.content[0];
+      expect(content).toEqual(expect.objectContaining({
+        type: 'resource_link',
+        uri: expect.stringMatching(/^\/api\/chat\/media\/outgoing\/agent%3Api%3Aimage\/acp-inline-/),
+        mimeType: 'image/png',
+        size: image.length,
+        _meta: { clawx: { transcriptMessageId: 'image-message' } },
+      }));
+      expect(content).not.toHaveProperty('data');
+      expect(JSON.stringify(envelope)).not.toContain(image.toString('base64'));
+
+      const attachmentId = content.uri.split('/').at(-2);
+      const record = JSON.parse(await readFile(join(stateDir, 'media', 'outgoing', 'records', `${attachmentId}.json`), 'utf8'));
+      expect(record).toMatchObject({
+        attachmentId,
+        sessionKey: 'agent:pi:image',
+        messageId: 'image-message',
+        original: { contentType: 'image/png', sizeBytes: image.length },
+      });
+      expect(record.original.path).toContain(join(stateDir, 'media', 'outgoing', 'originals'));
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('removes malformed oversized image data instead of forwarding it to the Renderer', async () => {
+    const { service, send } = await createService();
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    const malformedData = 'a'.repeat(1024 * 1024 + 1);
+
+    await service.client.sessionUpdate({
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'agent_message',
+        messageId: 'malformed-image',
+        content: [{ type: 'image', data: malformedData }],
+      },
+    } as never);
+
+    const content = send.mock.calls.at(-1)?.[1].notification.update.content[0];
+    expect(content).toEqual({ type: 'text', text: '[Image omitted: invalid inline image data.]' });
+    expect(JSON.stringify(send.mock.calls.at(-1)?.[1])).not.toContain(malformedData);
   });
 
   it('emits permission requests separately and resolves them from respondPermission', async () => {

@@ -908,6 +908,12 @@ async function initialize(): Promise<void> {
       } else {
         const managedAuthStatus = await getManagedAuthLocalStatus();
         if (!isManagedRuntimeReady(managedAuthStatus)) {
+          // Do not leave a previous or in-flight launch presented as reconnecting when
+          // managed credentials are unavailable. The renderer's auth gate can then
+          // take ownership of recovery instead of waiting for a Gateway that cannot start.
+          if (gatewayManager.getStatus().state !== 'stopped') {
+            await gatewayManager.stop();
+          }
           logger.info('Gateway auto-start deferred until managed authentication is ready', {
             event: 'managed_gateway_start_deferred',
             authValid: managedAuthStatus.authValid,

@@ -10,12 +10,14 @@ const createFromPathMock = vi.hoisted(() => vi.fn(() => ({
   getSize: () => ({ width: 1, height: 1 }),
   resize: vi.fn(),
   toPNG: vi.fn(),
+  toJPEG: vi.fn(),
 })));
 const createFromBufferMock = vi.hoisted(() => vi.fn(() => ({
   isEmpty: () => true,
   getSize: () => ({ width: 1, height: 1 }),
   resize: vi.fn(),
   toPNG: vi.fn(),
+  toJPEG: vi.fn(),
 })));
 
 vi.mock('electron', () => ({
@@ -105,6 +107,48 @@ describe('media api', () => {
     });
     expect(result).not.toHaveProperty(attachmentFileRef.uri);
     expect(createFromPathMock).not.toHaveBeenCalled();
+  });
+
+  it('re-encodes large attachment previews within the inline preview budget', async () => {
+    const attachmentFileRef = {
+      sessionKey: 'agent:main:session-a',
+      generation: 3,
+      uri: '/api/chat/media/outgoing/agent%3Amain%3Asession-a/acp-inline-image/full',
+    };
+    const opaqueKey = 'c'.repeat(64);
+    const previewImage = {
+      isEmpty: () => false,
+      getSize: () => ({ width: 2048, height: 2048 }),
+      resize: vi.fn(),
+      toPNG: vi.fn(),
+      toJPEG: vi.fn(() => Buffer.alloc(180_000, 7)),
+    };
+    previewImage.resize.mockReturnValue(previewImage);
+    createFromBufferMock.mockReturnValueOnce(previewImage);
+    const readAttachmentBinary = vi.fn().mockResolvedValue({
+      ok: true,
+      data: new Uint8Array(Buffer.alloc(2 * 1024 * 1024, 5)),
+      mimeType: 'image/png',
+      size: 2 * 1024 * 1024,
+    });
+    const resolveAttachment = vi.fn().mockResolvedValue({
+      ok: true,
+      identity: opaqueKey,
+      displayName: 'generated-image.png',
+      mimeType: 'image/png',
+      size: 2 * 1024 * 1024,
+      target: { kind: 'local', scope: 'openclaw-media', ref: attachmentFileRef },
+    });
+    const { createMediaApi } = await import('../../electron/services/media-api');
+    const result = await createMediaApi({
+      attachmentAccess: { resolveAttachment, readAttachmentBinary } as never,
+    }).thumbnails({
+      paths: [{ attachmentFileRef, key: opaqueKey, mimeType: 'image/png' }],
+    });
+
+    expect(result[opaqueKey]?.preview).toMatch(/^data:image\/jpeg;base64,/);
+    expect(result[opaqueKey]?.preview?.length).toBeLessThanOrEqual(1024 * 1024);
+    expect(previewImage.resize).toHaveBeenCalledWith({ width: 512 });
   });
 
   it('rejects attachment thumbnail keys that were not issued by Main', async () => {

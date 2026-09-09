@@ -94,6 +94,8 @@ describe('app runtime managed gate startup', () => {
 
     expect(startup).toContain('getManagedAuthLocalStatus()');
     expect(startup).toContain('isManagedRuntimeReady(managedAuthStatus)');
+    expect(startup).toContain("gatewayManager.getStatus().state !== 'stopped'");
+    expect(startup).toContain('await gatewayManager.stop();');
     expect(startup).toContain("event: 'managed_gateway_start_deferred'");
     expect(startup.indexOf('getManagedAuthLocalStatus()')).toBeLessThan(
       startup.indexOf('syncAllProviderAuthToRuntime('),

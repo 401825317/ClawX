@@ -14,7 +14,12 @@ export const CHAT_PROMPT_MAX_UTF8_BYTES = 2 * 1024 * 1024;
  * data URIs are not useful as React state and create another full-size string
  * when the URI prefix is added, so use a much smaller renderer-side ceiling.
  */
-export const ACP_INLINE_IMAGE_MAX_DATA_URI_CHARS = 512 * 1024;
+/**
+ * This budget is for renderer-visible previews, never for original generated
+ * images. Oversized ACP image blocks are materialized by Main and reach the
+ * renderer through the scoped attachment path instead.
+ */
+export const ACP_INLINE_IMAGE_MAX_DATA_URI_CHARS = 1024 * 1024;
 
 export function base64EncodedLength(byteLength: number): number {
   if (!Number.isFinite(byteLength) || byteLength <= 0) return 0;

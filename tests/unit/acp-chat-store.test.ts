@@ -2046,6 +2046,70 @@ describe('ACP Chat store', () => {
     });
   });
 
+  it('keeps Main-materialized assistant images as scoped attachments instead of inline data errors', async () => {
+    hostApiMock.resolveAttachment.mockResolvedValue({
+      ok: true,
+      identity: 'a'.repeat(64),
+      displayName: 'generated-image.png',
+      mimeType: 'image/png',
+      size: 6_103_902,
+      target: {
+        kind: 'local',
+        scope: 'openclaw-media',
+        ref: {
+          sessionKey: 'agent:pi:s1',
+          generation: 1,
+          uri: '/api/chat/media/outgoing/agent%3Api%3As1/acp-inline-image/full',
+          transcriptMessageId: 'image-message',
+        },
+      },
+    });
+    const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+    ensureAcpChatSubscriptions();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo',
+    });
+
+    hostEventsMock.updateListener?.({
+      sessionKey: 'agent:pi:s1',
+      generation: 1,
+      notification: {
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'agent_message',
+          messageId: 'image-message',
+          content: [{
+            type: 'resource_link',
+            uri: '/api/chat/media/outgoing/agent%3Api%3As1/acp-inline-image/full',
+            name: 'generated-image.png',
+            mimeType: 'image/png',
+            size: 6_103_902,
+            _meta: { clawx: { transcriptMessageId: 'image-message' } },
+          }],
+        },
+      },
+    });
+
+    await vi.waitFor(() => expect(hostApiMock.resolveAttachment).toHaveBeenCalledWith({
+      ref: {
+        sessionKey: 'agent:pi:s1',
+        generation: 1,
+        uri: '/api/chat/media/outgoing/agent%3Api%3As1/acp-inline-image/full',
+        transcriptMessageId: 'image-message',
+      },
+      name: 'generated-image.png',
+      mimeType: 'image/png',
+      size: 6_103_902,
+    }));
+    await vi.waitFor(() => {
+      const item = useAcpChatSessionStore.getState().timeline.itemsById['image-message:0'];
+      expect(item).toMatchObject({
+        kind: 'message-segment',
+        parts: [{ kind: 'attachment', access: { status: 'available', identity: 'a'.repeat(64) } }],
+      });
+    });
+  });
+
   it('drops an old deferred resolution when the same attachment position receives a new reference', async () => {
     const resolutionA = createDeferred<Record<string, unknown>>();
     const resolutionB = createDeferred<Record<string, unknown>>();
