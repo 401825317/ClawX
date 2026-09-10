@@ -1797,16 +1797,11 @@ describe('AcpChatService', () => {
     const firstConnection = createConnection();
     const firstInitialization = createDeferred<ReturnType<typeof createInitResponse>>();
     firstConnection.initialize.mockReturnValue(firstInitialization.promise);
-    const secondConnection = createConnection();
-    const secondInitialization = createDeferred<ReturnType<typeof createInitResponse>>();
-    secondConnection.initialize.mockReturnValue(secondInitialization.promise);
     const firstChild = createFakeChild();
-    const secondChild = createFakeChild();
     Object.assign(firstChild, { exitCode: null, signalCode: null, pid: 1221 });
-    Object.assign(secondChild, { exitCode: null, signalCode: null, pid: 1222 });
     acpSdkMock.state.connectionForSpawn = firstConnection;
     childProcessMock.state.child = firstChild;
-    const { AcpChatService, ACP_CHILD_TERMINATION_TIMEOUT_MS } = await import('../../electron/services/acp-chat-service');
+    const { AcpChatService, ACP_INITIALIZATION_TIMEOUT_MS } = await import('../../electron/services/acp-chat-service');
     const service = new AcpChatService(
       { webContents: { send: vi.fn() } } as never,
       createPassthroughAccessRegistry() as never,
@@ -1819,16 +1814,13 @@ describe('AcpChatService', () => {
       await vi.waitFor(() => expect(firstChild.listenerCount('exit')).toBeGreaterThan(0));
       // No error/exit/close is emitted. The bounded timer must release the
       // initialization and remove its three temporary listeners.
-      await vi.advanceTimersByTimeAsync(ACP_CHILD_TERMINATION_TIMEOUT_MS);
+      await vi.advanceTimersByTimeAsync(ACP_INITIALIZATION_TIMEOUT_MS);
       expect(firstChild.listenerCount('close')).toBe(1); // spawnConnection's permanent state listener only
-      acpSdkMock.state.connectionForSpawn = secondConnection;
-      childProcessMock.state.child = secondChild;
-      await vi.advanceTimersByTimeAsync(1_000);
-      expect(childProcessMock.fork).toHaveBeenCalledTimes(2);
-      await vi.advanceTimersByTimeAsync(ACP_CHILD_TERMINATION_TIMEOUT_MS);
+      // A timeout means the child is alive but its Gateway handshake is stuck.
+      // Do not create a second identical ACP child until Gateway changes.
+      expect(childProcessMock.fork).toHaveBeenCalledTimes(1);
       await expect(load).resolves.toMatchObject({ success: false });
       firstInitialization.resolve(createInitResponse());
-      secondInitialization.resolve(createInitResponse());
     } finally {
       vi.useRealTimers();
     }

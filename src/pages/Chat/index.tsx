@@ -301,6 +301,10 @@ export function Chat() {
   const closeArtifactPanel = useArtifactPanel((s) => s.close);
   const splitContainerRef = useRef<HTMLDivElement | null>(null);
   const loadedGatewayRuntimeRef = useRef<string | null>(null);
+  // Do not turn one failed ACP bootstrap into an endless full-page spinner.
+  // A Gateway restart changes this identity and automatically permits the
+  // normal recovery load; dismissing the error is an explicit manual retry.
+  const failedAcpLoadGatewayRuntimeRef = useRef<string | null>(null);
   const acpLoadInFlightRef = useRef<AcpLoadInFlight | null>(null);
   const loadAcpSessionDeduped = useCallback((input: AcpChatLoadPayload): Promise<boolean> => {
     const key = `${gatewayRuntimeIdentity ?? 'not-ready'}\0${acpLoadIntentKey(input)}`;
@@ -458,6 +462,7 @@ export function Chat() {
   useEffect(() => {
     if (!gatewayRuntimeIdentity || !currentSessionKey || !cwd || !workspaceContextAvailable || acpLoading) return;
     if (currentSessionKey === DEFAULT_SESSION_KEY && sessions.length === 0 && acpActiveSessionKey == null && !sessionDiscoveryAttempted) return;
+    if (failedAcpLoadGatewayRuntimeRef.current === gatewayRuntimeIdentity) return;
     if (
       loadedGatewayRuntimeRef.current === gatewayRuntimeIdentity
       && acpActiveSessionKey === currentSessionKey
@@ -473,7 +478,12 @@ export function Chat() {
       cwd,
       ...(createIfMissing ? { createIfMissing: true } : {}),
     }).then((loaded) => {
-      if (loaded) loadedGatewayRuntimeRef.current = gatewayRuntimeIdentity;
+      if (loaded) {
+        loadedGatewayRuntimeRef.current = gatewayRuntimeIdentity;
+        failedAcpLoadGatewayRuntimeRef.current = null;
+      } else {
+        failedAcpLoadGatewayRuntimeRef.current = gatewayRuntimeIdentity;
+      }
       if (loaded && createIfMissing) {
         acknowledgeAcpSessionCreated(currentSessionKey);
       }
@@ -506,6 +516,10 @@ export function Chat() {
     && !(acpTimeline.itemOrder.length === 0 && !hasAttemptedAcpPromptForCurrentSession && isRecoverableInitialAcpLoadError(acpError))
     ? acpError
     : null;
+  const dismissAcpError = () => {
+    failedAcpLoadGatewayRuntimeRef.current = null;
+    clearAcpError();
+  };
   const chooseReplacementWorkspace = async () => {
     try {
       const result = await hostApi.dialog.open({
@@ -585,7 +599,7 @@ export function Chat() {
                       onChooseWorkspace={effectiveWorkspace.readOnly ? undefined : () => void chooseReplacementWorkspace()}
                     />
                   )}
-                  {visibleAcpError && <AcpErrorBanner message={visibleAcpError} onDismiss={clearAcpError} />}
+                  {visibleAcpError && <AcpErrorBanner message={visibleAcpError} onDismiss={dismissAcpError} />}
                   {acpSessionLoading ? (
                     <div className="flex min-h-[40vh] items-center justify-center" data-testid="acp-chat-loading">
                       <LoadingSpinner size="md" />

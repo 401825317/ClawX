@@ -38,6 +38,7 @@ import { syncLaunchAtStartupSettingFromStore } from './launch-at-startup';
 import { writePortableUpdateReadyMarker } from './portable-update-ready';
 import { longTermRuleService } from '../services/long-term-rule-service';
 import { artifactTaskService } from '../services/artifact-task-service';
+import { stopAcpChatForAppQuit } from '../services/chat-api';
 import {
   startManagedClientRuntimeConfigRefresh,
   subscribeManagedClientRuntimeConfig,
@@ -1086,9 +1087,14 @@ if (gotTheLock) {
     const managedRuntimeShutdown = stopManagedRuntimeServices();
 
     const stopPromise = Promise.all([
-      gatewayManager.stop().catch((err) => {
-        logger.warn('gatewayManager.stop() error during quit:', err);
-      }),
+      stopAcpChatForAppQuit()
+        .catch((err) => {
+          logger.warn('ACP shutdown error during quit:', err);
+        })
+        .then(() => gatewayManager.stop())
+        .catch((err) => {
+          logger.warn('gatewayManager.stop() error during quit:', err);
+        }),
       stopBlenderBridgeServer().catch((err) => {
         logger.warn('stopBlenderBridgeServer() error during quit:', err);
       }),

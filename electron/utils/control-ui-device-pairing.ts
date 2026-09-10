@@ -45,6 +45,8 @@ export type GatewayPairingRpcClient = {
   isConnected: () => boolean;
   getStatus?: () => GatewayStatus;
   getGatewayToken?: () => Promise<string>;
+  /** Recovery is optional because pairing-only clients do not own a process. */
+  restartForAcpInitializationFailure?: () => Promise<boolean>;
   rpc: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
 };
 

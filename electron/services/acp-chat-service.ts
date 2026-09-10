@@ -126,6 +126,9 @@ type AcpChildProcess = ChildProcess & {
 type AcpChildDiagnostics = {
   resourceFailure: boolean;
   stderrTail: string;
+  spawnedAtMs: number;
+  initializeStartedAtMs?: number;
+  firstProtocolResponseAtMs?: number;
   termination?: AcpChildTermination;
 };
 type AcpChildTermination = {
@@ -158,8 +161,8 @@ const ACP_GATEWAY_READY_WAIT_TIMEOUT_MS = 90_000;
 const ACP_GATEWAY_READY_POLL_INTERVAL_MS = 250;
 const ACP_CONNECTION_RETRY_BASE_DELAY_MS = 250;
 const ACP_CONNECTION_RETRY_MAX_DELAY_MS = 2_000;
-/** A child that neither initializes nor reports a terminal event must not pin a load forever. */
-export const ACP_CHILD_TERMINATION_TIMEOUT_MS = 15_000;
+/** A hard protocol-handshake budget for slow packaged ACP startup. */
+export const ACP_INITIALIZATION_TIMEOUT_MS = 45_000;
 const ACP_PROMPT_RETRY_BASE_DELAY_MS = 500;
 const ACP_PROMPT_RETRY_MAX_DELAY_MS = 4_000;
 const ACP_PROMPT_TRANSIENT_MAX_ATTEMPTS = 3;
@@ -223,7 +226,7 @@ function childTerminationMessage(
       return `ACP process failed before initialization: ${detail}${suffix}`;
     }
     case 'timeout':
-      return `ACP process did not initialize or exit within ${ACP_CHILD_TERMINATION_TIMEOUT_MS}ms${suffix}`;
+      return `ACP process did not initialize or exit within ${ACP_INITIALIZATION_TIMEOUT_MS}ms${suffix}`;
     case 'close':
       return `ACP process exited with code ${String(termination.code)} (close event)${suffix}`;
     case 'exit':
@@ -615,7 +618,10 @@ function promptCompletionDurations(context: AcpLivePromptContext, completedAtMs:
 // OpenClaw can emit clack/doctor diagnostics to stdout during ACP startup.
 // Keep those lines away from the SDK's strict NDJSON parser.
 // Upstream fixed this in https://github.com/openclaw/openclaw/pull/89997 .
-function filterAcpStdoutDiagnostics(output: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+function filterAcpStdoutDiagnostics(
+  output: ReadableStream<Uint8Array>,
+  onProtocolResponse?: () => void,
+): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
 
@@ -638,6 +644,7 @@ function filterAcpStdoutDiagnostics(output: ReadableStream<Uint8Array>): Readabl
             const trimmedLine = line.trim();
             if (!trimmedLine) continue;
             if (trimmedLine.startsWith('{')) {
+              onProtocolResponse?.();
               controller.enqueue(encoder.encode(`${line}\n`));
             } else {
               logger.info(`[acp-chat] [stdout] ${line}`);
@@ -665,6 +672,8 @@ export class AcpChatService {
   /** Invalidates an initialization only when the Gateway runtime changes. */
   private initializationEpoch = 0;
   private initialized = false;
+  /** A Gateway gets at most one ACP-timeout recovery attempt per runtime identity. */
+  private recoveredStalledGatewayIdentity: string | null = null;
   private connectionRuntimeIdentity: string | null = null;
   private generation = 0;
   private generationSeq = 0;
@@ -733,6 +742,39 @@ export class AcpChatService {
         details: { error: error instanceof Error ? error.message : String(error) },
       });
     }
+  }
+
+  /** Stop the direct ACP child before its owning Gateway is stopped on app quit. */
+  async shutdown(): Promise<void> {
+    this.initializationEpoch += 1;
+    this.resolveAllPermissionWaiters(cancelledPermissionResponse());
+    this.activeLoadBatch = null;
+    const child = this.child;
+    this.trace('connection/process:shutdown', {
+      details: { pid: child?.pid ?? null, hadChild: Boolean(child) },
+    });
+    if (!child) {
+      this.connection = null;
+      this.initialized = false;
+      return;
+    }
+    const exited = new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 1_500);
+      timer.unref?.();
+      const settled = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      child.once('exit', settled);
+      child.once('close', settled);
+    });
+    try {
+      child.kill();
+    } catch (error) {
+      logger.warn(`[acp-chat] ACP shutdown signal failed: ${String(error)}`);
+    }
+    await exited;
+    this.dropConnectionForChild(child);
   }
 
   loadSession(payload: AcpChatLoadPayload): Promise<AcpChatOperationResult> {
@@ -1379,6 +1421,14 @@ export class AcpChatService {
         this.connectionRuntimeIdentity = runtimeIdentity;
         return connection;
       } catch (error) {
+        if (this.isInitializationTimeout(error)) {
+          const recovered = await this.recoverStalledGateway(runtimeIdentity, error);
+          if (recovered) throw new Error(GATEWAY_TRANSITION_ERROR, { cause: error });
+          // Spawning another ACP child against the same unresponsive Gateway
+          // only repeats the visible loading delay. Wait for a real runtime
+          // transition before retrying this protocol handshake.
+          throw error;
+        }
         if (attempt >= 2) throw error;
         const failureKind: AcpProcessFailureKind = classifyAcpProcessFailure(error);
         const delayMs = failureKind === 'resource' || failureKind === 'process-exit'
@@ -1409,6 +1459,51 @@ export class AcpChatService {
     throw new Error('ACP connection failed');
   }
 
+  private isInitializationTimeout(error: unknown): boolean {
+    return typeof error === 'object' && error != null
+      && 'code' in error
+      && (error as { code?: unknown }).code === 'ACP_INITIALIZATION_TIMEOUT';
+  }
+
+  private async recoverStalledGateway(runtimeIdentity: string | null, error: unknown): Promise<boolean> {
+    if (
+      !runtimeIdentity
+      || !this.gateway?.restartForAcpInitializationFailure
+      || this.recoveredStalledGatewayIdentity === runtimeIdentity
+    ) {
+      return false;
+    }
+    this.recoveredStalledGatewayIdentity = runtimeIdentity;
+    this.trace('connection/initialize:gateway-recovery:start', {
+      details: { reason: 'acp-initialization-timeout' },
+    });
+    try {
+      // No ACP prompt has been dispatched during initialize, so restarting the
+      // stale local runtime cannot replay a provider-side operation.
+      const restarted = await this.gateway.restartForAcpInitializationFailure();
+      if (!restarted) {
+        this.trace('connection/initialize:gateway-recovery:skipped', {
+          details: { reason: 'gateway-not-owned' },
+        });
+        return false;
+      }
+      this.trace('connection/initialize:gateway-recovery:success', {
+        details: { reason: 'acp-initialization-timeout' },
+      });
+      return true;
+    } catch (restartError) {
+      logger.warn(`[acp-chat] Gateway recovery after ACP initialization timeout failed: ${String(restartError)}`);
+      this.trace('connection/initialize:gateway-recovery:failed', {
+        details: {
+          reason: 'acp-initialization-timeout',
+          error: restartError instanceof Error ? restartError.message : String(restartError),
+          timeoutError: error instanceof Error ? error.message : String(error),
+        },
+      });
+      return false;
+    }
+  }
+
   private async initializeConnectionOnce(attempt: number, initializationEpoch: number): Promise<AcpConnection> {
     if (this.initializationEpoch !== initializationEpoch) {
       throw new Error(GATEWAY_TRANSITION_ERROR);
@@ -1432,7 +1527,11 @@ export class AcpChatService {
     }
     if (!connection) throw new Error('ACP connection was not created');
 
-    this.trace('connection/initialize:start', { details: { attempt } });
+    const diagnostics = child ? this.childDiagnostics.get(child) : undefined;
+    if (diagnostics) diagnostics.initializeStartedAtMs = Date.now();
+    this.trace('connection/initialize:start', {
+      details: { attempt, pid: child?.pid ?? null },
+    });
     const initOutcome = await Promise.race([
       connection.initialize({
         protocolVersion: PROTOCOL_VERSION,
@@ -1473,6 +1572,9 @@ export class AcpChatService {
         || classifyAcpProcessFailure(initOutcome.termination.error) === 'resource';
       if (resourceFailure) {
         Object.assign(failure, { code: 'ACP_RESOURCE_EXHAUSTED' });
+      }
+      if (initOutcome.termination.event === 'timeout') {
+        Object.assign(failure, { code: 'ACP_INITIALIZATION_TIMEOUT' });
       }
       throw failure;
     }
@@ -1600,11 +1702,26 @@ export class AcpChatService {
         code,
         signal,
       });
-      const timeout = setTimeout(() => settle({
-        event: 'timeout',
-        code: child.exitCode ?? null,
-        signal: child.signalCode ?? null,
-      }), ACP_CHILD_TERMINATION_TIMEOUT_MS);
+      const timeout = setTimeout(() => {
+        const diagnostics = this.childDiagnostics.get(child);
+        const now = Date.now();
+        this.trace('connection/initialize:timeout', {
+          details: {
+            pid: child.pid ?? null,
+            spawnToTimeoutMs: diagnostics ? now - diagnostics.spawnedAtMs : null,
+            initializeStarted: diagnostics?.initializeStartedAtMs != null,
+            initializeToTimeoutMs: diagnostics?.initializeStartedAtMs == null
+              ? null
+              : now - diagnostics.initializeStartedAtMs,
+            firstProtocolResponse: diagnostics?.firstProtocolResponseAtMs != null,
+          },
+        });
+        settle({
+          event: 'timeout',
+          code: child.exitCode ?? null,
+          signal: child.signalCode ?? null,
+        });
+      }, ACP_INITIALIZATION_TIMEOUT_MS);
       timeout.unref?.();
 
       // ChildProcess can emit `error` without ever emitting `exit` (for
@@ -1650,6 +1767,7 @@ export class AcpChatService {
     this.childDiagnostics.set(child, {
       resourceFailure: false,
       stderrTail: '',
+      spawnedAtMs: Date.now(),
     });
     this.trace('connection/process:spawned', {
       details: {
@@ -1720,7 +1838,23 @@ export class AcpChatService {
     });
 
     const input = Writable.toWeb(child.stdin) as WritableStream<Uint8Array>;
-    const output = filterAcpStdoutDiagnostics(Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>);
+    const output = filterAcpStdoutDiagnostics(
+      Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
+      () => {
+        const diagnostics = this.childDiagnostics.get(child);
+        if (!diagnostics || diagnostics.firstProtocolResponseAtMs != null) return;
+        diagnostics.firstProtocolResponseAtMs = Date.now();
+        this.trace('connection/protocol:first-response', {
+          details: {
+            pid: child.pid ?? null,
+            spawnToResponseMs: diagnostics.firstProtocolResponseAtMs - diagnostics.spawnedAtMs,
+            initializeToResponseMs: diagnostics.initializeStartedAtMs == null
+              ? null
+              : diagnostics.firstProtocolResponseAtMs - diagnostics.initializeStartedAtMs,
+          },
+        });
+      },
+    );
     const stream = ndJsonStream(input, output);
     return {
       connection: new ClientSideConnection(() => this.client, stream),

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,6 +44,16 @@ type processEntry32 struct {
 	ExeFile         [maxExeFile]uint16
 }
 
+// observedChildProcess keeps enough identity detail to explain an update
+// timeout without ever letting the detached updater terminate a PID from the
+// task file. The image name is intentionally only diagnostic: a PID may be
+// recycled after the original child exits, so it is not a safe ownership
+// proof for taskkill.
+type observedChildProcess struct {
+	pid               int
+	observedImageName string
+}
+
 var (
 	kernel32                = syscall.NewLazyDLL("kernel32.dll")
 	procOpenProcess         = kernel32.NewProc("OpenProcess")
@@ -58,7 +69,7 @@ func waitForParentExit(pid int, timeout time.Duration, logf func(string, ...any)
 		return err
 	}
 	deadline := time.Now().Add(timeout)
-	children := make(map[int]struct{})
+	children := make(map[int]observedChildProcess)
 	for {
 		descendants, err := snapshotDescendantPIDs(pid)
 		if err != nil {
@@ -66,8 +77,17 @@ func waitForParentExit(pid int, timeout time.Duration, logf func(string, ...any)
 		}
 		for _, childPID := range descendants {
 			if _, known := children[childPID]; !known {
-				children[childPID] = struct{}{}
-				logf("observed UClaw child process %d while waiting for parent process %d", childPID, pid)
+				observed := observedChildProcess{
+					pid:               childPID,
+					observedImageName: windowsProcessImageName(childPID),
+				}
+				children[childPID] = observed
+				logf(
+					"observed UClaw child process %d (%s) while waiting for parent process %d",
+					childPID,
+					observed.observedImageName,
+					pid,
+				)
 			}
 		}
 
@@ -93,10 +113,45 @@ func waitForParentExit(pid int, timeout time.Duration, logf func(string, ...any)
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting %s for parent process %d and its child processes to exit", timeout, pid)
+			return fmt.Errorf(
+				"timed out waiting %s for parent process %d and its child processes to exit; residual observed children: %s",
+				timeout,
+				pid,
+				formatLiveObservedChildren(children),
+			)
 		}
 		time.Sleep(time.Duration(timeoutChunkMs) * time.Millisecond)
 	}
+}
+
+func formatLiveObservedChildren(children map[int]observedChildProcess) string {
+	if len(children) == 0 {
+		return "none (parent process is still running)"
+	}
+
+	entries := make([]string, 0, len(children))
+	for _, child := range children {
+		currentImageName := windowsProcessImageName(child.pid)
+		entry := fmt.Sprintf("pid=%d image=%s", child.pid, currentImageName)
+		if child.observedImageName != currentImageName {
+			entry += fmt.Sprintf(" observed-image=%s (PID may have been reused)", child.observedImageName)
+		}
+		entries = append(entries, entry)
+	}
+	sort.Strings(entries)
+	return strings.Join(entries, ", ")
+}
+
+func windowsProcessImageName(pid int) string {
+	imagePath, err := processImagePath(pid)
+	if err != nil {
+		return fmt.Sprintf("unavailable(%v)", err)
+	}
+	name := filepath.Base(imagePath)
+	if name == "." || name == string(filepath.Separator) || strings.TrimSpace(name) == "" {
+		return "unknown"
+	}
+	return name
 }
 
 // forceStopWindowsProcesses is reserved for the replacement process that the

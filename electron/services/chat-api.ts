@@ -23,6 +23,17 @@ const VISION_MIME_TYPES = new Set([
   'image/webp',
 ]);
 
+// There is one Main-process Chat API registry per application runtime. Keep
+// the ACP owner private to this module while giving app shutdown an explicit,
+// awaitable cleanup boundary.
+let activeAcpChat: ReturnType<typeof createAcpChatService> | null = null;
+
+export async function stopAcpChatForAppQuit(): Promise<void> {
+  const acpChat = activeAcpChat;
+  activeAcpChat = null;
+  await acpChat?.shutdown();
+}
+
 type ChatSendWithMediaPayload = {
   sessionKey?: unknown;
   message?: unknown;
@@ -95,6 +106,7 @@ export function createChatApi({
   acpSessionAccessRegistry: AcpSessionAccessRegistry;
 }): CompleteHostServiceRegistry['chat'] {
   const acpChat = createAcpChatService(mainWindow, acpSessionAccessRegistry, gatewayManager);
+  activeAcpChat = acpChat;
   if (typeof gatewayManager.getStatus === 'function') {
     void acpChat.warmupConnection();
   }

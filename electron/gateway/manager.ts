@@ -1265,6 +1265,20 @@ export class GatewayManager extends EventEmitter {
     }
   }
 
+  /**
+   * ACP startup is safe to recover only when this manager owns the child it
+   * would stop. A connected external Gateway may serve another client, so its
+   * lifecycle remains under its own owner's control.
+   */
+  async restartForAcpInitializationFailure(): Promise<boolean> {
+    if (!this.ownsProcess) {
+      logger.warn('[gateway-recovery] skipped ACP initialization recovery because Gateway is not owned by ClawX');
+      return false;
+    }
+    await this.restart();
+    return true;
+  }
+
   private async executeRestart(
     lease: ManagedRuntimeMutationLease | undefined,
     drainContext: GatewayRestartDrainLogContext,
