@@ -94,6 +94,9 @@ const IMAGE_GENERATION_TRANSCRIPT_RETRY_DELAYS_MS = [1500, 3000, 5000, 8000, 13_
 const IMAGE_GENERATION_PENDING_TIMEOUT_MS = UCLAW_IMAGE_GENERATION_TIMEOUT_MS + 15_000;
 const VIDEO_GENERATION_PENDING_TIMEOUT_MS = UCLAW_VIDEO_GENERATION_TIMEOUT_MS + 15_000;
 const VIDEO_GENERATION_TRANSCRIPT_RETRY_DELAYS_MS = [500, 1500, 3000, 5000, 8000];
+const MEDIA_GENERATION_EXHAUSTED_RECOVERY_MS = 180_000;
+const MEDIA_GENERATION_EXHAUSTED_RECOVERY_DELAYS_MS = [5000, 8000, 13_000, 21_000, 30_000, 30_000, 30_000, 30_000];
+const MEDIA_TOOL_ACTIVITY_RE = /\b(?:image|video)[\s_-]*(?:generate|generation|edit|creation|tool)\b|\b(?:generate|create|edit)\s+(?:an?\s+)?(?:image|video)\b|\b(?:image|video)_generate\b|\bgpt-image\b|\btool-(?:image|video)-generation\b/iu;
 const LIVE_TEXT_BATCH_WINDOW_MS = 32;
 const LIVE_TEXT_BATCH_MAX_UPDATES = 128;
 /** Bound notifications retained while Main is replaying a session. */
@@ -227,9 +230,13 @@ type TranscriptSupplementOperation = {
   completedTaskIds: Set<string>;
   videoTaskIds: Set<string>;
   completedVideoTaskIds: Set<string>;
+  deliveredImageTaskIds: Set<string>;
+  deliveredVideoTaskIds: Set<string>;
+  terminalVideoFailureTaskIds: Set<string>;
   videoRequesterProbe: boolean;
   videoRetryIndex: number;
   videoRetryEpoch: number;
+  mediaRecoveryRetryIndex: number;
   started: boolean;
   terminal: boolean;
   cancelled: boolean;
@@ -238,8 +245,12 @@ type TranscriptSupplementOperation = {
   browserReleased: boolean;
   inFlight?: Promise<number>;
   liveUserMessageId?: string;
+  promptFailure?: AcpChatErrorDetails;
   retryTimer?: ReturnType<typeof setTimeout>;
   videoRetryTimer?: ReturnType<typeof setTimeout>;
+  mediaRecoveryTimer?: ReturnType<typeof setTimeout>;
+  mediaRecoveryUntil?: number;
+  mediaRecoveryRunning?: boolean;
 };
 
 let transcriptSupplementSeq = 0;
@@ -590,7 +601,12 @@ function applyVideoGenerationUpdateToSnapshot(
   if (terminal) {
     clearVideoGenerationTaskTimeout(terminal.taskId);
     pendingVideoGenerationTaskIds = pendingVideoGenerationTaskIds.filter((taskId) => taskId !== terminal.taskId);
-    if (terminal.status === 'failed') timeline = appendVideoGenerationFailure(timeline, terminal.taskId);
+    if (
+      terminal.status === 'failed'
+      && !deferVideoGenerationFailureForRecovery(snapshot.sessionKey, snapshot.generation, terminal.taskId)
+    ) {
+      timeline = appendVideoGenerationFailure(timeline, terminal.taskId);
+    }
   }
   if (start && !pendingVideoGenerationTaskIds.includes(start.taskId)) {
     scheduleVideoGenerationTaskTimeout(snapshot.sessionKey, snapshot.generation, start.taskId);
@@ -613,6 +629,76 @@ function appendVideoGenerationFailure(
     source: 'video-generation',
     parts: [{ kind: 'error', message: i18n.t('chat:videoGeneration.failed') }],
   });
+}
+
+function removeTimelineItemIds(
+  timeline: AcpTimelineSnapshot,
+  removedIds: ReadonlySet<string>,
+): AcpTimelineSnapshot {
+  if (removedIds.size === 0) return timeline;
+  const itemOrder = timeline.itemOrder.filter((itemId) => !removedIds.has(itemId));
+  const itemsById = Object.fromEntries(itemOrder.flatMap((itemId) => {
+    const item = timeline.itemsById[itemId];
+    return item ? [[itemId, item]] : [];
+  }));
+  return enforceAcpTimelineBounds({
+    ...timeline,
+    itemOrder,
+    itemsById,
+    openMessageSegments: Object.fromEntries(Object.entries(timeline.openMessageSegments)
+      .filter(([, itemId]) => !removedIds.has(itemId))),
+    segmentCounts: Object.fromEntries(Object.entries(timeline.segmentCounts)
+      .filter(([messageId]) => Object.values(itemsById).some((item) => (
+        item.kind === 'message-segment' && item.messageId === messageId
+      )))),
+  });
+}
+
+function removeVideoGenerationFailure(
+  timeline: AcpTimelineSnapshot,
+  taskId: string,
+): AcpTimelineSnapshot {
+  const evidenceId = `video-generation:${taskId}:failed`;
+  const removedIds = new Set(timeline.itemOrder.filter((itemId) => {
+    const item = timeline.itemsById[itemId];
+    return item?.kind === 'message-segment'
+      && item.compat?.source === 'video-generation'
+      && item.compat.evidenceId === evidenceId;
+  }));
+  return removeTimelineItemIds(timeline, removedIds);
+}
+
+function appendMediaRecoveryUnavailable(
+  timeline: AcpTimelineSnapshot,
+  operation: TranscriptSupplementOperation,
+): AcpTimelineSnapshot {
+  if (!operation.liveUserMessageId) return timeline;
+  const hasVideo = operation.videoTaskIds.size > 0 || operation.terminalVideoFailureTaskIds.size > 0;
+  const evidenceId = `media-generation:${operation.liveUserMessageId}:unavailable`;
+  return appendSyntheticAssistantMessage(timeline, {
+    messageId: `compat:${evidenceId}`,
+    evidenceId,
+    source: hasVideo ? 'video-generation' : 'image-generation',
+    parts: [{
+      kind: 'markdown',
+      text: i18n.t(hasVideo
+        ? 'chat:videoGeneration.unavailableAfterRecovery'
+        : 'chat:imageGeneration.unavailableAfterRecovery'),
+    }],
+  });
+}
+
+function removeMediaRecoveryUnavailable(
+  timeline: AcpTimelineSnapshot,
+  userMessageId: string,
+): AcpTimelineSnapshot {
+  const evidenceId = `media-generation:${userMessageId}:unavailable`;
+  const removedIds = new Set(timeline.itemOrder.filter((itemId) => {
+    const item = timeline.itemsById[itemId];
+    return item?.kind === 'message-segment'
+      && item.compat?.evidenceId === evidenceId;
+  }));
+  return removeTimelineItemIds(timeline, removedIds);
 }
 
 /** Starts one deadline for the task's stable session owner across generation reloads. */
@@ -699,8 +785,12 @@ function invalidateTranscriptSupplement(operation: TranscriptSupplementOperation
   operation.terminal = true;
   if (operation.retryTimer) clearTimeout(operation.retryTimer);
   if (operation.videoRetryTimer) clearTimeout(operation.videoRetryTimer);
+  if (operation.mediaRecoveryTimer) clearTimeout(operation.mediaRecoveryTimer);
   operation.retryTimer = undefined;
   operation.videoRetryTimer = undefined;
+  operation.mediaRecoveryTimer = undefined;
+  operation.mediaRecoveryUntil = undefined;
+  operation.mediaRecoveryRunning = false;
   transcriptSupplements.delete(operation.key);
   sessionTimelineCoordinator.release(
     sessionIdentity(operation.sessionKey, operation.generation),
@@ -726,6 +816,118 @@ function latestLiveTranscriptOperation(
   generation: number,
 ): TranscriptSupplementOperation | undefined {
   return liveTranscriptOperations(sessionKey, generation).at(-1);
+}
+
+function operationHasTrackedMediaTask(operation: TranscriptSupplementOperation): boolean {
+  return operation.imageTaskIds.size > 0 || operation.videoTaskIds.size > 0;
+}
+
+function operationHasUndeliveredTrackedMedia(operation: TranscriptSupplementOperation): boolean {
+  return [...operation.imageTaskIds].some((taskId) => !operation.deliveredImageTaskIds.has(taskId))
+    || [...operation.videoTaskIds].some((taskId) => !operation.deliveredVideoTaskIds.has(taskId));
+}
+
+function operationTrackedMediaDelivered(operation: TranscriptSupplementOperation): boolean {
+  if (!operationHasTrackedMediaTask(operation)) return operation.authorizedMediaDelivered;
+  return !operationHasUndeliveredTrackedMedia(operation);
+}
+
+function renderPartText(part: RenderPart): string {
+  if (part.kind === 'markdown') return part.text;
+  if (part.kind === 'error') return part.message;
+  if (part.kind === 'attachment') return [
+    part.reference.uri,
+    part.reference.name,
+    part.reference.displayPath,
+    part.reference.mimeType,
+  ].filter(Boolean).join(' ');
+  if (part.kind === 'image') return [part.source, part.mimeType, part.alt].filter(Boolean).join(' ');
+  return '';
+}
+
+function timelineTurnHasMediaToolActivity(
+  timeline: AcpTimelineSnapshot | undefined,
+  userMessageId: string | undefined,
+): boolean {
+  if (!timeline || !userMessageId) return false;
+  const userIndex = timeline.itemOrder.findIndex((itemId) => {
+    const item = timeline.itemsById[itemId];
+    return item?.kind === 'message-segment'
+      && item.role === 'user'
+      && item.messageId === userMessageId;
+  });
+  if (userIndex < 0) return false;
+  for (let index = userIndex + 1; index < timeline.itemOrder.length; index += 1) {
+    const item = timeline.itemsById[timeline.itemOrder[index]!];
+    if (item?.kind === 'message-segment' && item.role === 'user') return false;
+    if (item?.kind !== 'tool-call') continue;
+    const text = [
+      item.toolCallId,
+      item.title,
+      item.toolKind,
+      ...item.outputParts.map(renderPartText),
+    ].filter(Boolean).join('\n');
+    if (MEDIA_TOOL_ACTIVITY_RE.test(text)) return true;
+  }
+  return false;
+}
+
+function operationHasMediaRecoveryActivity(operation: TranscriptSupplementOperation): boolean {
+  return operationHasTrackedMediaTask(operation)
+    || timelineTurnHasMediaToolActivity(operationTimeline(operation), operation.liveUserMessageId);
+}
+
+function clearMediaRecoveryTimer(operation: TranscriptSupplementOperation): void {
+  if (operation.mediaRecoveryTimer) clearTimeout(operation.mediaRecoveryTimer);
+  operation.mediaRecoveryTimer = undefined;
+}
+
+function removeOperationMediaRecoveryArtifacts(
+  timeline: AcpTimelineSnapshot,
+  operation: TranscriptSupplementOperation,
+): AcpTimelineSnapshot {
+  let next = timeline;
+  if (operation.liveUserMessageId) {
+    next = removeResolvedPromptFailure(next, operation.liveUserMessageId);
+    next = removeMediaRecoveryUnavailable(next, operation.liveUserMessageId);
+  }
+  for (const taskId of operation.videoTaskIds) {
+    next = removeVideoGenerationFailure(next, taskId);
+  }
+  for (const taskId of operation.terminalVideoFailureTaskIds) {
+    next = removeVideoGenerationFailure(next, taskId);
+  }
+  return next;
+}
+
+function commitOperationMediaRecoveryResolved(operation: TranscriptSupplementOperation): void {
+  clearMediaRecoveryTimer(operation);
+  operation.mediaRecoveryUntil = undefined;
+  operation.mediaRecoveryRetryIndex = 0;
+  commitSessionTimeline(
+    operation.sessionKey,
+    operation.generation,
+    (timeline) => removeOperationMediaRecoveryArtifacts(timeline, operation),
+    { retainForReplay: true },
+  );
+}
+
+function deferVideoGenerationFailureForRecovery(
+  sessionKey: string,
+  generation: number,
+  taskId: string,
+): boolean {
+  let deferred = false;
+  for (const operation of liveTranscriptOperations(sessionKey, generation)) {
+    if (!operation.videoTaskIds.has(taskId)) continue;
+    operation.completedVideoTaskIds.add(taskId);
+    operation.terminalVideoFailureTaskIds.add(taskId);
+    deferred = startBoundedMediaRecovery(operation, {
+      reason: 'video-generation-terminal-failed',
+      startImmediately: operation.started,
+    }) || deferred;
+  }
+  return deferred;
 }
 
 /** Ends the expired task at its current generation without crossing the owning session boundary. */
@@ -764,7 +966,9 @@ function expireImageGenerationTask(sessionKey: string, taskId: string): void {
       .some((pendingTaskId) => !operation.completedTaskIds.has(pendingTaskId));
     const hasPendingVideo = [...operation.videoTaskIds]
       .some((pendingTaskId) => !operation.completedVideoTaskIds.has(pendingTaskId));
-    if (!hasPendingImage && !hasPendingVideo) invalidateTranscriptSupplement(operation);
+    if (!hasPendingImage && !hasPendingVideo) {
+      startBoundedMediaRecovery(operation, { reason: 'image-generation-timeout' });
+    }
   }
 
   const latest = useAcpChatSessionStore.getState();
@@ -781,7 +985,9 @@ function expireVideoGenerationTask(sessionKey: string, generation: number, taskI
       .some((pendingTaskId) => !operation.completedTaskIds.has(pendingTaskId));
     const hasPendingVideo = [...operation.videoTaskIds]
       .some((pendingTaskId) => !operation.completedVideoTaskIds.has(pendingTaskId));
-    if (!hasPendingImage && !hasPendingVideo) invalidateTranscriptSupplement(operation);
+    if (!hasPendingImage && !hasPendingVideo) {
+      startBoundedMediaRecovery(operation, { reason: 'video-generation-timeout' });
+    }
   }
 }
 
@@ -792,13 +998,19 @@ function stopLiveTranscriptSupplementRetry(sessionKey: string, taskId?: string):
   for (const operation of liveTranscriptOperations(sessionKey)) {
     if (!operation.imageTaskIds.has(taskId)) continue;
     operation.completedTaskIds.add(taskId);
+    operation.deliveredImageTaskIds.add(taskId);
     if ([...operation.imageTaskIds].some((id) => !operation.completedTaskIds.has(id))) continue;
     operation.terminal = true;
     if (operation.retryTimer) clearTimeout(operation.retryTimer);
     operation.retryTimer = undefined;
     const hasPendingVideo = [...operation.videoTaskIds]
       .some((id) => !operation.completedVideoTaskIds.has(id));
-    if (!hasPendingVideo) invalidateTranscriptSupplement(operation);
+    const hasUndeliveredVideo = [...operation.videoTaskIds]
+      .some((id) => !operation.deliveredVideoTaskIds.has(id));
+    if (!hasPendingVideo && !hasUndeliveredVideo) {
+      commitOperationMediaRecoveryResolved(operation);
+      invalidateTranscriptSupplement(operation);
+    }
   }
 }
 
@@ -826,9 +1038,13 @@ function beginTranscriptSupplement(
     completedTaskIds: new Set<string>(),
     videoTaskIds: new Set<string>(),
     completedVideoTaskIds: new Set<string>(),
+    deliveredImageTaskIds: new Set<string>(),
+    deliveredVideoTaskIds: new Set<string>(),
+    terminalVideoFailureTaskIds: new Set<string>(),
     videoRequesterProbe: false,
     videoRetryIndex: 0,
     videoRetryEpoch: 0,
+    mediaRecoveryRetryIndex: 0,
     started: false,
     terminal: false,
     cancelled: false,
@@ -2060,6 +2276,7 @@ function recordOpenClawMediaTrace(
 type ResolvedOpenClawMediaCandidate = {
   authorized: boolean;
   localVideoIdentity?: string;
+  localImageIdentity?: string;
 };
 
 async function resolveOpenClawMediaCandidate(
@@ -2161,6 +2378,11 @@ async function resolveOpenClawMediaCandidate(
     && result.mimeType.startsWith('video/')
       ? { localVideoIdentity: result.identity }
       : {}),
+    ...(result.ok
+    && result.target.kind === 'local'
+    && result.mimeType.startsWith('image/')
+      ? { localImageIdentity: result.identity }
+      : {}),
   };
 }
 
@@ -2214,6 +2436,7 @@ async function runTranscriptSupplement(operation: TranscriptSupplementOperation)
     });
   }
   const localVideoIdentities = new Set<string>();
+  const localImageIdentities = new Set<string>();
   for (const supplement of result.media) {
     for (const candidate of supplement.candidates) {
       if (!isCurrent()) return 0;
@@ -2226,6 +2449,7 @@ async function runTranscriptSupplement(operation: TranscriptSupplementOperation)
       );
       operation.authorizedMediaDelivered ||= resolved.authorized;
       if (resolved.localVideoIdentity) localVideoIdentities.add(resolved.localVideoIdentity);
+      if (resolved.localImageIdentity) localImageIdentities.add(resolved.localImageIdentity);
     }
     if (supplement.finalAssistant && isCurrent()) {
       commitSessionTimeline(operation.sessionKey, operation.generation, (timeline) => (
@@ -2235,6 +2459,16 @@ async function runTranscriptSupplement(operation: TranscriptSupplementOperation)
           supplement.finalAssistant!.text,
         )
       ), { retainForReplay: true });
+    }
+  }
+  if (localImageIdentities.size > 0) {
+    for (const taskId of operation.imageTaskIds) {
+      operation.deliveredImageTaskIds.add(taskId);
+    }
+  }
+  if (localVideoIdentities.size > 0) {
+    for (const taskId of operation.videoTaskIds) {
+      operation.deliveredVideoTaskIds.add(taskId);
     }
   }
   return localVideoIdentities.size;
@@ -2310,6 +2544,10 @@ async function runLiveTranscriptSupplement(operation: TranscriptSupplementOperat
 
 function startLiveTranscriptSupplement(operation: TranscriptSupplementOperation): void {
   operation.started = true;
+  if (operation.mediaRecoveryUntil) {
+    void runBoundedMediaRecovery(operation);
+    return;
+  }
   const hasCompletedVideoTask = operation.completedVideoTaskIds.size > 0
     || operation.videoRequesterProbe;
   if (hasCompletedVideoTask) {
@@ -2378,9 +2616,12 @@ async function runVideoCompletionTranscriptSupplement(
     : (operation.videoRequesterProbe ? operation.videoTaskIds : new Set<string>());
   if (expectedTaskIds.size > 0 && localVideoCount >= expectedTaskIds.size) {
     for (const taskId of expectedTaskIds) {
+      operation.completedVideoTaskIds.add(taskId);
+      operation.deliveredVideoTaskIds.add(taskId);
       useAcpChatSessionStore.getState().settleVideoGenerationTask(taskId);
     }
     operation.videoRequesterProbe = false;
+    commitOperationMediaRecoveryResolved(operation);
     recordProjectionTrace({
       event: 'video-generation:completion-transcript-projected',
       sessionKey: operation.sessionKey,
@@ -2743,6 +2984,7 @@ function settleBackgroundPromptSnapshot(input: {
   success: boolean;
   resultGeneration?: number;
   failure?: AcpChatErrorDetails;
+  deferFailure?: boolean;
 }): void {
   const snapshot = liveSessionSnapshots.get(input.sessionKey);
   if (snapshot?.generation !== input.generation) return;
@@ -2752,6 +2994,8 @@ function settleBackgroundPromptSnapshot(input: {
     : snapshot.generation;
   const timeline = input.success
     ? snapshot.timeline
+    : input.deferFailure
+      ? settleOptimisticUserSegment(snapshot.timeline, input.messageId)
     : appendPromptFailure(
         snapshot.timeline,
         input.messageId,
@@ -2823,7 +3067,12 @@ function reconcileFailedAssistantSegment(
 }
 
 function isMediaSummaryRecoveryFailure(failure: AcpChatErrorDetails): boolean {
-  return failure.code === 'SERVICE_UNAVAILABLE';
+  return failure.code === 'SERVICE_UNAVAILABLE'
+    || failure.code === 'NETWORK'
+    || failure.code === 'TIMEOUT'
+    || failure.code === 'GATEWAY_UNAVAILABLE'
+    || failure.code === 'RATE_LIMIT'
+    || failure.code === 'UNKNOWN';
 }
 
 function isFailedTurnTextRecoveryFailure(failure: AcpChatErrorDetails): boolean {
@@ -2831,6 +3080,14 @@ function isFailedTurnTextRecoveryFailure(failure: AcpChatErrorDetails): boolean 
     || failure.code === 'NETWORK'
     || failure.code === 'TIMEOUT'
     || failure.code === 'UNKNOWN';
+}
+
+function isRecoverableMediaPromptFailure(
+  operation: TranscriptSupplementOperation,
+  failure: AcpChatErrorDetails,
+): boolean {
+  return isMediaSummaryRecoveryFailure(failure)
+    && operationHasMediaRecoveryActivity(operation);
 }
 
 /** Removes only the exact failure card once this same failed turn has an authorized media result. */
@@ -2883,6 +3140,9 @@ async function reconcileFailedPromptTurn(
     }
   }
   if (!isCurrent()) return;
+  if (candidateCount > 0 && authorizedCount === candidateCount) {
+    operation.authorizedMediaDelivered = true;
+  }
   commitSessionTimeline(operation.sessionKey, operation.generation, (timeline) => {
     const reconciled = reconcileFailedAssistantSegment(
       timeline,
@@ -2894,6 +3154,140 @@ async function reconcileFailedPromptTurn(
       ? removeResolvedPromptFailure(reconciled, operation.liveUserMessageId!)
       : reconciled;
   }, { retainForReplay: true });
+}
+
+function settlePromptFailureAfterMediaRecovery(operation: TranscriptSupplementOperation): void {
+  clearMediaRecoveryTimer(operation);
+  operation.mediaRecoveryUntil = undefined;
+  operation.mediaRecoveryRetryIndex = 0;
+  commitSessionTimeline(operation.sessionKey, operation.generation, (timeline) => (
+    appendMediaRecoveryUnavailable(timeline, operation)
+  ), { retainForReplay: true });
+  invalidateTranscriptSupplement(operation);
+}
+
+async function runBoundedMediaRecovery(operation: TranscriptSupplementOperation): Promise<void> {
+  if (
+    operation.mediaRecoveryRunning
+    || !operation.mediaRecoveryUntil
+    || !isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation)
+  ) return;
+  operation.mediaRecoveryRunning = true;
+  try {
+    if (!isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation)) return;
+    recordProjectionTrace({
+      event: 'media-generation:recovery-transcript-started',
+      sessionKey: operation.sessionKey,
+      generation: operation.generation,
+      details: {
+        imageTaskCount: operation.imageTaskIds.size,
+        videoTaskCount: operation.videoTaskIds.size,
+        retryIndex: operation.mediaRecoveryRetryIndex,
+      },
+    });
+    if (operationHasTrackedMediaTask(operation)) {
+      const localVideoCount = await runTranscriptSupplementSerialized(operation);
+      if (
+        operation.videoTaskIds.size > 0
+        && localVideoCount >= operation.videoTaskIds.size
+      ) {
+        for (const taskId of operation.videoTaskIds) {
+          operation.completedVideoTaskIds.add(taskId);
+          operation.deliveredVideoTaskIds.add(taskId);
+          useAcpChatSessionStore.getState().settleVideoGenerationTask(taskId);
+        }
+      }
+    } else {
+      await reconcileFailedPromptTurn(operation, { recoverMedia: true });
+    }
+    if (!isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation)) return;
+    if (operationTrackedMediaDelivered(operation)) {
+      recordProjectionTrace({
+        event: 'media-generation:recovery-resolved',
+        sessionKey: operation.sessionKey,
+        generation: operation.generation,
+        details: {
+          imageTaskCount: operation.imageTaskIds.size,
+          videoTaskCount: operation.videoTaskIds.size,
+        },
+      });
+      commitOperationMediaRecoveryResolved(operation);
+      invalidateTranscriptSupplement(operation);
+      return;
+    }
+
+    const now = Date.now();
+    const delay = MEDIA_GENERATION_EXHAUSTED_RECOVERY_DELAYS_MS[operation.mediaRecoveryRetryIndex];
+    const remainingMs = operation.mediaRecoveryUntil - now;
+    if (remainingMs <= 0) {
+      settlePromptFailureAfterMediaRecovery(operation);
+      return;
+    }
+    const nextDelay = delay === undefined ? remainingMs : Math.min(delay, remainingMs);
+    operation.mediaRecoveryRetryIndex += 1;
+    clearMediaRecoveryTimer(operation);
+    operation.mediaRecoveryTimer = setTimeout(() => {
+      operation.mediaRecoveryTimer = undefined;
+      void runBoundedMediaRecovery(operation);
+    }, nextDelay);
+  } finally {
+    operation.mediaRecoveryRunning = false;
+  }
+}
+
+function startBoundedMediaRecovery(
+  operation: TranscriptSupplementOperation,
+  input: {
+    reason: string;
+    failure?: AcpChatErrorDetails;
+    startImmediately?: boolean;
+  },
+): boolean {
+  if (!operation.liveUserMessageId) return false;
+  if (!isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation)) return false;
+  const startImmediately = input.startImmediately !== false;
+  operation.promptFailure = input.failure ?? operation.promptFailure;
+  if (startImmediately) operation.started = true;
+  operation.terminal = false;
+  operation.mediaRecoveryUntil = operation.mediaRecoveryUntil
+    ?? Date.now() + MEDIA_GENERATION_EXHAUSTED_RECOVERY_MS;
+  if (operation.retryTimer) clearTimeout(operation.retryTimer);
+  if (operation.videoRetryTimer) clearTimeout(operation.videoRetryTimer);
+  operation.retryTimer = undefined;
+  operation.videoRetryTimer = undefined;
+  recordProjectionTrace({
+    event: 'media-generation:recovery-started',
+    sessionKey: operation.sessionKey,
+    generation: operation.generation,
+    details: {
+      reason: input.reason,
+      imageTaskCount: operation.imageTaskIds.size,
+      videoTaskCount: operation.videoTaskIds.size,
+      failureCode: input.failure?.code,
+    },
+  });
+  if (startImmediately) void runBoundedMediaRecovery(operation);
+  return true;
+}
+
+function recoverFailedPromptTurnOrInvalidate(
+  operation: TranscriptSupplementOperation,
+  failure: AcpChatErrorDetails,
+): void {
+  if (transcriptSupplements.get(operation.key)?.id !== operation.id) return;
+  if (isRecoverableMediaPromptFailure(operation, failure)) {
+    startBoundedMediaRecovery(operation, { reason: 'prompt-failure-after-media-start', failure });
+    return;
+  }
+  if (isFailedTurnTextRecoveryFailure(failure)) {
+    void reconcileFailedPromptTurn(operation, {
+      recoverMedia: isMediaSummaryRecoveryFailure(failure),
+    }).finally(() => {
+      invalidateTranscriptSupplement(operation);
+    });
+    return;
+  }
+  invalidateTranscriptSupplement(operation);
 }
 
 function applyOperationGeneration(
@@ -3225,6 +3619,9 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       const failure = result.success ? null : operationFailure(result);
       if (transcriptOperation.browserReleased) return result.success;
       if (!isCurrentAction(state, sessionKey, generation)) {
+        const deferFailure = failure
+          ? isRecoverableMediaPromptFailure(transcriptOperation, failure)
+          : false;
         settleBackgroundPromptSnapshot({
           sessionKey,
           generation,
@@ -3234,27 +3631,23 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
           success: result.success,
           resultGeneration: result.generation,
           ...(failure ? { failure } : {}),
+          deferFailure,
         });
         if (result.success && isCurrentTranscriptSupplement(get(), transcriptOperation)) {
           startLiveTranscriptSupplement(transcriptOperation);
-        } else if (
-          failure
-          && isFailedTurnTextRecoveryFailure(failure)
-          && transcriptSupplements.get(transcriptOperation.key)?.id === transcriptOperation.id
-        ) {
-          void reconcileFailedPromptTurn(transcriptOperation, {
-            recoverMedia: isMediaSummaryRecoveryFailure(failure),
-          }).finally(() => {
-            invalidateTranscriptSupplement(transcriptOperation);
-          });
-        } else if (transcriptSupplements.get(transcriptOperation.key)?.id === transcriptOperation.id) {
-          invalidateTranscriptSupplement(transcriptOperation);
+        } else if (failure) {
+          recoverFailedPromptTurnOrInvalidate(transcriptOperation, failure);
         }
         return result.success;
       }
       deleteLiveSessionSnapshot(sessionKey, generation);
+      const deferFailure = failure
+        ? isRecoverableMediaPromptFailure(transcriptOperation, failure)
+        : false;
       const failedTimeline = result.success
         ? state.timeline
+        : deferFailure
+          ? settleOptimisticUserSegment(state.timeline, messageId)
         : appendPromptFailure(state.timeline, messageId, failure!);
       set({
         sending: false,
@@ -3277,18 +3670,8 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         } else if (transcriptSupplements.get(transcriptOperation.key)?.id === transcriptOperation.id) {
           invalidateTranscriptSupplement(transcriptOperation);
         }
-      } else if (
-        failure
-        && isFailedTurnTextRecoveryFailure(failure)
-        && transcriptSupplements.get(transcriptOperation.key)?.id === transcriptOperation.id
-      ) {
-        void reconcileFailedPromptTurn(transcriptOperation, {
-          recoverMedia: isMediaSummaryRecoveryFailure(failure),
-        }).finally(() => {
-          invalidateTranscriptSupplement(transcriptOperation);
-        });
-      } else if (transcriptSupplements.get(transcriptOperation.key)?.id === transcriptOperation.id) {
-        invalidateTranscriptSupplement(transcriptOperation);
+      } else if (failure) {
+        recoverFailedPromptTurnOrInvalidate(transcriptOperation, failure);
       }
       return result.success;
     } catch (error) {
@@ -3296,6 +3679,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       const state = get();
       const settledAtMs = Date.now();
       const failure = normalizeAcpChatError(error);
+      const deferFailure = isRecoverableMediaPromptFailure(transcriptOperation, failure);
       if (transcriptOperation.browserReleased) return false;
       if (!isCurrentAction(state, sessionKey, generation)) {
         settleBackgroundPromptSnapshot({
@@ -3306,6 +3690,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
           settledAtMs,
           success: false,
           failure,
+          deferFailure,
         });
       } else {
         deleteLiveSessionSnapshot(sessionKey, generation);
@@ -3316,7 +3701,9 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
             return {
               sending: false,
               error: null,
-              timeline: appendPromptFailure(current.timeline, messageId, failure),
+              timeline: deferFailure
+                ? settleOptimisticUserSegment(current.timeline, messageId)
+                : appendPromptFailure(current.timeline, messageId, failure),
               turnTimingsByUserMessageId: settledPromptTurnTimings(
                 current.turnTimingsByUserMessageId,
                 { messageId, success: false, startedAtMs, settledAtMs },
@@ -3325,18 +3712,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
           })()
           : {}
       ));
-      if (
-        isFailedTurnTextRecoveryFailure(failure)
-        && transcriptSupplements.get(transcriptOperation.key)?.id === transcriptOperation.id
-      ) {
-        void reconcileFailedPromptTurn(transcriptOperation, {
-          recoverMedia: isMediaSummaryRecoveryFailure(failure),
-        }).finally(() => {
-          invalidateTranscriptSupplement(transcriptOperation);
-        });
-      } else {
-        invalidateTranscriptSupplement(transcriptOperation);
-      }
+      recoverFailedPromptTurnOrInvalidate(transcriptOperation, failure);
       return false;
     }
   },
@@ -3480,13 +3856,16 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
     const terminal = extractVideoGenerationTerminalFromAcpEnvelope(event);
     if (terminal) {
       if (terminal.status === 'failed') {
-        expireVideoGenerationTask(event.sessionKey, event.generation, terminal.taskId);
-        commitSessionTimeline(
-          event.sessionKey,
-          event.generation,
-          (timeline) => appendVideoGenerationFailure(timeline, terminal.taskId),
-          { retainForReplay: true },
-        );
+        clearVideoGenerationTaskTimeout(terminal.taskId);
+        get().settleVideoGenerationTask(terminal.taskId);
+        if (!deferVideoGenerationFailureForRecovery(event.sessionKey, event.generation, terminal.taskId)) {
+          commitSessionTimeline(
+            event.sessionKey,
+            event.generation,
+            (timeline) => appendVideoGenerationFailure(timeline, terminal.taskId),
+            { retainForReplay: true },
+          );
+        }
       } else {
         completeVideoGenerationTask(terminal.taskId);
       }
@@ -3637,6 +4016,21 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       const current = get();
       if (isCurrentAction(current, sessionKey, generation)) pruneSettledActiveSnapshot(current);
     };
+    const markImageTaskDelivered = (): void => {
+      if (!correlatedTaskId) return;
+      for (const operation of liveTranscriptOperations(sessionKey, generation)) {
+        if (!operation.imageTaskIds.has(correlatedTaskId)) continue;
+        operation.completedTaskIds.add(correlatedTaskId);
+        operation.deliveredImageTaskIds.add(correlatedTaskId);
+        commitOperationMediaRecoveryResolved(operation);
+        if (
+          [...operation.imageTaskIds].every((taskId) => operation.deliveredImageTaskIds.has(taskId))
+          && [...operation.videoTaskIds].every((taskId) => operation.deliveredVideoTaskIds.has(taskId))
+        ) {
+          invalidateTranscriptSupplement(operation);
+        }
+      }
+    };
     const reconcileSyntheticCompletion = (trackingKey: string): void => {
       const ownerTimeline = sessionTimelineCoordinator.read(sessionIdentity(sessionKey, generation))?.timeline;
       if (!ownerTimeline) return;
@@ -3689,6 +4083,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
           });
         }
         stopLiveTranscriptSupplementRetry(sessionKey, correlatedTaskId);
+        markImageTaskDelivered();
         finalizeProjection(true);
       }
       return;
@@ -3885,6 +4280,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
           details: projectionTraceDetails(evidence, { reason: 'matching-acp-reply' }),
         });
         if (missingCount === 0) stopLiveTranscriptSupplementRetry(sessionKey, correlatedTaskId);
+        if (missingCount === 0) markImageTaskDelivered();
         finalizeProjection(missingCount === 0);
         return;
       }
@@ -3960,6 +4356,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
         details: projectionTraceDetails(evidence, { imageCount: imageParts.length, missingCount }),
       });
       if (missingCount === 0) stopLiveTranscriptSupplementRetry(sessionKey, correlatedTaskId);
+      if (missingCount === 0) markImageTaskDelivered();
       finalizeProjection(missingCount === 0);
     } finally {
       releaseTimelineRetention(sessionKey, generation, retentionOwner);
@@ -4040,8 +4437,12 @@ export function disposeAcpChatSessionRuntime(): void {
     operation.terminal = true;
     if (operation.retryTimer) clearTimeout(operation.retryTimer);
     if (operation.videoRetryTimer) clearTimeout(operation.videoRetryTimer);
+    if (operation.mediaRecoveryTimer) clearTimeout(operation.mediaRecoveryTimer);
     operation.retryTimer = undefined;
     operation.videoRetryTimer = undefined;
+    operation.mediaRecoveryTimer = undefined;
+    operation.mediaRecoveryUntil = undefined;
+    operation.mediaRecoveryRunning = false;
   }
   transcriptSupplements.clear();
 

@@ -326,11 +326,13 @@
         "previewLoading": "正在加载图片预览…",
         "previewUnavailable": "图片生成已完成，但无法加载预览。",
         "generatedReady": "生成的图片已准备好。",
-        "generatedReadyWithMissing": "生成的图片已准备好，但有部分图片无法加载。"
+        "generatedReadyWithMissing": "生成的图片已准备好，但有部分图片无法加载。",
+        "unavailableAfterRecovery": "图片结果暂时还没有同步到本地，可以稍后刷新会话查看，或稍后再试。"
     },
     "videoGeneration": {
         "generating": "视频生成中，请稍候…",
-        "failed": "视频生成失败，请重试。"
+        "failed": "视频结果暂时不可用，请稍后再试。",
+        "unavailableAfterRecovery": "视频结果暂时还没有同步到本地，可以稍后刷新会话查看，或稍后再试。"
     },
     "composer": {
         "attachFiles": "添加文件",

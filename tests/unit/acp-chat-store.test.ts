@@ -82,6 +82,9 @@ vi.mock('@/i18n', () => ({
         'chat:imageGeneration.generatedReady': 'Generated image is ready.',
         'chat:imageGeneration.generatedReadyWithMissing': 'Generated image is ready. Some images could not be loaded.',
         'chat:imageGeneration.previewUnavailable': 'Image generation completed, but the preview could not be loaded.',
+        'chat:imageGeneration.unavailableAfterRecovery': 'The image result is not available yet. Refresh this chat later or try again.',
+        'chat:videoGeneration.unavailableAfterRecovery': 'The video result is not available yet. Refresh this chat later or try again.',
+        'chat:videoGeneration.failed': 'The video result is not available yet. Please try again later.',
         'chat:acp.image': 'Image',
       };
       return labels[key] ?? key;
@@ -2998,6 +3001,197 @@ describe('ACP Chat store', () => {
 
   });
 
+  it('keeps a started image task in recovery after an aborted prompt and projects late transcript media', async () => {
+    vi.useFakeTimers();
+    try {
+      const prompt = '生成一张产品海报';
+      const taskId = '7c626aaa-8fb3-4102-8f00-910db453a9df';
+      const imagePath = '/tmp/uclaw-late-product-poster.png';
+      const pendingMessages = [
+        { role: 'user', id: 'aborted-image-transcript-user', content: prompt },
+        {
+          role: 'toolresult',
+          toolCallId: 'aborted-image-tool',
+          toolName: 'image_generate',
+          content: `Background task started for image generation (${taskId}).`,
+          details: { taskId },
+        },
+      ];
+      let imageReady = false;
+      hostApiMock.sendAcpPrompt.mockImplementationOnce(async () => {
+        hostEventsMock.updateListener?.({
+          sessionKey: 'agent:pi:s1',
+          generation: 1,
+          notification: {
+            sessionId: 'agent:pi:s1',
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'aborted-image-tool',
+              title: 'Generate image',
+              status: 'completed',
+              content: [{
+                type: 'content',
+                content: {
+                  type: 'text',
+                  text: `Background task started for image generation (${taskId}).`,
+                },
+              }],
+            },
+          },
+        });
+        throw new Error('This operation was aborted');
+      });
+      hostApiMock.sessionsHistory.mockImplementation(async () => ({
+        success: true,
+        messages: imageReady
+          ? [
+              ...pendingMessages,
+              {
+                role: 'user',
+                content: `[Inter-session message] sourceSession=image_generate:${taskId} sourceChannel=webchat sourceTool=image_generate isUser=false\n[Internal task completion event]\nstatus: completed successfully`,
+              },
+              { role: 'assistant', id: 'aborted-image-result', content: `图片已准备好\nMEDIA:${imagePath}` },
+            ]
+          : pendingMessages,
+      }));
+      hostApiMock.mediaThumbnails.mockResolvedValue({
+        [imagePath]: { preview: 'data:image/png;base64,late-product-poster', fileSize: 64 },
+      });
+      const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+      ensureAcpChatSubscriptions();
+      await useAcpChatSessionStore.getState().loadSession({
+        sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+      });
+
+      await expect(useAcpChatSessionStore.getState().sendPrompt({
+        sessionKey: 'agent:pi:s1', cwd: '/repo', message: prompt, messageId: 'aborted-image-user',
+      })).resolves.toBe(false);
+      await vi.waitFor(() => expect(hostApiMock.sessionsHistory).toHaveBeenCalledTimes(1));
+      expect(hostApiMock.sendAcpPrompt).toHaveBeenCalledTimes(1);
+      expect(useAcpChatSessionStore.getState().timeline.itemsById['turn-failure:aborted-image-user']).toBeUndefined();
+      expect(useAcpChatSessionStore.getState().pendingImageGenerationTaskIds).toEqual([taskId]);
+
+      imageReady = true;
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      const timeline = useAcpChatSessionStore.getState().timeline;
+      expect(hostApiMock.sendAcpPrompt).toHaveBeenCalledTimes(1);
+      expect(timeline.itemsById['turn-failure:aborted-image-user']).toBeUndefined();
+      expect(Object.values(timeline.itemsById)
+        .flatMap((item) => item.kind === 'message-segment' ? item.parts : [])
+        .filter((part) => part.kind === 'image')).toMatchObject([{
+        source: 'data:image/png;base64,late-product-poster',
+        mediaIdentity: imagePath,
+      }]);
+      expect(useAcpChatSessionStore.getState().pendingImageGenerationTaskIds).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('defers a tracked video terminal failure and clears it when late transcript video resolves', async () => {
+    vi.useFakeTimers();
+    try {
+      const prompt = '生成一段产品讲解视频';
+      const taskId = '8d6b7946-390e-4986-8ccd-21ee411f6b48';
+      const videoPath = '/Users/test/.openclaw/media/tool-video-generation/late-product.mp4';
+      let videoReady = false;
+      hostApiMock.sessionsHistory.mockImplementation(async () => ({
+        success: true,
+        messages: videoReady
+          ? [
+              { role: 'user', id: 'late-video-transcript-user', content: prompt },
+              { role: 'assistant', id: 'late-video-result', content: `视频已准备好\nMEDIA:${videoPath}` },
+            ]
+          : [{ role: 'user', id: 'late-video-transcript-user', content: prompt }],
+      }));
+      hostApiMock.resolveAttachment.mockImplementation(async (payload: {
+        ref: { sessionKey: string; generation: number; uri: string; transcriptMessageId?: string };
+      }) => ({
+        ok: true,
+        identity: 'late-video-identity',
+        displayName: 'late-product.mp4',
+        mimeType: 'video/mp4',
+        size: 8_192,
+        target: { kind: 'local', scope: 'openclaw-media', ref: payload.ref },
+      }));
+      hostApiMock.sendAcpPrompt.mockImplementationOnce(async () => {
+        hostEventsMock.updateListener?.({
+          sessionKey: 'agent:pi:s1',
+          generation: 1,
+          notification: {
+            sessionId: 'agent:pi:s1',
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'late-video-tool',
+              title: 'Generate video',
+              status: 'completed',
+              content: [{
+                type: 'content',
+                content: {
+                  type: 'text',
+                  text: `Background task started for video generation (${taskId}).`,
+                },
+              }],
+            },
+          },
+        });
+        return { success: true };
+      });
+      const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+      ensureAcpChatSubscriptions();
+      await useAcpChatSessionStore.getState().loadSession({
+        sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+      });
+      await useAcpChatSessionStore.getState().sendPrompt({
+        sessionKey: 'agent:pi:s1', cwd: '/repo', message: prompt, messageId: 'late-video-user',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      hostEventsMock.updateListener?.({
+        sessionKey: 'agent:pi:s1',
+        generation: 1,
+        notification: {
+          sessionId: 'agent:pi:s1',
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: {
+              type: 'text',
+              text: [
+                '[Internal task completion event]',
+                'source: video_generation',
+                `session_key: video_generate:${taskId}`,
+                'status: failed',
+              ].join('\n'),
+            },
+          },
+        },
+      });
+      await vi.waitFor(() => expect(hostApiMock.sessionsHistory.mock.calls.length).toBeGreaterThan(1));
+      expect(useAcpChatSessionStore.getState().pendingVideoGenerationTaskIds).toEqual([]);
+      expect(JSON.stringify(useAcpChatSessionStore.getState().timeline)).not.toContain('video-generation:'
+        + `${taskId}:failed`);
+
+      videoReady = true;
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      const timeline = useAcpChatSessionStore.getState().timeline;
+      expect(hostApiMock.sendAcpPrompt).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(timeline)).not.toContain('video-generation:' + `${taskId}:failed`);
+      expect(Object.values(timeline.itemsById)
+        .flatMap((item) => item.kind === 'message-segment' ? item.parts : [])
+        .filter((part) => part.kind === 'attachment'
+          && part.access.status === 'available'
+          && part.access.mimeType === 'video/mp4')).toMatchObject([{
+        source: 'openclaw-media',
+        reference: { uri: videoPath, transcriptMessageId: 'late-video-result' },
+        access: { identity: 'late-video-identity' },
+      }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('recovers only authorized mixed media when the summary request rejects', async () => {
     const prompt = '生成一组商品素材';
     const media = {
@@ -4491,7 +4685,7 @@ describe('ACP Chat store', () => {
     }
   });
 
-  it('releases image transcript retention when the configured generation deadline expires', async () => {
+  it('keeps image transcript recovery after the generation deadline and releases it when recovery is exhausted', async () => {
     vi.useFakeTimers();
     try {
       const taskId = '1f34c41f-dd22-4c7d-a59f-51f8b01cd452';
@@ -4531,9 +4725,19 @@ describe('ACP Chat store', () => {
       await vi.advanceTimersByTimeAsync(UCLAW_IMAGE_GENERATION_TIMEOUT_MS + 15_000);
 
       expect(useAcpChatSessionStore.getState().pendingImageGenerationTaskIds).toEqual([]);
+      expect(release).not.toHaveBeenCalledWith(
+        { sessionKey: 'agent:pi:s1', generation: 1 },
+        expect.stringMatching(/^transcript:/),
+      );
+
+      await vi.advanceTimersByTimeAsync(180_000);
+
       expect(release).toHaveBeenCalledWith(
         { sessionKey: 'agent:pi:s1', generation: 1 },
         expect.stringMatching(/^transcript:/),
+      );
+      expect(JSON.stringify(useAcpChatSessionStore.getState().timeline)).toContain(
+        'The image result is not available yet. Refresh this chat later or try again.',
       );
     } finally {
       vi.useRealTimers();

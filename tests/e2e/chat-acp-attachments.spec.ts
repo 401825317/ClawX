@@ -1485,6 +1485,115 @@ test.describe('ACP media attachments', () => {
     }
   });
 
+  test('recovers generated video media after a terminal failure event', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const prompt = 'Create a product launch video with late recovery';
+    const intro = 'I will render the product launch video.';
+    const finalText = 'The product launch video is ready to play.';
+    const taskId = '69eae446-9be5-44c3-a97b-2d1e960141f7';
+    const taskStarted = `Background task started for video generation (${taskId}).`;
+    const unavailableCopy = 'The video result is not available yet. Please try again later.';
+
+    try {
+      const fixture = await installAttachmentHostFixture(app, {
+        sessions: [{ key: MAIN_SESSION_KEY, title: 'Main session' }],
+      });
+      const videoPath = await fixture.createOpenClawMediaFile(
+        'tool-video-generation/recovered-after-terminal-failure.mp4',
+        playableVideoBytes(),
+      );
+      const transcriptMessages = [
+        { role: 'user' as const, id: 'terminal-failure-video-user', content: prompt },
+        {
+          role: 'assistant' as const,
+          id: 'terminal-failure-video-result',
+          provider: 'openai',
+          model: 'smart-latest',
+          content: `${finalText}\nMEDIA:${videoPath}`,
+        },
+      ];
+      await fixture.setTranscriptResponses(MAIN_SESSION_KEY, [[]]);
+      await fixture.setPromptUpdates(prompt, [
+        {
+          sessionUpdate: 'agent_message_chunk',
+          messageId: 'terminal-failure-video-reply',
+          content: { type: 'text', text: intro },
+        },
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'terminal-failure-video-tool',
+          title: 'Generate video',
+          status: 'completed',
+          content: [{ type: 'content', content: { type: 'text', text: taskStarted } }],
+          locations: [],
+        },
+        {
+          sessionUpdate: 'user_message_chunk',
+          messageId: 'terminal-failure-video-completion',
+          content: {
+            type: 'text',
+            text: [
+              '[Internal task completion event]',
+              'source: video_generation',
+              `session_key: video_generate:${taskId}`,
+              'status: failed',
+            ].join('\n'),
+          },
+        },
+      ]);
+
+      const page = await openChat(app);
+      await fixture.waitForHistoryRequestCount(MAIN_SESSION_KEY, 1);
+      await fixture.waitForHistoryQuiet(MAIN_SESSION_KEY);
+      await fixture.setTranscriptResponses(MAIN_SESSION_KEY, [{
+        deferId: 'terminal-failure-video-resolution',
+        messages: transcriptMessages,
+      }], { resetHistoryRequestTimes: true });
+      await expect(fixture.releaseTranscriptResponse('terminal-failure-video-resolution')).rejects.toThrow(
+        'Deferred transcript response is not ready: terminal-failure-video-resolution',
+      );
+
+      await page.getByTestId('chat-composer-input').fill(prompt);
+      await page.getByTestId('chat-composer-send').click();
+      await fixture.waitForDeferredTranscriptReady('terminal-failure-video-resolution', 10_000);
+      await expect(page.getByTestId('acp-turn-failure')).toHaveCount(0);
+      await expect(page.getByText(unavailableCopy, { exact: true })).toHaveCount(0);
+
+      await fixture.releaseTranscriptResponse('terminal-failure-video-resolution');
+      await fixture.waitForDeferredTranscriptCompleted('terminal-failure-video-resolution');
+
+      const timeline = page.getByTestId('acp-chat-timeline');
+      await expect(timeline.getByText(intro, { exact: true })).toHaveCount(1, { timeout: 30_000 });
+      await expect(timeline.getByTestId('acp-video-attachment')).toHaveCount(1, { timeout: 30_000 });
+      await expect(page.getByTestId('acp-turn-failure')).toHaveCount(0);
+      await expect(page.getByText(unavailableCopy, { exact: true })).toHaveCount(0);
+      await expect(page.getByText(/MEDIA:/)).toHaveCount(0);
+      await expect.poll(async () => {
+        const calls = await fixture.getHostInvocations();
+        return {
+          promptCount: calls.filter((call) => (
+            call.module === 'chat' && call.action === 'sendAcpPrompt'
+          )).length,
+          resolved: calls.some((call) => (
+            call.module === 'files'
+            && call.action === 'resolveAttachment'
+            && call.payload?.ref
+            && (call.payload.ref as Record<string, unknown>).sessionKey === MAIN_SESSION_KEY
+            && (call.payload.ref as Record<string, unknown>).uri === videoPath
+          )),
+          projected: calls.some((call) => (
+            call.module === 'diagnostics'
+            && call.action === 'recordAcpTrace'
+            && call.payload?.event === 'openclaw-media:projection-appended'
+            && call.payload?.sessionKey === MAIN_SESSION_KEY
+          )),
+        };
+      }).toEqual({ promptCount: 1, resolved: true, projected: true });
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
   test('lifts an early attachment after later prose and before file activity', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 

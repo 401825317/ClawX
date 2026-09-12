@@ -326,11 +326,13 @@
         "previewLoading": "画像プレビューを読み込み中…",
         "previewUnavailable": "画像生成は完了しましたが、プレビューを読み込めませんでした。",
         "generatedReady": "生成された画像の準備ができました。",
-        "generatedReadyWithMissing": "生成された画像の準備ができましたが、一部の画像を読み込めませんでした。"
+        "generatedReadyWithMissing": "生成された画像の準備ができましたが、一部の画像を読み込めませんでした。",
+        "unavailableAfterRecovery": "画像の結果はまだローカルに同期されていません。後でチャットを更新するか、再試行してください。"
     },
     "videoGeneration": {
         "generating": "動画を生成しています。しばらくお待ちください…",
-        "failed": "動画の生成に失敗しました。もう一度お試しください。"
+        "failed": "動画の結果はまだ利用できません。後でもう一度お試しください。",
+        "unavailableAfterRecovery": "動画の結果はまだローカルに同期されていません。後でチャットを更新するか、再試行してください。"
     },
     "composer": {
         "attachFiles": "ファイルを添付",

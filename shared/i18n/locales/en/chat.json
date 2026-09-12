@@ -326,11 +326,13 @@
         "previewLoading": "Loading image preview…",
         "previewUnavailable": "Image generation completed, but the preview could not be loaded.",
         "generatedReady": "Generated image is ready.",
-        "generatedReadyWithMissing": "Generated image is ready. Some images could not be loaded."
+        "generatedReadyWithMissing": "Generated image is ready. Some images could not be loaded.",
+        "unavailableAfterRecovery": "The image result is not available yet. Refresh this chat later or try again."
     },
     "videoGeneration": {
         "generating": "Generating video, please wait…",
-        "failed": "Video generation failed. Please try again."
+        "failed": "The video result is not available yet. Please try again later.",
+        "unavailableAfterRecovery": "The video result is not available yet. Refresh this chat later or try again."
     },
     "composer": {
         "attachFiles": "Attach files",
