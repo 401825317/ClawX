@@ -77,10 +77,7 @@ let packagedBuildTimeMs = 0;
 const SENSITIVE_KEY_PATTERN = /^(?:api[_-]?key|.*token|password|secret|authorization|cookie|credential|private[_-]?key|client[_-]?secret|signature)$/i;
 
 function redactText(value) {
-  let text = String(value ?? '');
-  const userProfile = process.env.USERPROFILE || os.homedir();
-  if (userProfile) text = text.split(userProfile).join('%USERPROFILE%');
-  text = text
+  const text = String(value ?? '')
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, '$1[REDACTED]')
     .replace(/((?:"|')?(?:api[_-]?key|[a-z0-9_-]*token|password|secret|authorization|cookie|credential|private[_-]?key|client[_-]?secret|signature)(?:"|')?\s*[:=]\s*)(?:"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|[^\s,;}\]]+)/gi, '$1[REDACTED]')
     .replace(/([?&](?:api[_-]?key|access[_-]?token|token|signature|sig|key|code)=)[^&#\s]+/gi, '$1[REDACTED]')
@@ -118,7 +115,7 @@ function runRedactionSelfTest() {
   }));
   const plain = redactText(`Authorization: Bearer ${markers[3]}`);
   const passed = markers.every((marker) => !structured.includes(marker) && !plain.includes(marker));
-  record(passed ? 'PASS' : 'FAIL', '诊断脱敏自检', passed ? 'JSON 密钥、URL 签名和授权头均已遮蔽' : '脱敏器未覆盖全部测试密钥');
+  record(passed ? 'PASS' : 'FAIL', '密钥遮蔽自检', passed ? 'JSON 密钥、URL 签名和授权头均已遮蔽' : '遮蔽器未覆盖全部测试密钥');
 }
 
 function record(level, check, detail) {
@@ -687,7 +684,7 @@ async function runOpenClawChecks(nodeExe, openClawEntry) {
     timeout: 60_000,
   });
   const doctorPath = await writeCommandArtifact(`OpenClaw-Doctor-${timestamp}.txt`, doctor);
-  record(doctor.exitCode === 0 ? 'PASS' : 'WARN', 'OpenClaw Doctor', `退出码 ${doctor.exitCode ?? 'null'}，脱敏输出：${doctorPath}`);
+  record(doctor.exitCode === 0 ? 'PASS' : 'WARN', 'OpenClaw Doctor', `退出码 ${doctor.exitCode ?? 'null'}，安全输出：${doctorPath}`);
 
   const supportZip = path.join(diagnosticsDir, `OpenClaw-Support-${timestamp}.zip`);
   const support = runCommand(nodeExe, [
@@ -703,7 +700,7 @@ async function runOpenClawChecks(nodeExe, openClawEntry) {
   ], { env, timeout: 60_000 });
   const exported = support.exitCode === 0 && fs.existsSync(supportZip);
   record(exported ? 'PASS' : 'WARN', 'OpenClaw 支持包', exported
-    ? `已生成脱敏 ZIP：${supportZip}`
+    ? `已生成支持 ZIP：${supportZip}`
     : support.error || support.stderr.trim() || `退出码 ${support.exitCode}`);
 }
 

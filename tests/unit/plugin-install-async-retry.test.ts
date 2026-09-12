@@ -174,11 +174,12 @@ describe('plugin installer asynchronous filesystem retries', () => {
     // explicitly; the default ENOENT lstat mock is still useful for the
     // target/ownership probes above.
     fsPromises.lstat.mockImplementation(async (filePath: string) => {
-      const normalized = String(filePath).replace(/^\\\\\?\\/, '').replace(/\\\\/g, '/');
-      if (normalized === sourceDir.replace(/\\\\/g, '/')) {
+      const normalized = String(filePath).replace(/^\\\\\?\\/, '').replace(/[\\/]+/g, '/');
+      const normalizedSourceDir = sourceDir.replace(/[\\/]+/g, '/');
+      if (normalized === normalizedSourceDir) {
         return { isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false };
       }
-      if (normalized === `${sourceDir}\\index.mjs`.replace(/\\\\/g, '/')) {
+      if (normalized === `${normalizedSourceDir}/index.mjs`) {
         return { isDirectory: () => false, isFile: () => true, isSymbolicLink: () => false };
       }
       throw errno('ENOENT');
@@ -196,8 +197,24 @@ describe('plugin installer asynchronous filesystem retries', () => {
       '[plugin] Bundled mirror install failed for Fixture',
       expect.objectContaining({
         attempts: [
-          expect.objectContaining({ attempt: 1, code: 'EIO', phase: 'staging-copy' }),
-          expect.objectContaining({ attempt: 2, code: 'EIO', phase: 'staging-copy' }),
+          expect.objectContaining({
+            attempt: 1,
+            code: 'EIO',
+            copyOperation: 'copyFile',
+            copyRelativePath: 'index.mjs',
+            copySourcePath: expect.stringContaining('C:\\plugin-source'),
+            copyTargetPath: expect.stringContaining('fixture-plugin.staging-'),
+            phase: 'staging-copy',
+          }),
+          expect.objectContaining({
+            attempt: 2,
+            code: 'EIO',
+            copyOperation: 'copyFile',
+            copyRelativePath: 'index.mjs',
+            copySourcePath: expect.stringContaining('C:\\plugin-source'),
+            copyTargetPath: expect.stringContaining('fixture-plugin.staging-'),
+            phase: 'staging-copy',
+          }),
         ],
       }),
     );

@@ -65,10 +65,7 @@ const SENSITIVE_QUERY_VALUE_PATTERN = /([?&](?:access(?:[_-]|%5f|%2d)?token|refr
 const URL_CREDENTIALS_PATTERN = /(\b(?:https?|wss?):\/\/)(?:[^/\s?#@]+(?::[^/\s?#@]*)?)@/giu;
 const COMMON_SECRET_PATTERN = /\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|AIza[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{12,})\b/gu;
 const JWT_PATTERN = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/gu;
-const FILE_URL_PATTERN = /\b(file:\/\/\/?)[^\s"'`<>]+/giu;
 const ABSOLUTE_URL_PATTERN = /\b(?![A-Z]:\/\/)[A-Z][A-Z0-9+.-]*:\/\/[^\s"'`<>]+/giu;
-const QUOTED_ABSOLUTE_PATH_PATTERN = /(["'`])((?:[A-Z]:[\\/]+|\\{2,}(?:[?.][\\/]+)?|\/{2}(?!\/)|\/(?!\/))(?:(?!\1)[^\r\n])*)\1/giu;
-const UNQUOTED_ABSOLUTE_PATH_PATTERN = /(^|[\s=(:,{}\x5B])((?:[A-Z]:[\\/]+|\\{2,}(?:[?.][\\/]+)?|\/{2}(?!\/)|\/(?!\/))(?:(?!\s+[A-Z_][A-Z0-9_.-]*=)[^\r\n"'`<>\x5B\x5D{},;)])*)/gimu;
 const DUPLICATE_ERROR_WINDOW_MS = 30_000;
 const DUPLICATE_ERROR_IDLE_FLUSH_MS = 1_000;
 
@@ -775,12 +772,6 @@ function parseRawParamsTextValue(rawValue: string): unknown {
   }
 }
 
-function redactLocalAbsolutePaths(value: string): string {
-  return value
-    .replace(QUOTED_ABSOLUTE_PATH_PATTERN, '$1[UserPath]$1')
-    .replace(UNQUOTED_ABSOLUTE_PATH_PATTERN, '$1[UserPath]');
-}
-
 const SENSITIVE_URL_QUERY_KEYS = new Set([
   'accesstoken',
   'apikey',
@@ -819,13 +810,6 @@ function isSensitiveUrlQueryKey(rawKey: string): boolean {
   return SENSITIVE_URL_QUERY_KEYS.has(decoded.toLowerCase().replace(/[^a-z0-9]/gu, ''));
 }
 
-function isEncodedAbsolutePath(rawValue: string): boolean {
-  if (!rawValue.includes('%')) return false;
-  const decoded = decodePercentEncoding(rawValue);
-  if (decoded === null || decoded === rawValue) return false;
-  return /^(?:[A-Z]:[\\/]+|\\{2}|\/{1,2}(?!\/)|file:\/{2,})/iu.test(decoded);
-}
-
 function redactUrlQueryValues(url: string): string {
   const queryStart = url.indexOf('?');
   if (queryStart < 0) return url;
@@ -836,9 +820,7 @@ function redactUrlQueryValues(url: string): string {
     const equals = parameter.indexOf('=');
     if (equals < 0) return parameter;
     const key = parameter.slice(0, equals);
-    const rawValue = parameter.slice(equals + 1);
     if (isSensitiveUrlQueryKey(key)) return `${key}=[redacted]`;
-    if (isEncodedAbsolutePath(rawValue)) return `${key}=[UserPath]`;
     return parameter;
   }).join('&');
   return `${url.slice(0, queryStart + 1)}${redactedQuery}${url.slice(queryEnd)}`;
@@ -846,23 +828,6 @@ function redactUrlQueryValues(url: string): string {
 
 function redactAbsoluteUrlQueries(value: string): string {
   return value.replace(ABSOLUTE_URL_PATTERN, match => redactUrlQueryValues(match));
-}
-
-function redactAbsolutePaths(value: string): string {
-  // File URLs identify local files, so retain the scheme while removing the
-  // path. Other URLs are kept intact and excluded from filesystem matching.
-  const fileUrlsRedacted = value.replace(FILE_URL_PATTERN, '$1[UserPath]');
-  ABSOLUTE_URL_PATTERN.lastIndex = 0;
-  let cursor = 0;
-  let redacted = '';
-  let match: RegExpExecArray | null;
-  while ((match = ABSOLUTE_URL_PATTERN.exec(fileUrlsRedacted)) !== null) {
-    redacted += redactLocalAbsolutePaths(fileUrlsRedacted.slice(cursor, match.index));
-    redacted += match[0];
-    cursor = match.index + match[0].length;
-  }
-  redacted += redactLocalAbsolutePaths(fileUrlsRedacted.slice(cursor));
-  return redacted;
 }
 
 function sanitizeStructuredValue(value: unknown, seen = new WeakSet<object>()): unknown {
@@ -994,12 +959,12 @@ function redactSensitiveText(value: string): string {
     JSON.stringify(summarizeSensitiveValue(parseRawParamsTextValue(rawValue)))
   ));
   const text = redactMatches(rawParamsRedacted, SENSITIVE_TEXT_KEY_PATTERN, () => '[redacted]');
-  return redactAbsolutePaths(redactAbsoluteUrlQueries(text)
+  return redactAbsoluteUrlQueries(text)
     .replace(URL_CREDENTIALS_PATTERN, '$1[credentials-redacted]@')
     .replace(AUTHORIZATION_VALUE_PATTERN, '[authorization redacted]')
     .replace(SENSITIVE_QUERY_VALUE_PATTERN, '$1[redacted]')
     .replace(COMMON_SECRET_PATTERN, '[secret-redacted]')
-    .replace(JWT_PATTERN, '[secret-redacted]'));
+    .replace(JWT_PATTERN, '[secret-redacted]');
 }
 
 function normalizeCorrelationValue(value: unknown): string | undefined {

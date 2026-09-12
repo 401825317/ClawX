@@ -33,4 +33,19 @@ describe('gateway ws trace', () => {
     expect(summarizeGatewayFrameForTrace({ type: 'event', event: 'chat' }))
       .toEqual('event chat');
   });
+
+  it('keeps local paths in structural diagnostics while redacting secret fields', () => {
+    const frame = redactGatewayFrameForTrace({
+      type: 'event',
+      event: 'gateway.path',
+      id: 'C:\\Users\\Alice\\UClaw\\run-1',
+      params: {
+        token: 'secret-token',
+      },
+    });
+
+    expect(JSON.stringify(frame)).toContain('C:\\\\Users\\\\Alice\\\\UClaw\\\\run-1');
+    expect(JSON.stringify(frame)).not.toContain('secret-token');
+    expect(JSON.stringify(frame)).not.toContain('[UserPath]');
+  });
 });

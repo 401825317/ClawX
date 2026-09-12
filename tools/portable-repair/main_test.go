@@ -147,7 +147,7 @@ func TestPortableRepairExitCodeHelper(t *testing.T) {
 	os.Exit(exitCode)
 }
 
-func TestSanitizedReportDoesNotMutateOriginalPaths(t *testing.T) {
+func TestSanitizedReportPreservesPathsAndRedactsSecrets(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "User")
 	t.Setenv("USERPROFILE", home)
 	original := report{
@@ -159,11 +159,16 @@ func TestSanitizedReportDoesNotMutateOriginalPaths(t *testing.T) {
 		Errors:         []string{"token=abc123 path=" + filepath.Join(home, "secret")},
 	}
 	safe := sanitizedReport(original)
-	if strings.Contains(safe.AppPath, home) || strings.Contains(safe.LogEvidence[0].File, home) || strings.Contains(safe.Errors[0], "abc123") {
-		t.Fatalf("expected path and secret redaction, got %#v", safe)
+	if !strings.Contains(safe.AppPath, home) || !strings.Contains(safe.LogEvidence[0].File, home) || !strings.Contains(safe.Errors[0], filepath.Join(home, "secret")) {
+		t.Fatalf("expected diagnostic paths to be preserved, got %#v", safe)
 	}
-	if original.AppPath == safe.AppPath || !strings.Contains(original.AppPath, home) || !strings.Contains(original.LogEvidence[0].File, home) {
-		t.Fatalf("sanitization mutated the original report: original=%#v safe=%#v", original, safe)
+	if strings.Contains(safe.Errors[0], "abc123") {
+		t.Fatalf("expected secret redaction, got %#v", safe)
+	}
+	safe.CandidateRoots[0] = "mutated"
+	safe.LogEvidence[0].Signals[0] = "mutated"
+	if original.CandidateRoots[0] == "mutated" || original.LogEvidence[0].Signals[0] == "mutated" {
+		t.Fatalf("sanitization should copy diagnostic slices without mutating original: original=%#v safe=%#v", original, safe)
 	}
 }
 

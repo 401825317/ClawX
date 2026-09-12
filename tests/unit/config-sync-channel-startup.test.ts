@@ -43,7 +43,7 @@ vi.mock('@electron/utils/channel-config', () => ({
   readOpenClawConfig: mocks.readOpenClawConfig,
 }));
 vi.mock('@electron/utils/openclaw-auth', () => ({
-  REQUIRED_UCLAW_RUNTIME_PLUGIN_IDS: [],
+  REQUIRED_UCLAW_RUNTIME_PLUGIN_IDS: ['uclaw-local-artifacts'],
   sanitizeOpenClawConfig: vi.fn(async () => undefined),
   batchSyncConfigFields: vi.fn(async () => undefined),
 }));
@@ -108,7 +108,8 @@ vi.mock('@electron/gateway/async-prelaunch-maintenance-cache', () => ({
     task: () => Promise<boolean>,
   ) => {
     await getCacheKey();
-    return { status: 'executed', succeeded: await task() };
+    const taskResult = await task();
+    return { executed: true, reason: taskResult === false ? 'task-failed' : 'cache-miss' };
   }),
   scheduleCachedPrelaunchMaintenanceTaskAsync: vi.fn(() => ({
     scheduled: true,
@@ -206,12 +207,16 @@ describe('Gateway channel startup config sync', () => {
       configuredChannels: ['wecom'],
       cleanedDanglingWeChatState: false,
     });
-    mocks.ensurePluginInstalled.mockResolvedValue({
-      installed: false,
-      repairRequired: true,
-      code: 'bundled-source-missing',
-      warning: 'Bundled wecom plugin mirror not found. Checked: /bundled/wecom',
-    });
+    mocks.ensurePluginInstalled.mockImplementation(async (pluginId: string) => (
+      pluginId === 'wecom'
+        ? {
+          installed: false,
+          repairRequired: true,
+          code: 'bundled-source-missing',
+          warning: 'Bundled wecom plugin mirror not found. Checked: /bundled/wecom',
+        }
+        : { installed: true }
+    ));
 
     const error = await syncGatewayConfigBeforeLaunch(appSettings, '/tmp/openclaw-runtime')
       .then(() => null, (caught) => caught);
@@ -222,6 +227,40 @@ describe('Gateway channel startup config sync', () => {
       pluginIds: ['wecom'],
     });
     expect((error as Error).message).toMatch(/repair required/i);
+    expect(mocks.repairTrustedOfficialPluginInstallRecords).not.toHaveBeenCalled();
+  });
+
+  it('blocks Gateway startup when the core product runtime plugin cannot be repaired', async () => {
+    mocks.captureChannelStartupSnapshot.mockResolvedValue({
+      config: {},
+      configuredChannels: [],
+      cleanedDanglingWeChatState: false,
+    });
+    mocks.ensurePluginInstalled.mockImplementation(async (pluginId: string) => (
+      pluginId === 'uclaw-local-artifacts'
+        ? {
+          installed: false,
+          repairRequired: true,
+          code: 'bundled-source-invalid',
+          warning: 'Failed to install bundled uclaw-local-artifacts plugin mirror',
+        }
+        : { installed: true }
+    ));
+
+    const error = await syncGatewayConfigBeforeLaunch(appSettings, '/tmp/openclaw-runtime')
+      .then(() => null, (caught) => caught);
+    expect(error).toBeInstanceOf(GatewayPluginRepairRequiredError);
+    expect(error).toMatchObject({
+      name: 'GatewayPluginRepairRequiredError',
+      code: 'gateway_plugin_repair_required',
+      pluginIds: ['uclaw-local-artifacts'],
+    });
+    expect(mocks.ensurePluginInstalled).toHaveBeenCalledWith(
+      'uclaw-local-artifacts',
+      ['/bundled/uclaw-local-artifacts'],
+      'uclaw-local-artifacts',
+      { deferTrustedRecordSync: true, requireBundledSource: true },
+    );
     expect(mocks.repairTrustedOfficialPluginInstallRecords).not.toHaveBeenCalled();
   });
 

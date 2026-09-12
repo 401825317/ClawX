@@ -37,6 +37,13 @@ import {
   resolvePluginInstallWorkRoot,
 } from './plugin-install-paths';
 
+type PluginCopyDiagnostic = Readonly<{
+  copyOperation: 'mkdir' | 'readdir' | 'lstat' | 'copyFile';
+  copyRelativePath: string;
+  copySourcePath: string;
+  copyTargetPath: string;
+}>;
+
 function normalizeFsPathForWindows(filePath: string): string {
   if (process.platform !== 'win32') return filePath;
   if (!filePath) return filePath;
@@ -52,6 +59,13 @@ function normalizeFsPathForWindows(filePath: string): string {
 
 function fsPath(filePath: string): string {
   return normalizeFsPathForWindows(filePath);
+}
+
+function displayFsPath(filePath: string): string {
+  if (process.platform !== 'win32') return filePath;
+  if (filePath.startsWith('\\\\?\\UNC\\')) return `\\\\${filePath.slice('\\\\?\\UNC\\'.length)}`;
+  if (filePath.startsWith('\\\\?\\')) return filePath.slice('\\\\?\\'.length);
+  return filePath;
 }
 
 async function pathExists(filePath: string): Promise<boolean> {
@@ -85,19 +99,51 @@ async function realpathSafe(filePath: string): Promise<string> {
  */
 export async function cpAsyncSafe(src: string, dest: string): Promise<void> {
   const sourcePath = fsPath(src);
-  const sourceInfo = await lstat(sourcePath);
+  const sourceInfo = await withPluginCopyDiagnostic({
+    copyOperation: 'lstat',
+    copyRelativePath: '',
+    copySourcePath: sourcePath,
+    copyTargetPath: fsPath(dest),
+  }, () => lstat(sourcePath));
   if (!sourceInfo.isDirectory()) {
     throw new Error(`Refusing to copy non-directory plugin source: ${src}`);
   }
   await _copyDirAsyncRecursive(sourcePath, fsPath(dest));
 }
 
-async function _copyDirAsyncRecursive(src: string, dest: string): Promise<void> {
-  await mkdir(dest, { recursive: true });
-  const entries = await readdir(src, { withFileTypes: true });
+async function withPluginCopyDiagnostic<T>(
+  diagnostic: PluginCopyDiagnostic,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof PluginCopyDiagnosticError) throw error;
+    throw new PluginCopyDiagnosticError({
+      ...diagnostic,
+      copySourcePath: displayFsPath(diagnostic.copySourcePath),
+      copyTargetPath: displayFsPath(diagnostic.copyTargetPath),
+    }, error);
+  }
+}
+
+async function _copyDirAsyncRecursive(src: string, dest: string, relativeDir = ''): Promise<void> {
+  await withPluginCopyDiagnostic({
+    copyOperation: 'mkdir',
+    copyRelativePath: relativeDir,
+    copySourcePath: src,
+    copyTargetPath: dest,
+  }, () => mkdir(dest, { recursive: true }));
+  const entries = await withPluginCopyDiagnostic({
+    copyOperation: 'readdir',
+    copyRelativePath: relativeDir,
+    copySourcePath: src,
+    copyTargetPath: dest,
+  }, () => readdir(src, { withFileTypes: true }));
   for (const entry of entries) {
     const srcChild = join(src, entry.name);
     const destChild = join(dest, entry.name);
+    const relativePath = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
     // Do not follow links while copying a plugin tree.  `stat()` used here
     // previously made a symlink to an arbitrary file/directory look like a
     // regular source entry, allowing a malformed bundled mirror to copy
@@ -105,14 +151,24 @@ async function _copyDirAsyncRecursive(src: string, dest: string): Promise<void> 
     // cycle).  Bundled mirrors and staged plugin trees are expected to be
     // self-contained ordinary files, so fail closed for links and special
     // filesystem nodes instead of silently dereferencing them.
-    const info = await lstat(srcChild);
+    const info = await withPluginCopyDiagnostic({
+      copyOperation: 'lstat',
+      copyRelativePath: relativePath,
+      copySourcePath: srcChild,
+      copyTargetPath: destChild,
+    }, () => lstat(srcChild));
     if (info.isSymbolicLink()) {
       throw new Error(`Refusing to copy symbolic link in plugin source: ${srcChild}`);
     }
     if (info.isDirectory()) {
-      await _copyDirAsyncRecursive(srcChild, destChild);
+      await _copyDirAsyncRecursive(srcChild, destChild, relativePath);
     } else if (info.isFile()) {
-      await copyFile(srcChild, destChild);
+      await withPluginCopyDiagnostic({
+        copyOperation: 'copyFile',
+        copyRelativePath: relativePath,
+        copySourcePath: srcChild,
+        copyTargetPath: destChild,
+      }, () => copyFile(srcChild, destChild));
     } else {
       throw new Error(`Refusing to copy unsupported filesystem entry in plugin source: ${srcChild}`);
     }
@@ -153,6 +209,23 @@ class PluginOwnershipConflictError extends Error {
   }
 }
 
+class PluginCopyDiagnosticError extends Error {
+  constructor(
+    readonly diagnostic: PluginCopyDiagnostic,
+    cause: unknown,
+  ) {
+    const root = asErrnoException(cause);
+    super(
+      `Plugin copy failed during ${diagnostic.copyOperation}: ` +
+      `relativePath="${diagnostic.copyRelativePath || '.'}", ` +
+      `source="${diagnostic.copySourcePath}", target="${diagnostic.copyTargetPath}"` +
+      `${root?.message ? ` (${root.message})` : ''}`,
+      { cause },
+    );
+    this.name = 'PluginCopyDiagnosticError';
+  }
+}
+
 function rootErrnoException(error: unknown): NodeJS.ErrnoException | null {
   let current = error;
   const seen = new Set<unknown>();
@@ -165,8 +238,23 @@ function rootErrnoException(error: unknown): NodeJS.ErrnoException | null {
   return asErrnoException(error);
 }
 
+function findPluginCopyDiagnosticError(error: unknown): PluginCopyDiagnosticError | null {
+  let current = error;
+  const seen = new Set<unknown>();
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    if (current instanceof PluginCopyDiagnosticError) return current;
+    current = 'cause' in current ? current.cause : null;
+  }
+  return null;
+}
+
 function toErrorDiagnostic(error: unknown): {
   code?: string;
+  copyOperation?: PluginCopyDiagnostic['copyOperation'];
+  copyRelativePath?: string;
+  copySourcePath?: string;
+  copyTargetPath?: string;
   name?: string;
   phase?: PluginInstallPhase;
   message: string;
@@ -176,8 +264,10 @@ function toErrorDiagnostic(error: unknown): {
     return { message: String(error) };
   }
 
+  const copyDiagnostic = findPluginCopyDiagnosticError(error);
   return {
     code: typeof errno.code === 'string' ? errno.code : undefined,
+    ...(copyDiagnostic ? copyDiagnostic.diagnostic : {}),
     name: error instanceof Error ? error.name : errno.name,
     phase: error instanceof PluginInstallPhaseError ? error.phase : undefined,
     message: error instanceof Error ? error.message : errno.message || String(error),

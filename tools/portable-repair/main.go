@@ -555,18 +555,15 @@ func trimLogFieldSuffix(value string) string {
 }
 
 func sanitizedReport(r report) report {
-	r.RuntimeDir = redactUserPath(r.RuntimeDir)
-	r.CandidateRoots = redactPaths(r.CandidateRoots)
-	r.SelectedRoot = redactUserPath(r.SelectedRoot)
-	r.AppPath = redactUserPath(r.AppPath)
-	r.UpdateTasks = redactPaths(r.UpdateTasks)
-	r.UpdateLogs = redactPaths(r.UpdateLogs)
-	r.AppLogs = redactPaths(r.AppLogs)
+	r.CandidateRoots = cloneStrings(r.CandidateRoots)
+	r.UpdateTasks = cloneStrings(r.UpdateTasks)
+	r.UpdateLogs = cloneStrings(r.UpdateLogs)
+	r.AppLogs = cloneStrings(r.AppLogs)
 	evidence := make([]logEvidence, 0, len(r.LogEvidence))
 	for _, item := range r.LogEvidence {
 		evidence = append(evidence, logEvidence{
-			File:    redactUserPath(item.File),
-			Signals: append([]string(nil), item.Signals...),
+			File:    item.File,
+			Signals: redactStrings(item.Signals),
 		})
 	}
 	r.LogEvidence = evidence
@@ -589,36 +586,12 @@ func redactFindings(findings []finding) []finding {
 	return out
 }
 
-func redactPaths(paths []string) []string {
-	out := make([]string, 0, len(paths))
-	for _, path := range paths {
-		out = append(out, redactUserPath(path))
-	}
-	return out
-}
-
-func redactUserPath(value string) string {
-	profile := strings.TrimSpace(os.Getenv("USERPROFILE"))
-	if profile == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			profile = home
-		}
-	}
-	for _, candidate := range []string{
-		profile,
-		strings.ReplaceAll(profile, `\`, `/`),
-		strings.ReplaceAll(profile, `/`, `\`),
-	} {
-		if candidate == "" {
-			continue
-		}
-		value = replaceInsensitive(value, candidate, "%USERPROFILE%")
-	}
-	return value
+func cloneStrings(values []string) []string {
+	return append([]string(nil), values...)
 }
 
 func redactText(value string) string {
-	text := redactUserPath(value)
+	text := value
 	text = bearerPattern.ReplaceAllString(text, `${1}[REDACTED]`)
 	text = secretPattern.ReplaceAllString(text, `${1}[REDACTED]`)
 	text = urlCredentialPattern.ReplaceAllString(text, `${1}[REDACTED]@`)
@@ -631,17 +604,6 @@ func redactStrings(values []string) []string {
 		out = append(out, redactText(value))
 	}
 	return out
-}
-
-func replaceInsensitive(value string, old string, replacement string) string {
-	if old == "" {
-		return value
-	}
-	pattern, err := regexp.Compile(`(?i)` + regexp.QuoteMeta(old))
-	if err != nil {
-		return value
-	}
-	return pattern.ReplaceAllString(value, replacement)
 }
 
 func pathExists(filePath string) bool {
@@ -729,7 +691,7 @@ func summary(r report, repaired bool, reportPath string) string {
 	if repaired {
 		builder.WriteString("修复动作: " + strconv.Itoa(len(safe.Actions)) + "\n")
 	}
-	builder.WriteString("诊断报告: " + redactUserPath(reportPath) + "\n")
+	builder.WriteString("诊断报告: " + reportPath + "\n")
 	if len(safe.Errors) > 0 {
 		builder.WriteString("部分动作失败，请把诊断报告发给技术支持。\n")
 	} else if repaired && safe.Restarted {
