@@ -582,12 +582,11 @@ async function initialize(): Promise<void> {
   // state and runtime-cache recovery have already run in portable bootstrap;
   // this gate never overwrites user data or user-owned extensions.
   if (portableModeInfo.enabled && app.isPackaged && portableModeInfo.portableLayout.hasPortableFlag) {
-    const packageRootDir = process.platform === 'win32' && portableModeInfo.rootDir
-      ? portableModeInfo.rootDir
-      : resolvePackagedPortableRootDir(process.platform);
-    // Windows portable verification must use the payload beside UClaw.exe.
-    // A bootstrap probe can intentionally isolate mutable state, while
-    // process.resourcesPath may still reflect that transient launch context.
+    // Keep the immutable payload root separate from the mutable portable
+    // state root. Packaged regression and recovery launches can intentionally
+    // place UClawData elsewhere, but UClaw.exe and resources always live next
+    // to the executable being launched.
+    const packageRootDir = resolvePackagedPortableRootDir(process.platform);
     const packageResourcesDir = process.platform === 'win32'
       ? join(packageRootDir, 'resources')
       : process.resourcesPath;

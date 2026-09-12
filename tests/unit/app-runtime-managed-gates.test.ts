@@ -37,6 +37,8 @@ describe('app runtime managed gate startup', () => {
     expect(runtimePreparation).toBeGreaterThan(packageGate);
     expect(providerSync).toBeGreaterThan(packageGate);
     expect(initialize).toContain('Portable package integrity check blocked startup');
+    expect(initialize).toContain('const packageRootDir = resolvePackagedPortableRootDir(process.platform);');
+    expect(initialize).not.toContain('packageRootDir = process.platform === \'win32\' && portableModeInfo.rootDir');
   });
 
   it('applies proxy settings before starting the non-blocking gate watcher and rule repair', () => {
