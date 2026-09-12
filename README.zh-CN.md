@@ -456,7 +456,7 @@ pnpm release              # 构建并校验本地 Windows USB 候选包，不执
 pnpm package:linux        # 为 Linux 打包
 ```
 
-Windows USB 构建会输出 `UClaw-<version>-win-x64-usb.zip` 及同名 JSON 元数据。持久数据保存在 `UClawData`，高频状态使用本机隔离运行目录；便携更新只有在 ZIP 格式、文件大小和 SHA-512 全部校验通过后才会安装。替换阶段会持续显示递归文件数和字节进度；Windows 同盘更新直接移动已校验文件，跨盘复制最多使用四个工作线程，`UClawData` 始终不参与替换和回滚。`pnpm release` 仅作为 Windows 本地候选包构建：它要求 Git 工作区干净，构建 USB 包，并校验精确的版本、提交、build ID、文件大小和 SHA-512，不执行功能回归；不会签名、上传、修改生产更新记录、创建 Git 标签或 GitHub Release。`.github/workflows/uclaw-portable-production.yml` 默认只在 GitHub 托管 Runner 上构建不可变的未签名 Windows/macOS USB 候选。显式审批的受保护暂存路径会通过 SignPath 签名 Windows 的 UClaw 可执行文件、对 macOS App 签名并公证、按最终字节重建 ZIP 元数据，然后才上传 OSS 和写入 `enabled=false` 的 zz-cn 记录。
+Windows USB 构建会输出 `UClaw-<version>-win-x64-usb.zip` 及同名 JSON 元数据。持久数据保存在 `UClawData`，高频状态使用本机隔离运行目录；便携更新只有在 ZIP 格式、文件大小和 SHA-512 全部校验通过后才会安装。替换阶段会持续显示递归文件数和字节进度；Windows 同盘更新直接移动已校验文件，跨盘复制最多使用四个工作线程，`UClawData` 始终不参与替换和回滚。包内同时包含外部 `resources/bin/UClawRepair.exe` 修复小助手，可生成脱敏诊断报告，并在用户确认或传入 `--repair` 后只隔离更新临时目录、结束归属明确的 UClaw/OpenClaw 进程、尝试重启，不删除 `UClawData`、SQLite、会话、配置或凭据。`pnpm release` 仅作为 Windows 本地候选包构建：它要求 Git 工作区干净，构建 USB 包，并校验精确的版本、提交、build ID、文件大小和 SHA-512，不执行功能回归；不会签名、上传、修改生产更新记录、创建 Git 标签或 GitHub Release。`.github/workflows/uclaw-portable-production.yml` 默认只在 GitHub 托管 Runner 上构建不可变的未签名 Windows/macOS USB 候选。显式审批的受保护暂存路径会通过 SignPath 签名 Windows 的 UClaw 可执行文件、修复小助手和更新助手、对 macOS App 签名并公证、按最终字节重建 ZIP 元数据，然后才上传 OSS 和写入 `enabled=false` 的 zz-cn 记录。
 
 在无头 Linux 环境下，Electron 测试需要显示服务；可使用 `xvfb-run -a pnpm run test:e2e`。
 

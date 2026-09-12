@@ -1108,6 +1108,7 @@ test('runs the packaged UClaw regression matrix', async () => {
         'resources/bin/node.exe',
         'resources/bin/uv.exe',
         'resources/bin/agent-browser.exe',
+        'resources/bin/UClawRepair.exe',
         'resources/app.asar.unpacked/node_modules/sharp/package.json',
         'resources/app.asar.unpacked/node_modules/@img/sharp-win32-x64/package.json',
         'resources/app.asar.unpacked/node_modules/@img/sharp-win32-x64/lib/sharp-win32-x64.node',

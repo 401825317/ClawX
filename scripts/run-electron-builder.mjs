@@ -18,7 +18,7 @@ const args = passthroughArgs.filter((arg) => arg !== '--skip-nsis-patch');
 if (process.env.CLAWX_SKIP_WINDOWS_SIGNING === '1' && process.platform === 'win32') {
   args.push('-c.win.signAndEditExecutable=false');
 }
-const REQUIRED_WINDOWS_RUNTIME_BINARIES = ['node.exe', 'uv.exe', 'agent-browser.exe'];
+const REQUIRED_WINDOWS_RUNTIME_BINARIES = ['node.exe', 'uv.exe', 'agent-browser.exe', 'UClawRepair.exe'];
 const endpointConfig = JSON.parse(
   fs.readFileSync(path.join(ROOT, 'shared', 'junfeiai-endpoints.json'), 'utf8'),
 );
@@ -55,7 +55,7 @@ function validateWindowsRuntimeBinaries() {
   });
   if (missing.length > 0) {
     throw new Error(
-      `[run-electron-builder] Missing Windows runtime binaries for win32-${arch}: ${missing.join(', ')}. Run pnpm run prep:win-binaries.`,
+      `[run-electron-builder] Missing Windows runtime binaries for win32-${arch}: ${missing.join(', ')}. Run pnpm run prep:win-binaries and pnpm run repair:build:win.`,
     );
   }
 }

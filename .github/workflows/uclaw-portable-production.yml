@@ -524,6 +524,7 @@ jobs:
           Expand-Archive -LiteralPath $zip -DestinationPath $payload -Force
           $files = @(
             (Join-Path $payload 'UClaw.exe'),
+            (Join-Path $payload 'resources/bin/UClawRepair.exe'),
             (Join-Path $payload 'resources/resources/updater/win32-x64/uclaw-portable-updater.exe')
           )
           $missing = @($files | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
@@ -560,7 +561,7 @@ jobs:
           $commit = '${{ needs.preflight.outputs.commit }}'
           $payload = '${{ steps.unsigned.outputs.payload }}'
           $signed = Get-ChildItem -Path 'stage/signpath-output' -Filter *.exe -Recurse -File
-          if ($signed.Count -ne 2) { throw "SignPath returned $($signed.Count) signed executables, expected 2." }
+          if ($signed.Count -ne 3) { throw "SignPath returned $($signed.Count) signed executables, expected 3." }
           foreach ($file in $signed) {
             $target = Get-ChildItem -Path $payload -Filter $file.Name -Recurse -File | Select-Object -First 1
             if ($null -eq $target) { throw "Signed executable has no payload target: $($file.Name)" }
@@ -572,6 +573,7 @@ jobs:
           node scripts/windows-support/repack-portable-release.mjs `
             --zip $zip `
             --replace "UClaw.exe=$(Join-Path $payload 'UClaw.exe')" `
+            --replace "resources/bin/UClawRepair.exe=$(Join-Path $payload 'resources/bin/UClawRepair.exe')" `
             --replace "resources/resources/updater/win32-x64/uclaw-portable-updater.exe=$(Join-Path $payload 'resources/resources/updater/win32-x64/uclaw-portable-updater.exe')"
           node scripts/windows-support/refresh-portable-release-metadata.mjs --zip $zip --version $version --commit $commit
           node scripts/windows-support/stage-production-release-candidate.mjs --release-dir stage/unsigned --output stage/signed-candidate --version $version --commit $commit

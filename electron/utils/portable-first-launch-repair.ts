@@ -240,6 +240,7 @@ function inspectPackage(
       ['resources/bin/node.exe', join(resourcesDir, 'bin', 'node.exe')],
       ['resources/bin/uv.exe', join(resourcesDir, 'bin', 'uv.exe')],
       ['resources/bin/agent-browser.exe', join(resourcesDir, 'bin', 'agent-browser.exe')],
+      ['resources/bin/UClawRepair.exe', join(resourcesDir, 'bin', 'UClawRepair.exe')],
       ['uclaw-usb-build.json', join(packageRootDir, USB_BUILD_IDENTITY_FILE)],
       ['UClaw-SelfCheck.cmd', join(packageRootDir, 'UClaw-SelfCheck.cmd')],
       ['resources/openclaw/node_modules/sharp/package.json', join(resourcesDir, 'openclaw', 'node_modules', 'sharp', 'package.json')],

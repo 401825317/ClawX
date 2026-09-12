@@ -152,6 +152,8 @@ test('production workflow can perform only explicitly approved disabled staging'
   assert.match(workflow, /sign-windows-usb:/u);
   assert.match(workflow, /sign-macos-usb:/u);
   assert.match(workflow, /Sign UClaw executables via SignPath/u);
+  assert.match(workflow, /resources\/bin\/UClawRepair\.exe/u);
+  assert.match(workflow, /expected 3/u);
   assert.match(workflow, /Build signed and notarized macOS USB packages/u);
   assert.match(workflow, /Authenticode validation failed/u);
   assert.match(workflow, /codesign --verify --deep --strict/u);
@@ -229,6 +231,7 @@ test('disabled stage publisher never enables a release row', async () => {
   assert.match(publisher, /OSS SHA-512 mismatch/u);
   assert.match(publisher, /function Assert-PortableMetadata/u);
   assert.match(publisher, /function Assert-SignedWindowsPortableCandidate/u);
+  assert.match(publisher, /resources\/bin\/UClawRepair\.exe/u);
   assert.match(publisher, /\[switch\]\$WindowsOnly/u);
   assert.match(publisher, /\[switch\]\$OverwriteExistingOssObjects/u);
   assert.match(publisher, /\[switch\]\$AllowUnsignedWindowsCandidate/u);

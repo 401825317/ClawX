@@ -88,6 +88,7 @@ function createPortablePackage(): {
     join(resourcesDir, 'bin', 'node.exe'),
     join(resourcesDir, 'bin', 'uv.exe'),
     join(resourcesDir, 'bin', 'agent-browser.exe'),
+    join(resourcesDir, 'bin', 'UClawRepair.exe'),
   ]) {
     mkdirSync(join(filePath, '..'), { recursive: true });
     writeFileSync(filePath, 'fixture\n', 'utf8');
