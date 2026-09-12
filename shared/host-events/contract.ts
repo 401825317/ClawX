@@ -5,6 +5,7 @@ import type {
 import type { UpdateStatusSnapshot } from '../host-api/contract';
 import type { ChatRuntimeEvent } from '../chat-runtime-events';
 import type { PortableRuntimeHealthSnapshot } from '../portable-runtime-health';
+import type { PortableOpenClawRuntimePreparationProgress } from '../portable-openclaw-runtime';
 import type {
   GatewayNotification,
   GatewayRuntimePayload,
@@ -104,6 +105,9 @@ export type HostEventContract = {
     newChat: () => void;
     openClawCliInstalled: (installedPath: string) => void;
     portableRuntimeHealthChanged: (snapshot: PortableRuntimeHealthSnapshot) => void;
+    portableRuntimePreparationProgress: (
+      progress: PortableOpenClawRuntimePreparationProgress,
+    ) => void;
   };
 };
 
@@ -149,6 +153,7 @@ export const HOST_EVENT_CHANNELS = {
     newChat: 'new-chat',
     openClawCliInstalled: 'openclaw:cli-installed',
     portableRuntimeHealthChanged: 'portable-runtime:health-changed',
+    portableRuntimePreparationProgress: 'portable-runtime:preparation-progress',
   },
 } as const satisfies {
   [M in Exclude<HostEventModule, 'channel'>]: {

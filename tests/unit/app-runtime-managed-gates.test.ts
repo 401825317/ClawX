@@ -11,7 +11,9 @@ describe('app runtime managed gate startup', () => {
       source.indexOf('async function initialize()'),
       source.indexOf('if (gotTheLock)'),
     );
-    const preparePortableRuntime = initialize.indexOf('await prepareConfiguredPortableOpenClawRuntime()');
+    const preparePortableRuntime = initialize.indexOf(
+      'await prepareConfiguredPortableOpenClawRuntime(sendPortableRuntimePreparationProgress)',
+    );
     const seedDefaultWorkspace = initialize.indexOf('await ensureClawXDefaultIdentity()');
     const loadRenderer = initialize.indexOf('loadMainWindow(window)');
 
@@ -19,6 +21,22 @@ describe('app runtime managed gate startup', () => {
     expect(seedDefaultWorkspace).toBeGreaterThan(preparePortableRuntime);
     expect(loadRenderer).toBeGreaterThan(seedDefaultWorkspace);
     expect(initialize).not.toContain('void ensureClawXDefaultIdentity()');
+  });
+
+  it('renders portable runtime preparation progress through the isolated preload bridge', () => {
+    const source = readFileSync(join(process.cwd(), 'electron/main/app-runtime.ts'), 'utf8');
+    const preparationWindow = source.slice(
+      source.indexOf('function loadPortableRuntimePreparationWindow'),
+      source.indexOf('function focusWindow'),
+    );
+
+    expect(preparationWindow).toContain('window.electron.ipcRenderer.on(channel, update)');
+    expect(preparationWindow).not.toContain("require('electron')");
+    expect(preparationWindow).toContain("data-testid=\"portable-runtime-progress-bar\"");
+    expect(preparationWindow).toContain("data-testid=\"portable-runtime-progress-stage\"");
+    expect(preparationWindow).toContain("progressBar.setAttribute('aria-label', copy.progressLabel)");
+    expect(preparationWindow).toContain("win.webContents.once('did-finish-load'");
+    expect(preparationWindow).toContain('lastPortableRuntimePreparationProgress');
   });
 
   it('checks a packaged portable payload before runtime preparation or Gateway startup', () => {
@@ -29,7 +47,9 @@ describe('app runtime managed gate startup', () => {
     );
     const migration = initialize.indexOf('await migratePortableDefaultWorkspaceConfig();');
     const packageGate = initialize.indexOf('runPortableFirstLaunchRepair({');
-    const runtimePreparation = initialize.indexOf('prepareConfiguredPortableOpenClawRuntime();');
+    const runtimePreparation = initialize.indexOf(
+      'prepareConfiguredPortableOpenClawRuntime(sendPortableRuntimePreparationProgress)',
+    );
     const providerSync = initialize.indexOf('syncAllProviderAuthToRuntime(');
 
     expect(migration).toBeGreaterThan(-1);

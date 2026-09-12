@@ -1165,7 +1165,21 @@ test('runs the packaged UClaw regression matrix', async () => {
       await expect(context.page.getByTestId('setup-page')).toBeVisible({ timeout: 120_000 });
       await expect(context.page.getByTestId('setup-welcome-step')).toBeVisible();
       expect(context.startupMs).toBeLessThan(120_000);
-      return { startupMs: context.startupMs, executable: path.join(appRoot, 'UClaw.exe') };
+      await expect.poll(
+        () => context.output.join(''),
+        { timeout: 10_000 },
+      ).toContain('Portable OpenClaw runtime preparation progress');
+      const startupOutput = context.output.join('');
+      const progressPhases = ['validating', 'cleanup', 'scanning', 'copying', 'publishing', 'done']
+        .filter((phase) => startupOutput.includes(`"phase": "${phase}"`));
+      expect(progressPhases).toEqual(
+        expect.arrayContaining(['validating', 'scanning', 'copying', 'publishing', 'done']),
+      );
+      return {
+        startupMs: context.startupMs,
+        executable: path.join(appRoot, 'UClaw.exe'),
+        progressPhases,
+      };
     });
 
     await runner.run('setup.persist', 'persist first-run completion in the isolated regression profile', async () => {

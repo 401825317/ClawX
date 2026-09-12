@@ -124,4 +124,7 @@ export const hostEvents = {
   onPortableRuntimeHealthChanged: (
     handler: HostEventHandler<'app', 'portableRuntimeHealthChanged'>,
   ) => onAppEvent('portableRuntimeHealthChanged', handler),
+  onPortableRuntimePreparationProgress: (
+    handler: HostEventHandler<'app', 'portableRuntimePreparationProgress'>,
+  ) => onAppEvent('portableRuntimePreparationProgress', handler),
 };

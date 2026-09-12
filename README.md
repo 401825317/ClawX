@@ -233,6 +233,8 @@ The wizard preselects your system language when it is supported, and falls back 
 
 In UClaw managed distributions, the wizard also requires UClaw sign-in or registration and authorization for the current device before runtime setup can continue.
 
+On packaged portable USB builds, the first launch may show a preparation screen while the immutable OpenClaw runtime is copied into a machine-local cache. The screen reports validation, cleanup, scanning, file and byte copy progress, and final activation; keep the USB drive connected until it finishes. Later launches reuse a complete local cache and should skip the copy.
+
 > Web search: UClaw enables the official Parallel Search plugin's key-free provider by default.
 >
 > When Moonshot is configured, UClaw also syncs its web-search settings to the China endpoint (`https://api.moonshot.cn/v1`); Parallel Search remains the default provider for general web search.

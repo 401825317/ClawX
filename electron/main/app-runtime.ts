@@ -18,6 +18,11 @@ import { logger } from '../utils/logger';
 import { warmupNetworkOptimization } from '../utils/uv-env';
 import { captureFatalException, initTelemetry, shutdownTelemetry } from '../utils/telemetry';
 import { HOST_EVENT_CHANNELS } from '@shared/host-events/contract';
+import { resolveSupportedLanguage } from '@shared/language';
+import {
+  PORTABLE_OPENCLAW_RUNTIME_PREPARATION_COPY,
+  type PortableOpenClawRuntimePreparationProgress,
+} from '@shared/portable-openclaw-runtime';
 
 import { ClawHubService } from '../gateway/clawhub';
 import { extensionRegistry } from '../extensions/registry';
@@ -220,6 +225,7 @@ const rendererRecoveryGovernors = new Set<RendererRecoveryGovernor>();
 let completionSetupTimer: ReturnType<typeof setTimeout> | null = null;
 const mainWindowFocusState = createMainWindowFocusState();
 const quitLifecycleState = createQuitLifecycleState();
+let lastPortableRuntimePreparationProgress: PortableOpenClawRuntimePreparationProgress | null = null;
 
 function stopManagedRuntimeServices(): Promise<void> {
   if (managedRuntimeShutdownPromise) return managedRuntimeShutdownPromise;
@@ -312,6 +318,14 @@ function sendMainWindowEvent(channel: string, payload: unknown): void {
   const win = mainWindow;
   if (!win || win.isDestroyed()) return;
   win.webContents.send(channel, payload);
+}
+
+function sendPortableRuntimePreparationProgress(
+  progress: PortableOpenClawRuntimePreparationProgress,
+): void {
+  lastPortableRuntimePreparationProgress = progress;
+  sendMainWindowEvent(HOST_EVENT_CHANNELS.app.portableRuntimePreparationProgress, progress);
+  logger.info('Portable OpenClaw runtime preparation progress', progress);
 }
 
 /**
@@ -416,15 +430,97 @@ function loadMainWindow(win: BrowserWindow): void {
   }
 }
 
-function loadPortableRuntimePreparationWindow(win: BrowserWindow): void {
+function loadPortableRuntimePreparationWindow(win: BrowserWindow, language?: string): void {
+  const copy = PORTABLE_OPENCLAW_RUNTIME_PREPARATION_COPY[
+    resolveSupportedLanguage(language ?? app.getLocale())
+  ];
+  const serializedCopy = JSON.stringify(copy).replace(/</gu, '\\u003c');
   const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+    :root{color-scheme:light dark}
     body{margin:0;background:#f7f7f5;color:#20201e;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
-    main{height:100vh;display:flex;align-items:center;justify-content:center;gap:18px;padding:32px;box-sizing:border-box}
-    .spinner{width:24px;height:24px;border:3px solid #d8d8d3;border-top-color:#e34d2f;border-radius:50%;animation:spin .9s linear infinite;flex:none}
-    h1{font-size:18px;margin:0 0 8px;font-weight:650}p{font-size:13px;line-height:1.55;color:#66645f;margin:0}
+    main{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:32px;box-sizing:border-box}
+    section{width:min(460px,100%);display:grid;grid-template-columns:32px 1fr;gap:18px;align-items:start}
+    .spinner{width:24px;height:24px;margin-top:1px;border:3px solid #d8d8d3;border-top-color:#e34d2f;border-radius:50%;animation:spin .9s linear infinite}
+    h1{font-size:18px;margin:0 0 8px;font-weight:650;line-height:1.35}
+    p{font-size:13px;line-height:1.55;color:#66645f;margin:0}
+    .progress{grid-column:2;margin-top:18px}
+    .track{height:6px;background:#e2e1dc;border-radius:999px;overflow:hidden}
+    .bar{height:100%;width:0%;background:#e34d2f;border-radius:inherit;transition:width .18s ease}
+    .meta{margin-top:8px;display:flex;justify-content:space-between;gap:12px;font-size:12px;line-height:1.45;color:#74716a}
+    .stage{font-variant-numeric:tabular-nums}
+    .detail{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right;min-width:0}
+    @media (prefers-color-scheme:dark){
+      body{background:#1f201d;color:#f4f1ea}
+      p{color:#b9b4aa}.track{background:#373832}.meta{color:#a9a397}
+    }
     @keyframes spin{to{transform:rotate(360deg)}}
-  </style></head><body><main><div class="spinner"></div><div><h1>正在准备运行环境</h1>
-  <p>首次在这台电脑启动可能需要几分钟，请保持 U 盘连接。</p></div></main></body></html>`;
+  </style></head><body><main data-testid="portable-runtime-preparation">
+  <section><div class="spinner"></div><div><h1 id="title"></h1>
+  <p id="message"></p></div>
+  <div class="progress" id="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+    <div class="track"><div class="bar" id="bar" data-testid="portable-runtime-progress-bar"></div></div>
+    <div class="meta">
+      <span class="stage" id="stage" data-testid="portable-runtime-progress-stage"></span>
+      <span class="detail" id="detail" data-testid="portable-runtime-progress-detail"></span>
+    </div>
+  </div></section></main>
+  <script>
+    const copy = ${serializedCopy};
+    const channel = ${JSON.stringify(HOST_EVENT_CHANNELS.app.portableRuntimePreparationProgress)};
+    const title = document.getElementById('title');
+    const bar = document.getElementById('bar');
+    const progressBar = document.getElementById('progress');
+    const stage = document.getElementById('stage');
+    const detail = document.getElementById('detail');
+    const message = document.getElementById('message');
+    title.textContent = copy.title;
+    message.textContent = copy.defaultMessage;
+    stage.textContent = copy.initialStage;
+    progressBar.setAttribute('aria-label', copy.progressLabel);
+    function formatBytes(value) {
+      if (!Number.isFinite(value) || value <= 0) return '';
+      if (value < 1024) return value + ' B';
+      if (value < 1024 * 1024) return (value / 1024).toFixed(1) + ' KB';
+      if (value < 1024 * 1024 * 1024) return (value / 1024 / 1024).toFixed(1) + ' MB';
+      return (value / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+    }
+    function update(progress) {
+      if (!progress || typeof progress !== 'object') return;
+      const phase = typeof progress.phase === 'string' ? progress.phase : 'validating';
+      const percent = Number.isFinite(progress.percent)
+        ? Math.max(0, Math.min(100, Math.round(progress.percent)))
+        : null;
+      const label = copy.stageLabels[phase] || copy.title;
+      stage.textContent = percent === null ? label : label + ' ' + percent + '%';
+      if (percent !== null) {
+        bar.style.width = percent + '%';
+        progressBar.setAttribute('aria-valuenow', String(percent));
+      }
+      const parts = [];
+      if (Number.isFinite(progress.copiedFiles) && Number.isFinite(progress.totalFiles) && progress.totalFiles > 0) {
+        parts.push(progress.copiedFiles + '/' + progress.totalFiles + ' ' + copy.filesUnit);
+      }
+      if (Number.isFinite(progress.copiedBytes) && Number.isFinite(progress.totalBytes) && progress.totalBytes > 0) {
+        parts.push(formatBytes(progress.copiedBytes) + ' / ' + formatBytes(progress.totalBytes));
+      }
+      if (typeof progress.currentFile === 'string' && progress.currentFile) {
+        parts.push(progress.currentFile);
+      }
+      detail.textContent = parts.join(' · ');
+      if (phase === 'copying') message.textContent = copy.copyingMessage;
+      if (phase === 'publishing') message.textContent = copy.publishingMessage;
+      if (phase === 'failed') message.textContent = copy.failedMessage;
+    }
+    window.electron.ipcRenderer.on(channel, update);
+  </script></body></html>`;
+  win.webContents.once('did-finish-load', () => {
+    if (lastPortableRuntimePreparationProgress) {
+      win.webContents.send(
+        HOST_EVENT_CHANNELS.app.portableRuntimePreparationProgress,
+        lastPortableRuntimePreparationProgress,
+      );
+    }
+  });
   void win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
 }
 
@@ -724,10 +820,11 @@ async function initialize(): Promise<void> {
   // runtime has been completely published.
   if (portableModeInfo.enabled && app.isPackaged) {
     if (!isConfiguredPortableOpenClawRuntimePrepared()) {
-      loadPortableRuntimePreparationWindow(window);
+      const preparationLanguage = await getSetting('language').catch(() => app.getLocale());
+      loadPortableRuntimePreparationWindow(window, preparationLanguage);
     }
     try {
-      const prepared = await prepareConfiguredPortableOpenClawRuntime();
+      const prepared = await prepareConfiguredPortableOpenClawRuntime(sendPortableRuntimePreparationProgress);
       if (prepared) {
         logger.info(
           `Portable OpenClaw runtime ${prepared.cacheHit ? 'cache hit' : 'prepared'} (${prepared.cacheKey})`,
