@@ -123,11 +123,18 @@ export function normalizeAcpChatError(error: unknown, fallback = 'ACP prompt fai
   ])) return result('CONTENT_POLICY', false);
 
   if (includesAny(searchable, [
+    /no configured account/u,
+    /not supported by any configured account/u,
+    /model.{0,40}(?:unavailable|temporarily unavailable)/u,
+    /model[_ -]?unavailable/u,
+    /模型.{0,12}不可用/u,
+  ])) return result('MODEL_UNAVAILABLE', true);
+
+  if (includesAny(searchable, [
     /model.{0,40}not supported/u,
     /model.{0,40}not found/u,
     /model[_ -]?not[_ -]?found/u,
-    /no configured account/u,
-    /模型.{0,12}(?:不支持|不存在|不可用)/u,
+    /模型.{0,12}(?:不支持|不存在)/u,
   ])) return result('MODEL_UNAVAILABLE', false);
 
   if (includesAny(searchable, [

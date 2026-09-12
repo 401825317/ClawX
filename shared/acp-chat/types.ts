@@ -110,7 +110,7 @@ export type AcpTurnFailureUpdate = {
   upstreamCode?: string;
 };
 
-/** Visible status emitted while Main waits to replay a side-effect-free turn. */
+/** Visible status emitted while Main waits to recover a retryable turn. */
 export type AcpTurnRetryUpdate = {
   sessionUpdate: 'uclaw_turn_retrying';
   userMessageId: string;

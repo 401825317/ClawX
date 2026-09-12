@@ -7,7 +7,7 @@ describe('ACP chat error classification', () => {
     [
       'status_code=404, Model "gpt-5.6-luna" is not supported by any configured account in this group',
       'MODEL_UNAVAILABLE',
-      false,
+      true,
       404,
     ],
     [
@@ -62,6 +62,7 @@ describe('ACP chat error classification', () => {
     ['status_code=400, Unsupported parameter: max_output_tokens', 'INVALID_REQUEST', false],
     ['status_code=400, Video duration must be 6 or 10 seconds.', 'INVALID_REQUEST', false],
     ['status_code=400, model_not_found', 'MODEL_UNAVAILABLE', false],
+    ['status_code=503, model temporarily unavailable', 'MODEL_UNAVAILABLE', true],
     ['sensitive_words_detected', 'CONTENT_POLICY', false],
   ] as const)('keeps recovery semantics for %s', (message, code, retryable) => {
     expect(normalizeAcpChatError(message)).toMatchObject({ code, retryable });

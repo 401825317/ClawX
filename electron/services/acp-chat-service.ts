@@ -15,7 +15,11 @@ import {
   type SessionNotification,
 } from '@agentclientprotocol/sdk';
 import { HOST_EVENT_CHANNELS } from '@shared/host-events/contract';
-import { UCLAW_VIDEO_GENERATION_MAX_INPUT_IMAGE_BYTES } from '@shared/junfeiai-endpoints';
+import {
+  UCLAW_DEFAULT_FALLBACK_MODEL,
+  UCLAW_MANAGED_PROVIDER_ID,
+  UCLAW_VIDEO_GENERATION_MAX_INPUT_IMAGE_BYTES,
+} from '@shared/junfeiai-endpoints';
 import {
   addChatMediaImageToBudget,
   ACP_INLINE_IMAGE_MAX_DATA_URI_CHARS,
@@ -110,6 +114,7 @@ type AcpLivePromptContext = {
   dispatchedAtMs: number | null;
   firstTextAtMs: number | null;
   attempt: number;
+  retryStatusPending: boolean;
   retryReplacementPending: boolean;
   toolCallObserved: boolean;
   replayUnsafeObserved: boolean;
@@ -165,9 +170,10 @@ const ACP_CONNECTION_RETRY_MAX_DELAY_MS = 2_000;
 export const ACP_INITIALIZATION_TIMEOUT_MS = 45_000;
 const ACP_PROMPT_RETRY_BASE_DELAY_MS = 500;
 const ACP_PROMPT_RETRY_MAX_DELAY_MS = 4_000;
-const ACP_PROMPT_TRANSIENT_MAX_ATTEMPTS = 3;
+const ACP_PROMPT_TRANSIENT_MAX_ATTEMPTS = 5;
 const ACP_PROMPT_CONTEXT_RECOVERY_MAX_ATTEMPTS = 2;
 const ACP_RECOVERY_SUMMARY_MAX_CHARS = 12_000;
+const ACP_PROMPT_FALLBACK_MODEL_REF = `${UCLAW_MANAGED_PROVIDER_ID}/${UCLAW_DEFAULT_FALLBACK_MODEL}`;
 // OpenClaw replay is bounded to 1,000 messages. Leave room for more than one
 // notification per message while keeping the byte budget as the hard limit.
 const ACP_SESSION_LOAD_MAX_UPDATES = 4_096;
@@ -444,11 +450,14 @@ function hasOversizedInlineImage(value: unknown): boolean {
   return Object.values(record).some(hasOversizedInlineImage);
 }
 
-function isPromptRetryableUpstreamError(code: AcpChatErrorCode): boolean {
+function isPromptRetryableUpstreamError(failure: ReturnType<typeof normalizeAcpChatError>): boolean {
+  if (!failure.retryable) return false;
+  const { code } = failure;
   return code === 'RATE_LIMIT'
     || code === 'SERVICE_UNAVAILABLE'
     || code === 'TIMEOUT'
-    || code === 'NETWORK';
+    || code === 'NETWORK'
+    || code === 'MODEL_UNAVAILABLE';
 }
 
 function errorRecord(value: unknown): Record<string, unknown> | null {
@@ -529,6 +538,23 @@ function buildTransientRetryPrompt(replacingPartialText: boolean): ContentBlock[
       'Continue the latest unresolved user request already recorded in this session.',
       'The previous attempt stopped before any tool call or visible assistant reply.',
     ]).join('\n'),
+  }];
+}
+
+function buildSideEffectSafeContinuationPrompt(failure: ReturnType<typeof normalizeAcpChatError>): ContentBlock[] {
+  const errorLabel = failure.httpStatus != null
+    ? `${failure.code} (HTTP ${failure.httpStatus})`
+    : failure.code;
+  return [{
+    type: 'text',
+    text: [
+      '[UClaw automatic upstream recovery]',
+      `The previous attempt hit a retryable upstream/model availability error: ${errorLabel}.`,
+      'Continue the latest unresolved user request from the recorded session state.',
+      'Do not repeat completed tool actions, completed media generation jobs, file writes, or permission requests.',
+      'Reuse existing tool results, generated media, task IDs, and files already visible in the session when they are relevant.',
+      'If a required side effect is uncertain, inspect the recorded state first and then continue; do not restart the whole task.',
+    ].join('\n'),
   }];
 }
 
@@ -725,6 +751,57 @@ export class AcpChatService {
       });
     } catch (error) {
       logger.warn(`[acp-chat] trace failed: ${String(error)}`);
+    }
+  }
+
+  private async trySwitchPromptToFallbackModel(
+    connection: AcpConnection,
+    acpSessionId: string,
+    promptContext: AcpLivePromptContext,
+    failure: ReturnType<typeof normalizeAcpChatError>,
+  ): Promise<void> {
+    if (typeof connection.unstable_setSessionModel !== 'function') {
+      this.trace('session/prompt:fallback-model-unavailable', {
+        sessionKey: promptContext.sessionKey,
+        generation: promptContext.generation,
+        details: {
+          requestId: promptContext.userMessageId,
+          attempt: promptContext.attempt,
+          reason: failure.code,
+          modelId: ACP_PROMPT_FALLBACK_MODEL_REF,
+          cause: 'unsupported-acp-method',
+        },
+      });
+      return;
+    }
+    try {
+      await connection.unstable_setSessionModel({
+        sessionId: acpSessionId,
+        modelId: ACP_PROMPT_FALLBACK_MODEL_REF,
+      });
+      this.trace('session/prompt:fallback-model-set', {
+        sessionKey: promptContext.sessionKey,
+        generation: promptContext.generation,
+        details: {
+          requestId: promptContext.userMessageId,
+          attempt: promptContext.attempt,
+          reason: failure.code,
+          modelId: ACP_PROMPT_FALLBACK_MODEL_REF,
+        },
+      });
+    } catch (error) {
+      logger.warn(`[acp-chat] Could not switch to fallback model ${ACP_PROMPT_FALLBACK_MODEL_REF}: ${String(error)}`);
+      this.trace('session/prompt:fallback-model-failed', {
+        sessionKey: promptContext.sessionKey,
+        generation: promptContext.generation,
+        details: {
+          requestId: promptContext.userMessageId,
+          attempt: promptContext.attempt,
+          reason: failure.code,
+          modelId: ACP_PROMPT_FALLBACK_MODEL_REF,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
     }
   }
 
@@ -981,6 +1058,7 @@ export class AcpChatService {
       dispatchedAtMs: null,
       firstTextAtMs: null,
       attempt: 1,
+      retryStatusPending: false,
       retryReplacementPending: false,
       toolCallObserved: false,
       replayUnsafeObserved: false,
@@ -1136,13 +1214,13 @@ export class AcpChatService {
           const failure = normalizeAcpChatError(attemptError);
           const replaySafe = !promptContext.toolCallObserved && !promptContext.replayUnsafeObserved;
           const isContextRecovery = failure.code === 'CONTEXT_OVERFLOW';
-          const isTransientUpstream = isPromptRetryableUpstreamError(failure.code);
+          const isTransientUpstream = isPromptRetryableUpstreamError(failure);
           const maxAttempts = isContextRecovery
             ? ACP_PROMPT_CONTEXT_RECOVERY_MAX_ATTEMPTS
             : ACP_PROMPT_TRANSIENT_MAX_ATTEMPTS;
 
           const contextRecoverySafe = replaySafe && promptContext.firstTextAtMs == null;
-          if ((!replaySafe && isTransientUpstream) || (!contextRecoverySafe && isContextRecovery)) {
+          if (!contextRecoverySafe && isContextRecovery) {
             throw promptRecoveryError(
               promptContext.toolCallObserved
                 ? 'The upstream request failed after a tool started. UClaw did not replay the turn to avoid repeating side effects.'
@@ -1170,12 +1248,18 @@ export class AcpChatService {
           }
 
           if (isTransientUpstream && attempt < maxAttempts) {
-            const replacingPartialText = promptContext.firstTextAtMs != null;
+            const replacingPartialText = replaySafe && promptContext.firstTextAtMs != null;
             attempt += 1;
-            attemptPrompt = buildTransientRetryPrompt(replacingPartialText);
-            attemptMessageId = `${originalMessageId}:upstream-retry:${attempt}`;
+            promptContext.attempt = attempt;
+            attemptPrompt = replaySafe
+              ? buildTransientRetryPrompt(replacingPartialText)
+              : buildSideEffectSafeContinuationPrompt(failure);
+            attemptMessageId = replaySafe
+              ? `${originalMessageId}:upstream-retry:${attempt}`
+              : `${originalMessageId}:upstream-continuation:${attempt}`;
             const delayMs = promptRetryDelay(attempt);
-            promptContext.retryReplacementPending = true;
+            promptContext.retryStatusPending = true;
+            promptContext.retryReplacementPending = replacingPartialText;
             void this.emitSessionUpdate(retryingNotification(
               acpSessionId,
               userMessageId,
@@ -1187,11 +1271,19 @@ export class AcpChatService {
             this.trace('session/prompt:retry', {
               sessionKey: payload.sessionKey,
               generation,
-              details: { requestId: userMessageId, attempt, delayMs, reason: failure.code, recovery: 'continue-recorded-request' },
+              details: {
+                requestId: userMessageId,
+                attempt,
+                delayMs,
+                reason: failure.code,
+                recovery: replaySafe ? 'continue-recorded-request' : 'side-effect-safe-continuation',
+              },
             });
-            logger.warn(`[acp-chat] Replay-safe upstream retry ${attempt}/${maxAttempts} scheduled after ${delayMs}ms`);
+            logger.warn(`[acp-chat] Upstream recovery ${attempt}/${maxAttempts} scheduled after ${delayMs}ms`);
             const continueRetry = await waitForDelay(delayMs, promptContext.retryAbortController.signal);
             if (!continueRetry) break;
+            this.requireSameGatewayRuntime(runtimeIdentity);
+            await this.trySwitchPromptToFallbackModel(connection, acpSessionId, promptContext, failure);
             this.requireSameGatewayRuntime(runtimeIdentity);
             continue;
           }
@@ -1204,7 +1296,7 @@ export class AcpChatService {
           }
           if (isTransientUpstream && attempt >= maxAttempts) {
             throw promptRecoveryError(
-              `The upstream service remained unavailable after ${attempt} replay-safe attempts. Please try again later.`,
+              `The upstream service remained unavailable after ${attempt} automatic recovery attempts. Please try again later.`,
               attemptError,
             );
           }
@@ -1215,7 +1307,8 @@ export class AcpChatService {
           }
         }
       }
-      if (promptContext.retryReplacementPending) {
+      if (promptContext.retryStatusPending) {
+        promptContext.retryStatusPending = false;
         promptContext.retryReplacementPending = false;
         void this.emitSessionUpdate(retryCancelledNotification(acpSessionId, userMessageId));
       }
@@ -1245,6 +1338,8 @@ export class AcpChatService {
       return ok(generation);
     } catch (error) {
       const failure = normalizeAcpChatError(error);
+      promptContext.retryStatusPending = false;
+      promptContext.retryReplacementPending = false;
       const terminalFailure = promptContext.pendingTerminalFailure
         ?? terminalFailureNotification(acpSessionId, userMessageId, failure);
       promptContext.pendingTerminalFailure = null;
@@ -1301,7 +1396,8 @@ export class AcpChatService {
       const livePrompt = this.livePrompts.get(payload.sessionKey);
       if (livePrompt) {
         livePrompt.retryAbortController.abort();
-        if (livePrompt.retryReplacementPending) {
+        if (livePrompt.retryStatusPending) {
+          livePrompt.retryStatusPending = false;
           livePrompt.retryReplacementPending = false;
           void this.emitSessionUpdate(retryCancelledNotification(livePrompt.acpSessionId, livePrompt.userMessageId));
         }
@@ -2055,6 +2151,7 @@ export class AcpChatService {
     const visibleAgentText = livePrompt ? isVisibleAgentText(notification) : false;
     let retryReplacement: AcpTurnRetryReplacement | undefined;
     if (livePrompt && visibleAgentText) {
+      livePrompt.retryStatusPending = false;
       if (livePrompt.retryReplacementPending && livePrompt.attempt > 1) {
         retryReplacement = {
           userMessageId: livePrompt.userMessageId,

@@ -64,6 +64,7 @@ function createConnection() {
     loadSession: vi.fn().mockResolvedValue({}),
     prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
     cancel: vi.fn().mockResolvedValue(undefined),
+    unstable_setSessionModel: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -520,10 +521,7 @@ describe('AcpChatService', () => {
     [{ type: 'upstream_error', message: 'The upstream failed.' }, 'SERVICE_UNAVAILABLE'],
   ] as const)('retries Responses upstream failure shape %j', async (upstreamError, expectedCode) => {
     const connection = createConnection();
-    connection.prompt
-      .mockRejectedValueOnce(upstreamError)
-      .mockRejectedValueOnce(upstreamError)
-      .mockRejectedValueOnce(upstreamError);
+    connection.prompt.mockRejectedValue(upstreamError);
     const { service } = await createService(connection);
     await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
     vi.useFakeTimers();
@@ -532,14 +530,46 @@ describe('AcpChatService', () => {
       const result = service.sendPrompt({
         sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'continue', messageId: 'msg-responses-shape',
       });
-      await vi.advanceTimersByTimeAsync(500);
-      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(500 + 1_000 + 2_000 + 4_000);
       await expect(result).resolves.toMatchObject({
         success: false,
         errorCode: expectedCode,
         retryable: true,
       });
-      expect(connection.prompt).toHaveBeenCalledTimes(3);
+      expect(connection.prompt).toHaveBeenCalledTimes(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries a recoverable model availability error so runtime fallbacks can engage', async () => {
+    const connection = createConnection();
+    connection.prompt
+      .mockRejectedValueOnce({
+        status: 404,
+        message: 'Model "smart-latest" is not supported by any configured account in this group',
+      })
+      .mockResolvedValueOnce({ stopReason: 'end_turn' });
+    const { service } = await createService(connection);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    vi.useFakeTimers();
+
+    try {
+      const result = service.sendPrompt({
+        sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'continue', messageId: 'msg-model-fallback',
+      });
+      await vi.advanceTimersByTimeAsync(500);
+
+      await expect(result).resolves.toEqual({ success: true, generation: 1 });
+      expect(connection.prompt).toHaveBeenCalledTimes(2);
+      expect(connection.unstable_setSessionModel).toHaveBeenCalledWith({
+        sessionId: 'agent:pi:s1',
+        modelId: 'openai/deepseek-v4-flash',
+      });
+      expect(connection.prompt.mock.calls[1]?.[0]).toMatchObject({
+        messageId: 'msg-model-fallback:upstream-retry:2',
+        prompt: [{ type: 'text', text: expect.stringContaining('latest unresolved user request already recorded') }],
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -556,13 +586,13 @@ describe('AcpChatService', () => {
       const result = service.sendPrompt({
         sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'continue', messageId: 'msg-final-failure',
       });
-      await vi.advanceTimersByTimeAsync(500 + 1_000);
+      await vi.advanceTimersByTimeAsync(500 + 1_000 + 2_000 + 4_000);
       await expect(result).resolves.toMatchObject({
         success: false,
         errorCode: 'SERVICE_UNAVAILABLE',
         retryable: true,
       });
-      expect(connection.prompt).toHaveBeenCalledTimes(3);
+      expect(connection.prompt).toHaveBeenCalledTimes(5);
       expect(send).toHaveBeenCalledWith(HOST_EVENT_CHANNELS.chat.acpSessionUpdate, expect.objectContaining({
         notification: expect.objectContaining({
           sessionId: 'agent:pi:s1',
@@ -612,7 +642,7 @@ describe('AcpChatService', () => {
               sessionUpdate: 'uclaw_turn_retrying',
               userMessageId: 'msg-partial-retry',
               attempt: 2,
-              maxAttempts: 3,
+              maxAttempts: 5,
             }),
           }),
         }),
@@ -692,39 +722,78 @@ describe('AcpChatService', () => {
     }
   });
 
-  it('does not replay an upstream 503 after a tool call has started', async () => {
+  it('continues an upstream 503 after a tool call without replacing prior output', async () => {
     const connection = createConnection();
     const pendingPrompt = createDeferred<unknown>();
-    connection.prompt.mockReturnValueOnce(pendingPrompt.promise);
-    const { service } = await createService(connection);
+    const continuationPrompt = createDeferred<unknown>();
+    connection.prompt
+      .mockReturnValueOnce(pendingPrompt.promise)
+      .mockReturnValueOnce(continuationPrompt.promise);
+    const { service, send } = await createService(connection);
     await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    vi.useFakeTimers();
 
-    const result = service.sendPrompt({
-      sessionKey: 'agent:pi:s1',
-      cwd: '/repo',
-      message: 'edit the workbook',
-      messageId: 'msg-post-tool',
-    });
-    await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(1));
-    await service.client.sessionUpdate({
-      sessionId: 'agent:pi:s1',
-      update: {
-        sessionUpdate: 'tool_call',
-        toolCallId: 'tool-side-effect',
-        title: 'Write workbook',
-        status: 'in_progress',
-      },
-    } as never);
-    pendingPrompt.reject({ status: 503, type: 'upstream_error', message: 'Upstream service temporarily unavailable.' });
+    try {
+      const result = service.sendPrompt({
+        sessionKey: 'agent:pi:s1',
+        cwd: '/repo',
+        message: 'edit the workbook',
+        messageId: 'msg-post-tool',
+      });
+      await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(1));
+      await service.client.sessionUpdate({
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tool-side-effect',
+          title: 'Write workbook',
+          status: 'in_progress',
+        },
+      } as never);
+      pendingPrompt.reject({ status: 503, type: 'upstream_error', message: 'Upstream service temporarily unavailable.' });
+      await vi.waitFor(() => expect(send).toHaveBeenCalledWith(
+        HOST_EVENT_CHANNELS.chat.acpSessionUpdate,
+        expect.objectContaining({
+          notification: expect.objectContaining({
+            update: expect.objectContaining({
+              sessionUpdate: 'uclaw_turn_retrying',
+              userMessageId: 'msg-post-tool',
+              attempt: 2,
+              maxAttempts: 5,
+            }),
+          }),
+        }),
+      ));
 
-    await expect(result).resolves.toMatchObject({
-      success: false,
-      error: expect.stringContaining('did not replay the turn'),
-      errorCode: 'SERVICE_UNAVAILABLE',
-      retryable: true,
-      httpStatus: 503,
-    });
-    expect(connection.prompt).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(500);
+      await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(2));
+      expect(connection.unstable_setSessionModel).toHaveBeenCalledWith({
+        sessionId: 'agent:pi:s1',
+        modelId: 'openai/deepseek-v4-flash',
+      });
+      expect(connection.prompt.mock.calls[1]?.[0]).toMatchObject({
+        messageId: 'msg-post-tool:upstream-continuation:2',
+        prompt: [{ type: 'text', text: expect.stringContaining('Do not repeat completed tool actions') }],
+      });
+
+      await service.client.sessionUpdate({
+        sessionId: 'agent:pi:s1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          messageId: 'post-tool-assistant',
+          content: { type: 'text', text: 'Workbook updated.' },
+        },
+      } as never);
+      expect(send).not.toHaveBeenCalledWith(
+        HOST_EVENT_CHANNELS.chat.acpSessionUpdate,
+        expect.objectContaining({ retryReplacement: expect.anything() }),
+      );
+
+      continuationPrompt.resolve({ stopReason: 'end_turn' });
+      await expect(result).resolves.toEqual({ success: true, generation: 1 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('settles a hung prompt from its terminal event and completes a replay-safe retry', async () => {
