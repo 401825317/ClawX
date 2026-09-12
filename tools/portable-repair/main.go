@@ -20,16 +20,17 @@ import (
 )
 
 const (
-	runtimeDirName       = "UClawRuntime"
-	updateTaskPrefix     = "portable-update-"
-	updateTaskSuffix     = ".json"
-	logFilePrefix        = "clawx-"
-	maxReadBytes         = 512 * 1024
-	maxLogFiles          = 12
-	maxLogTailBytes      = 256 * 1024
-	repairReportFileName = "UClawRepair-report.json"
-	startupProbeWait     = 8 * time.Second
-	startupProbeInterval = 250 * time.Millisecond
+	runtimeDirName              = "UClawRuntime"
+	updateTaskPrefix            = "portable-update-"
+	updateTaskSuffix            = ".json"
+	logFilePrefix               = "clawx-"
+	maxReadBytes                = 512 * 1024
+	maxLogFiles                 = 12
+	maxLogTailBytes             = 256 * 1024
+	repairReportFileName        = "UClawRepair-report.json"
+	startupProbeWait            = 8 * time.Second
+	startupProbeInterval        = 250 * time.Millisecond
+	taskkillAlreadyGoneExitCode = 128
 )
 
 type updateTask struct {
@@ -433,14 +434,27 @@ func findProcesses(root string) []processInfo {
 }
 
 func killUClawProcesses(processes []processInfo) (int, error) {
+	return killUClawProcessesWith(processes, func(pid int) error {
+		cmd := exec.Command("taskkill.exe", "/PID", strconv.Itoa(pid), "/T", "/F")
+		return cmd.Run()
+	})
+}
+
+func killUClawProcessesWith(processes []processInfo, runTaskkill func(pid int) error) (int, error) {
 	killed := 0
 	var firstErr error
 	for _, process := range processes {
 		if process.PID <= 0 {
 			continue
 		}
-		cmd := exec.Command("taskkill.exe", "/PID", strconv.Itoa(process.PID), "/T", "/F")
-		if err := cmd.Run(); err != nil {
+		if err := runTaskkill(process.PID); err != nil {
+			// taskkill /T can terminate a child while killing its parent. A
+			// subsequent taskkill for that child returns 128 even though the
+			// process tree has already been stopped successfully.
+			if isTaskkillAlreadyGone(err) {
+				killed++
+				continue
+			}
 			if firstErr == nil {
 				firstErr = fmt.Errorf("%s(%d): %w", process.Name, process.PID, err)
 			}
@@ -449,6 +463,13 @@ func killUClawProcesses(processes []processInfo) (int, error) {
 		killed++
 	}
 	return killed, firstErr
+}
+
+func isTaskkillAlreadyGone(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) &&
+		exitErr.ProcessState != nil &&
+		exitErr.ProcessState.ExitCode() == taskkillAlreadyGoneExitCode
 }
 
 func writeReport(filePath string, r report) error {

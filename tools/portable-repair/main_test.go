@@ -2,8 +2,10 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -89,6 +91,60 @@ func TestApplySafeRepairsSkipsNonPortableRoot(t *testing.T) {
 	if r.RestartAttempted {
 		t.Fatal("non-portable repair must not restart the app")
 	}
+}
+
+func TestKillUClawProcessesTreatsAlreadyGoneChildrenAsSuccess(t *testing.T) {
+	exitErr := runPortableRepairTestProcess(t, 128)
+	killed, err := killUClawProcessesWith([]processInfo{
+		{Name: "UClaw.exe", PID: 100},
+		{Name: "node.exe", PID: 101},
+	}, func(pid int) error {
+		return exitErr
+	})
+	if err != nil {
+		t.Fatalf("expected an already-gone process to be treated as success, got %v", err)
+	}
+	if killed != 2 {
+		t.Fatalf("expected both processes to count as stopped, got %d", killed)
+	}
+}
+
+func TestKillUClawProcessesKeepsUnexpectedErrors(t *testing.T) {
+	exitErr := runPortableRepairTestProcess(t, 127)
+	killed, err := killUClawProcessesWith([]processInfo{
+		{Name: "UClaw.exe", PID: 100},
+	}, func(pid int) error {
+		return exitErr
+	})
+	if err == nil {
+		t.Fatal("expected an unexpected taskkill exit code to remain an error")
+	}
+	if killed != 0 {
+		t.Fatalf("unexpected taskkill failure must not count as stopped, got %d", killed)
+	}
+}
+
+func runPortableRepairTestProcess(t *testing.T, exitCode int) error {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=TestPortableRepairExitCodeHelper")
+	cmd.Env = append(os.Environ(), "PORTABLE_REPAIR_TEST_EXIT_CODE="+strconv.Itoa(exitCode))
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected helper process to exit with code %d", exitCode)
+	}
+	return err
+}
+
+func TestPortableRepairExitCodeHelper(t *testing.T) {
+	raw := os.Getenv("PORTABLE_REPAIR_TEST_EXIT_CODE")
+	if raw == "" {
+		return
+	}
+	exitCode, err := strconv.Atoi(raw)
+	if err != nil {
+		t.Fatalf("invalid test exit code: %v", err)
+	}
+	os.Exit(exitCode)
 }
 
 func TestSanitizedReportDoesNotMutateOriginalPaths(t *testing.T) {
