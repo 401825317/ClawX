@@ -710,6 +710,7 @@ async function validatePackagedContents(installerRoot, sourcePackage, sourceComm
     'resources/bin/node.exe',
     'resources/bin/uv.exe',
     'resources/bin/agent-browser.exe',
+    'resources/bin/UClawRepair.exe',
     'resources/cli/openclaw.cmd',
     'resources/openclaw/openclaw.mjs',
     'resources/openclaw/package.json',

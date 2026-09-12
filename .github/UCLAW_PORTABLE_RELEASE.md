@@ -2,7 +2,7 @@
 
 正式候选使用 `.github/workflows/uclaw-portable-production.yml`。GitHub Actions 只在托管 Runner 上构建 Windows x64 与 macOS x64/arm64 USB ZIP，校验精确版本、commit、build ID、size 和 SHA-512，并上传不可变候选制品。
 
-手动 dispatch 使用单一 `operation` 选择运行模式。`build_candidates` 只构建未签名候选包；`verify_oss_upload` 只在隔离前缀上传、回读并删除一个随机小对象，不构建候选、不访问数据库；`stage_disabled` 会先通过同一 OSS 探针，再进入受 GitHub Environment `uclaw-disabled-stage` 保护的签名与发布 job：Windows 对 USB 包内的 `UClaw.exe` 和更新助手执行 SignPath 签名，macOS 以 Developer ID 签名并公证 App；两端重封 ZIP、刷新 size/SHA-512/JSON 后才上传 OSS、写入 zz-cn 的禁用记录并保存回执。仅发布 Windows 时使用 `stage_disabled_windows`：它仍需要同一受保护环境和 SignPath 验证，但只上传 Windows ZIP/JSON 并写入一条 `win/x64/portable_zip` 的禁用记录，不依赖 macOS 证书或公证；不创建 Git 标签、GitHub Release 或公开更新。
+手动 dispatch 使用单一 `operation` 选择运行模式。`build_candidates` 只构建未签名候选包；`verify_oss_upload` 只在隔离前缀上传、回读并删除一个随机小对象，不构建候选、不访问数据库；`stage_disabled` 会先通过同一 OSS 探针，再进入受 GitHub Environment `uclaw-disabled-stage` 保护的签名与发布 job：Windows 对 USB 包内的 `UClaw.exe`、修复小助手和更新助手执行 SignPath 签名，macOS 以 Developer ID 签名并公证 App；两端重封 ZIP、刷新 size/SHA-512/JSON 后才上传 OSS、写入 zz-cn 的禁用记录并保存回执。仅发布 Windows 时使用 `stage_disabled_windows`：它仍需要同一受保护环境和 SignPath 验证，但只上传 Windows ZIP/JSON 并写入一条 `win/x64/portable_zip` 的禁用记录，不依赖 macOS 证书或公证；不创建 Git 标签、GitHub Release 或公开更新。
 
 所有新记录固定为 `enabled=false`，现有公共更新 Feed 必须保持不变；启用候选属于独立审批操作。本机 DPAPI 发布器保留为应急路径，但不再是常规 CI 发布的唯一入口。
 

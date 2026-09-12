@@ -32,6 +32,7 @@ const WINDOWS_PE_FILES = [
   'resources/bin/node.exe',
   'resources/bin/uv.exe',
   'resources/bin/agent-browser.exe',
+  'resources/bin/UClawRepair.exe',
 ];
 const REQUIRED_FILES = [
   ...WINDOWS_PE_FILES,

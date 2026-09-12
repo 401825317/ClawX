@@ -30,7 +30,7 @@ param(
   [switch]$OverwriteExistingOssObjects,
 
   # Emergency compatibility only. The default remains to require Valid
-  # Authenticode signatures for the two Windows portable executables.
+  # Authenticode signatures for the three Windows portable executables.
   [switch]$AllowUnsignedWindowsCandidate,
 
   [switch]$ValidateOnly
@@ -195,6 +195,7 @@ function Assert-SignedWindowsPortableCandidate {
     Expand-Archive -LiteralPath $ZipPath -DestinationPath $temporaryRoot -Force
     $executables = @(
       (Join-Path $temporaryRoot 'UClaw.exe'),
+      (Join-Path $temporaryRoot 'resources/bin/UClawRepair.exe'),
       (Join-Path $temporaryRoot 'resources/resources/updater/win32-x64/uclaw-portable-updater.exe')
     )
     foreach ($executable in $executables) {

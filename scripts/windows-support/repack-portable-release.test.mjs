@@ -11,6 +11,7 @@ async function writeFixture(directory) {
   zip.file('portable.flag', 'portable\n');
   zip.folder('UClawData/updates');
   zip.file('UClaw.exe', 'unsigned-main');
+  zip.file('resources/bin/UClawRepair.exe', 'unsigned-repair');
   zip.file('resources/resources/updater/win32-x64/uclaw-portable-updater.exe', 'unsigned-updater');
   const archive = path.join(directory, 'UClaw.zip');
   await writeFile(archive, await zip.generateAsync({ type: 'nodebuffer' }));
@@ -21,13 +22,16 @@ test('repack preserves portable directories and replaces only approved entries',
   const directory = await mkdtemp(path.join(os.tmpdir(), 'uclaw-repack-'));
   const archive = await writeFixture(directory);
   const main = path.join(directory, 'main.exe');
+  const repair = path.join(directory, 'repair.exe');
   const updater = path.join(directory, 'updater.exe');
   await writeFile(main, 'signed-main');
+  await writeFile(repair, 'signed-repair');
   await writeFile(updater, 'signed-updater');
   await repackPortableRelease({
     zip: archive,
     replacements: new Map([
       ['UClaw.exe', main],
+      ['resources/bin/UClawRepair.exe', repair],
       ['resources/resources/updater/win32-x64/uclaw-portable-updater.exe', updater],
     ]),
   });
@@ -36,6 +40,7 @@ test('repack preserves portable directories and replaces only approved entries',
   assert.ok(result.files['UClawData/']);
   assert.ok(result.files['UClawData/updates/']);
   assert.equal(await result.file('UClaw.exe').async('text'), 'signed-main');
+  assert.equal(await result.file('resources/bin/UClawRepair.exe').async('text'), 'signed-repair');
   assert.equal(await result.file('resources/resources/updater/win32-x64/uclaw-portable-updater.exe').async('text'), 'signed-updater');
 });
 
