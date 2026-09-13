@@ -43,6 +43,7 @@ requiredTests:
   - tests/e2e/chat-acp-inline-timeline.spec.ts
 acceptance:
   - HTTP 429, retryable 5xx/timeout failures, and interrupted upstream connections can retry after partial text only when no replay-unsafe event has occurred.
+  - Resolved HTTP 200 failure envelopes and replay-safe empty ACP completions enter the same bounded recovery loop instead of returning a false success.
   - Main marks the first visible replacement event with its owning user turn and attempt.
   - Renderer applies replacement cleanup and the first new text event atomically.
   - Retry status and interrupted content survive ordinary in-memory navigation.

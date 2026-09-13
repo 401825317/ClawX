@@ -62,10 +62,28 @@ function createConnection() {
     initialize: vi.fn().mockResolvedValue({ protocolVersion: 1, agentCapabilities: { loadSession: true } }),
     newSession: vi.fn().mockResolvedValue({ sessionId: 'acp-session-1' }),
     loadSession: vi.fn().mockResolvedValue({}),
-    prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
+    prompt: vi.fn().mockResolvedValue({
+      stopReason: 'end_turn',
+      content: [{ type: 'text', text: 'mock assistant response' }],
+    }),
     cancel: vi.fn().mockResolvedValue(undefined),
     unstable_setSessionModel: vi.fn().mockResolvedValue(undefined),
   };
+}
+
+async function resolvePromptWithText(
+  service: { client: { sessionUpdate: (notification: unknown) => Promise<void> } },
+  text = 'ok',
+  sessionId = 'agent:pi:s1',
+) {
+  await service.client.sessionUpdate({
+    sessionId,
+    update: {
+      sessionUpdate: 'agent_message_chunk',
+      messageId: 'assistant-message',
+      content: { type: 'text', text },
+    },
+  });
 }
 
 function createPassthroughAccessRegistry() {
@@ -376,15 +394,22 @@ describe('AcpChatService', () => {
   });
 
   it('routes fresh-session prompts through the ACP session id returned by session/new', async () => {
-    const { service, connection } = await createService();
+    const connection = createConnection();
+    const prompt = createDeferred<{ stopReason: string }>();
+    connection.prompt.mockReturnValueOnce(prompt.promise);
+    const { service } = await createService(connection);
 
     await service.loadSession({ sessionKey: 'agent:pi:session-123', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true });
-    await expect(service.sendPrompt({
+    const promptResult = service.sendPrompt({
       sessionKey: 'agent:pi:session-123',
       cwd: '/repo',
       message: 'hello',
       messageId: 'msg-1',
-    })).resolves.toEqual({ success: true, generation: 1 });
+    });
+    await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(1));
+    await resolvePromptWithText(service, 'hello', 'acp-session-1');
+    prompt.resolve({ stopReason: 'end_turn' });
+    await expect(promptResult).resolves.toEqual({ success: true, generation: 1 });
 
     expect(connection.prompt).toHaveBeenCalledWith({
       sessionId: 'acp-session-1',
@@ -395,23 +420,30 @@ describe('AcpChatService', () => {
   });
 
   it('queues image composer options without changing the ACP prompt text', async () => {
+    const connection = createConnection();
+    const prompt = createDeferred<{ stopReason: string }>();
+    connection.prompt.mockReturnValueOnce(prompt.promise);
     const turnImagePreferenceStore = {
       enqueue: vi.fn().mockResolvedValue({ id: 'image-pref-1' }),
       discard: vi.fn().mockResolvedValue(undefined),
     };
-    const { service, connection } = await createService(
-      createConnection(),
+    const { service } = await createService(
+      connection,
       createPassthroughAccessRegistry(),
       turnImagePreferenceStore,
     );
 
     await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
-    await expect(service.sendPrompt({
+    const promptResult = service.sendPrompt({
       sessionKey: 'agent:pi:s1',
       cwd: '/repo',
       message: 'Create a blue coffee cup on a white table.',
       imageOptions: { size: '3840x2160', quality: 'medium' },
-    })).resolves.toEqual({ success: true, generation: 1 });
+    });
+    await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(1));
+    await resolvePromptWithText(service, 'Image request received.');
+    prompt.resolve({ stopReason: 'end_turn' });
+    await expect(promptResult).resolves.toEqual({ success: true, generation: 1 });
 
     expect(turnImagePreferenceStore.enqueue).toHaveBeenCalledWith({
       sessionKey: 'agent:pi:s1',
@@ -476,7 +508,10 @@ describe('AcpChatService', () => {
     connection.prompt
       .mockRejectedValueOnce({ status: 503, type: 'service_unavailable_error', message: 'Our servers are currently overloaded.' })
       .mockRejectedValueOnce({ status: 503, type: 'upstream_error', message: 'Upstream service temporarily unavailable.' })
-      .mockResolvedValueOnce({ stopReason: 'end_turn' });
+      .mockResolvedValueOnce({
+        stopReason: 'end_turn',
+        content: [{ type: 'text', text: 'mock assistant response' }],
+      });
     const { service } = await createService(connection);
     await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
     vi.useFakeTimers();
@@ -549,7 +584,10 @@ describe('AcpChatService', () => {
         status: 404,
         message: 'Model "smart-latest" is not supported by any configured account in this group',
       })
-      .mockResolvedValueOnce({ stopReason: 'end_turn' });
+      .mockResolvedValueOnce({
+        stopReason: 'end_turn',
+        content: [{ type: 'text', text: 'mock assistant response' }],
+      });
     const { service } = await createService(connection);
     await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
     vi.useFakeTimers();
@@ -573,6 +611,130 @@ describe('AcpChatService', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it.each([
+    { status: 'failed', error: { message: 'upstream service unavailable' } },
+    { success: false, error: { message: 'provider temporarily unavailable' } },
+    { stopReason: 'error', errorMessage: 'upstream service unavailable' },
+  ] as const)('recovers a resolved HTTP 200 failure envelope %j', async (failedResult) => {
+    const connection = createConnection();
+    connection.prompt
+      .mockResolvedValueOnce(failedResult as never)
+      .mockResolvedValueOnce({
+        stopReason: 'end_turn',
+        content: [{ type: 'text', text: 'fallback response' }],
+      });
+    const { service, connection: activeConnection } = await createService(connection);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    vi.useFakeTimers();
+
+    try {
+      const result = service.sendPrompt({
+        sessionKey: 'agent:pi:s1',
+        cwd: '/repo',
+        message: 'continue',
+        messageId: 'msg-http-200-failure',
+      });
+      await vi.advanceTimersByTimeAsync(500);
+
+      await expect(result).resolves.toEqual({ success: true, generation: 1 });
+      expect(activeConnection.prompt).toHaveBeenCalledTimes(2);
+      expect(activeConnection.unstable_setSessionModel).toHaveBeenCalledWith({
+        sessionId: 'agent:pi:s1',
+        modelId: 'openai/deepseek-v4-flash',
+      });
+      expect(activeConnection.prompt.mock.calls[1]?.[0]).toMatchObject({
+        messageId: 'msg-http-200-failure:upstream-retry:2',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries a resolved end_turn with no output instead of returning a false success', async () => {
+    const connection = createConnection();
+    connection.prompt
+      .mockResolvedValueOnce({ stopReason: 'end_turn' })
+      .mockResolvedValueOnce({
+        stopReason: 'end_turn',
+        content: [{ type: 'text', text: 'recovered response' }],
+      });
+    const { service } = await createService(connection);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    vi.useFakeTimers();
+
+    try {
+      const result = service.sendPrompt({
+        sessionKey: 'agent:pi:s1',
+        cwd: '/repo',
+        message: 'continue',
+        messageId: 'msg-empty-200',
+      });
+      await vi.advanceTimersByTimeAsync(500);
+
+      await expect(result).resolves.toEqual({ success: true, generation: 1 });
+      expect(connection.prompt).toHaveBeenCalledTimes(2);
+      expect(connection.prompt.mock.calls[1]?.[0]).toMatchObject({
+        messageId: 'msg-empty-200:upstream-retry:2',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not classify a tool-only ACP turn as an empty reply', async () => {
+    const connection = createConnection();
+    const prompt = createDeferred<{ stopReason: string }>();
+    connection.prompt.mockReturnValueOnce(prompt.promise);
+    const { service } = await createService(connection);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+
+    const result = service.sendPrompt({
+      sessionKey: 'agent:pi:s1',
+      cwd: '/repo',
+      message: 'inspect the workbook',
+      messageId: 'msg-tool-only',
+    });
+    await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(1));
+    await service.client.sessionUpdate({
+      sessionId: 'agent:pi:s1',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-only',
+        title: 'Inspect workbook',
+        status: 'completed',
+      },
+    } as never);
+    prompt.resolve({ stopReason: 'end_turn' });
+
+    await expect(result).resolves.toEqual({ success: true, generation: 1 });
+    expect(connection.prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry a prompt cancelled by the user', async () => {
+    const connection = createConnection();
+    const prompt = createDeferred<{ stopReason: string }>();
+    connection.prompt.mockReturnValueOnce(prompt.promise);
+    const { service } = await createService(connection);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+
+    const result = service.sendPrompt({
+      sessionKey: 'agent:pi:s1',
+      cwd: '/repo',
+      message: 'stop this',
+      messageId: 'msg-user-cancel',
+    });
+    await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(1));
+    await expect(service.cancelSession({ sessionKey: 'agent:pi:s1' })).resolves.toEqual({
+      success: true,
+      generation: 1,
+    });
+    prompt.resolve({ stopReason: 'cancelled' });
+
+    await expect(result).resolves.toEqual({ success: true, generation: 1 });
+    expect(connection.prompt).toHaveBeenCalledTimes(1);
+    expect(connection.unstable_setSessionModel).not.toHaveBeenCalled();
   });
 
   it('emits one terminal failure reply when bounded upstream retries are exhausted', async () => {
@@ -801,7 +963,10 @@ describe('AcpChatService', () => {
     const firstPrompt = createDeferred<unknown>();
     connection.prompt
       .mockReturnValueOnce(firstPrompt.promise)
-      .mockResolvedValueOnce({ stopReason: 'end_turn' });
+      .mockResolvedValueOnce({
+        stopReason: 'end_turn',
+        content: [{ type: 'text', text: 'mock assistant response' }],
+      });
     const { service, send } = await createService(connection);
     await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
     vi.useFakeTimers();
@@ -846,7 +1011,10 @@ describe('AcpChatService', () => {
         message: 'Context is too large and auto-compaction could not recover this turn.',
         data: { recoverySummary: structuredSummary },
       })
-      .mockResolvedValueOnce({ stopReason: 'end_turn' });
+      .mockResolvedValueOnce({
+        stopReason: 'end_turn',
+        content: [{ type: 'text', text: 'mock assistant response' }],
+      });
     const { service } = await createService(connection);
     await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
     vi.useFakeTimers();
@@ -875,7 +1043,10 @@ describe('AcpChatService', () => {
     const connection = createConnection();
     connection.prompt
       .mockRejectedValueOnce({ message: 'Context limit exceeded; compaction failed.' })
-      .mockResolvedValueOnce({ stopReason: 'end_turn' });
+      .mockResolvedValueOnce({
+        stopReason: 'end_turn',
+        content: [{ type: 'text', text: 'mock assistant response' }],
+      });
     const { service } = await createService(connection);
     await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
     vi.useFakeTimers();
@@ -957,7 +1128,7 @@ describe('AcpChatService', () => {
     );
 
     await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
-    await expect(service.sendPrompt({
+    const prompt = service.sendPrompt({
       sessionKey: 'agent:pi:s1',
       cwd: '/repo',
       message: 'Create a six-second product video.',
@@ -966,7 +1137,10 @@ describe('AcpChatService', () => {
         resolution: '480P',
         durationSeconds: 6,
       },
-    })).resolves.toEqual({ success: true, generation: 1 });
+    });
+    await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(1));
+    await resolvePromptWithText(service, 'Video request received.');
+    await expect(prompt).resolves.toEqual({ success: true, generation: 1 });
 
     expect(turnVideoPreferenceStore.enqueue).toHaveBeenCalledWith({
       sessionKey: 'agent:pi:s1',
@@ -1000,7 +1174,7 @@ describe('AcpChatService', () => {
       );
       await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
 
-      await expect(service.sendPrompt({
+      const prompt = service.sendPrompt({
         sessionKey: 'agent:pi:s1',
         cwd: '/repo',
         message: 'Animate this product image.',
@@ -1011,7 +1185,10 @@ describe('AcpChatService', () => {
           fileName: 'product.png',
           mimeType: 'image/png',
         }],
-      })).resolves.toEqual({ success: true, generation: 1 });
+      });
+      await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(1));
+      await resolvePromptWithText(service, 'Video request received.');
+      await expect(prompt).resolves.toEqual({ success: true, generation: 1 });
 
       const enqueueInput = turnVideoPreferenceStore.enqueue.mock.calls[0]?.[0] as {
         referenceImage: { buffer: Buffer; fileName: string; mimeType: string };
@@ -2200,11 +2377,14 @@ describe('AcpChatService', () => {
         workspaceRoot: '~/.openclaw/workspace',
         cwd: '~/.openclaw/workspace',
       })).resolves.toEqual({ success: true, generation: 1 });
-      await expect(service.sendPrompt({
+      const prompt = service.sendPrompt({
         sessionKey: 'agent:pi:portable',
         cwd: '~/.openclaw/workspace',
         message: 'hello',
-      })).resolves.toEqual({ success: true, generation: 1 });
+      });
+      await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(1));
+      await resolvePromptWithText(service, 'hello', 'agent:pi:portable');
+      await expect(prompt).resolves.toEqual({ success: true, generation: 1 });
 
       expect(connection.loadSession).toHaveBeenCalledWith({
         sessionId: 'agent:pi:portable',
@@ -2432,7 +2612,7 @@ describe('AcpChatService', () => {
       const { service, connection } = await createService();
 
       await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
-      await expect(service.sendPrompt({
+      const prompt = service.sendPrompt({
         sessionKey: 'agent:pi:s1',
         cwd: '/repo',
         message: 'Inspect attachments',
@@ -2441,7 +2621,10 @@ describe('AcpChatService', () => {
           { filePath: imagePath, stagingId: 'staged-image', mimeType: 'image/png', fileName: 'image.png' },
           { filePath, stagingId: 'staged-notes', mimeType: 'text/plain', fileName: 'notes.txt' },
         ],
-      })).resolves.toEqual({ success: true, generation: 1 });
+      });
+      await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(1));
+      await resolvePromptWithText(service, 'Attachments inspected.');
+      await expect(prompt).resolves.toEqual({ success: true, generation: 1 });
 
       expect(connection.prompt).toHaveBeenCalledWith({
         sessionId: 'agent:pi:s1',

@@ -4,8 +4,19 @@ import {
   readFileSync,
   statSync,
 } from 'node:fs';
-import { cp, mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import {
+  copyFile,
+  lstat,
+  mkdir,
+  readdir,
+  readlink,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import type { PortableOpenClawRuntimePreparationProgress } from '@shared/portable-openclaw-runtime';
 
 const CACHE_SCHEMA = 'uclaw.portable-openclaw-runtime/v1';
 const CACHE_MARKER_FILE = '.uclaw-openclaw-runtime.json';
@@ -32,6 +43,7 @@ export type PreparePortableOpenClawRuntimeInput = {
   profileDir: string;
   resourcesDir: string;
   cacheRootDir?: string;
+  onProgress?: (progress: PortableOpenClawRuntimePreparationProgress) => void;
 };
 
 export type PortableOpenClawRuntimeResult = {
@@ -44,6 +56,9 @@ let configuredRuntime:
   | { input: PreparePortableOpenClawRuntimeInput; result: PortableOpenClawRuntimeResult; prepared: boolean }
   | null = null;
 let configuredPreparation: Promise<PortableOpenClawRuntimeResult> | null = null;
+const configuredPreparationProgressListeners = new Set<
+  (progress: PortableOpenClawRuntimePreparationProgress) => void
+>();
 
 function readJson(path: string): Record<string, unknown> | null {
   try {
@@ -168,6 +183,138 @@ function isCompleteRuntime(runtimeDir: string, cacheKey: string): boolean {
   return marker?.schema === CACHE_SCHEMA && marker.cacheKey === cacheKey;
 }
 
+type RuntimeCopyEntry = {
+  sourcePath: string;
+  relativePath: string;
+  sizeBytes: number;
+};
+
+type RuntimeCopyPlan = {
+  entries: RuntimeCopyEntry[];
+  totalBytes: number;
+};
+
+function normalizeRelativeRuntimePath(path: string): string {
+  return path.split(sep).join('/');
+}
+
+function emitProgress(
+  input: PreparePortableOpenClawRuntimeInput,
+  progress: PortableOpenClawRuntimePreparationProgress,
+): void {
+  try {
+    input.onProgress?.(progress);
+  } catch {
+    // Progress reporting must never prevent runtime preparation or cleanup.
+  }
+}
+
+function emitConfiguredPreparationProgress(
+  progress: PortableOpenClawRuntimePreparationProgress,
+): void {
+  for (const listener of configuredPreparationProgressListeners) {
+    try {
+      listener(progress);
+    } catch {
+      // One observer must not prevent other observers or the preparation task.
+    }
+  }
+}
+
+function copyPercent(copiedBytes: number, totalBytes: number): number | undefined {
+  if (totalBytes <= 0) return undefined;
+  return Math.max(5, Math.min(95, 5 + Math.floor(copiedBytes / totalBytes * 90)));
+}
+
+async function buildRuntimeCopyPlan(sourceDir: string): Promise<RuntimeCopyPlan> {
+  const entries: RuntimeCopyEntry[] = [];
+  let totalBytes = 0;
+
+  async function visit(dir: string, relativeDir: string): Promise<void> {
+    const dirEntries = await readdir(dir, { withFileTypes: true });
+    for (const entry of dirEntries) {
+      const sourcePath = join(dir, entry.name);
+      const relativePath = relativeDir ? join(relativeDir, entry.name) : entry.name;
+      const resolved = await stat(sourcePath);
+      if (resolved.isDirectory()) {
+        await visit(sourcePath, relativePath);
+        continue;
+      }
+
+      if (!resolved.isFile()) continue;
+      const sizeBytes = resolved.size;
+      entries.push({
+        sourcePath,
+        relativePath: normalizeRelativeRuntimePath(relativePath),
+        sizeBytes,
+      });
+      totalBytes += sizeBytes;
+    }
+  }
+
+  await visit(sourceDir, '');
+  return { entries, totalBytes };
+}
+
+async function copyRuntimeEntry(sourcePath: string, targetPath: string): Promise<void> {
+  const sourceStat = await lstat(sourcePath);
+  await mkdir(dirname(targetPath), { recursive: true });
+  if (sourceStat.isSymbolicLink()) {
+    const linkTarget = await readlink(sourcePath);
+    await copyFile(resolve(dirname(sourcePath), linkTarget), targetPath);
+    return;
+  }
+  await copyFile(sourcePath, targetPath);
+}
+
+async function copyRuntimeWithProgress(
+  input: PreparePortableOpenClawRuntimeInput,
+  stagingDir: string,
+): Promise<void> {
+  emitProgress(input, { phase: 'scanning', percent: 4 });
+  const plan = await buildRuntimeCopyPlan(input.sourceDir);
+  emitProgress(input, {
+    phase: 'copying',
+    percent: plan.totalBytes > 0 ? 5 : undefined,
+    copiedBytes: 0,
+    totalBytes: plan.totalBytes,
+    copiedFiles: 0,
+    totalFiles: plan.entries.length,
+  });
+
+  let copiedBytes = 0;
+  let copiedFiles = 0;
+  let lastEmittedAt = 0;
+  let lastEmittedPercent = -1;
+
+  for (const entry of plan.entries) {
+    await copyRuntimeEntry(entry.sourcePath, join(stagingDir, entry.relativePath));
+    copiedBytes += entry.sizeBytes;
+    copiedFiles += 1;
+
+    const percent = copyPercent(copiedBytes, plan.totalBytes);
+    const now = Date.now();
+    if (
+      copiedFiles === plan.entries.length
+      || copiedFiles === 1
+      || percent !== lastEmittedPercent
+      || now - lastEmittedAt >= 250
+    ) {
+      emitProgress(input, {
+        phase: 'copying',
+        percent,
+        copiedBytes,
+        totalBytes: plan.totalBytes,
+        copiedFiles,
+        totalFiles: plan.entries.length,
+        currentFile: entry.relativePath,
+      });
+      lastEmittedAt = now;
+      lastEmittedPercent = percent ?? lastEmittedPercent;
+    }
+  }
+}
+
 /**
  * Copy the immutable packaged OpenClaw runtime from removable media to the
  * machine-local portable profile. A staging directory and completion marker
@@ -201,22 +348,44 @@ export function configurePortableOpenClawRuntime(
   const result = { runtimeDir, cacheKey: identity.cacheKey, cacheHit: prepared };
   configuredRuntime = { input, result, prepared };
   configuredPreparation = null;
+  configuredPreparationProgressListeners.clear();
   process.env.CLAWX_OPENCLAW_RUNTIME_DIR = runtimeDir;
   return result;
 }
 
-export async function prepareConfiguredPortableOpenClawRuntime(): Promise<PortableOpenClawRuntimeResult | null> {
+export async function prepareConfiguredPortableOpenClawRuntime(
+  onProgress?: (progress: PortableOpenClawRuntimePreparationProgress) => void,
+): Promise<PortableOpenClawRuntimeResult | null> {
   if (!configuredRuntime) return null;
-  if (configuredRuntime.prepared) return configuredRuntime.result;
+  if (configuredRuntime.prepared) {
+    emitProgress(
+      {
+        ...configuredRuntime.input,
+        ...(onProgress ? { onProgress } : {}),
+      },
+      { phase: 'done', percent: 100 },
+    );
+    return configuredRuntime.result;
+  }
+
+  const progressListener = onProgress ?? configuredRuntime.input.onProgress;
+  if (progressListener) {
+    configuredPreparationProgressListeners.add(progressListener);
+  }
   if (configuredPreparation) return configuredPreparation;
 
-  configuredPreparation = preparePortableOpenClawRuntime(configuredRuntime.input).then((result) => {
+  const input = {
+    ...configuredRuntime.input,
+    onProgress: emitConfiguredPreparationProgress,
+  };
+  configuredPreparation = preparePortableOpenClawRuntime(input).then((result) => {
     if (configuredRuntime) {
       configuredRuntime = { ...configuredRuntime, result, prepared: true };
     }
     return result;
   }).finally(() => {
     configuredPreparation = null;
+    configuredPreparationProgressListeners.clear();
   });
   return configuredPreparation;
 }
@@ -228,31 +397,38 @@ export function isConfiguredPortableOpenClawRuntimePrepared(): boolean {
 export async function preparePortableOpenClawRuntime(
   input: PreparePortableOpenClawRuntimeInput,
 ): Promise<PortableOpenClawRuntimeResult> {
-  if (!hasCompleteRuntimePayload(input.sourceDir)) {
-    throw new Error(`Packaged OpenClaw runtime is incomplete: ${input.sourceDir}`);
-  }
-
-  const identity = resolveRuntimeIdentity(input);
-  const cacheRoot = resolveRuntimeCacheRoot(input);
-  const runtimeDir = join(cacheRoot, identity.cacheKey);
-  await mkdir(cacheRoot, { recursive: true });
-
-  if (isCompleteRuntime(runtimeDir, identity.cacheKey)) {
-    return { runtimeDir, cacheKey: identity.cacheKey, cacheHit: true };
-  }
-
-  const staleEntries = await readdir(cacheRoot, { withFileTypes: true }).catch(() => []);
-  await Promise.all(staleEntries
-    .filter((entry) => entry.isDirectory() && entry.name.startsWith('.staging-'))
-    .map((entry) => rm(join(cacheRoot, entry.name), { recursive: true, force: true })));
-  const operationId = `${process.pid}-${randomUUID().slice(0, 8)}`;
-  const stagingDir = join(cacheRoot, `.staging-${operationId}`);
-  const previousDir = join(cacheRoot, `.previous-${operationId}`);
-  await rm(stagingDir, { recursive: true, force: true });
-  await rm(previousDir, { recursive: true, force: true });
-
+  emitProgress(input, { phase: 'validating', percent: 0 });
+  let stagingDir: string | null = null;
+  let previousDir: string | null = null;
+  let runtimeDir: string | null = null;
   try {
-    await cp(input.sourceDir, stagingDir, { recursive: true, dereference: true, force: true });
+    if (!hasCompleteRuntimePayload(input.sourceDir)) {
+      throw new Error(`Packaged OpenClaw runtime is incomplete: ${input.sourceDir}`);
+    }
+
+    const identity = resolveRuntimeIdentity(input);
+    const cacheRoot = resolveRuntimeCacheRoot(input);
+    runtimeDir = join(cacheRoot, identity.cacheKey);
+    await mkdir(cacheRoot, { recursive: true });
+
+    if (isCompleteRuntime(runtimeDir, identity.cacheKey)) {
+      emitProgress(input, { phase: 'done', percent: 100 });
+      return { runtimeDir, cacheKey: identity.cacheKey, cacheHit: true };
+    }
+
+    emitProgress(input, { phase: 'cleanup', percent: 2 });
+    const staleEntries = await readdir(cacheRoot, { withFileTypes: true }).catch(() => []);
+    await Promise.all(staleEntries
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith('.staging-'))
+      .map((entry) => rm(join(cacheRoot, entry.name), { recursive: true, force: true })));
+    const operationId = `${process.pid}-${randomUUID().slice(0, 8)}`;
+    stagingDir = join(cacheRoot, `.staging-${operationId}`);
+    previousDir = join(cacheRoot, `.previous-${operationId}`);
+    await rm(stagingDir, { recursive: true, force: true });
+    await rm(previousDir, { recursive: true, force: true });
+
+    await copyRuntimeWithProgress(input, stagingDir);
+    emitProgress(input, { phase: 'validating', percent: 96 });
     if (!hasCompleteRuntimePayload(stagingDir)) {
       throw new Error('Copied OpenClaw runtime failed payload validation');
     }
@@ -268,6 +444,7 @@ export async function preparePortableOpenClawRuntime(
       throw new Error('Copied OpenClaw runtime failed completion validation');
     }
 
+    emitProgress(input, { phase: 'publishing', percent: 99 });
     const hadPreviousRuntime = existsSync(runtimeDir);
     if (hadPreviousRuntime) {
       await rename(runtimeDir, previousDir);
@@ -291,13 +468,16 @@ export async function preparePortableOpenClawRuntime(
         && !entry.name.startsWith('.previous-')
       ))
       .map((entry) => rm(join(cacheRoot, entry.name), { recursive: true, force: true })));
+    emitProgress(input, { phase: 'done', percent: 100 });
+    return { runtimeDir, cacheKey: identity.cacheKey, cacheHit: false };
   } catch (error) {
-    await rm(stagingDir, { recursive: true, force: true });
-    if (!existsSync(runtimeDir) && existsSync(previousDir)) {
+    emitProgress(input, { phase: 'failed' });
+    if (stagingDir) {
+      await rm(stagingDir, { recursive: true, force: true });
+    }
+    if (runtimeDir && previousDir && !existsSync(runtimeDir) && existsSync(previousDir)) {
       await rename(previousDir, runtimeDir);
     }
     throw error;
   }
-
-  return { runtimeDir, cacheKey: identity.cacheKey, cacheHit: false };
 }

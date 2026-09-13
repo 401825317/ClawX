@@ -2,8 +2,10 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -91,7 +93,61 @@ func TestApplySafeRepairsSkipsNonPortableRoot(t *testing.T) {
 	}
 }
 
-func TestSanitizedReportDoesNotMutateOriginalPaths(t *testing.T) {
+func TestKillUClawProcessesTreatsAlreadyGoneChildrenAsSuccess(t *testing.T) {
+	exitErr := runPortableRepairTestProcess(t, 128)
+	killed, err := killUClawProcessesWith([]processInfo{
+		{Name: "UClaw.exe", PID: 100},
+		{Name: "node.exe", PID: 101},
+	}, func(pid int) error {
+		return exitErr
+	})
+	if err != nil {
+		t.Fatalf("expected an already-gone process to be treated as success, got %v", err)
+	}
+	if killed != 2 {
+		t.Fatalf("expected both processes to count as stopped, got %d", killed)
+	}
+}
+
+func TestKillUClawProcessesKeepsUnexpectedErrors(t *testing.T) {
+	exitErr := runPortableRepairTestProcess(t, 127)
+	killed, err := killUClawProcessesWith([]processInfo{
+		{Name: "UClaw.exe", PID: 100},
+	}, func(pid int) error {
+		return exitErr
+	})
+	if err == nil {
+		t.Fatal("expected an unexpected taskkill exit code to remain an error")
+	}
+	if killed != 0 {
+		t.Fatalf("unexpected taskkill failure must not count as stopped, got %d", killed)
+	}
+}
+
+func runPortableRepairTestProcess(t *testing.T, exitCode int) error {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=TestPortableRepairExitCodeHelper")
+	cmd.Env = append(os.Environ(), "PORTABLE_REPAIR_TEST_EXIT_CODE="+strconv.Itoa(exitCode))
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected helper process to exit with code %d", exitCode)
+	}
+	return err
+}
+
+func TestPortableRepairExitCodeHelper(t *testing.T) {
+	raw := os.Getenv("PORTABLE_REPAIR_TEST_EXIT_CODE")
+	if raw == "" {
+		return
+	}
+	exitCode, err := strconv.Atoi(raw)
+	if err != nil {
+		t.Fatalf("invalid test exit code: %v", err)
+	}
+	os.Exit(exitCode)
+}
+
+func TestSanitizedReportPreservesPathsAndRedactsSecrets(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "User")
 	t.Setenv("USERPROFILE", home)
 	original := report{
@@ -103,11 +159,16 @@ func TestSanitizedReportDoesNotMutateOriginalPaths(t *testing.T) {
 		Errors:         []string{"token=abc123 path=" + filepath.Join(home, "secret")},
 	}
 	safe := sanitizedReport(original)
-	if strings.Contains(safe.AppPath, home) || strings.Contains(safe.LogEvidence[0].File, home) || strings.Contains(safe.Errors[0], "abc123") {
-		t.Fatalf("expected path and secret redaction, got %#v", safe)
+	if !strings.Contains(safe.AppPath, home) || !strings.Contains(safe.LogEvidence[0].File, home) || !strings.Contains(safe.Errors[0], filepath.Join(home, "secret")) {
+		t.Fatalf("expected diagnostic paths to be preserved, got %#v", safe)
 	}
-	if original.AppPath == safe.AppPath || !strings.Contains(original.AppPath, home) || !strings.Contains(original.LogEvidence[0].File, home) {
-		t.Fatalf("sanitization mutated the original report: original=%#v safe=%#v", original, safe)
+	if strings.Contains(safe.Errors[0], "abc123") {
+		t.Fatalf("expected secret redaction, got %#v", safe)
+	}
+	safe.CandidateRoots[0] = "mutated"
+	safe.LogEvidence[0].Signals[0] = "mutated"
+	if original.CandidateRoots[0] == "mutated" || original.LogEvidence[0].Signals[0] == "mutated" {
+		t.Fatalf("sanitization should copy diagnostic slices without mutating original: original=%#v safe=%#v", original, safe)
 	}
 }
 

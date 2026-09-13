@@ -175,7 +175,7 @@ describe('logger and fatal-path safety', () => {
     expect(line).toContain('at gatewayCall (gateway.ts:42:5)');
   });
 
-  it('adds structured correlation without writing credentials, prompts, or user paths', () => {
+  it('adds structured correlation without writing credentials or prompts while preserving diagnostic paths', () => {
     const token = 'sk-never-write-this-token';
     const apiKey = 'api-key-never-write-this';
     const prompt = 'do not persist this user prompt';
@@ -197,12 +197,12 @@ describe('logger and fatal-path safety', () => {
     expect(line).not.toContain(token);
     expect(line).not.toContain(apiKey);
     expect(line).not.toContain(prompt);
-    expect(line).not.toContain('C:\\Users\\Alice');
-    expect(line).toContain('[UserPath]');
+    expect(line).toContain('C:\\\\Users\\\\Alice\\\\Documents\\\\private.txt');
+    expect(line).not.toContain('[UserPath]');
     expect(line).not.toContain('sha256');
   });
 
-  it('redacts arbitrary local absolute paths without corrupting network URLs', () => {
+  it('preserves arbitrary local absolute paths without corrupting network URLs', () => {
     const networkUrl = 'https://example.test/api/v1/files/C:/literal?next=/tmp/demo';
     logger.info('absolute path contract', {
       drivePath: 'F:\\Portable UClaw\\resources\\app.asar',
@@ -217,19 +217,14 @@ describe('logger and fatal-path safety', () => {
 
     const line = logger.getRecentLogs(1)[0];
     expect(line).toContain(networkUrl);
-    expect(line).toContain('file:///[UserPath]');
-    expect(line.match(/\[UserPath\]/gu)?.length).toBeGreaterThanOrEqual(7);
-    for (const secretFragment of [
-      'Portable UClaw',
-      'Portable Folder',
-      'fileserver',
-      'private-share',
-      'runtime.db',
-      '/opt/uclaw',
-      'E:/Portable%20UClaw',
-    ]) {
-      expect(line).not.toContain(secretFragment);
-    }
+    expect(line).toContain('F:\\\\Portable UClaw\\\\resources\\\\app.asar');
+    expect(line).toContain('Z:/Portable/UClaw/config.json');
+    expect(line).toContain('\\\\\\\\fileserver\\\\private-share\\\\customer\\\\state.json');
+    expect(line).toContain('\\\\\\\\?\\\\D:\\\\portable\\\\runtime.db');
+    expect(line).toContain('/opt/uclaw/private/openclaw.json');
+    expect(line).toContain('Portable Folder');
+    expect(line).toContain('file:///E:/Portable%20UClaw/private.json');
+    expect(line).not.toContain('[UserPath]');
   });
 
   it('preserves URL schemes and paths while still redacting sensitive query values', () => {
@@ -250,7 +245,7 @@ describe('logger and fatal-path safety', () => {
     expect(redacted).not.toContain('[UserPath]');
   });
 
-  it('recognizes arbitrarily percent-encoded sensitive URL keys and encoded absolute paths', () => {
+  it('recognizes arbitrarily percent-encoded sensitive URL keys while preserving encoded absolute paths', () => {
     const redacted = __test.redactSensitiveText(
       'https://example.test/call?%74%6f%6b%65%6e=secret-one'
       + '&%61pi%5fkey=secret-two&%2561%2575%2574%2568=secret-three'
@@ -261,10 +256,11 @@ describe('logger and fatal-path safety', () => {
     expect(redacted).toContain('%74%6f%6b%65%6e=[redacted]');
     expect(redacted).toContain('%61pi%5fkey=[redacted]');
     expect(redacted).toContain('%2561%2575%2574%2568=[redacted]');
-    expect(redacted).toContain('win=[UserPath]');
-    expect(redacted).toContain('unix=[UserPath]');
+    expect(redacted).toContain('win=C%3A%5CUsers%5CAlice%5Cprivate.txt');
+    expect(redacted).toContain('unix=%2Fhome%2Falice%2Fprivate.json');
     expect(redacted).toContain('relative=docs%2Fpublic.txt');
-    expect(redacted).not.toMatch(/secret-one|secret-two|secret-three|Alice|private\.json/u);
+    expect(redacted).not.toMatch(/secret-one|secret-two|secret-three/u);
+    expect(redacted).not.toContain('[UserPath]');
   });
 
   it('redacts unkeyed provider tokens and JWTs in free-form errors', () => {
@@ -279,7 +275,7 @@ describe('logger and fatal-path safety', () => {
     expect(line.match(/\[secret-redacted\]/gu)).toHaveLength(2);
   });
 
-  it('redacts command and stack paths without consuming adjacent diagnostics', () => {
+  it('preserves command and stack paths without consuming adjacent diagnostics', () => {
     const redacted = __test.redactSensitiveText([
       'entry=R:\\UClaw\\resources\\main.js cwd=S:/workspace/profile status=starting',
       'Error at \\\\server\\private\\index.js:4:2 code=EIO',
@@ -287,11 +283,11 @@ describe('logger and fatal-path safety', () => {
       'quoted="/var/lib/uclaw/data file.json" outcome=failed',
     ].join('\n'));
 
-    expect(redacted).toContain('entry=[UserPath] cwd=[UserPath] status=starting');
-    expect(redacted).toContain('Error at [UserPath] code=EIO');
-    expect(redacted).toContain('at [UserPath] requestId=req-safe');
-    expect(redacted).toContain('quoted="[UserPath]" outcome=failed');
-    expect(redacted).not.toMatch(/R:\\|S:\/|server|\/srv\/|\/var\/lib\//u);
+    expect(redacted).toContain('entry=R:\\UClaw\\resources\\main.js cwd=S:/workspace/profile status=starting');
+    expect(redacted).toContain('Error at \\\\server\\private\\index.js:4:2 code=EIO');
+    expect(redacted).toContain('at /srv/uclaw/index.mjs:3:1 requestId=req-safe');
+    expect(redacted).toContain('quoted="/var/lib/uclaw/data file.json" outcome=failed');
+    expect(redacted).not.toContain('[UserPath]');
   });
 
   it('aggregates repeated errors while retaining first and last complete contexts', () => {

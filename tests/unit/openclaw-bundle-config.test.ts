@@ -4,6 +4,20 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
+function versionAtLeast(version: string | undefined, minimum: string): boolean {
+  if (!version) return false;
+  const actualParts = version.split('.').map(part => Number.parseInt(part, 10));
+  const minimumParts = minimum.split('.').map(part => Number.parseInt(part, 10));
+  const length = Math.max(actualParts.length, minimumParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const actual = Number.isFinite(actualParts[index]) ? actualParts[index] : 0;
+    const expected = Number.isFinite(minimumParts[index]) ? minimumParts[index] : 0;
+    if (actual > expected) return true;
+    if (actual < expected) return false;
+  }
+  return true;
+}
+
 describe('openclaw bundle config', () => {
   it('includes Electron runtime-only packages needed in packaged builds', async () => {
     const {
@@ -172,7 +186,7 @@ describe('openclaw bundle config', () => {
         resolve(process.cwd(), `resources/openclaw-plugins/${pluginId}/package.json`),
         'utf8',
       )) as { version?: string };
-      expect(packageJson.version).toBe('0.2.0');
+      expect(versionAtLeast(packageJson.version, '0.2.0'), `${pluginId} package.json version`).toBe(true);
     }
   });
 

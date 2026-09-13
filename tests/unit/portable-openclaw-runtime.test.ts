@@ -55,7 +55,11 @@ describe('portable OpenClaw runtime cache', () => {
   it('publishes a complete local runtime and reuses it on the next launch', async () => {
     const fixture = await createFixture();
     expect(findPreparedPortableOpenClawRuntime(fixture)).toBeNull();
-    const first = await preparePortableOpenClawRuntime(fixture);
+    const progress: Array<{ phase: string; percent?: number; copiedFiles?: number; totalFiles?: number }> = [];
+    const first = await preparePortableOpenClawRuntime({
+      ...fixture,
+      onProgress: update => progress.push(update),
+    });
     const second = await preparePortableOpenClawRuntime(fixture);
 
     expect(first.cacheHit).toBe(false);
@@ -64,6 +68,19 @@ describe('portable OpenClaw runtime cache', () => {
     await expect(readFile(join(first.runtimeDir, 'dist', 'runtime.js'), 'utf8')).resolves.toBe('runtime-v1\n');
     await expect(readFile(join(first.runtimeDir, '.uclaw-openclaw-runtime.json'), 'utf8'))
       .resolves.toContain(first.cacheKey);
+    expect(progress[0]).toMatchObject({ phase: 'validating', percent: 0 });
+    expect(progress.map(update => update.phase)).toContain('cleanup');
+    expect(progress.map(update => update.phase)).toContain('scanning');
+    expect(progress.map(update => update.phase)).toContain('copying');
+    expect(progress.at(-3)).toMatchObject({ phase: 'validating', percent: 96 });
+    expect(progress.at(-2)).toMatchObject({ phase: 'publishing', percent: 99 });
+    expect(progress.at(-1)).toMatchObject({ phase: 'done', percent: 100 });
+    expect(progress.some(update => update.copiedFiles === update.totalFiles && update.totalFiles! > 0))
+      .toBe(true);
+    const percents = progress
+      .map(update => update.percent)
+      .filter((percent): percent is number => percent !== undefined);
+    expect(percents).toEqual([...percents].sort((a, b) => a - b));
   });
 
   it('selects a stable local path before asynchronously publishing first-launch bytes', async () => {
@@ -77,6 +94,24 @@ describe('portable OpenClaw runtime cache', () => {
     const prepared = await prepareConfiguredPortableOpenClawRuntime();
     expect(prepared).toEqual({ ...selected, cacheHit: false });
     await expect(readFile(join(selected.runtimeDir, 'openclaw.mjs'), 'utf8')).resolves.toBe('export {};\n');
+  });
+
+  it('fans out preparation progress to concurrent callers', async () => {
+    const fixture = await createFixture();
+    configurePortableOpenClawRuntime(fixture);
+    const firstProgress: string[] = [];
+    const secondProgress: string[] = [];
+
+    const first = prepareConfiguredPortableOpenClawRuntime(update => {
+      firstProgress.push(update.phase);
+    });
+    const second = prepareConfiguredPortableOpenClawRuntime(update => {
+      secondProgress.push(update.phase);
+    });
+
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+    expect(firstProgress).toContain('done');
+    expect(secondProgress).toContain('done');
   });
 
   it('uses a new cache directory when the packaged build identity changes', async () => {
@@ -163,7 +198,15 @@ describe('portable OpenClaw runtime cache', () => {
   it('rejects an incomplete packaged runtime without publishing a cache', async () => {
     const fixture = await createFixture();
     await rm(join(fixture.sourceDir, 'openclaw.mjs'));
+    const progress: Array<{ phase: string; percent?: number }> = [];
 
-    await expect(preparePortableOpenClawRuntime(fixture)).rejects.toThrow('incomplete');
+    await expect(preparePortableOpenClawRuntime({
+      ...fixture,
+      onProgress: update => progress.push(update),
+    })).rejects.toThrow('incomplete');
+    expect(progress).toEqual([
+      { phase: 'validating', percent: 0 },
+      { phase: 'failed' },
+    ]);
   });
 });

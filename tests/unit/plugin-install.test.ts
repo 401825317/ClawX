@@ -343,11 +343,22 @@ describe('plugin installer diagnostics', () => {
       '[plugin] Bundled mirror install failed for WeCom',
       expect.objectContaining({
         attempts: expect.arrayContaining([
-          expect.objectContaining({ code: 'EPERM', phase: 'staging-copy' }),
+          expect.objectContaining({
+            code: 'EPERM',
+            copyOperation: 'copyFile',
+            copyRelativePath: 'index.mjs',
+            copySourcePath: join(sourceDir, 'index.mjs'),
+            copyTargetPath: expect.stringContaining('wecom.staging-'),
+            phase: 'staging-copy',
+          }),
         ]),
       }),
     );
-    expect(mockDelay).toHaveBeenCalledWith(150);
+    if (process.platform === 'win32') {
+      expect(mockDelay).toHaveBeenCalledWith(150);
+    } else {
+      expect(mockDelay).not.toHaveBeenCalled();
+    }
   });
 
   it('preserves a same-name third-party user plugin instead of overwriting it', async () => {

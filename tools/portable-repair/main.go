@@ -20,16 +20,17 @@ import (
 )
 
 const (
-	runtimeDirName       = "UClawRuntime"
-	updateTaskPrefix     = "portable-update-"
-	updateTaskSuffix     = ".json"
-	logFilePrefix        = "clawx-"
-	maxReadBytes         = 512 * 1024
-	maxLogFiles          = 12
-	maxLogTailBytes      = 256 * 1024
-	repairReportFileName = "UClawRepair-report.json"
-	startupProbeWait     = 8 * time.Second
-	startupProbeInterval = 250 * time.Millisecond
+	runtimeDirName              = "UClawRuntime"
+	updateTaskPrefix            = "portable-update-"
+	updateTaskSuffix            = ".json"
+	logFilePrefix               = "clawx-"
+	maxReadBytes                = 512 * 1024
+	maxLogFiles                 = 12
+	maxLogTailBytes             = 256 * 1024
+	repairReportFileName        = "UClawRepair-report.json"
+	startupProbeWait            = 8 * time.Second
+	startupProbeInterval        = 250 * time.Millisecond
+	taskkillAlreadyGoneExitCode = 128
 )
 
 type updateTask struct {
@@ -433,14 +434,27 @@ func findProcesses(root string) []processInfo {
 }
 
 func killUClawProcesses(processes []processInfo) (int, error) {
+	return killUClawProcessesWith(processes, func(pid int) error {
+		cmd := exec.Command("taskkill.exe", "/PID", strconv.Itoa(pid), "/T", "/F")
+		return cmd.Run()
+	})
+}
+
+func killUClawProcessesWith(processes []processInfo, runTaskkill func(pid int) error) (int, error) {
 	killed := 0
 	var firstErr error
 	for _, process := range processes {
 		if process.PID <= 0 {
 			continue
 		}
-		cmd := exec.Command("taskkill.exe", "/PID", strconv.Itoa(process.PID), "/T", "/F")
-		if err := cmd.Run(); err != nil {
+		if err := runTaskkill(process.PID); err != nil {
+			// taskkill /T can terminate a child while killing its parent. A
+			// subsequent taskkill for that child returns 128 even though the
+			// process tree has already been stopped successfully.
+			if isTaskkillAlreadyGone(err) {
+				killed++
+				continue
+			}
 			if firstErr == nil {
 				firstErr = fmt.Errorf("%s(%d): %w", process.Name, process.PID, err)
 			}
@@ -449,6 +463,13 @@ func killUClawProcesses(processes []processInfo) (int, error) {
 		killed++
 	}
 	return killed, firstErr
+}
+
+func isTaskkillAlreadyGone(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) &&
+		exitErr.ProcessState != nil &&
+		exitErr.ProcessState.ExitCode() == taskkillAlreadyGoneExitCode
 }
 
 func writeReport(filePath string, r report) error {
@@ -534,18 +555,15 @@ func trimLogFieldSuffix(value string) string {
 }
 
 func sanitizedReport(r report) report {
-	r.RuntimeDir = redactUserPath(r.RuntimeDir)
-	r.CandidateRoots = redactPaths(r.CandidateRoots)
-	r.SelectedRoot = redactUserPath(r.SelectedRoot)
-	r.AppPath = redactUserPath(r.AppPath)
-	r.UpdateTasks = redactPaths(r.UpdateTasks)
-	r.UpdateLogs = redactPaths(r.UpdateLogs)
-	r.AppLogs = redactPaths(r.AppLogs)
+	r.CandidateRoots = cloneStrings(r.CandidateRoots)
+	r.UpdateTasks = cloneStrings(r.UpdateTasks)
+	r.UpdateLogs = cloneStrings(r.UpdateLogs)
+	r.AppLogs = cloneStrings(r.AppLogs)
 	evidence := make([]logEvidence, 0, len(r.LogEvidence))
 	for _, item := range r.LogEvidence {
 		evidence = append(evidence, logEvidence{
-			File:    redactUserPath(item.File),
-			Signals: append([]string(nil), item.Signals...),
+			File:    item.File,
+			Signals: redactStrings(item.Signals),
 		})
 	}
 	r.LogEvidence = evidence
@@ -568,36 +586,12 @@ func redactFindings(findings []finding) []finding {
 	return out
 }
 
-func redactPaths(paths []string) []string {
-	out := make([]string, 0, len(paths))
-	for _, path := range paths {
-		out = append(out, redactUserPath(path))
-	}
-	return out
-}
-
-func redactUserPath(value string) string {
-	profile := strings.TrimSpace(os.Getenv("USERPROFILE"))
-	if profile == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			profile = home
-		}
-	}
-	for _, candidate := range []string{
-		profile,
-		strings.ReplaceAll(profile, `\`, `/`),
-		strings.ReplaceAll(profile, `/`, `\`),
-	} {
-		if candidate == "" {
-			continue
-		}
-		value = replaceInsensitive(value, candidate, "%USERPROFILE%")
-	}
-	return value
+func cloneStrings(values []string) []string {
+	return append([]string(nil), values...)
 }
 
 func redactText(value string) string {
-	text := redactUserPath(value)
+	text := value
 	text = bearerPattern.ReplaceAllString(text, `${1}[REDACTED]`)
 	text = secretPattern.ReplaceAllString(text, `${1}[REDACTED]`)
 	text = urlCredentialPattern.ReplaceAllString(text, `${1}[REDACTED]@`)
@@ -610,17 +604,6 @@ func redactStrings(values []string) []string {
 		out = append(out, redactText(value))
 	}
 	return out
-}
-
-func replaceInsensitive(value string, old string, replacement string) string {
-	if old == "" {
-		return value
-	}
-	pattern, err := regexp.Compile(`(?i)` + regexp.QuoteMeta(old))
-	if err != nil {
-		return value
-	}
-	return pattern.ReplaceAllString(value, replacement)
 }
 
 func pathExists(filePath string) bool {
@@ -708,7 +691,7 @@ func summary(r report, repaired bool, reportPath string) string {
 	if repaired {
 		builder.WriteString("修复动作: " + strconv.Itoa(len(safe.Actions)) + "\n")
 	}
-	builder.WriteString("诊断报告: " + redactUserPath(reportPath) + "\n")
+	builder.WriteString("诊断报告: " + reportPath + "\n")
 	if len(safe.Errors) > 0 {
 		builder.WriteString("部分动作失败，请把诊断报告发给技术支持。\n")
 	} else if repaired && safe.Restarted {

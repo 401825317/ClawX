@@ -64,6 +64,10 @@ describe('ACP chat error classification', () => {
     ['status_code=400, model_not_found', 'MODEL_UNAVAILABLE', false],
     ['status_code=503, model temporarily unavailable', 'MODEL_UNAVAILABLE', true],
     ['sensitive_words_detected', 'CONTENT_POLICY', false],
+    ['ACP prompt completed without a visible assistant response.', 'SERVICE_UNAVAILABLE', true],
+    ['ACP prompt returned a failed completion: upstream service unavailable', 'SERVICE_UNAVAILABLE', true],
+    ['ACP prompt was aborted before completion.', 'SERVICE_UNAVAILABLE', true],
+    ['ACP prompt returned a failed completion: permission denied', 'PERMISSION_DENIED', false],
   ] as const)('keeps recovery semantics for %s', (message, code, retryable) => {
     expect(normalizeAcpChatError(message)).toMatchObject({ code, retryable });
   });

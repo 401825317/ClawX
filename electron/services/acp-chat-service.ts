@@ -114,10 +114,15 @@ type AcpLivePromptContext = {
   dispatchedAtMs: number | null;
   firstTextAtMs: number | null;
   attempt: number;
+  /** A tool call is valid output for the current attempt, but remains replay-unsafe. */
+  attemptToolCallObserved: boolean;
+  /** Non-text ACP output (media/resource) or a permission request is valid progress. */
+  attemptOutputObserved: boolean;
   retryStatusPending: boolean;
   retryReplacementPending: boolean;
   toolCallObserved: boolean;
   replayUnsafeObserved: boolean;
+  userCancelRequested: boolean;
   retryAbortController: AbortController;
   pendingTerminalFailure: SessionNotification | null;
   /** Rejects the current prompt wait when ACP has already emitted a terminal failure. */
@@ -462,6 +467,211 @@ function isPromptRetryableUpstreamError(failure: ReturnType<typeof normalizeAcpC
 
 function errorRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' ? value as Record<string, unknown> : null;
+}
+
+const ACP_PROMPT_SUCCESS_STOP_REASONS = new Set([
+  'end_turn',
+  'max_tokens',
+  'max_turn_requests',
+  'refusal',
+]);
+const ACP_PROMPT_TOOL_STOP_REASONS = new Set([
+  'tooluse',
+  'tool_use',
+  'tool_calls',
+  'tool_call',
+]);
+
+function promptResultMessage(value: unknown): string | null {
+  const queue: unknown[] = [value];
+  const seen = new Set<object>();
+  let inspected = 0;
+
+  while (queue.length > 0 && inspected < 24) {
+    const candidate = queue.shift();
+    if (typeof candidate === 'string') {
+      const trimmed = candidate.trim();
+      if (trimmed) return trimmed;
+      continue;
+    }
+    const record = errorRecord(candidate);
+    if (!record || seen.has(record)) continue;
+    seen.add(record);
+    inspected += 1;
+
+    for (const key of ['errorMessage', 'message', 'error', 'detail', 'reason', 'failure']) {
+      const nested = record[key];
+      if (typeof nested === 'string' && nested.trim()) return nested.trim();
+      if (nested && typeof nested === 'object') queue.push(nested);
+    }
+    for (const key of ['data', 'details', 'response', 'result']) {
+      if (record[key] != null) queue.push(record[key]);
+    }
+  }
+  return null;
+}
+
+function promptResultHasExplicitFailure(value: unknown): boolean {
+  const queue: unknown[] = [value];
+  const seen = new Set<object>();
+  let inspected = 0;
+
+  while (queue.length > 0 && inspected < 24) {
+    const candidate = queue.shift();
+    const record = errorRecord(candidate);
+    if (!record || seen.has(record)) continue;
+    seen.add(record);
+    inspected += 1;
+
+    if (record.success === false || record.ok === false) return true;
+    for (const key of ['status', 'statusCode', 'httpStatus']) {
+      const status = Number(record[key]);
+      if (Number.isInteger(status) && status >= 400 && status <= 599) return true;
+    }
+    for (const key of ['status', 'state']) {
+      const status = typeof record[key] === 'string' ? record[key].trim().toLowerCase() : '';
+      if (status === 'failed' || status === 'error') return true;
+    }
+    for (const key of ['error', 'errorMessage', 'failure', 'failureMessage']) {
+      const nested = record[key];
+      if (typeof nested === 'string' && nested.trim()) return true;
+      if (nested && typeof nested === 'object') return true;
+    }
+    for (const key of ['data', 'details', 'response', 'result']) {
+      if (record[key] != null) queue.push(record[key]);
+    }
+  }
+  return false;
+}
+
+function promptResultHasToolCall(value: unknown): boolean {
+  const queue: unknown[] = [value];
+  const seen = new Set<object>();
+  let inspected = 0;
+
+  while (queue.length > 0 && inspected < 24) {
+    const candidate = queue.shift();
+    const record = errorRecord(candidate);
+    if (!record || seen.has(record)) continue;
+    seen.add(record);
+    inspected += 1;
+
+    for (const key of ['toolCall', 'tool_call']) {
+      if (record[key] != null) return true;
+    }
+    for (const key of ['toolCalls', 'tool_calls']) {
+      const calls = record[key];
+      if (Array.isArray(calls) ? calls.length > 0 : calls != null) return true;
+    }
+    const content = record.content;
+    if (Array.isArray(content) && content.some((block) => {
+      const blockRecord = errorRecord(block);
+      const type = typeof blockRecord?.type === 'string' ? blockRecord.type.toLowerCase() : '';
+      return type === 'toolcall' || type === 'tool_call' || type === 'tool_use';
+    })) {
+      return true;
+    }
+    for (const key of ['content', 'data', 'details', 'response', 'result']) {
+      if (record[key] != null) queue.push(record[key]);
+    }
+  }
+  return false;
+}
+
+function promptResultHasOutput(value: unknown): boolean {
+  const queue: unknown[] = [value];
+  const seen = new Set<object>();
+  let inspected = 0;
+
+  while (queue.length > 0 && inspected < 24) {
+    const candidate = queue.shift();
+    const record = errorRecord(candidate);
+    if (!record || seen.has(record)) continue;
+    seen.add(record);
+    inspected += 1;
+
+    const content = record.content;
+    if (Array.isArray(content) && content.some((block) => {
+      const blockRecord = errorRecord(block);
+      if (!blockRecord) return false;
+      if (blockRecord.type === 'text') {
+        return typeof blockRecord.text === 'string' && blockRecord.text.trim().length > 0;
+      }
+      return typeof blockRecord.type === 'string' && blockRecord.type.trim().length > 0;
+    })) {
+      return true;
+    }
+    for (const key of ['content', 'data', 'details', 'response', 'result']) {
+      if (record[key] != null) queue.push(record[key]);
+    }
+  }
+  return false;
+}
+
+function promptCompletionError(value: unknown, fallback: string): Error {
+  const detail = promptResultMessage(value);
+  return new Error(detail ? `${fallback}: ${detail}` : fallback, { cause: value });
+}
+
+function hasAgentReplyContent(notification: SessionNotification): boolean {
+  const update = (notification as {
+    update?: {
+      sessionUpdate?: unknown;
+      content?: unknown;
+    };
+  }).update;
+  if (update?.sessionUpdate !== 'agent_message_chunk' && update?.sessionUpdate !== 'agent_message') return false;
+  const content = Array.isArray(update.content) ? update.content : [update.content];
+  return content.some((block) => {
+    const record = errorRecord(block);
+    if (!record) return false;
+    if (record.type === 'text') return typeof record.text === 'string' && record.text.trim().length > 0;
+    return typeof record.type === 'string' && record.type.trim().length > 0;
+  });
+}
+
+function inspectPromptCompletionResult(
+  result: unknown,
+  promptContext: AcpLivePromptContext,
+): Error | null {
+  const record = errorRecord(result);
+  if (!record) {
+    return promptCompletionError(result, 'ACP prompt returned no valid completion.');
+  }
+
+  if (promptResultHasExplicitFailure(result)) {
+    return promptCompletionError(result, 'ACP prompt returned a failed completion.');
+  }
+
+  const stopReason = typeof record.stopReason === 'string'
+    ? record.stopReason.trim().toLowerCase()
+    : '';
+  if (stopReason === 'cancelled' || stopReason === 'aborted') {
+    return promptContext.userCancelRequested
+      ? null
+      : promptCompletionError(result, `ACP prompt was ${stopReason} before completion.`);
+  }
+  if (stopReason === 'error') {
+    return promptCompletionError(result, 'ACP prompt returned an error completion.');
+  }
+  if (!stopReason) {
+    return promptCompletionError(result, 'ACP prompt returned no valid completion.');
+  }
+
+  // A refusal is already a user-facing model decision. Do not turn it into a
+  // provider failover just because the ACP adapter carried no text payload.
+  if (stopReason === 'refusal') return null;
+  if (ACP_PROMPT_TOOL_STOP_REASONS.has(stopReason)) {
+    return promptContext.attemptToolCallObserved || promptResultHasToolCall(result)
+      ? null
+      : promptCompletionError(result, `ACP prompt returned an unexpected stop reason: ${stopReason}.`);
+  }
+  if (!ACP_PROMPT_SUCCESS_STOP_REASONS.has(stopReason)) {
+    return promptCompletionError(result, `ACP prompt returned an unexpected stop reason: ${stopReason}.`);
+  }
+  if (promptContext.attemptOutputObserved || promptResultHasOutput(result)) return null;
+
+  return promptCompletionError(result, 'ACP prompt completed without a visible assistant response.');
 }
 
 function findStructuredRecoverySummary(value: unknown): string | null {
@@ -1058,10 +1268,13 @@ export class AcpChatService {
       dispatchedAtMs: null,
       firstTextAtMs: null,
       attempt: 1,
+      attemptToolCallObserved: false,
+      attemptOutputObserved: false,
       retryStatusPending: false,
       retryReplacementPending: false,
       toolCallObserved: false,
       replayUnsafeObserved: false,
+      userCancelRequested: false,
       retryAbortController: new AbortController(),
       pendingTerminalFailure: null,
       terminalFailureReject: null,
@@ -1180,6 +1393,8 @@ export class AcpChatService {
       let contextRecoveryAttempted = false;
       while (true) {
         promptContext.attempt = attempt;
+        promptContext.attemptToolCallObserved = false;
+        promptContext.attemptOutputObserved = false;
         promptContext.pendingTerminalFailure = null;
         let rejectTerminalFailure: ((reason?: unknown) => void) | null = null;
         const terminalFailureWait = new Promise<never>((_, reject) => {
@@ -1189,7 +1404,7 @@ export class AcpChatService {
         const promptWaiter = promptContext.terminalFailureReject;
         const promptAttemptStartedAtMs = Date.now();
         try {
-          await Promise.race([
+          const promptResult = await Promise.race([
             connection.prompt({
               sessionId: acpSessionId,
               prompt: attemptPrompt,
@@ -1198,6 +1413,8 @@ export class AcpChatService {
             }),
             terminalFailureWait,
           ]);
+          const promptCompletionFailure = inspectPromptCompletionResult(promptResult, promptContext);
+          if (promptCompletionFailure) throw promptCompletionFailure;
           connectionPromptWaitMs += Date.now() - promptAttemptStartedAtMs;
           if (attempt > 1) {
             this.trace('session/prompt:recovered', {
@@ -1212,6 +1429,7 @@ export class AcpChatService {
           connectionPromptWaitMs += Date.now() - promptAttemptStartedAtMs;
           this.requireSameGatewayRuntime(runtimeIdentity);
           const failure = normalizeAcpChatError(attemptError);
+          if (promptContext.userCancelRequested || failure.code === 'CANCELLED') break;
           const replaySafe = !promptContext.toolCallObserved && !promptContext.replayUnsafeObserved;
           const isContextRecovery = failure.code === 'CONTEXT_OVERFLOW';
           const isTransientUpstream = isPromptRetryableUpstreamError(failure);
@@ -1395,6 +1613,7 @@ export class AcpChatService {
       this.trace('session/cancel:start', { sessionKey: payload.sessionKey });
       const livePrompt = this.livePrompts.get(payload.sessionKey);
       if (livePrompt) {
+        livePrompt.userCancelRequested = true;
         livePrompt.retryAbortController.abort();
         if (livePrompt.retryStatusPending) {
           livePrompt.retryStatusPending = false;
@@ -2143,10 +2362,18 @@ export class AcpChatService {
     if (livePrompt && toolUpdate) {
       livePrompt.toolCallObserved = true;
       livePrompt.replayUnsafeObserved = true;
+      livePrompt.attemptToolCallObserved = true;
+      livePrompt.attemptOutputObserved = true;
       artifactTaskService.recordTool(sessionKey, toolUpdate);
     }
     if (livePrompt && hasReplayUnsafeAgentContent(notification)) {
       livePrompt.replayUnsafeObserved = true;
+    }
+    if (livePrompt && hasAgentReplyContent(notification)) {
+      livePrompt.attemptOutputObserved = true;
+    }
+    if (livePrompt && hasReplayUnsafeAgentContent(notification)) {
+      livePrompt.attemptOutputObserved = true;
     }
     const visibleAgentText = livePrompt ? isVisibleAgentText(notification) : false;
     let retryReplacement: AcpTurnRetryReplacement | undefined;
@@ -2226,7 +2453,10 @@ export class AcpChatService {
     const livePrompt = [...this.livePrompts.values()].find((context) => context.acpSessionId === acpSessionId);
     const sessionKey = livePrompt?.sessionKey ?? this.activeSessionKey;
     const generation = livePrompt?.generation ?? this.generation;
-    if (livePrompt) livePrompt.replayUnsafeObserved = true;
+    if (livePrompt) {
+      livePrompt.replayUnsafeObserved = true;
+      livePrompt.attemptOutputObserved = true;
+    }
     if (!livePrompt && !this.permissionsEnabled) {
       this.trace('permission:ignored', {
         direction: 'upstream',

@@ -6,8 +6,6 @@ const STRUCTURAL_KEYS = new Set([
   'traceid', 'trace_id', 'runid', 'run_id',
 ]);
 const PRIVATE_NETWORK_KEYS = new Set(['allowprivatenetwork', 'dangerouslyallowprivatenetwork']);
-const WINDOWS_USER_PATH = /(?:file:\/\/\/)?[A-Z]:\\(?:Users|Documents and Settings)\\[^\r\n"'`{}\x5B\x5D()<>]+/giu;
-const POSIX_USER_PATH = /(?:file:\/\/)?\/(?:Users|home)\/[^\r\n"'`{}\x5B\x5D()<>]+/gu;
 
 interface RedactedFrameValue {
   redacted: true;
@@ -56,10 +54,7 @@ function summarizeFrameValue(value: unknown): RedactedFrameValue {
 function safeStructuralValue(value: unknown): unknown {
   if (typeof value === 'number' || typeof value === 'boolean' || value === null) return value;
   if (typeof value !== 'string') return summarizeFrameValue(value);
-  return value
-    .slice(0, 128)
-    .replace(WINDOWS_USER_PATH, '[UserPath]')
-    .replace(POSIX_USER_PATH, '[UserPath]');
+  return value.slice(0, 128);
 }
 
 function redactGatewayFrameValue(value: unknown, key = '', depth = 0): unknown {

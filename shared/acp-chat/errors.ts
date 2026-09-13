@@ -252,5 +252,14 @@ export function normalizeAcpChatError(error: unknown, fallback = 'ACP prompt fai
     /无权限/u,
   ])) return result('PERMISSION_DENIED', false);
 
+  if (includesAny(searchable, [
+    /acp prompt (?:returned|completed|was) (?:no valid completion|a failed completion|an error completion|without a visible assistant response|an unexpected stop reason)/u,
+    /acp prompt was (?:aborted|cancelled) before completion/u,
+    /stream ended unexpectedly/u,
+    /no valid completion/u,
+    /empty assistant response/u,
+    /空回复/u,
+  ])) return result('SERVICE_UNAVAILABLE', true);
+
   return result('UNKNOWN', false);
 }
