@@ -88,10 +88,12 @@
         "unsupportedContent": "Unsupported content",
         "dismiss": "Dismiss",
         "failure": {
-            "insufficientQuota": { "title": "Insufficient balance", "message": "This request was not run because the account has insufficient quota. You can continue immediately after recharging.", "action": "Recharge" },
+            "insufficientQuota": { "title": "Insufficient account quota", "message": "The model service rejected this request because the account has insufficient quota. Automatic retries have stopped. Check the account balance and available quota, then send again manually after quota is restored.", "action": "View recharge" },
+            "subscriptionUnavailable": { "title": "Subscription unavailable or quota exhausted", "message": "The model service reported no active subscription or insufficient subscription quota. Automatic retries have stopped. Check the main account subscription and quota for this model; adding prepaid balance alone may not restore access." },
             "authInvalid": { "title": "Sign-in credentials expired", "message": "Sign in again or check the API key before sending another request." },
             "rateLimit": { "title": "Too many requests", "message": "The service is temporarily rate-limited. Send the request again shortly." },
             "permissionDenied": { "title": "Permission denied", "message": "This account or model cannot perform the request. Check its access settings." },
+            "tlsCertInvalid": { "title": "Certificate validation failed", "message": "TLS certificate validation failed for the model connection. Automatic retries have stopped. Ask your administrator to verify the service certificate chain and any proxy or security software certificates. Send again after repair; do not disable certificate validation." },
             "timeout": { "title": "Request timed out", "message": "The service did not respond in time. Send the request again shortly." },
             "network": { "title": "Network connection interrupted", "message": "The connection closed during the request. Check the network and send it again." },
             "serviceUnavailable": { "title": "Model service unavailable", "message": "The upstream service is temporarily unavailable. Send the request again shortly." },
@@ -336,6 +338,7 @@
     },
     "composer": {
         "attachFiles": "Attach files",
+        "mediaAttachmentLimit": "A message can include at most {{count}} attachments",
         "pickSkill": "Choose skill",
         "skillButton": "Skills",
         "skillPickerTitle": "Quick skill access for {{agent}}",

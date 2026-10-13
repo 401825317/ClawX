@@ -54,12 +54,22 @@ function readOptionalProfile(payload: unknown): AgentProfileDraft | undefined {
   return profile as unknown as AgentProfileDraft;
 }
 
-function scheduleGatewayReload(ctx: AgentsApiContext, reason: string): void {
-  if (ctx.gatewayManager.getStatus().state !== 'stopped') {
-    ctx.gatewayManager.debouncedReload();
-    return;
+/** A successful API call is not proof of a runtime change (auth sync can be a no-op). */
+async function scheduleGatewayReload(
+  ctx: AgentsApiContext,
+  reason: string,
+  before: string | null,
+): Promise<void> {
+  const after = await ctx.gatewayManager.captureRuntimeConfigFingerprint();
+  if (before !== null && after === before) {
+    const applied = ctx.gatewayManager.getAppliedRuntimeConfigFingerprint();
+    // A previous failed/partial refresh can leave disk ahead of the runtime.
+    // Do not discard the next successful sync just because it rewrote the same files.
+    if (applied === after) return;
   }
-  void reason;
+  // Manager also handles writes racing with startup and deduplicates against the
+  // launch snapshot. No config contents or credentials cross this boundary.
+  ctx.gatewayManager.debouncedReload(undefined, reason, after ?? undefined);
 }
 
 async function restartGatewayForAgentDeletion(ctx: AgentsApiContext): Promise<void> {
@@ -91,6 +101,7 @@ export function createAgentsApi(ctx: AgentsApiContext): CompleteHostServiceRegis
       const name = requireString(payload, 'name');
       const inheritWorkspace = isRecord(payload) ? payload.inheritWorkspace === true : undefined;
       const profile = readOptionalProfile(payload);
+      const runtimeBefore = await ctx.gatewayManager.captureRuntimeConfigFingerprint();
       const snapshot = await createAgent(name, {
         inheritWorkspace,
         ...(profile ? { profile } : {}),
@@ -98,7 +109,7 @@ export function createAgentsApi(ctx: AgentsApiContext): CompleteHostServiceRegis
       // Do not reload a newly created Agent while managed credential cleanup is incomplete.
       try {
         await syncAllProviderAuthToRuntime({ reconcileManagedRuntime: true });
-        scheduleGatewayReload(ctx, 'create-agent');
+        await scheduleGatewayReload(ctx, 'create-agent', runtimeBefore);
       } catch (syncError) {
         console.warn('[agents] Failed to sync provider auth after agent creation:', syncError);
       }
@@ -117,17 +128,19 @@ export function createAgentsApi(ctx: AgentsApiContext): CompleteHostServiceRegis
     update: async (payload) => {
       const agentId = requireString(payload, 'id');
       const name = requireString(payload, 'name');
+      const runtimeBefore = await ctx.gatewayManager.captureRuntimeConfigFingerprint();
       const snapshot = await updateAgentName(agentId, name);
       const updatedAgent = snapshot.agents.find((agent) => agent.id === agentId);
       if (updatedAgent) {
         await longTermRuleService.repair({ agentId, workspaceRoot: updatedAgent.workspace });
       }
-      scheduleGatewayReload(ctx, 'update-agent');
+      await scheduleGatewayReload(ctx, 'update-agent', runtimeBefore);
       return { success: true, ...snapshot };
     },
     updateModel: async (payload) => {
       const agentId = requireString(payload, 'id');
       const modelRef = isRecord(payload) && typeof payload.modelRef === 'string' ? payload.modelRef : null;
+      const runtimeBefore = await ctx.gatewayManager.captureRuntimeConfigFingerprint();
       const snapshot = await updateAgentModel(agentId, modelRef);
       // Runtime synchronization is a prerequisite for reload; a sync error
       // keeps a stale managed credential from becoming active again.
@@ -143,7 +156,7 @@ export function createAgentsApi(ctx: AgentsApiContext): CompleteHostServiceRegis
       // the next send; otherwise the UI can show the new selection while the
       // active runtime still answers with the previous model.
       if (runtimeSynchronized) {
-        scheduleGatewayReload(ctx, 'update-agent-model');
+        await scheduleGatewayReload(ctx, 'update-agent-model', runtimeBefore);
       }
       return { success: true, ...snapshot };
     },
@@ -160,13 +173,15 @@ export function createAgentsApi(ctx: AgentsApiContext): CompleteHostServiceRegis
     assignChannel: async (payload) => {
       const agentId = requireString(payload, 'id');
       const channelType = requireString(payload, 'channelType');
+      const runtimeBefore = await ctx.gatewayManager.captureRuntimeConfigFingerprint();
       const snapshot = await assignChannelToAgent(agentId, channelType);
-      scheduleGatewayReload(ctx, 'assign-channel');
+      await scheduleGatewayReload(ctx, 'assign-channel', runtimeBefore);
       return { success: true, ...snapshot };
     },
     removeChannel: async (payload) => {
       const agentId = requireString(payload, 'id');
       const channelType = requireString(payload, 'channelType');
+      const runtimeBefore = await ctx.gatewayManager.captureRuntimeConfigFingerprint();
       const ownerId = agentId.trim().toLowerCase();
       const snapshotBefore = await listAgentsSnapshot();
       const ownedAccountIds = Object.entries(snapshotBefore.channelAccountOwners)
@@ -187,7 +202,7 @@ export function createAgentsApi(ctx: AgentsApiContext): CompleteHostServiceRegis
         await clearChannelBinding(channelType, accountId);
       }
       const snapshot = await listAgentsSnapshot();
-      scheduleGatewayReload(ctx, 'remove-agent-channel');
+      await scheduleGatewayReload(ctx, 'remove-agent-channel', runtimeBefore);
       return { success: true, ...snapshot };
     },
   };

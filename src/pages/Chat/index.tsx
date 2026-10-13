@@ -288,10 +288,7 @@ export function Chat() {
   const respondAcpPermission = useAcpChatSessionStore((s) => s.respondPermission);
   const clearAcpError = useAcpChatSessionStore((s) => s.clearError);
   const gatewayStatus = useGatewayStore((s) => s.status);
-  // `gatewayReady` was added after the original running-state contract. Keep
-  // older/compatible status payloads usable; only an explicit false means the
-  // Gateway is still transitioning.
-  const gatewayReady = gatewayStatus.state === 'running' && gatewayStatus.gatewayReady !== false;
+  const gatewayReady = gatewayStatus.state === 'running' && gatewayStatus.gatewayReady === true;
   const gatewayRuntimeIdentity = gatewayReady
     ? `${gatewayStatus.pid ?? 'none'}:${gatewayStatus.connectedAt ?? 'none'}:${gatewayStatus.port}`
     : null;
@@ -653,7 +650,7 @@ export function Chat() {
             imageOptions?: AcpImageGenerationOptions,
             videoOptions?: AcpVideoGenerationOptions,
           ) => {
-            if (!gatewayReady || !currentSessionKey || !cwd || !workspaceContextAvailable) return;
+            if (!gatewayReady || !currentSessionKey || !cwd || !workspaceContextAvailable) return false;
             const targetAgent = targetAgentId
               ? agents.find((agent) => agent.id === targetAgentId) ?? null
               : null;
@@ -669,14 +666,14 @@ export function Chat() {
                 fileName: file.fileName,
                 mimeType: file.mimeType,
               }));
-            void (async () => {
-              if (!gatewayReady) return;
+            return (async () => {
+              if (!gatewayReady) return false;
               if (promptCwd !== cwd) {
                 const promptWorkspace = await hostApi.files.resolveWorkspaceContext({
                   workspaceRoot: promptCwd,
                   executionCwd: promptCwd,
                 }).catch(() => ({ ok: false }));
-                if (!promptWorkspace.ok) return;
+                if (!promptWorkspace.ok) return false;
               }
               const baseSession = sessions.find((session) => session.key === baseSessionKey);
               const hasHistory = baseSessionKey === currentSessionKey
@@ -759,7 +756,7 @@ export function Chat() {
                 if (loaded && pendingAcpConfirmation) {
                   acknowledgeAcpSessionCreated(sessionKey, promptCwd, text);
                 }
-                if (!loaded) return;
+                if (!loaded) return false;
                 loadedGatewayRuntimeRef.current = gatewayRuntimeIdentity;
               }
               const sendPromise = sendAcpPrompt({
@@ -773,10 +770,14 @@ export function Chat() {
               requestAnimationFrame(() => {
                 void scrollToBottom({ animation: 'instant', ignoreEscapes: true });
               });
-              await sendPromise;
+              // The request is now owned by the session store. Clear only the
+              // accepted draft; do not hold the composer until model completion.
+              void sendPromise;
+              return true;
             })();
           }}
           onStop={() => void cancelAcp()}
+          stopDisabled={acpCancelling || acpSessionSwitching}
           disabled={!gatewayReady || acpLoading || acpCancelling || !cwd || !workspaceContextAvailable}
           disabledPlaceholder={composerDisabledPlaceholder}
           sending={composerBusy}

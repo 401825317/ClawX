@@ -2555,6 +2555,40 @@ describe('ACP Chat store', () => {
     expect(useAcpChatSessionStore.getState().cancelling).toBe(false);
   });
 
+  it('stops locally and rejects late prompt and permission results while remote cancellation is pending', async () => {
+    const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+    ensureAcpChatSubscriptions();
+    await useAcpChatSessionStore.getState().loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    const promptResult = createDeferred<{ success: boolean; error: string; errorCode: string }>();
+    const cancelResult = createDeferred<{ success: boolean; generation: number }>();
+    hostApiMock.sendAcpPrompt.mockReturnValueOnce(promptResult.promise);
+    hostApiMock.cancelAcpSession.mockReturnValueOnce(cancelResult.promise);
+    const prompt = useAcpChatSessionStore.getState().sendPrompt({ sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'stop', messageId: 'cancel-me' });
+    hostEventsMock.permissionListener?.({
+      sessionKey: 'agent:pi:s1', generation: 1, requestId: 'cancel-permission',
+      request: { sessionId: 'agent:pi:s1', toolCall: { toolCallId: 'edit', title: 'Edit' }, options: [] },
+    });
+    const cancel = useAcpChatSessionStore.getState().cancel();
+    expect(useAcpChatSessionStore.getState()).toMatchObject({ sending: false, cancelling: true });
+    expect(useAcpChatSessionStore.getState().timeline.itemsById['permission:cancel-permission']).toMatchObject({ status: 'cancelled' });
+    const stoppedTimeline = useAcpChatSessionStore.getState().timeline;
+    hostEventsMock.updateListener?.({
+      sessionKey: 'agent:pi:s1', generation: 1,
+      notification: { sessionId: 'agent:pi:s1', update: { sessionUpdate: 'agent_message_chunk', messageId: 'late', content: { type: 'text', text: 'late text' } } },
+    });
+    hostEventsMock.permissionListener?.({
+      sessionKey: 'agent:pi:s1', generation: 1, requestId: 'late-permission',
+      request: { sessionId: 'agent:pi:s1', toolCall: { toolCallId: 'late-edit' }, options: [] },
+    });
+    expect(useAcpChatSessionStore.getState().timeline).toBe(stoppedTimeline);
+    promptResult.resolve({ success: false, error: 'late upstream failure', errorCode: 'SERVICE_UNAVAILABLE' });
+    await expect(prompt).resolves.toBe(false);
+    expect(useAcpChatSessionStore.getState().timeline).toBe(stoppedTimeline);
+    cancelResult.resolve({ success: true, generation: 1 });
+    await cancel;
+    expect(useAcpChatSessionStore.getState()).toMatchObject({ sending: false, cancelling: false, error: null });
+  });
+
   it('atomically replaces interrupted text when the retry first produces visible text', async () => {
     const { useAcpChatSessionStore } = await importStore();
     await useAcpChatSessionStore.getState().loadSession({
@@ -3711,6 +3745,45 @@ describe('ACP Chat store', () => {
       ],
     });
     expect(useAcpChatSessionStore.getState().pendingImageGenerationTaskIds).toEqual([]);
+  });
+
+  it('retains an accepted image delivery after stop without recovering cancelled text', async () => {
+    const taskId = '0d2ee919-2dfd-4b72-9da3-d87e6ee56747';
+    const promptResult = createDeferred<{ success: boolean }>();
+    hostApiMock.sendAcpPrompt.mockReturnValueOnce(promptResult.promise);
+    const { ensureAcpChatSubscriptions, useAcpChatSessionStore } = await importStore();
+    ensureAcpChatSubscriptions();
+    await useAcpChatSessionStore.getState().loadSession({
+      sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo', createIfMissing: true,
+    });
+    const prompt = useAcpChatSessionStore.getState().sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'Generate an image', messageId: 'stopped-media-user',
+    });
+    hostEventsMock.updateListener?.({
+      sessionKey: 'agent:pi:s1', generation: 1,
+      notification: { sessionId: 'agent:pi:s1', update: {
+        sessionUpdate: 'tool_call_update', toolCallId: 'accepted-image', status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: `Background task started for image generation (${taskId}).` } }],
+      } },
+    });
+    hostApiMock.sessionsHistory.mockResolvedValue({ success: true, messages: [
+      { role: 'user', content: 'Generate an image' },
+      { role: 'assistant', id: 'stopped-media-final', content: 'Unwanted cancelled prose\nMEDIA:/repo/accepted.png' },
+    ] });
+    hostApiMock.resolveAttachment.mockResolvedValue({
+      ok: true, identity: 'accepted-image', displayName: 'accepted.png', mimeType: 'image/png', size: 128,
+      target: { kind: 'local', scope: 'openclaw-media', ref: { sessionKey: 'agent:pi:s1', generation: 1, uri: '/repo/accepted.png' } },
+    });
+    await useAcpChatSessionStore.getState().cancel();
+    await vi.waitFor(() => {
+      const timeline = useAcpChatSessionStore.getState().timeline;
+      expect(Object.values(timeline.itemsById).flatMap((item) => item.kind === 'message-segment' ? item.parts : [])
+        .some((part) => part.kind === 'attachment' && part.source === 'openclaw-media')).toBe(true);
+      expect(JSON.stringify(timeline)).not.toContain('Unwanted cancelled prose');
+    });
+    promptResult.resolve({ success: true });
+    await expect(prompt).resolves.toBe(false);
+    expect(JSON.stringify(useAcpChatSessionStore.getState().timeline)).not.toContain('turn-failure:stopped-media-user');
   });
 
   it('records image-generation start detection trace entries', async () => {

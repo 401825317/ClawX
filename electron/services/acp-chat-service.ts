@@ -171,6 +171,7 @@ const ACP_GATEWAY_READY_WAIT_TIMEOUT_MS = 90_000;
 const ACP_GATEWAY_READY_POLL_INTERVAL_MS = 250;
 const ACP_CONNECTION_RETRY_BASE_DELAY_MS = 250;
 const ACP_CONNECTION_RETRY_MAX_DELAY_MS = 2_000;
+const ACP_CANCEL_NOTIFICATION_TIMEOUT_MS = 1_000;
 /** A hard protocol-handshake budget for slow packaged ACP startup. */
 export const ACP_INITIALIZATION_TIMEOUT_MS = 45_000;
 const ACP_PROMPT_RETRY_BASE_DELAY_MS = 500;
@@ -223,6 +224,20 @@ function waitForDelay(delayMs: number, signal?: AbortSignal): Promise<boolean> {
 }
 
 const GATEWAY_TRANSITION_ERROR = 'Gateway is starting or reconnecting. Please wait and try again.';
+
+function promptCancelledError(): Error {
+  return Object.assign(new Error('ACP prompt cancelled by user.'), { code: 'CANCELLED' });
+}
+
+/** Abort local waits without interpreting notification delivery as remote termination. */
+function withPromptCancellation<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(promptCancelledError());
+    if (signal.aborted) abort();
+    else signal.addEventListener('abort', abort, { once: true });
+    operation.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+  });
+}
 
 function childTerminationMessage(
   termination: AcpChildTermination,
@@ -648,7 +663,7 @@ function inspectPromptCompletionResult(
     : '';
   if (stopReason === 'cancelled' || stopReason === 'aborted') {
     return promptContext.userCancelRequested
-      ? null
+      ? promptCancelledError()
       : promptCompletionError(result, `ACP prompt was ${stopReason} before completion.`);
   }
   if (stopReason === 'error') {
@@ -923,6 +938,9 @@ export class AcpChatService {
   private loadQueue: Promise<void> | null = null;
   private activeLoadBatch: AcpSessionLoadBatch | null = null;
   private readonly livePrompts = new Map<string, AcpLivePromptContext>();
+  /** Cancelled protocol IDs are quarantined; logical chat history remains unchanged. */
+  private readonly cancelledAcpSessionIds = new Set<string>();
+  private readonly rebindingAcpSessionIds = new Set<string>();
   private permissionSeq = 0;
   private readonly permissionWaiters = new Map<string, PermissionWaiter>();
   readonly client: Client;
@@ -1164,7 +1182,14 @@ export class AcpChatService {
 
       this.generation = nextGeneration;
       this.activeSessionKey = payload.sessionKey;
-      this.activeAcpSessionId = payload.createIfMissing ? null : payload.sessionKey;
+      // A new protocol identity prevents late updates from a cancelled prompt
+      // being mistaken for replay or a newer turn in this same logical chat.
+      const loadAcpSessionId = this.cancelledAcpSessionIds.has(payload.sessionKey)
+        || (previousSessionKey === payload.sessionKey && previousAcpSessionId != null
+          && this.cancelledAcpSessionIds.has(previousAcpSessionId))
+        ? `uclaw-binding:${randomUUID()}`
+        : payload.sessionKey;
+      this.activeAcpSessionId = payload.createIfMissing ? null : loadAcpSessionId;
       this.loadedSessionKey = null;
       this.loadedAcpSessionId = null;
       this.historicalSessionKey = payload.createIfMissing ? null : payload.sessionKey;
@@ -1180,7 +1205,7 @@ export class AcpChatService {
         this.resolvePermissionWaitersForSession(previousSessionKey, cancelledPermissionResponse());
       }
 
-      let acpSessionId = payload.sessionKey;
+      let acpSessionId = loadAcpSessionId;
       if (payload.createIfMissing) {
         const created = await connection.newSession({
           cwd: preparedAccessGrant.executionCwd,
@@ -1190,9 +1215,12 @@ export class AcpChatService {
         acpSessionId = created.sessionId;
       } else {
         await connection.loadSession({
-          sessionId: payload.sessionKey,
+          sessionId: loadAcpSessionId,
           cwd: preparedAccessGrant.executionCwd,
           mcpServers: [],
+          ...(loadAcpSessionId !== payload.sessionKey
+            ? { _meta: { sessionKey: payload.sessionKey, prefixCwd: true } }
+            : {}),
         });
       }
       this.requireSameGatewayRuntime(runtimeIdentity);
@@ -1252,7 +1280,7 @@ export class AcpChatService {
     if (this.loadedSessionKey !== payload.sessionKey || !this.loadedAcpSessionId) return fail('ACP session is not loaded');
     if (this.livePrompts.has(payload.sessionKey)) return fail('ACP prompt is already active');
     const generation = this.generation;
-    const acpSessionId = this.loadedAcpSessionId;
+    let acpSessionId = this.loadedAcpSessionId;
     const userMessageId = payload.messageId ?? randomUUID();
     const accessGrant = this.accessRegistry.get(payload.sessionKey, generation);
     if (!accessGrant) return fail('ACP session access grant is not active');
@@ -1284,7 +1312,8 @@ export class AcpChatService {
     let videoPreferenceId: string | undefined;
     try {
       let phaseStartedAtMs = Date.now();
-      const runtimeIdentity = await this.requireReadyGatewayRuntime();
+      const signal = promptContext.retryAbortController.signal;
+      const runtimeIdentity = await withPromptCancellation(this.requireReadyGatewayRuntime(signal), signal);
       phaseDurations.readyGatewayMs = Date.now() - phaseStartedAtMs;
       const promptCwd = payload.cwd === accessGrant.executionCwd
         ? payload.cwd
@@ -1304,11 +1333,35 @@ export class AcpChatService {
         },
       });
       phaseStartedAtMs = Date.now();
-      const connection = await this.ensureConnection(runtimeIdentity);
+      const previousConnection = this.connection;
+      const connection = await withPromptCancellation(this.ensureConnection(runtimeIdentity), signal);
       phaseDurations.ensureConnectionMs = Date.now() - phaseStartedAtMs;
       this.requireSameGatewayRuntime(runtimeIdentity);
+      const cancelledBinding = this.cancelledAcpSessionIds.has(acpSessionId);
+      if (cancelledBinding) {
+        acpSessionId = `uclaw-binding:${randomUUID()}`;
+        promptContext.acpSessionId = acpSessionId;
+      }
+      if (connection !== previousConnection || cancelledBinding) {
+        // Rotate only this protocol binding. The logical session and its
+        // transcript stay intact, and other live prompts keep their bridge.
+        this.rebindingAcpSessionIds.add(acpSessionId);
+        try {
+          await withPromptCancellation(connection.loadSession({
+            sessionId: acpSessionId,
+            cwd: accessGrant.executionCwd,
+            mcpServers: [],
+            _meta: { sessionKey: payload.sessionKey, prefixCwd: true },
+          }), signal);
+        } finally {
+          this.rebindingAcpSessionIds.delete(acpSessionId);
+        }
+        this.loadedAcpSessionId = acpSessionId;
+        this.activeAcpSessionId = acpSessionId;
+      }
+      if (signal.aborted) throw promptCancelledError();
       phaseStartedAtMs = Date.now();
-      const promptBuild = await this.buildPromptBlocks(payload);
+      const promptBuild = await withPromptCancellation(this.buildPromptBlocks(payload), signal);
       phaseDurations.promptBuildMs = Date.now() - phaseStartedAtMs;
       const prompt = promptBuild.blocks;
       const artifactPolicy = artifactTaskService.getPolicy(payload.sessionKey);
@@ -1330,7 +1383,7 @@ export class AcpChatService {
             modelId: artifactPolicy.modelAlias,
           }),
         ];
-        const results = await Promise.allSettled(controls);
+        const results = await withPromptCancellation(Promise.allSettled(controls), signal);
         const rejected = results.filter((result) => result.status === 'rejected');
         phaseDurations.sessionControlsMs = Date.now() - phaseStartedAtMs;
         if (rejected.length > 0) {
@@ -1340,33 +1393,48 @@ export class AcpChatService {
       const message = payload.message?.trim();
       phaseStartedAtMs = Date.now();
       if (payload.imageOptions && message) {
-        const preference = await this.turnImagePreferenceStore.enqueue({
+        const preference = await withPromptCancellation(this.turnImagePreferenceStore.enqueue({
           sessionKey: payload.sessionKey,
           message,
           imageOptions: payload.imageOptions,
+        }).then(async (preference) => {
+          if (!preference) return null;
+          if (signal.aborted) {
+            await this.turnImagePreferenceStore.discard(preference.id);
+            return null;
+          }
+          return preference;
         }).catch((error) => {
           // Composer preferences must never prevent a normal ACP prompt from running.
           logger.warn(`[acp-chat] Could not queue image generation preferences: ${String(error)}`);
           return null;
-        });
+        }), signal);
         imagePreferenceId = preference?.id;
       }
       if (payload.videoOptions && message) {
-        const preference = await this.turnVideoPreferenceStore.enqueue({
+        const preference = await withPromptCancellation(this.turnVideoPreferenceStore.enqueue({
           sessionKey: payload.sessionKey,
           message,
           videoOptions: payload.videoOptions,
           ...(promptBuild.videoReferenceImage
             ? { referenceImage: promptBuild.videoReferenceImage }
             : {}),
+        }).then(async (preference) => {
+          if (!preference) return null;
+          if (signal.aborted) {
+            await this.turnVideoPreferenceStore.discard(preference.id);
+            return null;
+          }
+          return preference;
         }).catch((error) => {
           // Composer preferences must never prevent a normal ACP prompt from running.
           logger.warn(`[acp-chat] Could not queue video generation preferences: ${String(error)}`);
           return null;
-        });
+        }), signal);
         videoPreferenceId = preference?.id;
       }
       phaseDurations.preferenceEnqueueMs = Date.now() - phaseStartedAtMs;
+      if (signal.aborted) throw promptCancelledError();
       if (this.historicalSessionKey === payload.sessionKey) {
         this.historicalSessionKey = null;
         this.historicalGeneration = null;
@@ -1392,6 +1460,7 @@ export class AcpChatService {
       let attemptMessageId = originalMessageId;
       let contextRecoveryAttempted = false;
       while (true) {
+        if (signal.aborted) throw promptCancelledError();
         promptContext.attempt = attempt;
         promptContext.attemptToolCallObserved = false;
         promptContext.attemptOutputObserved = false;
@@ -1404,7 +1473,7 @@ export class AcpChatService {
         const promptWaiter = promptContext.terminalFailureReject;
         const promptAttemptStartedAtMs = Date.now();
         try {
-          const promptResult = await Promise.race([
+          const promptResult = await withPromptCancellation(Promise.race([
             connection.prompt({
               sessionId: acpSessionId,
               prompt: attemptPrompt,
@@ -1412,7 +1481,7 @@ export class AcpChatService {
               _meta: { sessionKey: payload.sessionKey, prefixCwd: true },
             }),
             terminalFailureWait,
-          ]);
+          ]), signal);
           const promptCompletionFailure = inspectPromptCompletionResult(promptResult, promptContext);
           if (promptCompletionFailure) throw promptCompletionFailure;
           connectionPromptWaitMs += Date.now() - promptAttemptStartedAtMs;
@@ -1427,9 +1496,10 @@ export class AcpChatService {
           break;
         } catch (attemptError) {
           connectionPromptWaitMs += Date.now() - promptAttemptStartedAtMs;
+          if (signal.aborted) throw promptCancelledError();
           this.requireSameGatewayRuntime(runtimeIdentity);
           const failure = normalizeAcpChatError(attemptError);
-          if (promptContext.userCancelRequested || failure.code === 'CANCELLED') break;
+          if (failure.code === 'CANCELLED') throw attemptError;
           const replaySafe = !promptContext.toolCallObserved && !promptContext.replayUnsafeObserved;
           const isContextRecovery = failure.code === 'CONTEXT_OVERFLOW';
           const isTransientUpstream = isPromptRetryableUpstreamError(failure);
@@ -1525,6 +1595,7 @@ export class AcpChatService {
           }
         }
       }
+      if (signal.aborted) throw promptCancelledError();
       if (promptContext.retryStatusPending) {
         promptContext.retryStatusPending = false;
         promptContext.retryReplacementPending = false;
@@ -1555,25 +1626,39 @@ export class AcpChatService {
       artifactTaskService.complete(payload.sessionKey, 'success');
       return ok(generation);
     } catch (error) {
-      const failure = normalizeAcpChatError(error);
+      const failure = normalizeAcpChatError(promptContext.userCancelRequested ? promptCancelledError() : error);
       promptContext.retryStatusPending = false;
       promptContext.retryReplacementPending = false;
       const terminalFailure = promptContext.pendingTerminalFailure
         ?? terminalFailureNotification(acpSessionId, userMessageId, failure);
       promptContext.pendingTerminalFailure = null;
-      if (terminalFailure.update && typeof (terminalFailure.update as { userMessageId?: unknown }).userMessageId === 'string') {
+      if (failure.code !== 'CANCELLED' && terminalFailure.update && typeof (terminalFailure.update as { userMessageId?: unknown }).userMessageId === 'string') {
         void this.emitSessionUpdate(terminalFailure, { forwardTerminalFailure: true });
       }
-      if (imagePreferenceId) {
-        await this.turnImagePreferenceStore.discard(imagePreferenceId).catch((discardError) => {
-          logger.warn(`[acp-chat] Could not discard image generation preferences: ${String(discardError)}`);
+      const discardPreferences = async () => {
+        // IDs belong to this prompt only; delayed cleanup cannot erase a later turn.
+        if (imagePreferenceId) {
+          await this.turnImagePreferenceStore.discard(imagePreferenceId).catch((discardError) => {
+            logger.warn(`[acp-chat] Could not discard image generation preferences: ${String(discardError)}`);
+          });
+        }
+        if (videoPreferenceId) {
+          await this.turnVideoPreferenceStore.discard(videoPreferenceId).catch((discardError) => {
+            logger.warn(`[acp-chat] Could not discard video generation preferences: ${String(discardError)}`);
+          });
+        }
+      };
+      if (failure.code === 'CANCELLED') {
+        // Local stop must not wait for filesystem cleanup or a remote response.
+        void discardPreferences();
+        this.trace('session/prompt:cancelled', {
+          sessionKey: payload.sessionKey,
+          generation,
+          details: { requestId: userMessageId, remoteTerminationConfirmed: false },
         });
+        return fail(promptCancelledError());
       }
-      if (videoPreferenceId) {
-        await this.turnVideoPreferenceStore.discard(videoPreferenceId).catch((discardError) => {
-          logger.warn(`[acp-chat] Could not discard video generation preferences: ${String(discardError)}`);
-        });
-      }
+      await discardPreferences();
       logger.error(`[acp-chat] prompt failed: ${String(error)}`);
       const completedAtMs = Date.now();
       this.trace('session/prompt:complete', {
@@ -1607,27 +1692,40 @@ export class AcpChatService {
 
   async cancelSession(payload: AcpChatCancelPayload): Promise<AcpChatOperationResult> {
     if (!isValidSessionKey(payload.sessionKey)) return fail('Invalid ACP cancel payload');
-    if (payload.sessionKey !== this.activeSessionKey || !this.loadedAcpSessionId) return fail('ACP session is not loaded');
+    if (payload.sessionKey !== this.activeSessionKey) return fail('ACP session is not active');
 
     try {
       this.trace('session/cancel:start', { sessionKey: payload.sessionKey });
       const livePrompt = this.livePrompts.get(payload.sessionKey);
+      const acpSessionId = livePrompt?.acpSessionId ?? this.loadedAcpSessionId;
+      const connection = this.connection;
       if (livePrompt) {
         livePrompt.userCancelRequested = true;
-        livePrompt.retryAbortController.abort();
         if (livePrompt.retryStatusPending) {
           livePrompt.retryStatusPending = false;
           livePrompt.retryReplacementPending = false;
           void this.emitSessionUpdate(retryCancelledNotification(livePrompt.acpSessionId, livePrompt.userMessageId));
         }
+        this.cancelledAcpSessionIds.add(livePrompt.acpSessionId);
+        // Older retired IDs also fail the active-ID check; keep this guard bounded.
+        if (this.cancelledAcpSessionIds.size > 256) {
+          this.cancelledAcpSessionIds.delete(this.cancelledAcpSessionIds.values().next().value!);
+        }
+        livePrompt.retryAbortController.abort();
+        // Release this owner synchronously. Its eventual completion/finally
+        // cannot clear a newer turn or resolve the newer turn's permissions.
+        this.livePrompts.delete(payload.sessionKey);
+        artifactTaskService.complete(payload.sessionKey, 'cancelled');
       }
-      const runtimeIdentity = await this.requireReadyGatewayRuntime();
-      const connection = await this.ensureConnection(runtimeIdentity);
-      this.requireSameGatewayRuntime(runtimeIdentity);
-      await connection.cancel({ sessionId: this.loadedAcpSessionId });
       this.permissionsEnabled = false;
       this.resolvePermissionWaitersForSession(payload.sessionKey, cancelledPermissionResponse());
-      this.trace('session/cancel:success', { sessionKey: payload.sessionKey });
+      // Use only the original transport. Never wait for ready, spawn ACP, or
+      // send this cancellation to a future Gateway/session after reconnect.
+      if (connection && acpSessionId) void this.deliverCancelNotification(connection, acpSessionId, payload.sessionKey);
+      this.trace('session/cancel:success', {
+        sessionKey: payload.sessionKey,
+        details: { localStopped: true, remoteCancel: connection && acpSessionId ? 'notification-pending' : 'no-original-connection', remoteTerminationConfirmed: false },
+      });
       return ok(this.generation);
     } catch (error) {
       logger.error(`[acp-chat] cancel failed: ${String(error)}`);
@@ -1636,6 +1734,23 @@ export class AcpChatService {
         details: { error: error instanceof Error ? error.message : String(error) },
       });
       return fail(error);
+    }
+  }
+
+  private async deliverCancelNotification(connection: AcpConnection, sessionId: string, sessionKey: string): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        connection.cancel({ sessionId }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('ACP cancel notification delivery timed out.')), ACP_CANCEL_NOTIFICATION_TIMEOUT_MS);
+        }),
+      ]);
+      this.trace('session/cancel:notification-sent', { sessionKey, details: { remoteTerminationConfirmed: false } });
+    } catch (error) {
+      this.trace('session/cancel:notification-failed', { sessionKey, details: { error: normalizeAcpChatError(error).code, remoteTerminationConfirmed: false } });
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -1655,20 +1770,15 @@ export class AcpChatService {
   private getReadyGatewayRuntimeIdentity(): string | null {
     if (!this.gateway) return null;
     const status = this.gateway.getStatus?.();
-    // `gatewayReady` was added after the original running-state contract. An
-    // older Gateway (or a compatible host bridge) may omit it; only an
-    // explicit false means that the runtime is still transitioning. The
-    // GatewayManager in current builds sets false while booting and true once
-    // its readiness event/probe succeeds, so this preserves the strict path
-    // without deadlocking legacy status payloads.
-    if (!status || status.state !== 'running' || status.gatewayReady === false) {
+    // Dispatch can produce external side effects and requires explicit readiness.
+    if (!status || status.state !== 'running' || status.gatewayReady !== true) {
       throw new Error(GATEWAY_TRANSITION_ERROR);
     }
     return `${status.pid ?? 'none'}:${status.connectedAt ?? 'none'}:${status.port}`;
   }
 
-  private async requireReadyGatewayRuntime(): Promise<string | null> {
-    await this.waitForGatewayReady();
+  private async requireReadyGatewayRuntime(signal?: AbortSignal): Promise<string | null> {
+    await this.waitForGatewayReady(signal);
     return this.getReadyGatewayRuntimeIdentity();
   }
 
@@ -1921,7 +2031,7 @@ export class AcpChatService {
     }
   }
 
-  private async waitForGatewayReady(): Promise<void> {
+  private async waitForGatewayReady(signal?: AbortSignal): Promise<void> {
     if (!this.gateway?.getStatus) return;
 
     const initialStatus = this.gateway.getStatus();
@@ -1936,7 +2046,7 @@ export class AcpChatService {
     });
 
     while (Date.now() - startedAt < ACP_GATEWAY_READY_WAIT_TIMEOUT_MS) {
-      await waitForDelay(ACP_GATEWAY_READY_POLL_INTERVAL_MS);
+      if (!await waitForDelay(ACP_GATEWAY_READY_POLL_INTERVAL_MS, signal)) throw promptCancelledError();
       const status = this.gateway.getStatus();
       if (gatewayNeedsReadinessWait(status)) continue;
 
@@ -2171,8 +2281,16 @@ export class AcpChatService {
       },
     );
     const stream = ndJsonStream(input, output);
+    const scopedClient: Client = {
+      sessionUpdate: async (notification) => {
+        if (this.child === child) await this.emitSessionUpdate(notification, { sourceChild: child });
+      },
+      requestPermission: async (request) => this.child === child
+        ? this.requestPermission(request)
+        : cancelledPermissionResponse(),
+    };
     return {
-      connection: new ClientSideConnection(() => this.client, stream),
+      connection: new ClientSideConnection(() => scopedClient, stream),
       child,
     };
   }
@@ -2319,13 +2437,16 @@ export class AcpChatService {
 
   private async emitSessionUpdate(
     notification: SessionNotification,
-    options: { forwardTerminalFailure?: boolean } = {},
+    options: { forwardTerminalFailure?: boolean; sourceChild?: AcpChildProcess } = {},
   ): Promise<void> {
     const acpSessionId = notification.sessionId;
+    if (this.rebindingAcpSessionIds.has(acpSessionId)) return;
     const livePrompt = [...this.livePrompts.values()].find((context) => context.acpSessionId === acpSessionId);
     const sessionKey = livePrompt?.sessionKey ?? this.activeSessionKey;
     const generation = livePrompt?.generation ?? this.generation;
     const updateType = sessionUpdateType(notification);
+    const cancellationControl = updateType === 'uclaw_turn_retry_cancelled';
+    if (this.cancelledAcpSessionIds.has(acpSessionId) && !cancellationControl) return;
     this.trace('session-update:received', {
       direction: 'upstream',
       sessionKey: sessionKey ?? null,
@@ -2392,6 +2513,9 @@ export class AcpChatService {
     const safeNotification = materializedInlineImage
       ? await this.materializeSessionNotification(notification, sessionKey, generation)
       : notification;
+    if ((options.sourceChild && this.child !== options.sourceChild)
+      || (livePrompt?.userCancelRequested && !cancellationControl)
+      || (this.cancelledAcpSessionIds.has(acpSessionId) && !cancellationControl)) return;
     if (materializedInlineImage && !this.accessRegistry.get(sessionKey, generation)) {
       this.trace('session-update:ignored', {
         direction: 'upstream',
@@ -2450,9 +2574,13 @@ export class AcpChatService {
 
   private requestPermission(request: RequestPermissionRequest): Promise<RequestPermissionResponse> {
     const acpSessionId = request.sessionId;
+    if (this.rebindingAcpSessionIds.has(acpSessionId)) return Promise.resolve(cancelledPermissionResponse());
     const livePrompt = [...this.livePrompts.values()].find((context) => context.acpSessionId === acpSessionId);
     const sessionKey = livePrompt?.sessionKey ?? this.activeSessionKey;
     const generation = livePrompt?.generation ?? this.generation;
+    if (livePrompt?.userCancelRequested || this.cancelledAcpSessionIds.has(acpSessionId)) {
+      return Promise.resolve(cancelledPermissionResponse());
+    }
     if (livePrompt) {
       livePrompt.replayUnsafeObserved = true;
       livePrompt.attemptOutputObserved = true;

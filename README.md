@@ -99,6 +99,12 @@ When Developer Mode is enabled, the sidebar also provides a native Dreams page f
 
 ## Features
 
+### Request Failure And Stop Behavior
+
+Managed subscription/quota failures and certificate validation failures are terminal: UClaw shows the matching error without retrying or switching text models. Certificate verification stays enabled. Stop releases the local prompt and pending permissions even while Gateway is unavailable; remote cancellation is best effort, and cannot prove that a disconnected provider stopped. Cancelled ACP events are isolated before the next turn. Attachment selection is capped at eight, checked again before send, and a rejected send preserves the draft. Configuration refreshes merge duplicate writes and skip unchanged runtime settings; a real change still uses the supported platform refresh path, including a necessary Windows restart.
+
+After cancellation, a new ACP protocol binding retains the original conversation history and shared connection. Accepted asynchronous media keeps its attachment delivery without recovering cancelled prose. OpenClaw 2026.6.10 native execution approvals without a run identity cannot prove ownership after binding rotation, so they are denied for that logical conversation during the current bridge lifetime; run-scoped approvals and untouched conversations are unaffected. A connected unowned external Gateway cannot be marked refreshed by reconnecting: its config change stays pending until a controlled start. These client changes do not repair certificate trust on the actual customer network or prove that Windows ACP process exits are resolved. Runtime patches fail the install or bundle on version/layout drift; they are not a cross-script filesystem transaction.
+
 ### 🎯 Zero Configuration Barrier
 Complete the entire setup—from installation to your first AI interaction—through an intuitive graphical interface. No terminal commands, no YAML files, no environment variable hunting.
 

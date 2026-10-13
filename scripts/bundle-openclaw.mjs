@@ -24,6 +24,8 @@ import {
 } from './install-openclaw-skill-shims.mjs';
 import { patchOpenClawAcpStreamingRuntime } from './openclaw-acp-streaming-patch.mjs';
 import { patchOpenClawAcpTerminalErrorRuntime } from './openclaw-acp-terminal-error-patch.mjs';
+import { patchOpenClawAcpBindingIsolationRuntime } from './openclaw-acp-binding-isolation-patch.mjs';
+import { patchOpenClawProviderTerminalErrorRuntime } from './openclaw-provider-terminal-error-patch.mjs';
 import { patchOpenClawAcpSessionReplayRuntime } from './openclaw-acp-session-replay-guard-patch.mjs';
 import { patchOpenClawMediaGenerationRuntime } from './openclaw-media-generation-patch.mjs';
 import { patchOpenClawModelCatalogCacheRuntime } from './openclaw-model-catalog-cache-patch.mjs';
@@ -1044,10 +1046,17 @@ patchBundledRuntime(OUTPUT);
 const acpStreamingPatch = await patchOpenClawAcpStreamingRuntime(OUTPUT);
 echo`   🩹 Verified UClaw ACP streaming patch (${acpStreamingPatch.filesPatched} file(s) patched)`;
 
+// Install and verify the helper before ACP adds imports of it. Each patch
+// preflights its own files; this sequence is not a transaction across patches.
+const providerTerminalErrorPatch = await patchOpenClawProviderTerminalErrorRuntime(OUTPUT);
+echo`   Verified terminal provider error patch (${providerTerminalErrorPatch.filesPatched} file(s) patched)`;
 // Terminal provider failures must reject the ACP prompt so the renderer can
 // attach the correct recovery message to the originating user turn.
 const acpTerminalErrorPatch = await patchOpenClawAcpTerminalErrorRuntime(OUTPUT);
 echo`   🩹 Verified UClaw ACP terminal error patch (${acpTerminalErrorPatch.filesPatched} file(s) patched)`;
+
+const acpBindingIsolationPatch = await patchOpenClawAcpBindingIsolationRuntime(OUTPUT);
+echo`   Verified UClaw ACP binding isolation patch (${acpBindingIsolationPatch.filesPatched} file(s) patched)`;
 
 // Session/load must never ask the gateway for an unbounded million-message
 // transcript. Keep the packaged runtime on the same guarded 6.10 layout as

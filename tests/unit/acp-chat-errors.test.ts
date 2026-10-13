@@ -61,6 +61,7 @@ describe('ACP chat error classification', () => {
     ['session file changed while embedded prompt lock was released', 'SESSION_LOCKED', true],
     ['status_code=400, Unsupported parameter: max_output_tokens', 'INVALID_REQUEST', false],
     ['status_code=400, Video duration must be 6 or 10 seconds.', 'INVALID_REQUEST', false],
+    ['A message can include at most 8 media attachments.', 'INVALID_REQUEST', false],
     ['status_code=400, model_not_found', 'MODEL_UNAVAILABLE', false],
     ['status_code=503, model temporarily unavailable', 'MODEL_UNAVAILABLE', true],
     ['sensitive_words_detected', 'CONTENT_POLICY', false],
@@ -68,6 +69,11 @@ describe('ACP chat error classification', () => {
     ['ACP prompt returned a failed completion: upstream service unavailable', 'SERVICE_UNAVAILABLE', true],
     ['ACP prompt was aborted before completion.', 'SERVICE_UNAVAILABLE', true],
     ['ACP prompt returned a failed completion: permission denied', 'PERMISSION_DENIED', false],
+    ['provider-transport-fetch error causeCode=DEPTH_ZERO_SELF_SIGNED_CERT', 'TLS_CERT_INVALID', false],
+    ['self-signed certificate in certificate chain', 'TLS_CERT_INVALID', false],
+    ['unable to verify the first certificate', 'TLS_CERT_INVALID', false],
+    ['certificate has expired', 'TLS_CERT_INVALID', false],
+    ['request failed: certificate is not trusted', 'TLS_CERT_INVALID', false],
   ] as const)('keeps recovery semantics for %s', (message, code, retryable) => {
     expect(normalizeAcpChatError(message)).toMatchObject({ code, retryable });
   });
@@ -116,4 +122,20 @@ describe('ACP chat error classification', () => {
       upstreamCode: 'insufficient_user_quota',
     });
   });
+
+  it('separates the real subscription ACP envelope from permission and prepaid balance', () => {
+    expect(normalizeAcpChatError({
+      message: 'Internal error',
+      data: { details: '403 订阅额度不足或未配置订阅: no active subscription' },
+    })).toMatchObject({ code: 'SUBSCRIPTION_UNAVAILABLE', retryable: false, httpStatus: 403 });
+  });
+
+  it.each(['DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'TLS_CERT_INVALID']) (
+    'preserves terminal TLS %s through a generic SDK/ACP envelope', (code) => {
+      expect(normalizeAcpChatError({
+        message: 'Connection error. (timeout)',
+        data: { details: { errorCode: code, errorMessage: 'Certificate rejected' } },
+      })).toMatchObject({ code: 'TLS_CERT_INVALID', retryable: false });
+    },
+  );
 });

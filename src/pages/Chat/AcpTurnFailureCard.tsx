@@ -6,9 +6,11 @@ import { Button } from '@/components/ui/button';
 function failureCopyKey(code: TurnFailureItem['failure']['code']): string {
   switch (code) {
     case 'INSUFFICIENT_QUOTA': return 'insufficientQuota';
+    case 'SUBSCRIPTION_UNAVAILABLE': return 'subscriptionUnavailable';
     case 'AUTH_INVALID': return 'authInvalid';
     case 'RATE_LIMIT': return 'rateLimit';
     case 'PERMISSION_DENIED': return 'permissionDenied';
+    case 'TLS_CERT_INVALID': return 'tlsCertInvalid';
     case 'TIMEOUT': return 'timeout';
     case 'NETWORK': return 'network';
     case 'SERVICE_UNAVAILABLE': return 'serviceUnavailable';

@@ -88,10 +88,12 @@
         "unsupportedContent": "不支持的内容",
         "dismiss": "关闭",
         "failure": {
-            "insufficientQuota": { "title": "余额不足", "message": "当前账户额度不足，本次请求未执行。充值后可以立即继续。", "action": "去充值" },
+            "insufficientQuota": { "title": "账户额度不足", "message": "模型服务因当前账户额度不足拒绝了本次请求，已停止自动重试。请核对账户余额和可用额度，恢复额度后再手动发送。", "action": "查看充值" },
+            "subscriptionUnavailable": { "title": "订阅不可用或订阅额度不足", "message": "模型服务提示没有有效订阅或订阅额度不足，已停止自动重试。请核对主账号订阅状态及该模型的可用额度；仅充值余额不一定能恢复调用。" },
             "authInvalid": { "title": "登录凭证已失效", "message": "请重新登录或检查 API 密钥后再发送。" },
             "rateLimit": { "title": "请求过于频繁", "message": "服务正在临时限流，请稍后重新发送。" },
             "permissionDenied": { "title": "没有调用权限", "message": "当前账户或模型无权执行此请求，请检查权限配置。" },
+            "tlsCertInvalid": { "title": "证书校验失败", "message": "模型连接的 TLS 证书校验失败，已停止自动重试。请联系管理员核对服务入口证书链及代理或安全软件提供的证书；修复后再手动发送，不要关闭证书校验。" },
             "timeout": { "title": "请求超时", "message": "服务在规定时间内没有完成响应，请稍后重新发送。" },
             "network": { "title": "网络连接异常", "message": "连接在请求过程中中断，请检查网络后重新发送。" },
             "serviceUnavailable": { "title": "模型服务暂不可用", "message": "上游服务暂时异常，请稍后重新发送。" },
@@ -336,6 +338,7 @@
     },
     "composer": {
         "attachFiles": "添加文件",
+        "mediaAttachmentLimit": "单条消息最多支持 {{count}} 个附件",
         "pickSkill": "选择技能",
         "skillButton": "技能",
         "skillPickerTitle": "{{agent}} 的快捷技能",

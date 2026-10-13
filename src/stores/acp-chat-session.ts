@@ -240,6 +240,8 @@ type TranscriptSupplementOperation = {
   started: boolean;
   terminal: boolean;
   cancelled: boolean;
+  /** Suppresses only this user's stopped prompt result, not accepted media tasks. */
+  userCancelled?: boolean;
   mediaCandidateSeen: boolean;
   authorizedMediaDelivered: boolean;
   browserReleased: boolean;
@@ -2423,10 +2425,12 @@ async function runTranscriptSupplement(operation: TranscriptSupplementOperation)
 
   for (const start of result.imageGeneration.starts) {
     if (!isCurrent()) return 0;
+    if (operation.userCancelled && !operation.imageTaskIds.has(start.taskId)) continue;
     recordHistoricalImageGenerationStart(start, operation.generation);
   }
   for (const completion of result.imageGeneration.completions) {
     if (!isCurrent()) return 0;
+    if (operation.userCancelled && (!completion.taskId || !operation.imageTaskIds.has(completion.taskId))) continue;
     await useAcpChatSessionStore.getState().projectImageGenerationCompletion(completion, {
       isCurrent,
       staleReason: 'stale-transcript-supplement',
@@ -2451,7 +2455,7 @@ async function runTranscriptSupplement(operation: TranscriptSupplementOperation)
       if (resolved.localVideoIdentity) localVideoIdentities.add(resolved.localVideoIdentity);
       if (resolved.localImageIdentity) localImageIdentities.add(resolved.localImageIdentity);
     }
-    if (supplement.finalAssistant && isCurrent()) {
+    if (supplement.finalAssistant && !operation.userCancelled && isCurrent()) {
       commitSessionTimeline(operation.sessionKey, operation.generation, (timeline) => (
         reconcileSuccessfulMediaAssistant(
           timeline,
@@ -2912,8 +2916,8 @@ function settleOptimisticUserSegment(
 }
 
 const KNOWN_ACP_CHAT_ERROR_CODES = new Set<AcpChatErrorCode>([
-  'INSUFFICIENT_QUOTA', 'AUTH_INVALID', 'RATE_LIMIT', 'PERMISSION_DENIED',
-  'TIMEOUT', 'NETWORK', 'GATEWAY_UNAVAILABLE', 'SERVICE_UNAVAILABLE',
+  'INSUFFICIENT_QUOTA', 'SUBSCRIPTION_UNAVAILABLE', 'AUTH_INVALID', 'RATE_LIMIT', 'PERMISSION_DENIED',
+  'TLS_CERT_INVALID', 'TIMEOUT', 'NETWORK', 'GATEWAY_UNAVAILABLE', 'SERVICE_UNAVAILABLE',
   'CONTEXT_OVERFLOW', 'SESSION_LOCKED', 'MODEL_UNAVAILABLE', 'CONTENT_POLICY',
   'CONVERSATION_INVALID', 'IMAGE_TOO_LARGE', 'INVALID_REQUEST', 'CANCELLED', 'UNKNOWN',
 ]);
@@ -3112,9 +3116,9 @@ async function reconcileFailedPromptTurn(
 ): Promise<void> {
   const attempt = operation.attempt + 1;
   operation.attempt = attempt;
-  const isCurrent = () => operation.attempt === attempt
+  const isCurrent = () => !operation.userCancelled && operation.attempt === attempt
     && isCurrentTranscriptSupplement(useAcpChatSessionStore.getState(), operation);
-  if (!operation.liveUserMessageId || !isCurrent()) return;
+  if (!operation.liveUserMessageId || operation.userCancelled || !isCurrent()) return;
   const supplement = await fetchFailedOpenClawTurnSupplement({
     sessionKey: operation.sessionKey,
     executionCwd: operation.executionCwd,
@@ -3299,6 +3303,12 @@ function applyOperationGeneration(
     generation: result.generation,
     timeline: { ...state.timeline, loadGeneration: result.generation },
   };
+}
+
+const locallyCancelledSessions = new Map<string, number>();
+
+function isLocallyCancelledSession(sessionKey: string, generation: number): boolean {
+  return locallyCancelledSessions.get(sessionKey) === generation;
 }
 
 export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => ({
@@ -3583,6 +3593,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
     const startState = get();
     const generation = startState.generation;
     if (startState.activeSessionKey !== sessionKey) return false;
+    locallyCancelledSessions.delete(sessionKey);
 
     const startedAtMs = Date.now();
     const messageId = input.messageId ?? createOptimisticMessageId();
@@ -3617,6 +3628,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       const state = get();
       const settledAtMs = Date.now();
       const failure = result.success ? null : operationFailure(result);
+      if (transcriptOperation.userCancelled) return false;
       if (transcriptOperation.browserReleased) return result.success;
       if (!isCurrentAction(state, sessionKey, generation)) {
         const deferFailure = failure
@@ -3679,6 +3691,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
       const state = get();
       const settledAtMs = Date.now();
       const failure = normalizeAcpChatError(error);
+      if (transcriptOperation.userCancelled) return false;
       const deferFailure = isRecoverableMediaPromptFailure(transcriptOperation, failure);
       if (transcriptOperation.browserReleased) return false;
       if (!isCurrentAction(state, sessionKey, generation)) {
@@ -3724,9 +3737,33 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
     const generation = startState.generation;
     if (!sessionKey) return;
     const operation = latestLiveTranscriptOperation(sessionKey, generation);
-    if (operation) invalidateTranscriptSupplement(operation);
+    if (operation) {
+      operation.userCancelled = true;
+      // A provider-accepted media task owns its delivery independently of the prompt.
+      // Retain only that owner's attachment recovery, never cancelled-turn text.
+      if (operationHasUndeliveredTrackedMedia(operation)) startLiveTranscriptSupplement(operation);
+      else invalidateTranscriptSupplement(operation);
+    }
+    locallyCancelledSessions.set(sessionKey, generation);
+    if (locallyCancelledSessions.size > 64) locallyCancelledSessions.delete(locallyCancelledSessions.keys().next().value!);
 
-    set({ cancelling: true, error: null });
+    const itemsById = { ...startState.timeline.itemsById };
+    for (const [id, item] of Object.entries(itemsById)) {
+      if (item.kind === 'permission' && item.status === 'pending') itemsById[id] = { ...item, status: 'cancelled' };
+    }
+    set({
+      cancelling: true,
+      sending: false,
+      error: null,
+      timeline: {
+        ...startState.timeline,
+        itemsById,
+        openMessageSegments: {},
+      },
+      turnTimingsByUserMessageId: Object.fromEntries(Object.entries(startState.turnTimingsByUserMessageId)
+        .filter(([, timing]) => timing.status !== 'running')),
+    });
+    captureLiveSession(get());
     try {
       const result = await hostApi.chat.cancelAcpSession({ sessionKey });
       set((state) => {
@@ -4364,6 +4401,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
   },
 
   applyUpdateEnvelope(event) {
+    if (!event.historical && isLocallyCancelledSession(event.sessionKey, event.generation)) return;
     const state = get();
     if (state.loading) {
       if (event.sessionKey === state.activeSessionKey) {
@@ -4397,6 +4435,7 @@ export const useAcpChatSessionStore = create<AcpChatSessionState>((set, get) => 
   },
 
   applyPermissionRequest(event) {
+    if (isLocallyCancelledSession(event.sessionKey, event.generation)) return;
     const state = get();
     if (event.sessionKey !== state.activeSessionKey || event.generation !== state.generation) {
       const liveSnapshot = liveSessionSnapshots.get(event.sessionKey);
@@ -4420,6 +4459,7 @@ let acpChatUnsubscribers: Array<() => void> = [];
 
 /** Stops process-local ACP work so a replacement Store cannot receive stale callbacks. */
 export function disposeAcpChatSessionRuntime(): void {
+  locallyCancelledSessions.clear();
   loadRequestSeq += 1;
   pendingLoadUpdates.clear();
 

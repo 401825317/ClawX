@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ChatInput } from '@/pages/Chat/ChatInput';
 import { TooltipProvider } from '@/components/ui/tooltip';
+import { rendererExtensionRegistry } from '@/extensions/registry';
 const hostApiFetchMock = vi.hoisted(() => vi.fn());
 const hostApiDialogOpenMock = vi.hoisted(() => vi.fn());
 const toastErrorMock = vi.hoisted(() => vi.fn());
@@ -193,6 +194,8 @@ function translate(key: string, vars?: Record<string, unknown>): string {
   switch (key) {
     case 'composer.attachFiles':
       return 'Attach files';
+    case 'composer.mediaAttachmentLimit':
+      return `A message can include at most ${String(vars?.count ?? '')} attachments`;
     case 'composer.pickSkill':
       return 'Choose skill';
     case 'composer.skillButton':
@@ -332,6 +335,36 @@ function createDeferred<T>() {
     reject = rejectPromise;
   });
   return { promise, resolve, reject };
+}
+
+function stagedAttachment(fileName: string) {
+  return {
+    id: `staged-${fileName}`,
+    fileName,
+    mimeType: 'text/plain',
+    fileSize: 10,
+    stagedPath: `/tmp/staged-${fileName}`,
+    preview: null,
+  };
+}
+
+function dropAttachments(container: HTMLElement, files: File[]) {
+  fireEvent.drop(container.firstElementChild as Element, {
+    dataTransfer: { files },
+  });
+}
+
+function pasteAttachments(files: File[]) {
+  fireEvent.paste(screen.getByTestId('chat-composer-input'), {
+    clipboardData: {
+      items: files.map((file) => ({ kind: 'file', getAsFile: () => file })),
+    },
+  });
+}
+
+function removeAttachmentByName(fileName: string) {
+  const preview = screen.getByText(fileName).closest('div.relative');
+  fireEvent.click(preview!.querySelector('button')!);
 }
 
 function configureAgentAndModelPickers() {
@@ -479,6 +512,34 @@ describe('ChatInput agent targeting', () => {
     expect(indicator).toHaveAttribute('aria-live', 'polite');
     expect(screen.getByTestId('chat-composer-dot-pulse')).toBeInTheDocument();
     expect(screen.queryByTestId('chat-composer-zoomies')).not.toBeInTheDocument();
+  });
+
+  it('keeps stop available while sending even when gateway and composer are disabled', () => {
+    gatewayState.status = { state: 'running', port: 18789, gatewayReady: false };
+    const onStop = vi.fn();
+    render(
+      <TooltipProvider>
+        <ChatInput onSend={vi.fn()} onStop={onStop} sending disabled />
+      </TooltipProvider>,
+    );
+
+    const stopButton = screen.getByTestId('chat-composer-send');
+    expect(stopButton).not.toBeDisabled();
+    fireEvent.click(stopButton);
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables stop only when its independent cancellation guard is set', () => {
+    const onStop = vi.fn();
+    render(
+      <TooltipProvider>
+        <ChatInput onSend={vi.fn()} onStop={onStop} sending stopDisabled />
+      </TooltipProvider>,
+    );
+    const stopButton = screen.getByTestId('chat-composer-send');
+    expect(stopButton).toBeDisabled();
+    fireEvent.click(stopButton);
+    expect(onStop).not.toHaveBeenCalled();
   });
 
   it('shows the actual disabled reason instead of claiming the gateway is disconnected', () => {
@@ -706,6 +767,466 @@ describe('ChatInput agent targeting', () => {
     });
     expect(onSend).not.toHaveBeenCalled();
     expect(screen.getByTestId('chat-composer-input')).toHaveValue('Animate both images.');
+  });
+
+  it('rejects a file selection above the media attachment limit before staging', async () => {
+    vi.mocked(hostApiDialogOpenMock).mockResolvedValue({
+      canceled: false,
+      filePaths: Array.from({ length: 9 }, (_, index) => `/tmp/attachment-${index}.txt`),
+    });
+    const onSend = vi.fn();
+    renderChatInput(onSend);
+
+    fireEvent.click(screen.getByTestId('chat-composer-attach'));
+
+    await waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalledWith('A message can include at most 8 attachments');
+    });
+    expect(hostApiFetchMock).not.toHaveBeenCalledWith('/api/files/stage-paths', expect.anything());
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('reserves attachment slots across consecutive selections before staging completes', async () => {
+    vi.mocked(hostApiDialogOpenMock)
+      .mockResolvedValueOnce({
+        canceled: false,
+        filePaths: Array.from({ length: 5 }, (_, index) => `/tmp/first-${index}.txt`),
+      })
+      .mockResolvedValueOnce({
+        canceled: false,
+        filePaths: Array.from({ length: 4 }, (_, index) => `/tmp/second-${index}.txt`),
+      });
+    const staged = new Promise<Array<Record<string, unknown>>>(() => {});
+    vi.mocked(hostApiFetchMock).mockImplementation((path: string) => (
+      path === '/api/files/stage-paths' ? staged : Promise.resolve({ success: true, skills: [] })
+    ));
+    renderChatInput();
+
+    fireEvent.click(screen.getByTestId('chat-composer-attach'));
+    await Promise.resolve();
+    fireEvent.click(screen.getByTestId('chat-composer-attach'));
+
+    await waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalledWith('A message can include at most 8 attachments');
+    });
+    expect(vi.mocked(hostApiFetchMock).mock.calls.filter(([path]) => path === '/api/files/stage-paths'))
+      .toHaveLength(1);
+  });
+
+  it('keeps all buffer reservations when the first dropped attachment is removed during staging', async () => {
+    const firstBuffer = createDeferred<ReturnType<typeof stagedAttachment>>();
+    vi.mocked(hostApiFetchMock).mockImplementation((path: string, request?: { body?: string }) => {
+      if (path === '/api/files/stage-buffer') {
+        const { fileName } = JSON.parse(request!.body!);
+        return fileName === 'buffer-0.txt' ? firstBuffer.promise : Promise.resolve(stagedAttachment(fileName));
+      }
+      if (path === '/api/files/stage-paths') {
+        return Promise.resolve([stagedAttachment('replacement.txt')]);
+      }
+      return Promise.resolve({ success: true, skills: [] });
+    });
+    vi.mocked(hostApiDialogOpenMock)
+      .mockResolvedValueOnce({ canceled: false, filePaths: Array.from({ length: 8 }, (_, i) => `/tmp/extra-${i}.txt`) })
+      .mockResolvedValueOnce({ canceled: false, filePaths: ['/tmp/replacement.txt'] });
+    const onSend = vi.fn();
+    const { container } = renderChatInput(onSend);
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Keep this draft' } });
+    dropAttachments(container, Array.from({ length: 8 }, (_, i) => new File(['data'], `buffer-${i}.txt`)));
+    await waitFor(() => {
+      expect(hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/files/stage-buffer')).toHaveLength(1);
+    });
+
+    removeAttachmentByName('buffer-0.txt');
+    fireEvent.click(screen.getByTestId('chat-composer-attach'));
+    await waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalledWith('A message can include at most 8 attachments');
+    });
+    expect(hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/files/stage-paths')).toHaveLength(0);
+    expect(screen.getByTestId('chat-composer-input')).toHaveValue('Keep this draft');
+    expect(screen.getByText('buffer-7.txt')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('chat-composer-attach'));
+    await screen.findByText('replacement.txt');
+    await act(async () => { firstBuffer.resolve(stagedAttachment('buffer-0.txt')); });
+    await waitFor(() => { expect(screen.getByTestId('chat-composer-send')).not.toBeDisabled(); });
+    expect(screen.queryByText('buffer-0.txt')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('chat-composer-send'));
+    await waitFor(() => { expect(onSend).toHaveBeenCalledTimes(1); });
+    expect(onSend.mock.calls[0][1]).toHaveLength(8);
+    expect(onSend.mock.calls[0][1].map((attachment: { fileName: string }) => attachment.fileName))
+      .toEqual([...Array.from({ length: 7 }, (_, i) => `buffer-${i + 1}.txt`), 'replacement.txt']);
+  });
+
+  it('skips a removed buffer placeholder before its serial staging begins', async () => {
+    const firstBuffer = createDeferred<ReturnType<typeof stagedAttachment>>();
+    vi.mocked(hostApiFetchMock).mockImplementation((path: string, request?: { body?: string }) => {
+      if (path !== '/api/files/stage-buffer') return Promise.resolve({ success: true, skills: [] });
+      const { fileName } = JSON.parse(request!.body!);
+      return fileName === 'first.txt' ? firstBuffer.promise : Promise.resolve(stagedAttachment(fileName));
+    });
+    const { container } = renderChatInput();
+    dropAttachments(container, [new File(['a'], 'first.txt'), new File(['b'], 'removed.txt')]);
+    removeAttachmentByName('removed.txt');
+    await act(async () => { firstBuffer.resolve(stagedAttachment('first.txt')); });
+    await waitFor(() => { expect(screen.getByTestId('chat-composer-send')).not.toBeDisabled(); });
+    expect(hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/files/stage-buffer')).toHaveLength(1);
+    expect(screen.queryByText('removed.txt')).not.toBeInTheDocument();
+  });
+
+  it('clears only failed attachments without losing pending buffer reservations', async () => {
+    const secondBuffer = createDeferred<ReturnType<typeof stagedAttachment>>();
+    vi.mocked(hostApiFetchMock).mockImplementation((path: string, request?: { body?: string }) => {
+      if (path !== '/api/files/stage-buffer') return Promise.resolve({ success: true, skills: [] });
+      const { fileName } = JSON.parse(request!.body!);
+      if (fileName === 'paste-0.txt') return Promise.reject(new Error('buffer staging failed'));
+      if (fileName === 'paste-1.txt') return secondBuffer.promise;
+      return Promise.resolve(stagedAttachment(fileName));
+    });
+    vi.mocked(hostApiDialogOpenMock).mockResolvedValue({
+      canceled: false,
+      filePaths: Array.from({ length: 7 }, (_, i) => `/tmp/retry-${i}.txt`),
+    });
+    renderChatInput();
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Keep after failure' } });
+    pasteAttachments(Array.from({ length: 8 }, (_, i) => new File(['data'], `paste-${i}.txt`)));
+    fireEvent.click(await screen.findByText('Retry failed attachments'));
+    await waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalledWith('A message can include at most 8 attachments');
+    });
+    expect(screen.queryByText('paste-0.txt')).not.toBeInTheDocument();
+    expect(screen.getByText('paste-7.txt')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-composer-input')).toHaveValue('Keep after failure');
+    expect(hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/files/stage-paths')).toHaveLength(0);
+    await act(async () => { secondBuffer.resolve(stagedAttachment('paste-1.txt')); });
+    await waitFor(() => { expect(screen.getByTestId('chat-composer-send')).not.toBeDisabled(); });
+  });
+
+  it('releases failed path slots without marking another concurrent selection as failed', async () => {
+    const failedBatch = createDeferred<Array<ReturnType<typeof stagedAttachment>>>();
+    const healthyBatch = createDeferred<Array<ReturnType<typeof stagedAttachment>>>();
+    vi.mocked(hostApiDialogOpenMock)
+      .mockResolvedValueOnce({ canceled: false, filePaths: Array.from({ length: 4 }, (_, i) => `/tmp/failed-${i}.txt`) })
+      .mockResolvedValueOnce({ canceled: false, filePaths: Array.from({ length: 4 }, (_, i) => `/tmp/healthy-${i}.txt`) })
+      .mockResolvedValueOnce({ canceled: false, filePaths: Array.from({ length: 4 }, (_, i) => `/tmp/new-${i}.txt`) })
+      .mockResolvedValueOnce({ canceled: true, filePaths: [] });
+    vi.mocked(hostApiFetchMock).mockImplementation((path: string, request?: { body?: string }) => {
+      if (path !== '/api/files/stage-paths') return Promise.resolve({ success: true, skills: [] });
+      const { filePaths } = JSON.parse(request!.body!) as { filePaths: string[] };
+      if (filePaths[0].includes('failed-')) return failedBatch.promise;
+      if (filePaths[0].includes('healthy-')) return healthyBatch.promise;
+      return Promise.resolve(filePaths.map((filePath) => stagedAttachment(filePath.split('/').pop()!)));
+    });
+    const onSend = vi.fn();
+    renderChatInput(onSend);
+    fireEvent.click(screen.getByTestId('chat-composer-attach'));
+    await screen.findByText('failed-0.txt');
+    fireEvent.click(screen.getByTestId('chat-composer-attach'));
+    await screen.findByText('healthy-0.txt');
+    await act(async () => { failedBatch.reject(new Error('path staging failed')); });
+    expect(screen.getAllByText('Error')).toHaveLength(4);
+
+    fireEvent.click(screen.getByTestId('chat-composer-attach'));
+    await screen.findByText('new-0.txt');
+    expect(toastErrorMock).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText('Retry failed attachments'));
+    expect(screen.queryByText('failed-0.txt')).not.toBeInTheDocument();
+    expect(screen.getByText('healthy-0.txt')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-composer-send')).toBeDisabled();
+    await act(async () => {
+      healthyBatch.resolve(Array.from({ length: 4 }, (_, i) => stagedAttachment(`healthy-${i}.txt`)));
+    });
+    await waitFor(() => { expect(screen.getByTestId('chat-composer-send')).not.toBeDisabled(); });
+    fireEvent.click(screen.getByTestId('chat-composer-send'));
+    await waitFor(() => { expect(onSend).toHaveBeenCalledTimes(1); });
+    expect(onSend.mock.calls[0][1]).toHaveLength(8);
+  });
+
+  it.each(['paste', 'drop'])('rejects more than eight %s attachments and preserves the draft', async (source) => {
+    const onSend = vi.fn();
+    const { container } = renderChatInput(onSend);
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Unsent draft' } });
+    const files = Array.from({ length: 9 }, (_, i) => new File(['data'], `oversize-${i}.txt`));
+    if (source === 'paste') pasteAttachments(files);
+    else dropAttachments(container, files);
+    expect(toastErrorMock).toHaveBeenCalledWith('A message can include at most 8 attachments');
+    expect(hostApiFetchMock.mock.calls.filter(([path]) => path.startsWith('/api/files/stage-'))).toHaveLength(0);
+    expect(screen.getByTestId('chat-composer-input')).toHaveValue('Unsent draft');
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('rejects an oversized mixed path and buffer drop as one batch', () => {
+    const { container } = renderChatInput();
+    const pathFiles = Array.from({ length: 5 }, (_, i) => {
+      const file = new File(['data'], `path-${i}.txt`);
+      Object.defineProperty(file, 'path', { value: `/tmp/path-${i}.txt` });
+      return file;
+    });
+    dropAttachments(container, [...pathFiles, ...Array.from({ length: 4 }, (_, i) => new File(['data'], `buffer-${i}.txt`))]);
+    expect(toastErrorMock).toHaveBeenCalledWith('A message can include at most 8 attachments');
+    expect(hostApiFetchMock.mock.calls.filter(([path]) => path.startsWith('/api/files/stage-'))).toHaveLength(0);
+  });
+
+  it('reserves slots atomically when two file dialogs resolve together', async () => {
+    const firstDialog = createDeferred<{ canceled: boolean; filePaths: string[] }>();
+    const secondDialog = createDeferred<{ canceled: boolean; filePaths: string[] }>();
+    const staging = createDeferred<Array<ReturnType<typeof stagedAttachment>>>();
+    vi.mocked(hostApiDialogOpenMock).mockReturnValueOnce(firstDialog.promise).mockReturnValueOnce(secondDialog.promise);
+    vi.mocked(hostApiFetchMock).mockImplementation((path: string) => (
+      path === '/api/files/stage-paths' ? staging.promise : Promise.resolve({ success: true, skills: [] })
+    ));
+    renderChatInput();
+    fireEvent.click(screen.getByTestId('chat-composer-attach'));
+    fireEvent.click(screen.getByTestId('chat-composer-attach'));
+    await act(async () => {
+      firstDialog.resolve({ canceled: false, filePaths: Array.from({ length: 5 }, (_, i) => `/tmp/first-${i}.txt`) });
+      secondDialog.resolve({ canceled: false, filePaths: Array.from({ length: 4 }, (_, i) => `/tmp/second-${i}.txt`) });
+    });
+    expect(toastErrorMock).toHaveBeenCalledWith('A message can include at most 8 attachments');
+    expect(hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/files/stage-paths')).toHaveLength(1);
+    await act(async () => { staging.resolve(Array.from({ length: 5 }, (_, i) => stagedAttachment(`first-${i}.txt`))); });
+    await waitFor(() => { expect(screen.getByTestId('chat-composer-send')).not.toBeDisabled(); });
+  });
+
+  it('rejects send after new placeholders arrive during model persistence and keeps all draft attachments', async () => {
+    const persistence = createDeferred<void>();
+    const staging = createDeferred<Array<ReturnType<typeof stagedAttachment>>>();
+    vi.mocked(chatState.waitForSessionModelUpdate).mockReturnValueOnce(persistence.promise);
+    vi.mocked(hostApiDialogOpenMock).mockResolvedValue({ canceled: false, filePaths: ['/tmp/pending.txt'] });
+    vi.mocked(hostApiFetchMock).mockImplementation((path: string) => (
+      path === '/api/files/stage-paths' ? staging.promise : Promise.resolve({ success: true, skills: [] })
+    ));
+    const onSend = vi.fn();
+    renderChatInput(onSend);
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Keep while staging' } });
+    fireEvent.click(screen.getByTestId('chat-composer-send'));
+    fireEvent.click(screen.getByTestId('chat-composer-attach'));
+    await screen.findByText('pending.txt');
+    await act(async () => { persistence.resolve(); });
+    expect(onSend).not.toHaveBeenCalled();
+    expect(screen.getByTestId('chat-composer-input')).toHaveValue('Keep while staging');
+    expect(screen.getByText('pending.txt')).toBeInTheDocument();
+    await act(async () => { staging.resolve([stagedAttachment('pending.txt')]); });
+    await waitFor(() => { expect(screen.getByTestId('chat-composer-send')).not.toBeDisabled(); });
+    fireEvent.click(screen.getByTestId('chat-composer-send'));
+    await waitFor(() => { expect(onSend).toHaveBeenCalledTimes(1); });
+    expect(onSend.mock.calls[0][1]).toHaveLength(1);
+  });
+
+  it('does not send a removed attachment after awaiting model persistence', async () => {
+    const persistence = createDeferred<void>();
+    vi.mocked(hostApiDialogOpenMock).mockResolvedValue({ canceled: false, filePaths: ['/tmp/original.txt'] });
+    vi.mocked(hostApiFetchMock).mockImplementation((path: string) => (
+      path === '/api/files/stage-paths'
+        ? Promise.resolve([stagedAttachment('original.txt')])
+        : Promise.resolve({ success: true, skills: [] })
+    ));
+    const onSend = vi.fn();
+    renderChatInput(onSend);
+    fireEvent.click(screen.getByTestId('chat-composer-attach'));
+    await waitFor(() => { expect(screen.getByTestId('chat-composer-send')).not.toBeDisabled(); });
+    vi.mocked(chatState.waitForSessionModelUpdate).mockReturnValueOnce(persistence.promise);
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Keep after removal' } });
+    fireEvent.click(screen.getByTestId('chat-composer-send'));
+    removeAttachmentByName('original.txt');
+    await act(async () => { persistence.resolve(); });
+    expect(onSend).not.toHaveBeenCalled();
+    expect(screen.getByTestId('chat-composer-input')).toHaveValue('Keep after removal');
+    expect(screen.queryByText('original.txt')).not.toBeInTheDocument();
+  });
+
+  it('releases only missing results from a partially staged path batch', async () => {
+    vi.mocked(hostApiDialogOpenMock)
+      .mockResolvedValueOnce({ canceled: false, filePaths: Array.from({ length: 8 }, (_, i) => `/tmp/partial-${i}.txt`) })
+      .mockResolvedValueOnce({ canceled: false, filePaths: ['/tmp/replacement.txt'] })
+      .mockResolvedValueOnce({ canceled: true, filePaths: [] });
+    vi.mocked(hostApiFetchMock).mockImplementation((path: string, request?: { body?: string }) => {
+      if (path !== '/api/files/stage-paths') return Promise.resolve({ success: true, skills: [] });
+      const { filePaths } = JSON.parse(request!.body!) as { filePaths: string[] };
+      return Promise.resolve(filePaths.slice(0, filePaths.length === 8 ? 7 : 1)
+        .map((filePath) => stagedAttachment(filePath.split('/').pop()!)));
+    });
+    const onSend = vi.fn();
+    renderChatInput(onSend);
+    fireEvent.click(screen.getByTestId('chat-composer-attach'));
+    await screen.findByText('Retry failed attachments');
+    expect(screen.getAllByText('Error')).toHaveLength(1);
+    fireEvent.click(screen.getByTestId('chat-composer-attach'));
+    await screen.findByText('replacement.txt');
+    expect(toastErrorMock).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText('Retry failed attachments'));
+    await waitFor(() => { expect(screen.getByTestId('chat-composer-send')).not.toBeDisabled(); });
+    fireEvent.click(screen.getByTestId('chat-composer-send'));
+    await waitFor(() => { expect(onSend).toHaveBeenCalledTimes(1); });
+    expect(onSend.mock.calls[0][1]).toHaveLength(8);
+  });
+
+  it('revalidates attachment placeholders after awaiting an extension send guard', async () => {
+    const guard = createDeferred<{ ok: boolean }>();
+    const staging = createDeferred<Array<ReturnType<typeof stagedAttachment>>>();
+    const hasHooks = vi.spyOn(rendererExtensionRegistry, 'hasChatBeforeSendHooks').mockReturnValue(true);
+    const beforeSend = vi.spyOn(rendererExtensionRegistry, 'runChatBeforeSend').mockReturnValue(guard.promise);
+    vi.mocked(hostApiDialogOpenMock).mockResolvedValue({ canceled: false, filePaths: ['/tmp/guard-pending.txt'] });
+    vi.mocked(hostApiFetchMock).mockImplementation((path: string) => (
+      path === '/api/files/stage-paths' ? staging.promise : Promise.resolve({ success: true, skills: [] })
+    ));
+    const onSend = vi.fn();
+    renderChatInput(onSend);
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Guarded draft' } });
+    try {
+      fireEvent.click(screen.getByTestId('chat-composer-send'));
+      await waitFor(() => { expect(beforeSend).toHaveBeenCalledTimes(1); });
+      fireEvent.click(screen.getByTestId('chat-composer-attach'));
+      await screen.findByText('guard-pending.txt');
+      await act(async () => { guard.resolve({ ok: true }); });
+      expect(onSend).not.toHaveBeenCalled();
+      expect(screen.getByTestId('chat-composer-input')).toHaveValue('Guarded draft');
+      expect(screen.getByText('guard-pending.txt')).toBeInTheDocument();
+      await act(async () => { staging.resolve([stagedAttachment('guard-pending.txt')]); });
+    } finally {
+      hasHooks.mockRestore();
+      beforeSend.mockRestore();
+    }
+  });
+
+  it('checks the actual send array limit after extension guards and keeps the draft on rejection', async () => {
+    const hasHooks = vi.spyOn(rendererExtensionRegistry, 'hasChatBeforeSendHooks').mockReturnValue(true);
+    const beforeSend = vi.spyOn(rendererExtensionRegistry, 'runChatBeforeSend').mockImplementation(async (context) => {
+      context.attachments!.push(...Array.from({ length: 8 }, (_, i) => ({
+        ...stagedAttachment(`guard-extra-${i}.txt`), status: 'ready' as const,
+      })));
+      return { ok: true };
+    });
+    vi.mocked(hostApiDialogOpenMock).mockResolvedValue({ canceled: false, filePaths: ['/tmp/original.txt'] });
+    vi.mocked(hostApiFetchMock).mockImplementation((path: string) => (
+      path === '/api/files/stage-paths'
+        ? Promise.resolve([stagedAttachment('original.txt')])
+        : Promise.resolve({ success: true, skills: [] })
+    ));
+    const onSend = vi.fn();
+    renderChatInput(onSend);
+    try {
+      fireEvent.click(screen.getByTestId('chat-composer-attach'));
+      await waitFor(() => { expect(screen.getByTestId('chat-composer-send')).not.toBeDisabled(); });
+      fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Oversized guarded draft' } });
+      fireEvent.click(screen.getByTestId('chat-composer-send'));
+      await waitFor(() => { expect(toastErrorMock).toHaveBeenCalledWith('A message can include at most 8 attachments'); });
+      expect(onSend).not.toHaveBeenCalled();
+      expect(screen.getByTestId('chat-composer-input')).toHaveValue('Oversized guarded draft');
+      expect(screen.getByText('original.txt')).toBeInTheDocument();
+    } finally {
+      hasHooks.mockRestore();
+      beforeSend.mockRestore();
+    }
+  });
+
+  it.each(['text', 'image', 'video'])('preserves a refused async %s send and clears the draft only after acceptance', async (mode) => {
+    const onSend = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    vi.mocked(hostApiDialogOpenMock).mockResolvedValue({ canceled: false, filePaths: ['/tmp/unsent.txt'] });
+    vi.mocked(hostApiFetchMock).mockImplementation((path: string) => (
+      path === '/api/files/stage-paths'
+        ? Promise.resolve([stagedAttachment('unsent.txt')])
+        : Promise.resolve({ success: true, skills: [] })
+    ));
+    renderChatInput(onSend);
+    fireEvent.click(screen.getByTestId('chat-composer-attach'));
+    await waitFor(() => { expect(screen.getByTestId('chat-composer-send')).not.toBeDisabled(); });
+    if (mode !== 'text') fireEvent.click(screen.getByTestId(`chat-composer-mode-${mode}`));
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Retain refused draft' } });
+    await act(async () => { fireEvent.click(screen.getByTestId('chat-composer-send')); });
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend.mock.calls[0][1]).toHaveLength(1);
+    expect(screen.getByTestId('chat-composer-input')).toHaveValue('Retain refused draft');
+    expect(screen.getByText('unsent.txt')).toBeInTheDocument();
+
+    await act(async () => { fireEvent.click(screen.getByTestId('chat-composer-send')); });
+    expect(onSend).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId('chat-composer-input')).toHaveValue('');
+    expect(screen.queryByText('unsent.txt')).not.toBeInTheDocument();
+  });
+
+  it.each(['false', 'throw', 'reject'])('keeps the draft and unlocks another send when the host returns %s', async (outcome) => {
+    const onSend = vi.fn().mockImplementationOnce(() => {
+      if (outcome === 'throw') throw new Error('sync rejection');
+      if (outcome === 'reject') return Promise.reject(new Error('async rejection'));
+      return false;
+    }).mockReturnValue(true);
+    renderChatInput(onSend);
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Retry this draft' } });
+    await act(async () => { fireEvent.click(screen.getByTestId('chat-composer-send')); });
+    expect(screen.getByTestId('chat-composer-input')).toHaveValue('Retry this draft');
+    expect(onSend).toHaveBeenCalledTimes(1);
+    await act(async () => { fireEvent.click(screen.getByTestId('chat-composer-send')); });
+    expect(onSend).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId('chat-composer-input')).toHaveValue('');
+  });
+
+  it('retains attachments and text added while the host accepts an earlier draft', async () => {
+    const accepted = createDeferred<boolean>();
+    const onSend = vi.fn().mockReturnValue(accepted.promise);
+    vi.mocked(hostApiDialogOpenMock)
+      .mockResolvedValueOnce({ canceled: false, filePaths: ['/tmp/sent.txt'] })
+      .mockResolvedValueOnce({ canceled: false, filePaths: ['/tmp/next.txt'] });
+    vi.mocked(hostApiFetchMock).mockImplementation((path: string, request?: { body?: string }) => {
+      if (path !== '/api/files/stage-paths') return Promise.resolve({ success: true, skills: [] });
+      const { filePaths } = JSON.parse(request!.body!) as { filePaths: string[] };
+      return Promise.resolve(filePaths.map((filePath) => stagedAttachment(filePath.split('/').pop()!)));
+    });
+    renderChatInput(onSend);
+    fireEvent.click(screen.getByTestId('chat-composer-attach'));
+    await waitFor(() => { expect(screen.getByTestId('chat-composer-send')).not.toBeDisabled(); });
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Send first draft' } });
+    fireEvent.click(screen.getByTestId('chat-composer-send'));
+    await waitFor(() => { expect(onSend).toHaveBeenCalledTimes(1); });
+    expect(screen.getByText('sent.txt')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-composer-input')).toHaveValue('Send first draft');
+    fireEvent.click(screen.getByTestId('chat-composer-send'));
+    await act(async () => { await Promise.resolve(); });
+    expect(onSend).toHaveBeenCalledTimes(1);
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Next draft' } });
+    fireEvent.click(screen.getByTestId('chat-composer-attach'));
+    await screen.findByText('next.txt');
+    await act(async () => { accepted.resolve(true); });
+    expect(screen.getByTestId('chat-composer-input')).toHaveValue('Next draft');
+    expect(screen.queryByText('sent.txt')).not.toBeInTheDocument();
+    expect(screen.getByText('next.txt')).toBeInTheDocument();
+    expect(onSend.mock.calls[0][1]).toHaveLength(1);
+  });
+
+  it('preserves attached files when an async send throws', async () => {
+    const onSend = vi.fn().mockRejectedValue(new Error('host send failed'));
+    vi.mocked(hostApiDialogOpenMock).mockResolvedValue({ canceled: false, filePaths: ['/tmp/retained.txt'] });
+    vi.mocked(hostApiFetchMock).mockImplementation((path: string) => (
+      path === '/api/files/stage-paths'
+        ? Promise.resolve([stagedAttachment('retained.txt')])
+        : Promise.resolve({ success: true, skills: [] })
+    ));
+    renderChatInput(onSend);
+    fireEvent.click(screen.getByTestId('chat-composer-attach'));
+    await waitFor(() => { expect(screen.getByTestId('chat-composer-send')).not.toBeDisabled(); });
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Retain failed send' } });
+    await act(async () => { fireEvent.click(screen.getByTestId('chat-composer-send')); });
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('chat-composer-input')).toHaveValue('Retain failed send');
+    expect(screen.getByText('retained.txt')).toBeInTheDocument();
+  });
+
+  it.each(['sync', 'async'])('treats %s void as an accepted send and clears the sent draft', async (mode) => {
+    const onSend = vi.fn().mockImplementation(() => mode === 'async' ? Promise.resolve() : undefined);
+    vi.mocked(hostApiDialogOpenMock).mockResolvedValue({ canceled: false, filePaths: ['/tmp/void-accepted.txt'] });
+    vi.mocked(hostApiFetchMock).mockImplementation((path: string) => (
+      path === '/api/files/stage-paths'
+        ? Promise.resolve([stagedAttachment('void-accepted.txt')])
+        : Promise.resolve({ success: true, skills: [] })
+    ));
+    renderChatInput(onSend);
+    fireEvent.click(screen.getByTestId('chat-composer-attach'));
+    await waitFor(() => { expect(screen.getByTestId('chat-composer-send')).not.toBeDisabled(); });
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Accepted void draft' } });
+    await act(async () => { fireEvent.click(screen.getByTestId('chat-composer-send')); });
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend.mock.calls[0][1]).toHaveLength(1);
+    expect(screen.getByTestId('chat-composer-input')).toHaveValue('');
+    expect(screen.queryByText('void-accepted.txt')).not.toBeInTheDocument();
   });
 
   it('combines model and reasoning into one selector before image mode', () => {

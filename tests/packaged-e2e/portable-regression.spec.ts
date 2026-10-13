@@ -1397,6 +1397,46 @@ test('runs the packaged UClaw regression matrix', async () => {
       { skip: profile !== 'full' ? 'Requires two deterministic local Providers.' : undefined },
     );
 
+    // Keep the real fallback configured while proving business errors terminate
+    // at the primary. A later healthy turn proves the profile was not cooled down.
+    for (const [scenario, errorCode] of [
+      ['QUOTA_403', 'INSUFFICIENT_QUOTA'],
+      ['QUOTA_429', 'INSUFFICIENT_QUOTA'],
+      ['SUBSCRIPTION_403', 'SUBSCRIPTION_UNAVAILABLE'],
+    ] as const) {
+      await runner.run(
+        `chat.terminal-${scenario.toLowerCase()}`,
+        'preserve a terminal quota/subscription error without SDK retry or model fallback',
+        async () => {
+          const page = contextOrThrow(context).page;
+          const primaryBefore = providerRequestCount(provider, scenario);
+          const fallbackBefore = providerRequestCount(fallbackProvider, scenario);
+          await startNewChat(page);
+          await page.getByTestId('chat-composer-input').fill(`[REGRESSION:${scenario}] reject the operation`);
+          await page.getByTestId('chat-composer-send').click();
+          await waitForChatFailure(page, errorCode);
+          const callout = page.getByTestId('acp-turn-failure').last();
+          await expect(callout).toBeVisible();
+          await expect(callout).not.toContainText(/continue immediately|立即继续|すぐに続行|сразу продолжить/iu);
+          if (errorCode === 'SUBSCRIPTION_UNAVAILABLE') {
+            await expect(page.getByTestId('acp-turn-failure-recharge')).toHaveCount(0);
+            await expect(callout).toContainText(/subscription|订阅|サブスクリプション|подписк/iu);
+          }
+          await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', /Send|发送/iu, { timeout: 120_000 });
+          expect(providerRequestCount(provider, scenario) - primaryBefore).toBe(1);
+          expect(providerRequestCount(fallbackProvider, scenario) - fallbackBefore).toBe(0);
+          const healthyPrimaryBefore = providerRequestCount(provider, 'RECOVERY');
+          const healthyFallbackBefore = providerRequestCount(fallbackProvider, 'RECOVERY');
+          await startNewChat(page);
+          await sendChat(page, '[REGRESSION:RECOVERY] verify no terminal-error cooldown', 'UCLAW_REGRESSION_RECOVERY_OK');
+          expect(providerRequestCount(provider, 'RECOVERY') - healthyPrimaryBefore).toBe(1);
+          expect(providerRequestCount(fallbackProvider, 'RECOVERY') - healthyFallbackBefore).toBe(0);
+          return { primaryAttempts: 1, fallbackAttempts: 0, healthyPrimaryRestored: true };
+        },
+        { skip: profile !== 'full' ? 'Requires deterministic primary and configured fallback.' : undefined },
+      );
+    }
+
     await runner.run(
       'provider.delete-fallback',
       'delete the fallback Provider and remove stale runtime fallback references',
@@ -1559,7 +1599,7 @@ test('runs the packaged UClaw regression matrix', async () => {
         await waitForChatFailure(page, 'INSUFFICIENT_QUOTA');
         const callout = page.getByTestId('acp-turn-failure').last();
         await expect(callout).toBeVisible({ timeout: 120_000 });
-        await expect(callout).toContainText(/Insufficient balance|余额不足|残高不足|Недостаточно средств/iu);
+        await expect(callout).toContainText(/Insufficient account quota|账户额度不足|クォータ不足|Недостаточная квота/iu);
         await expect(page.getByTestId('acp-turn-failure-recharge').last()).toBeVisible();
         await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', /Send|发送/iu, { timeout: 120_000 });
         const attempts = providerRequestCount(provider, 'QUOTA') - beforeAttempts;

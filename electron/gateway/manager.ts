@@ -5,6 +5,8 @@
 import { app } from 'electron';
 import path from 'path';
 import { EventEmitter } from 'events';
+import { createHash } from 'node:crypto';
+import { readFile, readdir } from 'node:fs/promises';
 import WebSocket from 'ws';
 import { getPort } from '../utils/config';
 import { JsonRpcNotification, isNotification, isResponse } from './protocol';
@@ -99,6 +101,30 @@ import type {
   GatewayRuntimePayload,
 } from '@shared/host-events/contract';
 import type { ChatRuntimeEvent } from '@shared/chat-runtime-events';
+import { expandOpenClawPath, resolveOpenClawConfigPath, resolveOpenClawStateDir } from '../utils/paths';
+import { snapshotAuthProfilesSqlitePrimaryRows } from '../utils/openclaw-auth-sqlite';
+
+type PendingConfigReload = {
+  fingerprint?: string;
+  reasons: Set<string>;
+};
+
+/** Object ordering and JSON formatting are not runtime changes; array ordering is. */
+function canonicalConfigValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalConfigValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, child]) => [key, canonicalConfigValue(child)]));
+}
+
+async function readRuntimeJson(filePath: string): Promise<unknown> {
+  try {
+    return JSON.parse(await readFile(filePath, 'utf8'));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
 
 export interface GatewayStatus {
   state: GatewayLifecycleState;
@@ -291,6 +317,11 @@ export class GatewayManager extends EventEmitter {
   private readonly restartController = new GatewayRestartController();
   private readonly restartGovernor = new GatewayRestartGovernor();
   private reloadDebounceTimer: NodeJS.Timeout | null = null;
+  private pendingConfigReload: PendingConfigReload | null = null;
+  private configReloadInFlight = false;
+  // Only a pre-fork snapshot may prove that startup included a requested change.
+  private appliedRuntimeConfigFingerprint: string | null = null;
+  private launchedRuntimeConfigFingerprint: string | null = null;
   private initialReadyHeartbeatRecoveryTimer: NodeJS.Timeout | null = null;
   private reloadPolicy: GatewayReloadPolicy = { ...DEFAULT_GATEWAY_RELOAD_POLICY };
   private reloadPolicyLoadedAt = 0;
@@ -360,6 +391,7 @@ export class GatewayManager extends EventEmitter {
             });
           },
         );
+        this.flushPendingConfigReload();
       },
     });
     this.reconnectConfig = { ...DEFAULT_RECONNECT_CONFIG, ...config };
@@ -426,6 +458,80 @@ export class GatewayManager extends EventEmitter {
     return this.stateController.getStatus();
   }
 
+  /** Config captured by a successful controlled launch, not an unacknowledged reload signal. */
+  getAppliedRuntimeConfigFingerprint(): string | null {
+    return this.appliedRuntimeConfigFingerprint;
+  }
+
+  /**
+   * Hash runtime configuration, never credentials or config contents in logs.
+   * Compare auth credentials/order too, because the runtime caches auth snapshots.
+   * SQLite cache, cooldown and timestamp writes are not config changes. Secrets
+   * stay in Main-process memory and only an opaque hash leaves this method.
+   * Unknown/unreadable state cannot prove a no-op, so callers refresh conservatively.
+   */
+  async captureRuntimeConfigFingerprint(): Promise<string | null> {
+    try {
+      const raw = await readRuntimeJson(resolveOpenClawConfigPath());
+      if (raw !== null && (!raw || typeof raw !== 'object' || Array.isArray(raw))) {
+        throw new Error('Invalid runtime config root');
+      }
+      const config = raw && typeof raw === 'object' && !Array.isArray(raw)
+        ? { ...(raw as Record<string, unknown>) }
+        : {};
+      // These are writer/UI metadata, not active Gateway settings.
+      delete config.meta;
+      delete config.wizard;
+      const stateAgentsDir = path.join(resolveOpenClawStateDir(), 'agents');
+      const agentIds = new Set<string>(['main']);
+      const modelPaths = new Set<string>([path.join(stateAgentsDir, 'main', 'agent', 'models.json')]);
+      try {
+        for (const entry of await readdir(stateAgentsDir, { withFileTypes: true })) {
+          if (entry.isDirectory()) {
+            agentIds.add(entry.name);
+            modelPaths.add(path.join(stateAgentsDir, entry.name, 'agent', 'models.json'));
+          }
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      const agents = config.agents as { list?: Array<{ id?: string; agentDir?: string }> } | undefined;
+      const customAgentDirs = new Map<string, string>();
+      for (const entry of agents?.list ?? []) {
+        if (entry.id) {
+          agentIds.add(entry.id);
+          modelPaths.add(path.join(stateAgentsDir, entry.id, 'agent', 'models.json'));
+        }
+        if (entry.agentDir) {
+          const agentDir = expandOpenClawPath(entry.agentDir);
+          modelPaths.add(path.join(agentDir, 'models.json'));
+          customAgentDirs.set(agentDir, entry.id ?? 'main');
+        }
+      }
+      const catalogs: Record<string, unknown> = {};
+      for (const filePath of [...modelPaths].sort()) {
+        const catalog = await readRuntimeJson(filePath);
+        // Missing/empty directories created while provisioning are not a config change.
+        if (catalog !== null) catalogs[filePath] = catalog;
+      }
+      const auth: Record<string, unknown> = {};
+      const authDirs = new Map([...agentIds].map((id) => [path.join(stateAgentsDir, id, 'agent'), id]));
+      for (const [agentDir, agentId] of customAgentDirs) authDirs.set(agentDir, agentId);
+      for (const [agentDir, agentId] of [...authDirs].sort(([left], [right]) => left.localeCompare(right))) {
+        const snapshot = snapshotAuthProfilesSqlitePrimaryRows(agentId, agentDir);
+        const store = snapshot.parsedStore ?? await readRuntimeJson(path.join(agentDir, 'auth-profiles.json'));
+        if (store && typeof store === 'object') {
+          const { profiles, order } = store as { profiles?: Record<string, unknown>; order?: unknown };
+          if (profiles && Object.keys(profiles).length > 0) auth[agentDir] = { profiles, order };
+        }
+      }
+      return createHash('sha256').update(JSON.stringify(canonicalConfigValue({ config, catalogs, auth }))).digest('hex');
+    } catch {
+      logger.warn('[gateway-refresh] result=fingerprint_unavailable');
+      return null;
+    }
+  }
+
   async getGatewayToken(): Promise<string> {
     return await import('../utils/store').then(({ getSetting }) => getSetting('gatewayToken'));
   }
@@ -436,6 +542,7 @@ export class GatewayManager extends EventEmitter {
     this.lifecycleController.bump('managed-runtime-mutation-acquire');
     this.shouldReconnect = false;
     this.clearAllTimers();
+    this.pendingConfigReload = null;
     this.restartController.resetDeferredRestart();
     return lease;
   }
@@ -616,6 +723,8 @@ export class GatewayManager extends EventEmitter {
           this.connectedGatewayOwned = isOwnProcess;
           this.connectedGatewayProvenance = isOwnProcess ? 'managed-process' : gateway.provenance;
           if (!isOwnProcess) {
+            this.appliedRuntimeConfigFingerprint = null;
+            this.launchedRuntimeConfigFingerprint = null;
             this.setStatus({ pid: gateway.pid });
           }
 
@@ -711,7 +820,13 @@ export class GatewayManager extends EventEmitter {
         },
         canRecoverStartup: () => this.openClawDowngradeTransaction === null,
       });
+      // Fork success alone is not enough: startup must connect to the owned
+      // runtime. Use the pre-fork generation, never a later disk read.
+      if (this.ownsProcess && this.process?.pid) {
+        this.appliedRuntimeConfigFingerprint = this.launchedRuntimeConfigFingerprint;
+      }
     } catch (error) {
+      this.appliedRuntimeConfigFingerprint = null;
       let startupError = error;
       const downgradeTransaction = this.openClawDowngradeTransaction;
       const terminationUnconfirmed = isOpenClawCommandTerminationUnconfirmedError(error);
@@ -824,6 +939,7 @@ export class GatewayManager extends EventEmitter {
             });
           },
         );
+        this.flushPendingConfigReload();
       }
     }
   }
@@ -867,6 +983,8 @@ export class GatewayManager extends EventEmitter {
       if (this.process === child) {
         this.process = null;
         this.ownsProcess = false;
+        this.appliedRuntimeConfigFingerprint = null;
+        this.launchedRuntimeConfigFingerprint = null;
         if (this.status.pid === child.pid) {
           this.setStatus({ pid: undefined });
         }
@@ -884,6 +1002,7 @@ export class GatewayManager extends EventEmitter {
   async stop(): Promise<void> {
     this.stopRequestGeneration = this.nextGeneration(this.stopRequestGeneration);
     await this.runStopOperation();
+    if (!this.restartInFlight && !this.configReloadInFlight) this.pendingConfigReload = null;
   }
 
   /** Join or start the shared stop operation without recording a user stop request. */
@@ -996,6 +1115,8 @@ export class GatewayManager extends EventEmitter {
       }
     }
     this.ownsProcess = false;
+    this.appliedRuntimeConfigFingerprint = null;
+    this.launchedRuntimeConfigFingerprint = null;
 
     clearPendingGatewayRequests(this.pendingRequests, new Error('Gateway stopped'));
 
@@ -1427,6 +1548,7 @@ export class GatewayManager extends EventEmitter {
             });
           },
         );
+        this.flushPendingConfigReload();
       }
     }
   }
@@ -1455,13 +1577,24 @@ export class GatewayManager extends EventEmitter {
    * Ask the Gateway process to reload config in-place when possible.
    * Falls back to restart on unsupported platforms or signaling failures.
    */
-  async reload(lease?: ManagedRuntimeMutationLease): Promise<void> {
+  async reload(
+    lease?: ManagedRuntimeMutationLease,
+    reason = 'manual',
+    fingerprint?: string,
+  ): Promise<void> {
     await assertManagedRuntimeStartAllowed(lease);
     await this.refreshReloadPolicy();
 
+    // We cannot apply disk config to a process whose lifecycle we do not own.
+    // Reconnecting that same external process is not a refresh acknowledgement.
+    if (!this.process?.pid && this.status.state === 'running' && this.connectedGatewayProvenance === 'unknown-external') {
+      logger.warn(`[gateway-refresh] result=blocked_external configAck=unconfirmed reason=${reason}`);
+      throw new Error('Gateway configuration refresh requires control of the connected external process.');
+    }
+
     if (this.reloadPolicy.mode === 'off' || this.reloadPolicy.mode === 'restart') {
       logger.info(
-        `[gateway-refresh] mode=reload result=policy_forced_restart policy=${this.reloadPolicy.mode}`,
+        `[gateway-refresh] mode=reload result=policy_forced_restart policy=${this.reloadPolicy.mode} reason=${reason}`,
       );
       await this.restart(lease);
       return;
@@ -1471,7 +1604,7 @@ export class GatewayManager extends EventEmitter {
       state: this.status.state,
       startLock: this.startLock,
     })) {
-      this.restartController.markDeferredRestart('reload', {
+      this.restartController.markDeferredRestart(`reload:${reason}`, {
         state: this.status.state,
         startLock: this.startLock,
       });
@@ -1479,10 +1612,10 @@ export class GatewayManager extends EventEmitter {
     }
 
     const pidBefore = this.process?.pid;
-    logger.info(`[gateway-refresh] mode=reload requested pid=${pidBefore ?? 'n/a'} state=${this.status.state}`);
+    logger.info(`[gateway-refresh] mode=reload requested pid=${pidBefore ?? 'n/a'} state=${this.status.state} reason=${reason}`);
 
     if (!this.process?.pid || this.status.state !== 'running') {
-      logger.warn('[gateway-refresh] mode=reload result=fallback_restart cause=not_running');
+      logger.warn(`[gateway-refresh] mode=reload result=fallback_restart cause=not_running reason=${reason}`);
       logger.warn('Gateway reload requested while not running; falling back to restart');
       await this.restart(lease);
       return;
@@ -1502,17 +1635,16 @@ export class GatewayManager extends EventEmitter {
       );
       logger.info(
         `[gateway-refresh] mode=reload result=deferred_recent_connect delayMs=${delayMs} `
-          + `connectedForMs=${connectedForMs} pid=${this.process.pid}`,
+          + `connectedForMs=${connectedForMs} pid=${this.process.pid} reason=${reason}`,
       );
-      this.deferReloadUntilGatewayStable(delayMs, lease);
+      this.deferReloadUntilGatewayStable(delayMs, lease, reason, fingerprint);
       return;
     }
 
     if (process.platform === 'win32') {
       // Windows does not support SIGUSR1 for in-process reload.
-      // Fall back to a full restart.  The connectedForMs < 8000 guard above
-      // already skips unnecessary restarts for recently-started processes.
-      logger.warn('[gateway-refresh] mode=reload result=fallback_restart cause=windows');
+      // Keep the necessary restart; config-change callers deduplicate before this boundary.
+      logger.warn(`[gateway-refresh] mode=reload result=fallback_restart cause=windows reason=${reason}`);
       await this.restart(lease);
       return;
     }
@@ -1520,25 +1652,32 @@ export class GatewayManager extends EventEmitter {
     try {
       assertManagedRuntimeLaunchAllowed(lease);
       process.kill(this.process.pid, 'SIGUSR1');
-      logger.info(`Sent SIGUSR1 to Gateway for config reload (pid=${this.process.pid})`);
+      // The signal may apply config without an ACK. Neither the new generation
+      // nor the old one can now prove the runtime state (including change-back).
+      this.appliedRuntimeConfigFingerprint = null;
+      this.launchedRuntimeConfigFingerprint = null;
+      logger.info(`[gateway-refresh] mode=reload result=signal_sent signal=SIGUSR1 pid=${this.process.pid} reason=${reason}`);
       // Some gateway builds do not handle SIGUSR1 as an in-process reload.
       // If process state doesn't recover quickly, fall back to restart.
       await new Promise((resolve) => setTimeout(resolve, 1500));
       if (this.status.state !== 'running' || !this.process?.pid) {
-        logger.warn('[gateway-refresh] mode=reload result=fallback_restart cause=post_signal_unhealthy');
+        logger.warn(`[gateway-refresh] mode=reload result=fallback_restart cause=post_signal_unhealthy reason=${reason}`);
         logger.warn('Gateway did not stay running after reload signal, falling back to restart');
         await this.restart(lease);
       } else {
         const pidAfter = this.process.pid;
+        // A retained process/connection is a health check, not a config reload ACK.
+        // Keep the generation unknown until an applied-generation contract
+        // exists; a later identical write must not hide an unconfirmed reload.
         logger.info(
-          `[gateway-refresh] mode=reload result=applied_in_place pidBefore=${pidBefore} pidAfter=${pidAfter}`,
+          `[gateway-refresh] mode=reload result=health_retained configAck=unconfirmed pidBefore=${pidBefore} pidAfter=${pidAfter} reason=${reason}`,
         );
       }
     } catch (error) {
       if (isManagedRuntimeStartBlockedError(error)) {
         throw error;
       }
-      logger.warn('[gateway-refresh] mode=reload result=fallback_restart cause=signal_error');
+      logger.warn(`[gateway-refresh] mode=reload result=fallback_restart cause=signal_error reason=${reason}`);
       logger.warn('Gateway reload signal failed, falling back to restart:', error);
       await this.restart(lease);
     }
@@ -1548,41 +1687,97 @@ export class GatewayManager extends EventEmitter {
    * Debounced reload — coalesces multiple rapid config-change events into one
    * in-process reload when possible.
    */
-  debouncedReload(delayMs?: number): void {
+  debouncedReload(delayMs?: number, reason = 'config-change', fingerprint?: string): void {
     if (isManagedRuntimeMutationActive()) {
       if (this.reloadDebounceTimer) {
         clearTimeout(this.reloadDebounceTimer);
         this.reloadDebounceTimer = null;
       }
       logger.debug('Gateway debounced reload dropped during managed credential mutation');
+      this.pendingConfigReload = null;
       return;
     }
-    void this.refreshReloadPolicy();
+    if (this.status.state === 'stopped' && !this.startLock && !this.restartInFlight) {
+      logger.info(`[gateway-refresh] result=next_start reason=${reason}`);
+      return;
+    }
+    // Reasons are internal call-site identifiers, never user config values.
+    const safeReason = reason.replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 100);
+    const pending = this.pendingConfigReload;
+    const duplicate = pending && fingerprint !== undefined && pending.fingerprint === fingerprint;
+    if (pending) {
+      pending.reasons.add(safeReason);
+      // A legacy caller without a fingerprint cannot be discarded as a known no-op.
+      pending.fingerprint = pending.fingerprint && fingerprint ? fingerprint : undefined;
+    } else {
+      this.pendingConfigReload = { fingerprint, reasons: new Set([safeReason]) };
+    }
+    if (duplicate && this.reloadDebounceTimer) return;
     const effectiveDelay = delayMs ?? this.reloadPolicy.debounceMs;
-    if (this.reloadPolicy.mode === 'off' || this.reloadPolicy.mode === 'restart') {
-      logger.debug(
-        `Gateway reload policy=${this.reloadPolicy.mode}; routing debouncedReload to debouncedRestart (${effectiveDelay}ms)`,
-      );
-      this.debouncedRestart(effectiveDelay);
-      return;
-    }
-
     if (this.reloadDebounceTimer) {
       clearTimeout(this.reloadDebounceTimer);
     }
-    logger.debug(`Gateway reload debounced (will fire in ${effectiveDelay}ms)`);
+    logger.debug(`[gateway-refresh] result=debounced delayMs=${effectiveDelay} reason=${safeReason}`);
     this.reloadDebounceTimer = setTimeout(() => {
       this.reloadDebounceTimer = null;
-      void this.reload().catch((err) => {
-        logger.warn('Debounced Gateway reload failed:', err);
-      });
+      this.flushPendingConfigReload();
     }, effectiveDelay);
+  }
+
+  /** Merge config writes during startup/restart without converting each write into a restart. */
+  private flushPendingConfigReload(): void {
+    const pending = this.pendingConfigReload;
+    if (!pending || this.reloadDebounceTimer || this.configReloadInFlight) return;
+    if (this.startLock || this.restartInFlight || this.status.state === 'starting' || this.status.state === 'reconnecting') {
+      logger.debug(`[gateway-refresh] result=deferred_startup reason=${[...pending.reasons].join(',')}`);
+      return;
+    }
+    if (isManagedRuntimeMutationActive() || !this.shouldReconnect || this.status.state !== 'running') return;
+    if (pending.fingerprint && pending.fingerprint === this.appliedRuntimeConfigFingerprint) {
+      this.pendingConfigReload = null;
+      logger.info(`[gateway-refresh] result=unchanged_or_included_by_start reason=${[...pending.reasons].join(',')}`);
+      return;
+    }
+    if (!this.process?.pid && this.connectedGatewayProvenance === 'unknown-external') {
+      // Retain the newest request for a future controlled start. No auto-restart
+      // loop or termination of an unowned external Gateway is allowed here.
+      logger.warn(`[gateway-refresh] result=blocked_external configAck=unconfirmed pending=retained reason=${[...pending.reasons].join(',')}`);
+      return;
+    }
+    const connectedForMs = this.status.connectedAt ? Date.now() - this.status.connectedAt : Infinity;
+    if (connectedForMs < GatewayManager.RECENT_CONNECT_RELOAD_GUARD_MS) {
+      this.reloadDebounceTimer = setTimeout(() => {
+        this.reloadDebounceTimer = null;
+        this.flushPendingConfigReload();
+      }, Math.max(250, GatewayManager.RECENT_CONNECT_RELOAD_GUARD_MS - connectedForMs));
+      return;
+    }
+    this.pendingConfigReload = null;
+    this.configReloadInFlight = true;
+    const stopGeneration = this.stopRequestGeneration;
+    let refreshFailed = false;
+    void this.reload(undefined, [...pending.reasons].join(','), pending.fingerprint).catch((error) => {
+      refreshFailed = true;
+      const newer = this.pendingConfigReload;
+      this.pendingConfigReload = newer
+        ? { ...newer, reasons: new Set([...pending.reasons, ...newer.reasons]) }
+        : pending;
+      logger.warn('Debounced Gateway reload failed:', error);
+    }).finally(() => {
+      this.configReloadInFlight = false;
+      if (this.stopRequestGeneration !== stopGeneration && this.status.state === 'stopped') {
+        this.pendingConfigReload = null;
+      }
+      if (!refreshFailed) this.flushPendingConfigReload();
+    });
   }
 
   /** Retry a refresh after the connection has passed the startup guard. */
   private deferReloadUntilGatewayStable(
     delayMs: number,
     lease?: ManagedRuntimeMutationLease,
+    reason = 'manual',
+    fingerprint?: string,
   ): void {
     if (this.reloadDebounceTimer) {
       clearTimeout(this.reloadDebounceTimer);
@@ -1590,7 +1785,7 @@ export class GatewayManager extends EventEmitter {
 
     this.reloadDebounceTimer = setTimeout(() => {
       this.reloadDebounceTimer = null;
-      void this.reload(lease).catch((err) => {
+      void this.reload(lease, reason, fingerprint).catch((err) => {
         logger.warn('Deferred Gateway reload failed:', err);
       });
     }, Math.max(250, delayMs));
@@ -1934,6 +2129,8 @@ export class GatewayManager extends EventEmitter {
     }
     this.externalShutdownSupported = null;
     const processGeneration = ++this.processGeneration;
+    const launchFingerprint = await this.captureRuntimeConfigFingerprint();
+    assertCanLaunch('start/process-after-config-fingerprint');
     const startupStderrLines: string[] = [];
     let childExitedDuringLaunch = false;
     this.recentStartupStderrLines = startupStderrLines;
@@ -2006,6 +2203,8 @@ export class GatewayManager extends EventEmitter {
         }
         this.processExitCode = code;
         this.ownsProcess = false;
+        this.appliedRuntimeConfigFingerprint = null;
+        this.launchedRuntimeConfigFingerprint = null;
         this.connectedGatewayOwned = false;
         this.connectedGatewayProvenance = 'unknown-external';
         this.connectionMonitor.clear();
@@ -2055,6 +2254,8 @@ export class GatewayManager extends EventEmitter {
           && (this.process === null || this.process === failedChild);
         if (isCurrentFailedChild) {
           this.ownsProcess = false;
+          this.appliedRuntimeConfigFingerprint = null;
+          this.launchedRuntimeConfigFingerprint = null;
           this.connectedGatewayOwned = false;
           this.connectedGatewayProvenance = 'unknown-external';
         }
@@ -2075,6 +2276,7 @@ export class GatewayManager extends EventEmitter {
     // retain the post-await assignment as a compatibility fallback.
     this.process = child;
     this.ownsProcess = true;
+    this.launchedRuntimeConfigFingerprint = launchFingerprint;
     logger.debug(`Gateway manager now owns process pid=${child.pid ?? 'unknown'}`);
     this.lastSpawnSummary = lastSpawnSummary;
 

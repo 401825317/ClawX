@@ -248,6 +248,9 @@ export {
 \tisBillingAssistantError,
 \tisRateLimitAssistantError,
 };
+function classifyFailoverSignal(signal) {
+  return classifyFailoverClassificationFromMessage(signal.message, signal.provider, {});
+}
 `;
 
 interface AcpRuntimeModule {
@@ -289,6 +292,8 @@ async function importFixture<T>(prefix: string, source: string): Promise<T> {
   const root = await createTempRoot(prefix);
   const fixturePath = join(root, 'runtime.mjs');
   await writeFile(fixturePath, source, 'utf8');
+  const { TERMINAL_HELPER_SOURCE, TERMINAL_HELPER_FILE } = await import('../../scripts/openclaw-provider-terminal-error-patch.mjs');
+  await writeFile(join(root, TERMINAL_HELPER_FILE), TERMINAL_HELPER_SOURCE, 'utf8');
   return await import(`${pathToFileURL(fixturePath).href}?fixture=${Date.now()}-${Math.random()}`) as T;
 }
 
@@ -321,7 +326,7 @@ describe('OpenClaw 6.10 ACP terminal error runtime patch', () => {
     const { rewriteAcpTerminalErrors } = await importPatchModule();
     const rewritten = rewriteAcpTerminalErrors(acpRuntimeSource);
 
-    expect(rewritten).toMatchObject({ replacements: 6, supported: true });
+    expect(rewritten).toMatchObject({ replacements: 7, supported: true });
     const runtime = await importFixture<AcpRuntimeModule>(
       'uclaw-acp-state-error-',
       rewritten.content,
@@ -332,8 +337,9 @@ describe('OpenClaw 6.10 ACP terminal error runtime patch', () => {
     };
 
     await expect(runtime.rejectFromStateError(payload)).rejects.toMatchObject({
-      cause: payload,
-      message: payload.errorMessage,
+      cause: { code: 'insufficient_user_quota' },
+      message: 'insufficient_user_quota: user quota exhausted',
+      errorCode: 'insufficient_user_quota',
     });
   });
 
@@ -370,12 +376,15 @@ describe('OpenClaw 6.10 ACP terminal error runtime patch', () => {
 
     const result = await runtime.captureStateError(payload, transcript);
 
-    expect(result.error).toMatchObject({ cause: payload, message: quotaError });
+    expect(result.error).toMatchObject({
+      cause: { code: 'insufficient_user_quota' }, message: 'insufficient_user_quota: user quota exhausted',
+      errorCode: 'insufficient_user_quota',
+    });
     expect(result.emitted).toContainEqual(expect.objectContaining({
       update: {
         sessionUpdate: 'uclaw_turn_failure',
         userMessageId: 'user-state',
-        errorMessage: quotaError,
+        errorMessage: 'insufficient_user_quota: user quota exhausted',
         errorCode: 'insufficient_user_quota',
       },
     }));
@@ -487,7 +496,7 @@ describe('OpenClaw 6.10 ACP terminal error runtime patch', () => {
     const { rewriteManagedUserQuotaHandling } = await importPatchModule();
     const rewritten = rewriteManagedUserQuotaHandling(classifierRuntimeSource);
 
-    expect(rewritten).toMatchObject({ replacements: 5, supported: true });
+    expect(rewritten).toMatchObject({ replacements: 7, supported: true });
     const runtime = await importFixture<ClassifierRuntimeModule>(
       'uclaw-quota-classifier-',
       rewritten.content,
@@ -530,7 +539,7 @@ describe('OpenClaw 6.10 ACP terminal error runtime patch', () => {
     const { rewriteAcpTerminalErrors } = await importPatchModule();
     const upgraded = rewriteAcpTerminalErrors(legacyPatchedAcpRuntimeSource());
 
-    expect(upgraded).toMatchObject({ replacements: 3, supported: true });
+    expect(upgraded).toMatchObject({ replacements: 4, supported: true });
     expect(upgraded.content.match(/function buildAcpPromptError\(/gu)).toHaveLength(1);
     expect(upgraded.content.match(/async rejectPendingPromptWithFailure\(/gu)).toHaveLength(1);
     expect(upgraded.content).toContain('findUclawLatestTurnTranscriptError');
@@ -543,6 +552,17 @@ describe('OpenClaw 6.10 ACP terminal error runtime patch', () => {
     });
   });
 
+  it('upgrades the prior terminal helper boundary to remove raw transport causes', async () => {
+    const { rewriteAcpTerminalErrors } = await importPatchModule();
+    const current = rewriteAcpTerminalErrors(acpRuntimeSource).content;
+    const safeBoundary = '\treturn Object.assign(new Error(terminal?.errorMessage ?? message, { cause: terminal ? { code: terminal.tlsCauseCode ?? terminal.code } : value }), terminal ? { code: terminal.code, errorCode: terminal.code, ...terminal.tlsCauseCode ? { tlsCauseCode: terminal.tlsCauseCode } : {} } : {});';
+    const oldBoundary = '\treturn Object.assign(new Error(terminal?.errorMessage ?? message, { cause: value }), terminal ? { code: terminal.code, errorCode: terminal.code } : {});';
+    expect(current).toContain(safeBoundary);
+    expect(rewriteAcpTerminalErrors(current.replace(safeBoundary, oldBoundary))).toMatchObject({
+      content: current, replacements: 1, supported: true,
+    });
+  });
+
   it('rejects an unsupported OpenClaw version', async () => {
     const { patchOpenClawAcpTerminalErrorRuntime } = await importPatchModule();
     const runtime = await writeOpenClawRuntime('2026.6.11');
@@ -550,6 +570,78 @@ describe('OpenClaw 6.10 ACP terminal error runtime patch', () => {
     await expect(patchOpenClawAcpTerminalErrorRuntime(runtime.root)).rejects.toThrow(
       'Expected OpenClaw 2026.6.10, found 2026.6.11',
     );
+  });
+
+  it('repairs missing helper imports in already patched ACP and classifier files', async () => {
+    const { patchOpenClawAcpTerminalErrorRuntime } = await importPatchModule();
+    const runtime = await writeOpenClawRuntime('2026.6.10');
+    await patchOpenClawAcpTerminalErrorRuntime(runtime.root);
+    const helperImport = 'import { getUclawTerminalFailure } from "./uclaw-provider-terminal-errors.mjs";\n';
+    const paths = [runtime.acpPath, runtime.classifierPath];
+    const patched = await Promise.all(paths.map((filePath) => readFile(filePath, 'utf8')));
+    for (const [index, filePath] of paths.entries()) await writeFile(filePath, patched[index].replace(helperImport, ''));
+    expect(await patchOpenClawAcpTerminalErrorRuntime(runtime.root)).toMatchObject({ filesPatched: 2 });
+    for (const [index, filePath] of paths.entries()) expect(await readFile(filePath, 'utf8')).toBe(patched[index]);
+    expect(await patchOpenClawAcpTerminalErrorRuntime(runtime.root)).toMatchObject({ filesPatched: 0 });
+  });
+
+  it('rejects duplicate helper imports and mixed patched/unpatched implementations before writes', async () => {
+    const { patchOpenClawAcpTerminalErrorRuntime, rewriteAcpTerminalErrors, rewriteManagedUserQuotaHandling } = await importPatchModule();
+    const helperImport = 'import { getUclawTerminalFailure } from "./uclaw-provider-terminal-errors.mjs";\n';
+    const patchedAcp = rewriteAcpTerminalErrors(acpRuntimeSource).content;
+    const patchedClassifier = rewriteManagedUserQuotaHandling(classifierRuntimeSource).content;
+    expect(rewriteAcpTerminalErrors(helperImport + patchedAcp).supported).toBe(false);
+    expect(rewriteManagedUserQuotaHandling(helperImport + patchedClassifier).supported).toBe(false);
+    expect(rewriteAcpTerminalErrors(patchedAcp + '\n/** ACP Agent implementation backed by the OpenClaw Gateway and replay ledger. */').supported).toBe(false);
+    const duplicateClassifier = patchedClassifier + '\nfunction classifyFailoverSignal(signal) { return { kind: "reason", reason: "auth" }; }';
+    expect(rewriteManagedUserQuotaHandling(duplicateClassifier).supported).toBe(false);
+    const runtime = await writeOpenClawRuntime('2026.6.10', acpRuntimeSource, duplicateClassifier);
+    await expect(patchOpenClawAcpTerminalErrorRuntime(runtime.root)).rejects.toThrow('error classifier runtime, found 0');
+    expect(await readFile(runtime.acpPath, 'utf8')).toBe(acpRuntimeSource);
+    expect(await readFile(runtime.classifierPath, 'utf8')).toBe(duplicateClassifier);
+  });
+
+  it('rolls back both ACP chunks when a late write truncates then fails', async () => {
+    const { patchOpenClawAcpTerminalErrorRuntime } = await importPatchModule();
+    const runtime = await writeOpenClawRuntime('2026.6.10');
+    let writes = 0;
+    const writeFailure = Object.assign(new Error('injected write failure'), { code: 'ENOSPC' });
+    const fileOps = { writeFile: async (filePath: string, content: string) => {
+      writes += 1;
+      if (writes === 2) { await writeFile(filePath, 'partially written'); throw writeFailure; }
+      await writeFile(filePath, content);
+    } };
+    await expect(patchOpenClawAcpTerminalErrorRuntime(runtime.root, fileOps)).rejects.toBe(writeFailure);
+    expect(await readFile(runtime.acpPath, 'utf8')).toBe(acpRuntimeSource);
+    expect(await readFile(runtime.classifierPath, 'utf8')).toBe(classifierRuntimeSource);
+    expect(await patchOpenClawAcpTerminalErrorRuntime(runtime.root)).toMatchObject({ filesPatched: 2 });
+  });
+
+  it('reports incomplete rollback instead of hiding the original write failure', async () => {
+    const { patchOpenClawAcpTerminalErrorRuntime } = await importPatchModule();
+    const runtime = await writeOpenClawRuntime('2026.6.10');
+    let writes = 0;
+    const fileOps = { writeFile: async (filePath: string, content: string) => {
+      writes += 1;
+      if (writes === 2 || writes === 3) throw new Error(`injected failure ${writes}`);
+      await writeFile(filePath, content);
+    } };
+    await expect(patchOpenClawAcpTerminalErrorRuntime(runtime.root, fileOps)).rejects.toThrow('rollback incomplete');
+    expect(await readFile(runtime.acpPath, 'utf8')).toBe(acpRuntimeSource);
+  });
+
+  it('keeps allowlisted TLS cause but excludes the raw transport graph from ACP rejection and ledger', async () => {
+    const { rewriteAcpTerminalErrors } = await importPatchModule();
+    const runtime = await importFixture<AcpRuntimeModule>('uclaw-acp-tls-cause-', rewriteAcpTerminalErrors(acpRuntimeSource).content);
+    const payload = { code: 'TLS_CERT_INVALID', message: 'Connection error.',
+      cause: { code: 'CERT_HAS_EXPIRED', request: { apiKey: 'secret-must-not-leak' } } };
+    const result = await runtime.captureStateError(payload, []);
+    expect(result.error).toMatchObject({
+      code: 'TLS_CERT_INVALID', tlsCauseCode: 'CERT_HAS_EXPIRED', cause: { code: 'CERT_HAS_EXPIRED' },
+      message: 'TLS_CERT_INVALID: CERT_HAS_EXPIRED',
+    });
+    expect(result.emitted.at(-1)?.update).toMatchObject({ errorCode: 'TLS_CERT_INVALID', errorMessage: 'TLS_CERT_INVALID: CERT_HAS_EXPIRED' });
+    expect(JSON.stringify({ error: result.error, emitted: result.emitted })).not.toContain('secret-must-not-leak');
   });
 
   it('rejects unknown ACP and error-classifier runtime layouts', async () => {
@@ -570,6 +662,7 @@ describe('OpenClaw 6.10 ACP terminal error runtime patch', () => {
     await expect(patchOpenClawAcpTerminalErrorRuntime(unknownClassifier.root)).rejects.toThrow(
       'Expected exactly one supported OpenClaw error classifier runtime, found 0',
     );
+    expect(await readFile(unknownClassifier.acpPath, 'utf8')).toBe(acpRuntimeSource);
   });
 
   it('applies the patch during dependency installation and OpenClaw bundling', async () => {
@@ -581,9 +674,15 @@ describe('OpenClaw 6.10 ACP terminal error runtime patch', () => {
 
     expect(packageJson.devDependencies?.openclaw).toBe('2026.6.10');
     expect(packageJson.scripts.postinstall).toContain('openclaw-acp-terminal-error-patch.mjs');
+    expect(packageJson.scripts.postinstall).toContain('openclaw-provider-terminal-error-patch.mjs');
+    expect(packageJson.scripts.postinstall.indexOf('openclaw-provider-terminal-error-patch.mjs'))
+      .toBeLessThan(packageJson.scripts.postinstall.indexOf('openclaw-acp-terminal-error-patch.mjs'));
     expect(bundleScript).toContain(
       "import { patchOpenClawAcpTerminalErrorRuntime } from './openclaw-acp-terminal-error-patch.mjs';",
     );
     expect(bundleScript).toContain('await patchOpenClawAcpTerminalErrorRuntime(OUTPUT)');
+    expect(bundleScript).toContain('await patchOpenClawProviderTerminalErrorRuntime(OUTPUT)');
+    expect(bundleScript.indexOf('await patchOpenClawProviderTerminalErrorRuntime(OUTPUT)'))
+      .toBeLessThan(bundleScript.indexOf('await patchOpenClawAcpTerminalErrorRuntime(OUTPUT)'));
   });
 });

@@ -404,8 +404,10 @@ function snapshotRowsVersion(snapshot: AuthProfilesSqlitePrimaryRowsSnapshot): A
 /** Snapshot the exact primary auth rows without creating or modifying the SQLite database. */
 export function snapshotAuthProfilesSqlitePrimaryRows(
   agentId: string,
+  agentDirectory?: string,
 ): AuthProfilesSqlitePrimaryRowsSnapshot {
-  const sqlitePath = getAuthProfilesSqlitePath(agentId);
+  // Configured agentDir is a Main-owned path, used only for read-only snapshots.
+  const sqlitePath = agentDirectory ? join(agentDirectory, AUTH_SQLITE_FILENAME) : getAuthProfilesSqlitePath(agentId);
   if (!existsSync(sqlitePath)) {
     return {
       agentId,

@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SUPPORTED_OPENCLAW_VERSION = '2026.6.10';
+const TERMINAL_IMPORT = 'import { getUclawTerminalFailure } from "./uclaw-provider-terminal-errors.mjs";\n';
 
 const ACP_ERROR_HELPER_SOURCE = '/** ACP Agent implementation backed by the OpenClaw Gateway and replay ledger. */';
 const ACP_ERROR_HELPER_LEGACY_TARGET = [
@@ -16,7 +17,7 @@ const ACP_ERROR_HELPER_LEGACY_TARGET = [
   '}',
   ACP_ERROR_HELPER_SOURCE,
 ].join('\n');
-const ACP_ERROR_HELPER_TARGET = [
+const ACP_ERROR_HELPER_PREVIOUS_TARGET = [
   'function buildAcpPromptError(value, fallback) {',
   '\tconst record = value && typeof value === "object" ? value : void 0;',
   '\tconst messageText = record?.message && typeof record.message === "object" && Array.isArray(record.message.content) ? record.message.content.map((block) => typeof block?.text === "string" ? block.text : "").filter(Boolean).join("\\n").trim() : "";',
@@ -59,6 +60,19 @@ const ACP_ERROR_HELPER_TARGET = [
   '}',
   ACP_ERROR_HELPER_SOURCE,
 ].join('\n');
+// Only safe allowlisted metadata crosses ACP; transport causes may contain keys
+// and request bodies and must not be emitted in ledger notifications.
+const ACP_ERROR_HELPER_TERMINAL_PREVIOUS_TARGET = ACP_ERROR_HELPER_PREVIOUS_TARGET.replace(
+  '\treturn new Error(message, { cause: value });',
+  [
+    '\tconst terminal = getUclawTerminalFailure(value);',
+    '\treturn Object.assign(new Error(terminal?.errorMessage ?? message, { cause: value }), terminal ? { code: terminal.code, errorCode: terminal.code } : {});',
+  ].join('\n'),
+);
+const ACP_ERROR_HELPER_TARGET = ACP_ERROR_HELPER_TERMINAL_PREVIOUS_TARGET.replace(
+  '\treturn Object.assign(new Error(terminal?.errorMessage ?? message, { cause: value }), terminal ? { code: terminal.code, errorCode: terminal.code } : {});',
+  '\treturn Object.assign(new Error(terminal?.errorMessage ?? message, { cause: terminal ? { code: terminal.tlsCauseCode ?? terminal.code } : value }), terminal ? { code: terminal.code, errorCode: terminal.code, ...terminal.tlsCauseCode ? { tlsCauseCode: terminal.tlsCauseCode } : {} } : {});',
+);
 
 const ACP_STATE_ERROR_SOURCE = [
   '\t\tif (state === "error") {',
@@ -130,7 +144,7 @@ const ACP_REJECT_METHOD_LEGACY_TARGET = [
   '\t}',
   ACP_REJECT_METHOD_SOURCE,
 ].join('\n');
-const ACP_REJECT_METHOD_TARGET = [
+const ACP_REJECT_METHOD_PREVIOUS_TARGET = [
   '\tasync rejectPendingPromptWithFailure(pending, value, fallback) {',
   '\t\tlet error = buildAcpPromptError(value, fallback);',
   '\t\tlet transcriptFailure;',
@@ -161,6 +175,11 @@ const ACP_REJECT_METHOD_TARGET = [
   '\t}',
   ACP_REJECT_METHOD_SOURCE,
 ].join('\n');
+const ACP_REJECT_METHOD_TARGET = ACP_REJECT_METHOD_PREVIOUS_TARGET
+  .replace('if (transcriptFailure) error = new Error(transcriptFailure.errorMessage, { cause: value });',
+    'if (transcriptFailure) error = buildAcpPromptError({ ...transcriptFailure, cause: value }, fallback);')
+  .replace('...transcriptFailure?.errorCode ? { errorCode: transcriptFailure.errorCode } : {}',
+    '...error.errorCode || transcriptFailure?.errorCode ? { errorCode: error.errorCode ?? transcriptFailure.errorCode } : {}');
 
 const ACP_REPLAY_TRANSCRIPT_SOURCE = [
   '\tasync replaySessionTranscript(sessionId, transcript) {',
@@ -220,6 +239,10 @@ const USER_QUOTA_HELPER_TARGET = [
   '}',
   'function isRateLimitAssistantError(msg) {',
 ].join('\n');
+const USER_QUOTA_HELPER_CURRENT_TARGET = USER_QUOTA_HELPER_TARGET.replace(
+  '\treturn /insufficient[_ -]?user[_ -]?quota|用户额度不足|预扣费额度失败|订阅额度不足或未配置订阅/i.test(raw);',
+  '\treturn Boolean(getUclawTerminalFailure(raw));',
+);
 
 const RATE_LIMIT_ASSISTANT_SOURCE = [
   'function isRateLimitAssistantError(msg) {',
@@ -269,12 +292,26 @@ const CLASSIFY_MESSAGE_TARGET = [
   '\tif (isUclawManagedUserQuotaError(raw)) return toReasonClassification("format");',
   '\tif (isImageDimensionErrorMessage(raw)) return null;',
 ].join('\n');
+const CLASSIFY_SIGNAL_SOURCE = 'function classifyFailoverSignal(signal) {';
+const CLASSIFY_SIGNAL_TARGET = [
+  CLASSIFY_SIGNAL_SOURCE,
+  '\t// Terminal managed business and TLS failures precede HTTP/plugin auth classification.',
+  '\tif (getUclawTerminalFailure(signal)) return toReasonClassification("format");',
+].join('\n');
 
 function applyRewrite(content, source, target) {
-  if (content.includes(target)) return { content, changed: false, supported: true };
+  const targets = content.split(target).length - 1;
   const sources = Array.isArray(source) ? source : [source];
+  if (targets === 1) {
+    const rest = content.replace(target, '');
+    if (sources.some((candidate) => rest.includes(candidate))) return { content, changed: false, supported: false };
+    return { content, changed: false, supported: true };
+  }
+  if (targets > 1) return { content, changed: false, supported: false };
   const matched = sources.find((candidate) => content.includes(candidate));
-  if (!matched) return { content, changed: false, supported: false };
+  if (!matched || content.split(matched).length - 1 !== 1) return { content, changed: false, supported: false };
+  const rest = content.replace(matched, '');
+  if (sources.some((candidate) => rest.includes(candidate))) return { content, changed: false, supported: false };
   return { content: content.replace(matched, target), changed: true, supported: true };
 }
 
@@ -282,9 +319,9 @@ export function rewriteAcpTerminalErrors(content) {
   let rewritten = content;
   let replacements = 0;
   for (const [source, target] of [
-    [[ACP_ERROR_HELPER_LEGACY_TARGET, ACP_ERROR_HELPER_SOURCE], ACP_ERROR_HELPER_TARGET],
+    [[ACP_ERROR_HELPER_TERMINAL_PREVIOUS_TARGET, ACP_ERROR_HELPER_PREVIOUS_TARGET, ACP_ERROR_HELPER_LEGACY_TARGET, ACP_ERROR_HELPER_SOURCE], ACP_ERROR_HELPER_TARGET],
     [ACP_PENDING_MESSAGE_SOURCE, ACP_PENDING_MESSAGE_TARGET],
-    [[ACP_REJECT_METHOD_LEGACY_TARGET, ACP_REJECT_METHOD_SOURCE], ACP_REJECT_METHOD_TARGET],
+    [[ACP_REJECT_METHOD_PREVIOUS_TARGET, ACP_REJECT_METHOD_LEGACY_TARGET, ACP_REJECT_METHOD_SOURCE], ACP_REJECT_METHOD_TARGET],
     [[ACP_STATE_ERROR_SOURCE, ACP_STATE_ERROR_INTERMEDIATE], ACP_STATE_ERROR_TARGET],
     [[ACP_RECONCILE_ERROR_SOURCE, ACP_RECONCILE_ERROR_INTERMEDIATE], ACP_RECONCILE_ERROR_TARGET],
     [ACP_REPLAY_TRANSCRIPT_SOURCE, ACP_REPLAY_TRANSCRIPT_TARGET],
@@ -294,6 +331,8 @@ export function rewriteAcpTerminalErrors(content) {
     rewritten = result.content;
     if (result.changed) replacements += 1;
   }
+  if (rewritten.split(TERMINAL_IMPORT).length - 1 > 1) return { content: rewritten, replacements, supported: false };
+  if (!rewritten.includes(TERMINAL_IMPORT)) { rewritten = TERMINAL_IMPORT + rewritten; replacements += 1; }
   return { content: rewritten, replacements, supported: true };
 }
 
@@ -301,25 +340,29 @@ export function rewriteManagedUserQuotaHandling(content) {
   let rewritten = content;
   let replacements = 0;
   for (const [source, target] of [
-    [USER_QUOTA_HELPER_SOURCE, USER_QUOTA_HELPER_TARGET],
+    [[USER_QUOTA_HELPER_TARGET, USER_QUOTA_HELPER_SOURCE], USER_QUOTA_HELPER_CURRENT_TARGET],
     [RATE_LIMIT_ASSISTANT_SOURCE, RATE_LIMIT_ASSISTANT_TARGET],
     [BILLING_ASSISTANT_SOURCE, BILLING_ASSISTANT_TARGET],
     [AUTH_ASSISTANT_SOURCE, AUTH_ASSISTANT_TARGET],
     [CLASSIFY_MESSAGE_SOURCE, CLASSIFY_MESSAGE_TARGET],
+    [CLASSIFY_SIGNAL_SOURCE, CLASSIFY_SIGNAL_TARGET],
   ]) {
-    const result = applyRewrite(rewritten, source, target);
+    const currentTarget = target.replace('isUclawManagedUserQuotaError(msg.errorMessage)', 'isUclawManagedUserQuotaError(msg)');
+    const result = applyRewrite(rewritten, [...(Array.isArray(source) ? source : [source]), target], currentTarget);
     if (!result.supported) return { content: rewritten, replacements, supported: false };
     rewritten = result.content;
     if (result.changed) replacements += 1;
   }
+  if (rewritten.split(TERMINAL_IMPORT).length - 1 > 1) return { content: rewritten, replacements, supported: false };
+  if (!rewritten.includes(TERMINAL_IMPORT)) { rewritten = TERMINAL_IMPORT + rewritten; replacements += 1; }
   return { content: rewritten, replacements, supported: true };
 }
 
-async function patchExactlyOne(distDir, pattern, rewrite, label) {
+async function planExactlyOne(distDir, pattern, rewrite, label) {
   const entries = await readdir(distDir, { withFileTypes: true });
   const files = entries.filter((entry) => entry.isFile() && pattern.test(entry.name));
   let supportedFiles = 0;
-  let filesPatched = 0;
+  const plans = [];
 
   for (const entry of files) {
     const filePath = join(distDir, entry.name);
@@ -327,37 +370,53 @@ async function patchExactlyOne(distDir, pattern, rewrite, label) {
     const result = rewrite(content);
     if (!result.supported) continue;
     supportedFiles += 1;
-    if (result.replacements === 0) continue;
-    await writeFile(filePath, result.content, 'utf8');
-    filesPatched += 1;
+    if (result.content === content) continue;
+    plans.push({ filePath, original: content, content: result.content });
   }
 
   if (supportedFiles !== 1) {
     throw new Error(`Expected exactly one supported OpenClaw ${label} runtime, found ${supportedFiles}.`);
   }
-  return { filesPatched, filesScanned: files.length };
+  return { plans, filesScanned: files.length };
 }
 
 /**
  * Preserve terminal provider failures through ACP and keep UClaw end-user quota
  * errors out of OpenClaw's provider-profile failover and cooldown machinery.
  */
-export async function patchOpenClawAcpTerminalErrorRuntime(openclawDir) {
+export async function patchOpenClawAcpTerminalErrorRuntime(openclawDir, fileOps = { writeFile }) {
   const packageJson = JSON.parse(await readFile(join(openclawDir, 'package.json'), 'utf8'));
   if (packageJson.version !== SUPPORTED_OPENCLAW_VERSION) {
     throw new Error(`Expected OpenClaw ${SUPPORTED_OPENCLAW_VERSION}, found ${String(packageJson.version)}.`);
   }
 
   const distDir = join(openclawDir, 'dist');
-  const acp = await patchExactlyOne(distDir, /^acp-cli-.*\.js$/u, rewriteAcpTerminalErrors, 'ACP CLI');
-  const errors = await patchExactlyOne(
+  const acp = await planExactlyOne(distDir, /^acp-cli-.*\.js$/u, rewriteAcpTerminalErrors, 'ACP CLI');
+  const errors = await planExactlyOne(
     distDir,
     /^errors-.*\.js$/u,
     rewriteManagedUserQuotaHandling,
     'error classifier',
   );
+  // Preflight both chunks before writing, avoiding a partial patch on layout drift.
+  // Rollback belongs only to this invocation; provider and ACP patches are not one transaction.
+  const attempted = [];
+  try {
+    for (const plan of [...acp.plans, ...errors.plans]) {
+      attempted.push(plan);
+      await fileOps.writeFile(plan.filePath, plan.content, 'utf8');
+    }
+  } catch (error) {
+    const rollbackErrors = [];
+    for (const plan of attempted.reverse()) {
+      try { await fileOps.writeFile(plan.filePath, plan.original, 'utf8'); }
+      catch (rollbackError) { rollbackErrors.push(rollbackError); }
+    }
+    if (rollbackErrors.length) throw new AggregateError([error, ...rollbackErrors], 'ACP patch write failed; rollback incomplete', { cause: error });
+    throw error;
+  }
   return {
-    filesPatched: acp.filesPatched + errors.filesPatched,
+    filesPatched: acp.plans.length + errors.plans.length,
     filesScanned: acp.filesScanned + errors.filesScanned,
   };
 }

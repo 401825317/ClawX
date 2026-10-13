@@ -45,6 +45,7 @@ import { collectDroppedFiles } from '@/lib/collect-dropped-files';
 import { fetchQuickAccessSkills } from '@/lib/quick-access-skills';
 import { DEFAULT_WORKSPACE_CWD, isDefaultWorkspacePath, normalizeWorkspacePath } from '@/lib/workspace-context';
 import type { AcpImageGenerationOptions, AcpVideoGenerationOptions } from '@shared/acp-chat/types';
+import { CHAT_MEDIA_MAX_ITEMS } from '@shared/chat/media-limits';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -65,14 +66,18 @@ export interface ChatWorkspaceOption {
 }
 
 interface ChatInputProps {
+  // false rejects before dispatch; true/void accepts into the conversation,
+  // including a dispatched turn that ends with a model failure card.
   onSend: (
     text: string,
     attachments?: FileAttachment[],
     targetAgentId?: string | null,
     imageOptions?: AcpImageGenerationOptions,
     videoOptions?: AcpVideoGenerationOptions,
-  ) => void;
+  ) => void | boolean | Promise<void | boolean>;
   onStop?: () => void;
+  // Independent of disabled: cancellation/session transitions alone gate stop.
+  stopDisabled?: boolean;
   disabled?: boolean;
   disabledPlaceholder?: string;
   sending?: boolean;
@@ -422,6 +427,7 @@ function readFileAsBase64(file: globalThis.File): Promise<string> {
 export function ChatInput({
   onSend,
   onStop,
+  stopDisabled = false,
   disabled = false,
   disabledPlaceholder = '',
   sending = false,
@@ -459,6 +465,16 @@ export function ChatInput({
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
   const modelChangeVersionRef = useRef(0);
   const mountedRef = useRef(true);
+  // This synchronous snapshot includes every staging placeholder, even before
+  // React renders it. Removing one file cannot release another batch's slots.
+  const attachmentsRef = useRef<FileAttachment[]>([]);
+  const updateAttachments = useCallback((update: (current: FileAttachment[]) => FileAttachment[]) => {
+    const current = attachmentsRef.current;
+    const next = update(current);
+    if (next.length === current.length && next.every((attachment, index) => attachment === current[index])) return;
+    attachmentsRef.current = next;
+    setAttachments(next);
+  }, []);
   const sendAttemptInFlightRef = useRef<{
     sessionKey: string;
     sessionGeneration: number;
@@ -471,6 +487,7 @@ export function ChatInput({
   const handleSettingsPickerOpenChange = useCallback((open: boolean) => {
     setSettingsPickerOpen(open);
   }, []);
+
   const prepareGenerationOptionPicker = useCallback(() => {
     setPickerOpen(false);
     setSkillPickerOpen(false);
@@ -1098,45 +1115,61 @@ export function ChatInput({
 
   // ── File staging via native dialog / Electron drag-drop paths ──
 
-  const stagePathFiles = useCallback(async (filePaths: string[]) => {
-    if (filePaths.length === 0) return;
-
-    const tempIds: string[] = [];
-    for (const filePath of filePaths) {
-      const tempId = crypto.randomUUID();
-      tempIds.push(tempId);
-      const fileName = filePath.split(/[\\/]/).pop() || 'file';
-      setAttachments(prev => [...prev, {
-        id: tempId,
-        fileName,
-        mimeType: '',
-        fileSize: 0,
-        stagedPath: '',
-        preview: null,
-        status: 'staging' as const,
-      }]);
+  const reserveAttachments = useCallback((filePaths: string[], files: globalThis.File[]) => {
+    // Failed previews stay visible for retry but no longer occupy upload slots.
+    const reservedCount = attachmentsRef.current.filter((attachment) => attachment.status !== 'error').length;
+    if (reservedCount + filePaths.length + files.length > CHAT_MEDIA_MAX_ITEMS) {
+      toast.error(t('composer.mediaAttachmentLimit', { count: CHAT_MEDIA_MAX_ITEMS }));
+      return null;
     }
+    const pathPlaceholders = filePaths.map((filePath): FileAttachment => ({
+      id: crypto.randomUUID(),
+      fileName: filePath.split(/[\\/]/).pop() || 'file',
+      mimeType: '',
+      fileSize: 0,
+      stagedPath: '',
+      preview: null,
+      status: 'staging',
+    }));
+    const bufferPlaceholders = files.map((file): FileAttachment => ({
+      id: crypto.randomUUID(),
+      fileName: file.name,
+      mimeType: file.type || 'application/octet-stream',
+      fileSize: file.size,
+      stagedPath: '',
+      preview: null,
+      status: 'staging',
+    }));
+    updateAttachments((current) => [...current, ...pathPlaceholders, ...bufferPlaceholders]);
+    return {
+      pathIds: pathPlaceholders.map((attachment) => attachment.id),
+      bufferIds: bufferPlaceholders.map((attachment) => attachment.id),
+    };
+  }, [t, updateAttachments]);
+
+  const stagePathFiles = useCallback(async (filePaths: string[], tempIds: string[]) => {
+    if (filePaths.length === 0) return;
 
     try {
       console.log('[stagePathFiles] Staging files:', filePaths);
       const staged = await hostApi.files.stagePaths({ filePaths });
       console.log('[stagePathFiles] Stage result:', staged?.map(s => ({ id: s?.id, fileName: s?.fileName, mimeType: s?.mimeType, fileSize: s?.fileSize, stagedPath: s?.stagedPath, hasPreview: !!s?.preview })));
 
-      setAttachments(prev => {
+      updateAttachments(prev => {
         let updated = [...prev];
         for (let i = 0; i < tempIds.length; i++) {
           const tempId = tempIds[i];
           const data = staged[i];
           if (data) {
             updated = updated.map(a =>
-              a.id === tempId
+              a.id === tempId && a.status === 'staging'
                 ? { ...data, status: 'ready' as const }
                 : a,
             );
           } else {
             console.warn(`[stagePathFiles] No staged data for tempId=${tempId} at index ${i}`);
             updated = updated.map(a =>
-              a.id === tempId
+              a.id === tempId && a.status === 'staging'
                 ? { ...a, status: 'error' as const, error: 'Staging failed' }
                 : a,
             );
@@ -1146,13 +1179,13 @@ export function ChatInput({
       });
     } catch (err) {
       console.error('[stagePathFiles] Failed to stage files:', err);
-      setAttachments(prev => prev.map(a =>
-        a.status === 'staging'
+      updateAttachments(prev => prev.map(a =>
+        tempIds.includes(a.id) && a.status === 'staging'
           ? { ...a, status: 'error' as const, error: String(err) }
           : a,
       ));
     }
-  }, []);
+  }, [updateAttachments]);
 
   const pickFiles = useCallback(async () => {
     try {
@@ -1160,30 +1193,31 @@ export function ChatInput({
         properties: ['openFile', 'multiSelections'],
       });
       if (result.canceled || !result.filePaths?.length) return;
-      await stagePathFiles(result.filePaths);
+      const reserved = reserveAttachments(result.filePaths, []);
+      if (!reserved) return;
+      await stagePathFiles(result.filePaths, reserved.pathIds);
     } catch (err) {
       console.error('[pickFiles] Failed to open file dialog:', err);
     }
-  }, [stagePathFiles]);
+  }, [reserveAttachments, stagePathFiles]);
 
   // ── Stage browser File objects (paste / drag-drop) ─────────────
 
-  const stageBufferFiles = useCallback(async (files: globalThis.File[]) => {
-    for (const file of files) {
-      const tempId = crypto.randomUUID();
-      setAttachments(prev => [...prev, {
-        id: tempId,
-        fileName: file.name,
-        mimeType: file.type || 'application/octet-stream',
-        fileSize: file.size,
-        stagedPath: '',
-        preview: null,
-        status: 'staging' as const,
-      }]);
+  const stageBufferFiles = useCallback(async (files: globalThis.File[], tempIds: string[]) => {
+    for (let index = 0; index < files.length; index++) {
+      const file = files[index];
+      const tempId = tempIds[index];
+      const isPending = () => attachmentsRef.current.some((attachment) => (
+        attachment.id === tempId && attachment.status === 'staging'
+      ));
+      // Deleting a queued placeholder cancels that upload; in-flight responses
+      // can only update a still-present placeholder, never recreate a file.
+      if (!isPending()) continue;
 
       try {
         console.log(`[stageBuffer] Reading file: ${file.name} (${file.type}, ${file.size} bytes)`);
         const base64 = await readFileAsBase64(file);
+        if (!isPending()) continue;
         console.log(`[stageBuffer] Base64 length: ${base64?.length ?? 'null'}`);
         const staged = await hostApi.files.stageBuffer({
           base64,
@@ -1191,25 +1225,25 @@ export function ChatInput({
           mimeType: file.type || 'application/octet-stream',
         });
         console.log(`[stageBuffer] Staged: id=${staged?.id}, path=${staged?.stagedPath}, size=${staged?.fileSize}`);
-        setAttachments(prev => prev.map(a =>
-          a.id === tempId ? { ...staged, status: 'ready' as const } : a,
+        updateAttachments(prev => prev.map(a =>
+          a.id === tempId && a.status === 'staging' ? { ...staged, status: 'ready' as const } : a,
         ));
       } catch (err) {
         console.error(`[stageBuffer] Error staging ${file.name}:`, err);
-        setAttachments(prev => prev.map(a =>
-          a.id === tempId
+        updateAttachments(prev => prev.map(a =>
+          a.id === tempId && a.status === 'staging'
             ? { ...a, status: 'error' as const, error: String(err) }
             : a,
         ));
       }
     }
-  }, []);
+  }, [updateAttachments]);
 
   // ── Attachment management ──────────────────────────────────────
 
   const removeAttachment = useCallback((id: string) => {
-    setAttachments(prev => prev.filter(a => a.id !== id));
-  }, []);
+    updateAttachments(prev => prev.filter((attachment) => attachment.id !== id));
+  }, [updateAttachments]);
 
   const allReady = attachments.length === 0 || attachments.every(a => a.status === 'ready');
   const hasFailedAttachments = attachments.some((a) => a.status === 'error');
@@ -1220,10 +1254,26 @@ export function ChatInput({
     && !imageGenerating
     && !videoGenerating;
   const canSend = canSendWithoutModelPersistence && !modelPersisting && !thinkingPersisting;
-  const canStop = sending && !inputDisabled && !!onStop;
+  // Cancellation has its own guard; send/workspace/Gateway readiness cannot
+  // disable it while a foreground turn is active.
+  const canStop = sending && !stopDisabled && !!onStop;
 
   const handleSend = useCallback(async () => {
     if (!canSendWithoutModelPersistence) return;
+    const attachmentsAtSend = attachmentsRef.current;
+    const validateSendAttachments = (attachmentsToSend?: FileAttachment[]): boolean => {
+      const current = attachmentsRef.current;
+      const readyCount = current.filter((attachment) => attachment.status === 'ready').length;
+      const pendingCount = current.filter((attachment) => attachment.status === 'staging').length;
+      if (readyCount + pendingCount > CHAT_MEDIA_MAX_ITEMS || (attachmentsToSend?.length ?? 0) > CHAT_MEDIA_MAX_ITEMS) {
+        toast.error(t('composer.mediaAttachmentLimit', { count: CHAT_MEDIA_MAX_ITEMS }));
+        return false;
+      }
+      // Model persistence and extension guards yield to uploads/removals. Never
+      // send a stale snapshot or clear new placeholders while those await.
+      return current === attachmentsAtSend && current.every((attachment) => attachment.status === 'ready');
+    };
+    if (!validateSendAttachments()) return;
     const sessionKey = currentSessionKey;
     const sessionGeneration = currentSessionGenerationRef.current;
     const activeAttempt = sendAttemptInFlightRef.current;
@@ -1249,9 +1299,9 @@ export function ChatInput({
       } catch {
         return;
       }
-      if (!isCurrentSendContext()) return;
+      if (!isCurrentSendContext() || !validateSendAttachments()) return;
 
-      const readyAttachments = attachments.filter(a => a.status === 'ready');
+      const readyAttachments = attachmentsAtSend.filter(a => a.status === 'ready');
       const textToSend = input.trim();
       const attachmentsToSend = readyAttachments.length > 0 ? readyAttachments : undefined;
       if (
@@ -1290,9 +1340,7 @@ export function ChatInput({
         if (!isCurrentSendContext()) return;
       }
 
-      if (!isCurrentSendContext()) return;
-      // Capture values before clearing — clear input immediately for snappy UX,
-      // but keep attachments available for the async send
+      if (!isCurrentSendContext() || !validateSendAttachments(attachmentsToSend)) return;
       console.log(`[handleSend] textLength=${textToSend.length}, attachments=${attachments.length}, ready=${readyAttachments.length}, sending=${!!attachmentsToSend}`);
       if (attachmentsToSend) {
         console.log('[handleSend] Attachment details:', attachmentsToSend.map(a => ({
@@ -1300,15 +1348,9 @@ export function ChatInput({
           stagedPath: a.stagedPath, status: a.status, hasPreview: !!a.preview,
         })));
       }
-      setInput('');
-      setAttachments([]);
-      setSelectedSkill(null);
-      setSkillQuery('');
-      if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto';
-      }
+      let accepted: void | boolean;
       if (videoModeActive && videoOptions) {
-        onSend(
+        accepted = await onSend(
           textToSend,
           attachmentsToSend,
           targetAgentId,
@@ -1316,22 +1358,37 @@ export function ChatInput({
           { ...videoOptions },
         );
       } else if (imageModeActive) {
-        onSend(
+        accepted = await onSend(
           textToSend,
           attachmentsToSend,
           targetAgentId,
           { ...imageOptions } as unknown as AcpImageGenerationOptions,
         );
       } else {
-        onSend(textToSend, attachmentsToSend, targetAgentId);
+        accepted = await onSend(textToSend, attachmentsToSend, targetAgentId);
       }
-      setTargetAgentId(null);
+      if (accepted === false || !isCurrentSendContext()) return;
+      // Only consume the accepted draft. Files or text added while the host was
+      // accepting the send belong to the next draft and must remain editable.
+      const sentAttachments = new Set(readyAttachments);
+      setInput((current) => current === input ? '' : current);
+      updateAttachments((current) => current.filter((attachment) => !sentAttachments.has(attachment)));
+      setSelectedSkill((current) => current === selectedSkill ? null : current);
+      setSkillQuery((current) => current === skillQuery ? '' : current);
+      if (textareaRef.current?.value === input) {
+        textareaRef.current.style.height = 'auto';
+      }
+      setTargetAgentId((current) => current === targetAgentId ? null : current);
       setPickerOpen(false);
       setSkillPickerOpen(false);
       closeSettingsPicker();
       setImageOptionsPickerOpen(false);
       setVideoOptionsPickerOpen(false);
       setWorkspaceMenuOpen(false);
+    } catch (error) {
+      // The host owns the actionable error message; rejection must not discard
+      // the local draft or escape the fire-and-forget keyboard/click handler.
+      console.error('[handleSend] Failed to send draft:', error);
     } finally {
       if (sendAttemptInFlightRef.current?.token === token) {
         sendAttemptInFlightRef.current = null;
@@ -1348,9 +1405,12 @@ export function ChatInput({
     imageOptions,
     onSend,
     requestedModelRef,
+    selectedSkill,
+    skillQuery,
     t,
     targetAgentId,
     updateSessionModel,
+    updateAttachments,
     videoModeActive,
     videoOptions,
     waitForSessionModelUpdate,
@@ -1452,10 +1512,11 @@ export function ChatInput({
       }
       if (pastedFiles.length > 0) {
         e.preventDefault();
-        stageBufferFiles(pastedFiles);
+        const reserved = reserveAttachments([], pastedFiles);
+        if (reserved) void stageBufferFiles(pastedFiles, reserved.bufferIds);
       }
     },
-    [stageBufferFiles],
+    [reserveAttachments, stageBufferFiles],
   );
 
   // Handle drag & drop
@@ -1485,10 +1546,12 @@ export function ChatInput({
         toast.error(t('composer.folderDropUnsupported'));
         return;
       }
-      if (pathFiles.length > 0) void stagePathFiles(pathFiles);
-      if (bufferFiles.length > 0) void stageBufferFiles(bufferFiles);
+      const reserved = reserveAttachments(pathFiles, bufferFiles);
+      if (!reserved) return;
+      if (pathFiles.length > 0) void stagePathFiles(pathFiles, reserved.pathIds);
+      if (bufferFiles.length > 0) void stageBufferFiles(bufferFiles, reserved.bufferIds);
     },
-    [stageBufferFiles, stagePathFiles, t],
+    [reserveAttachments, stageBufferFiles, stagePathFiles, t],
   );
 
   return (
@@ -2255,7 +2318,7 @@ export function ChatInput({
                 size="sm"
                 className="h-auto shrink-0 p-0 text-tiny"
                 onClick={() => {
-                  setAttachments((prev) => prev.filter((att) => att.status !== 'error'));
+                  updateAttachments((prev) => prev.filter((attachment) => attachment.status !== 'error'));
                   void pickFiles();
                 }}
               >

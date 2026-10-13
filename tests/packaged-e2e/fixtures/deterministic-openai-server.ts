@@ -381,14 +381,25 @@ export class DeterministicOpenAiServer {
       else sendAssistant(res, 'UCLAW_REGRESSION_HTTP_500_RECOVERED', body.stream === true, responseModel);
       return;
     }
-    if (scenario === 'QUOTA') {
-      json(res, 400, {
+    if (scenario === 'QUOTA' || scenario === 'QUOTA_403' || scenario === 'QUOTA_429') {
+      const status = scenario === 'QUOTA_403' ? 403 : scenario === 'QUOTA_429' ? 429 : 400;
+      json(res, status, {
         error: {
           message: 'insufficient_user_quota: deterministic regression balance exhausted',
           type: 'insufficient_user_quota',
           code: 'insufficient_user_quota',
         },
-      });
+      }, { 'x-should-retry': 'true', 'retry-after': '0' });
+      return;
+    }
+    if (scenario === 'SUBSCRIPTION_403') {
+      json(res, 403, {
+        error: {
+          message: '订阅额度不足或未配置订阅: no active subscription',
+          type: 'subscription_error',
+          code: 'subscription_error',
+        },
+      }, { 'x-should-retry': 'true' });
       return;
     }
     if (scenario === 'MALFORMED_STREAM') {

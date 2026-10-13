@@ -23,6 +23,7 @@ touchedAreas:
   - harness/reference/acp-generated-media-and-diagnostics.md
   - harness/reference/openclaw-file-activity.md
   - shared/acp-chat/types.ts
+  - shared/acp-chat/errors.ts
   - shared/chat/types.ts
   - shared/host-api/contract.ts
   - shared/file-preview/limits.ts
@@ -53,6 +54,7 @@ touchedAreas:
   - src/pages/Chat/index.tsx
   - src/pages/Chat/ChatInput.tsx
   - src/pages/Chat/AcpAttachmentPart.tsx
+  - src/pages/Chat/AcpTurnFailureCard.tsx
   - src/pages/Chat/AcpMessageSegment.tsx
   - src/pages/Chat/AcpAssistantTurn.tsx
   - src/pages/Chat/AcpTimeline.tsx
@@ -87,6 +89,7 @@ touchedAreas:
   - tests/unit/acp-reducer.test.ts
   - tests/unit/acp-chat-store.test.ts
   - tests/unit/acp-chat-components.test.tsx
+  - tests/unit/acp-chat-errors.test.ts
   - tests/unit/artifact-panel.test.tsx
   - tests/unit/file-preview-body.test.tsx
   - tests/unit/rich-file-viewers.test.tsx
@@ -121,6 +124,8 @@ expectedUserBehavior:
   - MEDIA recovery remains aligned when the triggering ACP user turn contains structured resources, images, or no text.
   - Attachment rows render after assistant prose and preserve declaration order.
   - User image attachments render as thumbnails with a filename overlay on hover.
+  - Selecting, pasting, or dropping more than eight attachments is rejected before staging, with a localized actionable limit message.
+  - A backend media-count rejection is classified as an invalid request and does not fall back to the generic model-call failure card.
   - User non-image attachments show their source path after the filename, omit MIME text, and truncate long paths.
   - Supported session-valid local files, including paths outside the active workspace, open in the right-side Preview panel after a user click.
   - Unsupported session-valid local files open with the operating system default application after a user click.

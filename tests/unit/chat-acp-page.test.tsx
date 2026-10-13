@@ -182,6 +182,7 @@ vi.mock('@/pages/Chat/ChatToolbar', () => ({
 vi.mock('@/pages/Chat/ChatInput', () => ({
   ChatInput: ({
     disabled,
+    stopDisabled,
     onSend,
     onStop,
     sending,
@@ -190,6 +191,7 @@ vi.mock('@/pages/Chat/ChatInput', () => ({
     workspaceReadOnly,
   }: {
     disabled?: boolean;
+    stopDisabled?: boolean;
     onSend: (text: string, attachments?: Array<Record<string, unknown>>, targetAgentId?: string | null) => void;
     onStop?: () => void;
     sending?: boolean;
@@ -224,7 +226,7 @@ vi.mock('@/pages/Chat/ChatInput', () => ({
       >
         send
       </button>
-      <button type="button" data-testid="mock-stop" onClick={onStop}>stop</button>
+      <button type="button" data-testid="mock-stop" disabled={stopDisabled || !sending} onClick={onStop}>stop</button>
       <button type="button" data-testid="mock-send-target" onClick={() => onSend('Ask research', undefined, 'research')}>send target</button>
     </div>
   ),
@@ -443,7 +445,7 @@ describe('ACP Chat page', () => {
     acpState.workspaceRoot = '/workspace';
     acpState.cwd = '/workspace';
 
-    render(<Chat />);
+    const { rerender } = render(<Chat />);
 
     await waitFor(() => {
       expect(screen.getByTestId('mock-chat-input')).toHaveAttribute('data-disabled', 'false');
@@ -460,6 +462,20 @@ describe('ACP Chat page', () => {
       });
     });
 
+    acpState.sending = true;
+    rerender(<Chat />);
+    fireEvent.click(screen.getByTestId('mock-stop'));
+    expect(acpState.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps stop enabled for the current turn while Gateway restarts but blocks sends', async () => {
+    acpState.sending = true;
+    gatewayState.status = { state: 'starting', gatewayReady: false, port: 18789 };
+    render(<Chat />);
+    expect(screen.getByTestId('mock-chat-input')).toHaveAttribute('data-disabled', 'true');
+    expect(screen.getByTestId('mock-stop')).toBeEnabled();
+    fireEvent.click(screen.getByTestId('mock-send'));
+    expect(acpState.sendPrompt).not.toHaveBeenCalled();
     fireEvent.click(screen.getByTestId('mock-stop'));
     expect(acpState.cancel).toHaveBeenCalledTimes(1);
   });
@@ -798,7 +814,7 @@ describe('ACP Chat page', () => {
     expect(screen.getByTestId('mock-chat-input')).toHaveAttribute('data-disabled', 'true');
   });
 
-  it('waits for an explicit Gateway not-ready signal, then accepts compatible running statuses', async () => {
+  it('requires explicit Gateway readiness even for an otherwise running status', async () => {
     gatewayState.status = { state: 'running', gatewayReady: false, port: 18789 };
 
     const { rerender } = render(<Chat />);
@@ -809,6 +825,10 @@ describe('ACP Chat page', () => {
     gatewayState.status = {
       state: 'running', port: 18789, pid: 42, connectedAt: 1_786_545_000_000,
     };
+    rerender(<Chat />);
+    expect(screen.getByTestId('mock-chat-input')).toHaveAttribute('data-disabled', 'true');
+    expect(acpState.loadSession).not.toHaveBeenCalled();
+    gatewayState.status = { ...gatewayState.status, gatewayReady: true };
     rerender(<Chat />);
 
     await waitFor(() => {

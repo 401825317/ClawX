@@ -500,7 +500,7 @@ export class ArtifactTaskService {
     await this.persist().catch(() => undefined);
   }
 
-  complete(sessionKey: string, outcome: 'success' | 'failure'): void {
+  complete(sessionKey: string, outcome: 'success' | 'failure' | 'cancelled'): void {
     const metric = this.metrics.get(sessionKey);
     const policy = this.policies.get(sessionKey);
     if (!metric || !policy) return;

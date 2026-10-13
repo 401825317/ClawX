@@ -732,7 +732,7 @@ describe('AcpChatService', () => {
     });
     prompt.resolve({ stopReason: 'cancelled' });
 
-    await expect(result).resolves.toEqual({ success: true, generation: 1 });
+    await expect(result).resolves.toMatchObject({ success: false, errorCode: 'CANCELLED', retryable: false });
     expect(connection.prompt).toHaveBeenCalledTimes(1);
     expect(connection.unstable_setSessionModel).not.toHaveBeenCalled();
   });
@@ -868,7 +868,7 @@ describe('AcpChatService', () => {
         success: true,
         generation: 1,
       });
-      await expect(result).resolves.toEqual({ success: true, generation: 1 });
+      await expect(result).resolves.toMatchObject({ success: false, errorCode: 'CANCELLED', retryable: false });
       await vi.advanceTimersByTimeAsync(5_000);
       expect(connection.prompt).toHaveBeenCalledTimes(1);
       expect(send).toHaveBeenCalledWith(
@@ -1858,6 +1858,8 @@ describe('AcpChatService', () => {
     })).resolves.toEqual({
       success: false,
       error: 'A message can include at most 8 media attachments.',
+      errorCode: 'INVALID_REQUEST',
+      retryable: false,
     });
 
     expect(connection.prompt).not.toHaveBeenCalled();
@@ -2600,6 +2602,172 @@ describe('AcpChatService', () => {
 
     expect(connection.cancel).toHaveBeenCalledWith({ sessionId: 'agent:pi:s1' });
     await expect(pending).resolves.toEqual({ outcome: { outcome: 'cancelled' } });
+  });
+
+  it('still reports local cancel success when the remote cancel fails', async () => {
+    const { service, connection } = await createService();
+
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    await service.sendPrompt({ sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'edit the file' });
+    connection.cancel.mockRejectedValueOnce(new Error('Gateway is starting or reconnecting. Please wait and try again.'));
+
+    await expect(service.cancelSession({ sessionKey: 'agent:pi:s1' })).resolves.toEqual({
+      success: true,
+      generation: 1,
+    });
+    expect(connection.cancel).toHaveBeenCalledWith({ sessionId: 'agent:pi:s1' });
+  });
+
+  it('settles local prompt and permissions immediately when Gateway and remote cancel are stuck', async () => {
+    const connection = createConnection();
+    const pendingPrompt = createDeferred<{ stopReason: string }>();
+    const pendingCancel = createDeferred<void>();
+    connection.prompt.mockReturnValueOnce(pendingPrompt.promise);
+    connection.cancel.mockReturnValueOnce(pendingCancel.promise);
+    const status = { state: 'running', gatewayReady: true, port: 60792, pid: 42, connectedAt: 100 };
+    const gateway = { getStatus: vi.fn(() => ({ ...status })) };
+    const { service, send } = await createSpawnedService(connection, gateway);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    const prompt = service.sendPrompt({ sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'edit', messageId: 'stop-stuck' });
+    await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(1));
+    const permissionRequest = {
+      sessionId: 'agent:pi:s1',
+      toolCall: { toolCallId: 'pending-edit', title: 'Edit', status: 'pending' },
+      options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+    };
+    const permission = service.client.requestPermission(permissionRequest as never);
+    status.state = 'starting';
+    status.gatewayReady = false;
+    const callsBeforeStop = gateway.getStatus.mock.calls.length;
+    await expect(service.cancelSession({ sessionKey: 'agent:pi:s1' })).resolves.toMatchObject({ success: true });
+    await expect(prompt).resolves.toMatchObject({ success: false, errorCode: 'CANCELLED', retryable: false });
+    await expectCancelledSoon(permission);
+    expect(gateway.getStatus.mock.calls.length).toBe(callsBeforeStop);
+    send.mockClear();
+    await resolvePromptWithText(service, 'late text');
+    await expectCancelledSoon(service.client.requestPermission(permissionRequest as never));
+    expect(send).not.toHaveBeenCalled();
+    expect(connection.unstable_setSessionModel).not.toHaveBeenCalled();
+    pendingCancel.resolve();
+    pendingPrompt.resolve({ stopReason: 'end_turn' });
+  });
+
+  it('cancels Gateway readiness waiting without dispatching after ready returns', async () => {
+    const connection = createConnection();
+    const status = { state: 'running', gatewayReady: true, port: 60792, pid: 42, connectedAt: 100 };
+    const gateway = { getStatus: vi.fn(() => ({ ...status })) };
+    const { service } = await createSpawnedService(connection, gateway);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    status.state = 'starting';
+    status.gatewayReady = false;
+    const prompt = service.sendPrompt({ sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'never dispatch' });
+    await service.cancelSession({ sessionKey: 'agent:pi:s1' });
+    await expect(prompt).resolves.toMatchObject({ success: false, errorCode: 'CANCELLED' });
+    status.state = 'running';
+    status.gatewayReady = true;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(connection.prompt).not.toHaveBeenCalled();
+  });
+
+  it.each(['image', 'video'] as const)('returns CANCELLED while %s preference cleanup remains pending', async (kind) => {
+    const connection = createConnection();
+    const pendingPrompt = createDeferred<{ stopReason: string }>();
+    const cleanup = createDeferred<void>();
+    connection.prompt.mockReturnValueOnce(pendingPrompt.promise);
+    const preferences = {
+      enqueue: vi.fn().mockResolvedValue({ id: `${kind}-old-turn` }),
+      discard: vi.fn().mockReturnValueOnce(cleanup.promise),
+    };
+    const { service } = await createService(connection, createPassthroughAccessRegistry(),
+      kind === 'image' ? preferences : undefined,
+      kind === 'video' ? preferences : undefined);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    const prompt = service.sendPrompt({
+      sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'Generate media',
+      ...(kind === 'image'
+        ? { imageOptions: { modelId: 'gpt-image-2', size: '1024x1024', quality: 'medium' } }
+        : { videoOptions: { modelId: 'grok-video-1.5', size: '1280x720', mode: 'text-to-video', durationSeconds: 6, aspectRatio: '16:9', resolution: '720p' } }),
+    });
+    await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(1));
+    await service.cancelSession({ sessionKey: 'agent:pi:s1' });
+    let result: unknown;
+    void prompt.then((value) => { result = value; });
+    await vi.waitFor(() => expect(result).toMatchObject({ success: false, errorCode: 'CANCELLED' }));
+    expect(preferences.discard).toHaveBeenCalledWith(`${kind}-old-turn`);
+    cleanup.resolve();
+    pendingPrompt.resolve({ stopReason: 'cancelled' });
+    await prompt;
+  });
+
+  it('rotates the cancelled protocol binding without restarting ACP or Gateway', async () => {
+    const connection = createConnection();
+    const oldPrompt = createDeferred<{ stopReason: string }>();
+    const nextPrompt = createDeferred<{ stopReason: string }>();
+    connection.prompt.mockReturnValueOnce(oldPrompt.promise).mockReturnValueOnce(nextPrompt.promise);
+    const child = createFakeChild();
+    const kill = vi.fn();
+    Object.assign(child, { kill });
+    const { service, send } = await createSpawnedService(connection, undefined, child);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    const client = acpSdkMock.ClientSideConnection.mock.calls.at(-1)![0]() as typeof service.client;
+    const stopped = service.sendPrompt({ sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'old' });
+    await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(1));
+    await service.cancelSession({ sessionKey: 'agent:pi:s1' });
+    await expect(stopped).resolves.toMatchObject({ errorCode: 'CANCELLED' });
+
+    const next = service.sendPrompt({ sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'next' });
+    await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(2));
+    const nextId = connection.prompt.mock.calls[1][0].sessionId;
+    expect(nextId).toMatch(/^uclaw-binding:/);
+    expect(kill).not.toHaveBeenCalled();
+    expect(childProcessMock.fork).toHaveBeenCalledTimes(1);
+    expect(connection.loadSession).toHaveBeenLastCalledWith(expect.objectContaining({
+      sessionId: nextId, _meta: { sessionKey: 'agent:pi:s1', prefixCwd: true },
+    }));
+    expect(connection.newSession).not.toHaveBeenCalled();
+    send.mockClear();
+    await client.sessionUpdate({ sessionId: 'agent:pi:s1', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'old late text' } } } as never);
+    await expectCancelledSoon(client.requestPermission({ sessionId: 'agent:pi:s1', toolCall: { toolCallId: 'old' }, options: [] } as never));
+    expect(send).not.toHaveBeenCalled();
+    await client.sessionUpdate({ sessionId: nextId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'new text' } } } as never);
+    nextPrompt.resolve({ stopReason: 'end_turn' });
+    await expect(next).resolves.toMatchObject({ success: true });
+    expect(send).toHaveBeenCalledTimes(1);
+    oldPrompt.resolve({ stopReason: 'end_turn' });
+  });
+
+  it('keeps another live session running while rotating a cancelled session binding', async () => {
+    const connection = createConnection();
+    const first = createDeferred<{ stopReason: string }>();
+    const other = createDeferred<{ stopReason: string }>();
+    const next = createDeferred<{ stopReason: string }>();
+    connection.prompt.mockReturnValueOnce(first.promise).mockReturnValueOnce(other.promise).mockReturnValueOnce(next.promise);
+    const { service, send } = await createService(connection);
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    const stopped = service.sendPrompt({ sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'stop me' });
+    await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(1));
+    await service.loadSession({ sessionKey: 'agent:pi:s2', workspaceRoot: '/repo', cwd: '/repo' });
+    const retained = service.sendPrompt({ sessionKey: 'agent:pi:s2', cwd: '/repo', message: 'keep me' });
+    await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(2));
+    await service.loadSession({ sessionKey: 'agent:pi:s1', workspaceRoot: '/repo', cwd: '/repo' });
+    await service.cancelSession({ sessionKey: 'agent:pi:s1' });
+    await expect(stopped).resolves.toMatchObject({ errorCode: 'CANCELLED' });
+    const following = service.sendPrompt({ sessionKey: 'agent:pi:s1', cwd: '/repo', message: 'new' });
+    await vi.waitFor(() => expect(connection.prompt).toHaveBeenCalledTimes(3));
+    const nextId = connection.prompt.mock.calls[2][0].sessionId;
+    send.mockClear();
+    await resolvePromptWithText(service, 'late cancelled', 'agent:pi:s1');
+    expect(send).not.toHaveBeenCalled();
+    await resolvePromptWithText(service, 'other continues', 'agent:pi:s2');
+    expect(send).toHaveBeenCalledWith(HOST_EVENT_CHANNELS.chat.acpSessionUpdate, expect.objectContaining({ sessionKey: 'agent:pi:s2' }));
+    await resolvePromptWithText(service, 'next text', nextId);
+    other.resolve({ stopReason: 'end_turn' });
+    next.resolve({ stopReason: 'end_turn' });
+    await expect(retained).resolves.toMatchObject({ success: true });
+    await expect(following).resolves.toMatchObject({ success: true });
+    expect(connection.initialize).toHaveBeenCalledTimes(1);
+    expect(connection.cancel).toHaveBeenCalledExactlyOnceWith({ sessionId: 'agent:pi:s1' });
+    first.resolve({ stopReason: 'end_turn' });
   });
 
   it('builds ACP prompt blocks from message and media', async () => {

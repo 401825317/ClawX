@@ -1565,6 +1565,7 @@ describe('host services', () => {
     };
     const gatewayManager = {
       getStatus: vi.fn(() => ({ state: 'running' })),
+      captureRuntimeConfigFingerprint: vi.fn().mockResolvedValueOnce('before').mockResolvedValueOnce('after'),
       debouncedReload: vi.fn(),
     };
     const { createAgentsApi } = await import('@electron/services/agents-api');
@@ -1582,7 +1583,7 @@ describe('host services', () => {
     expect(agentConfig.updateAgentModel).toHaveBeenCalledWith('main', 'custom-enterpri/claude-sonnet-4');
     expect(providerRuntimeSync.syncAllProviderAuthToRuntime).toHaveBeenCalledWith();
     expect(providerRuntimeSync.syncAgentModelOverrideToRuntime).toHaveBeenCalledWith('main');
-    expect(gatewayManager.debouncedReload).toHaveBeenCalledTimes(1);
+    expect(gatewayManager.debouncedReload).toHaveBeenCalledExactlyOnceWith(undefined, 'update-agent-model', 'after');
   });
 
   it('does not reload after agent creation when managed auth synchronization fails', async () => {
@@ -1598,6 +1599,7 @@ describe('host services', () => {
     createAgentMock.mockResolvedValue(snapshot);
     const gatewayManager = {
       getStatus: vi.fn(() => ({ state: 'running' })),
+      captureRuntimeConfigFingerprint: vi.fn().mockResolvedValue('before'),
       debouncedReload: vi.fn(),
     };
     const { createAgentsApi } = await import('@electron/services/agents-api');
@@ -1645,6 +1647,8 @@ describe('host services', () => {
     createAgentMock.mockResolvedValue(snapshot);
     const gatewayManager = {
       getStatus: vi.fn(() => ({ state: 'stopped' })),
+      captureRuntimeConfigFingerprint: vi.fn().mockResolvedValue('same'),
+      getAppliedRuntimeConfigFingerprint: vi.fn().mockReturnValue(null),
       debouncedReload: vi.fn(),
     };
     const { createAgentsApi } = await import('@electron/services/agents-api');
@@ -1673,6 +1677,7 @@ describe('host services', () => {
     };
     const gatewayManager = {
       getStatus: vi.fn(() => ({ state: 'running' })),
+      captureRuntimeConfigFingerprint: vi.fn().mockResolvedValue('before'),
       debouncedReload: vi.fn(),
     };
     const { createAgentsApi } = await import('@electron/services/agents-api');
@@ -1709,6 +1714,7 @@ describe('host services', () => {
     assignChannelToAgentMock.mockResolvedValue(snapshot);
     const gatewayManager = {
       getStatus: vi.fn(() => ({ state: 'running' })),
+      captureRuntimeConfigFingerprint: vi.fn().mockResolvedValueOnce('before').mockResolvedValueOnce('after'),
       debouncedReload: vi.fn(),
     };
     const { createAgentsApi } = await import('@electron/services/agents-api');
@@ -1719,7 +1725,7 @@ describe('host services', () => {
     })).resolves.toEqual({ success: true, ...snapshot });
 
     expect(assignChannelToAgentMock).toHaveBeenCalledWith('main', 'feishu');
-    expect(gatewayManager.debouncedReload).toHaveBeenCalledTimes(1);
+    expect(gatewayManager.debouncedReload).toHaveBeenCalledExactlyOnceWith(undefined, 'assign-channel', 'after');
   });
 
   it('returns diagnostics snapshot with channel view and log tails', async () => {

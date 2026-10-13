@@ -1,8 +1,10 @@
 export type AcpChatErrorCode =
   | 'INSUFFICIENT_QUOTA'
+  | 'SUBSCRIPTION_UNAVAILABLE'
   | 'AUTH_INVALID'
   | 'RATE_LIMIT'
   | 'PERMISSION_DENIED'
+  | 'TLS_CERT_INVALID'
   | 'TIMEOUT'
   | 'NETWORK'
   | 'GATEWAY_UNAVAILABLE'
@@ -49,7 +51,7 @@ function collectErrorSignals(value: unknown, signals: ErrorSignals, seen: Set<ob
   seen.add(value);
 
   const record = value as Record<string, unknown>;
-  for (const key of ['message', 'error', 'detail', 'body', 'cause', 'data', 'details', 'response']) {
+  for (const key of ['message', 'errorMessage', 'error', 'detail', 'body', 'cause', 'data', 'details', 'response']) {
     collectErrorSignals(record[key], signals, seen, depth + 1);
   }
   for (const key of ['code', 'type', 'errorCode', 'upstreamCode']) {
@@ -103,6 +105,14 @@ export function normalizeAcpChatError(error: unknown, fallback = 'ACP prompt fai
     ...(upstreamCode ? { upstreamCode } : {}),
   });
 
+  // Subscription and balance are distinct remediation paths. A subscription
+  // failure must not imply that adding prepaid balance will restore access.
+  if (includesAny(searchable, [
+    /\bsubscription_unavailable\b/u,
+    /订阅额度不足或未配置订阅/u,
+    /\bno active subscription\b/u,
+  ])) return result('SUBSCRIPTION_UNAVAILABLE', false);
+
   if (includesAny(searchable, [
     /insufficient[_ -]?user[_ -]?quota/u,
     /insufficient[_ -]?(?:quota|balance|credits?)/u,
@@ -112,6 +122,27 @@ export function normalizeAcpChatError(error: unknown, fallback = 'ACP prompt fai
     /额度已用完/u,
     /预扣费额度失败/u,
   ])) return result('INSUFFICIENT_QUOTA', false);
+
+  // TLS certificate rejections (for example a self-signed certificate in the
+  // chain) never reach the model provider. They must not surface as generic
+  // network errors or retryable timeouts; the user has to fix trust/proxy
+  // configuration instead of retrying the same request.
+  if (includesAny(searchable, [
+    /\btls_cert_invalid\b/u,
+    /depth_zero_self_signed_cert/u,
+    /self_signed_cert_in_chain/u,
+    /unable_to_get_issuer_cert_locally/u,
+    /cert_not_yet_valid/u,
+    /err_tls_cert_altname_invalid/u,
+    /self[-_ ]signed certificate/u,
+    /unable to verify (?:the first )?certificate/u,
+    /unable_to_verify_leaf_signature/u,
+    /certificate has expired/u,
+    /certificate.{0,24}(?:expired|not trusted|invalid)/u,
+    /hostname.{0,24}(?:mismatch|mismatched)/u,
+    /cert_.{0,24}(?:expired|invalid|untrusted)/u,
+    /证书.{0,12}(?:自签|自签名|过期|不受信任|无效)/u,
+  ])) return result('TLS_CERT_INVALID', false);
 
   if (httpStatus === 451 || includesAny(searchable, [
     /generated images?.{0,20}unsafe/u,
@@ -168,6 +199,8 @@ export function normalizeAcpChatError(error: unknown, fallback = 'ACP prompt fai
   ])) return result('IMAGE_TOO_LARGE', false);
 
   if (httpStatus === 400 || httpStatus === 422 || includesAny(searchable, [
+    /message can include at most \d+ media attachments/u,
+    /媒体附件.{0,12}(?:最多|超过).{0,12}\d+/u,
     /invalid[_ -]?request/u,
     /unsupported parameter/u,
     /unsupported (?:video )?size/u,
