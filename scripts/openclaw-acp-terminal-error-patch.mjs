@@ -34,7 +34,7 @@ const ACP_ERROR_HELPER_PREVIOUS_TARGET = [
   '\tconst errorMessage = typeof message.errorMessage === "string" && message.errorMessage.trim();',
   '\tif (!errorMessage) return;',
   '\tconst errorCode = typeof message.errorCode === "string" && message.errorCode.trim() || typeof message.errorType === "string" && message.errorType.trim() || void 0;',
-  '\treturn { errorMessage, ...errorCode ? { errorCode } : {} };',
+  '\treturn { errorMessage, ...(errorCode ? { errorCode } : {}) };',
   '}',
   'function findUclawLatestTurnTranscriptError(transcript) {',
   '\tif (!Array.isArray(transcript)) return;',
@@ -71,7 +71,7 @@ const ACP_ERROR_HELPER_TERMINAL_PREVIOUS_TARGET = ACP_ERROR_HELPER_PREVIOUS_TARG
 );
 const ACP_ERROR_HELPER_TARGET = ACP_ERROR_HELPER_TERMINAL_PREVIOUS_TARGET.replace(
   '\treturn Object.assign(new Error(terminal?.errorMessage ?? message, { cause: value }), terminal ? { code: terminal.code, errorCode: terminal.code } : {});',
-  '\treturn Object.assign(new Error(terminal?.errorMessage ?? message, { cause: terminal ? { code: terminal.tlsCauseCode ?? terminal.code } : value }), terminal ? { code: terminal.code, errorCode: terminal.code, ...terminal.tlsCauseCode ? { tlsCauseCode: terminal.tlsCauseCode } : {} } : {});',
+  '\treturn Object.assign(new Error(terminal?.errorMessage ?? message, { cause: terminal ? { code: terminal.tlsCauseCode ?? terminal.code } : value }), terminal ? { code: terminal.code, errorCode: terminal.code, ...(terminal.tlsCauseCode ? { tlsCauseCode: terminal.tlsCauseCode } : {}) } : {});',
 );
 
 const ACP_STATE_ERROR_SOURCE = [
@@ -128,7 +128,7 @@ const ACP_REJECT_METHOD_LEGACY_TARGET = [
   '\t\t\tawait this.sessionUpdates.emit({',
   '\t\t\t\tsessionId: pending.sessionId,',
   '\t\t\t\tsessionKey: pending.sessionKey,',
-  '\t\t\t\t...pending.ledgerSessionId ? { ledgerSessionId: pending.ledgerSessionId } : {},',
+  '\t\t\t\t...(pending.ledgerSessionId ? { ledgerSessionId: pending.ledgerSessionId } : {}),',
   '\t\t\t\trunId: pending.idempotencyKey,',
   '\t\t\t\trecord: true,',
   '\t\t\t\tupdate: {',
@@ -158,14 +158,14 @@ const ACP_REJECT_METHOD_PREVIOUS_TARGET = [
   '\t\t\tawait this.sessionUpdates.emit({',
   '\t\t\t\tsessionId: pending.sessionId,',
   '\t\t\t\tsessionKey: pending.sessionKey,',
-  '\t\t\t\t...pending.ledgerSessionId ? { ledgerSessionId: pending.ledgerSessionId } : {},',
+  '\t\t\t\t...(pending.ledgerSessionId ? { ledgerSessionId: pending.ledgerSessionId } : {}),',
   '\t\t\t\trunId: pending.idempotencyKey,',
   '\t\t\t\trecord: true,',
   '\t\t\t\tupdate: {',
   '\t\t\t\t\tsessionUpdate: "uclaw_turn_failure",',
   '\t\t\t\t\tuserMessageId: pending.userMessageId,',
   '\t\t\t\t\terrorMessage: error.message,',
-  '\t\t\t\t\t...transcriptFailure?.errorCode ? { errorCode: transcriptFailure.errorCode } : {}',
+  '\t\t\t\t\t...(transcriptFailure?.errorCode ? { errorCode: transcriptFailure.errorCode } : {})',
   '\t\t\t\t}',
   '\t\t\t});',
   '\t\t} catch (recordError) {',
@@ -178,8 +178,8 @@ const ACP_REJECT_METHOD_PREVIOUS_TARGET = [
 const ACP_REJECT_METHOD_TARGET = ACP_REJECT_METHOD_PREVIOUS_TARGET
   .replace('if (transcriptFailure) error = new Error(transcriptFailure.errorMessage, { cause: value });',
     'if (transcriptFailure) error = buildAcpPromptError({ ...transcriptFailure, cause: value }, fallback);')
-  .replace('...transcriptFailure?.errorCode ? { errorCode: transcriptFailure.errorCode } : {}',
-    '...error.errorCode || transcriptFailure?.errorCode ? { errorCode: error.errorCode ?? transcriptFailure.errorCode } : {}');
+  .replace('...(transcriptFailure?.errorCode ? { errorCode: transcriptFailure.errorCode } : {})',
+    '...(error.errorCode || transcriptFailure?.errorCode ? { errorCode: error.errorCode ?? transcriptFailure.errorCode } : {})');
 
 const ACP_REPLAY_TRANSCRIPT_SOURCE = [
   '\tasync replaySessionTranscript(sessionId, transcript) {',
@@ -209,7 +209,7 @@ const ACP_REPLAY_TRANSCRIPT_TARGET = [
   '\t\t\t\tsessionId,',
   '\t\t\t\tupdate: {',
   '\t\t\t\t\tsessionUpdate: chunk.sessionUpdate,',
-  '\t\t\t\t\t...chunk.sessionUpdate === "user_message_chunk" && latestUserMessageId ? { messageId: latestUserMessageId } : {},',
+  '\t\t\t\t\t...(chunk.sessionUpdate === "user_message_chunk" && latestUserMessageId ? { messageId: latestUserMessageId } : {}),',
   '\t\t\t\t\tcontent: {',
   '\t\t\t\t\t\ttype: "text",',
   '\t\t\t\t\t\ttext: chunk.text',
@@ -224,12 +224,29 @@ const ACP_REPLAY_TRANSCRIPT_TARGET = [
   '\t\t\t\t\tsessionUpdate: "uclaw_turn_failure",',
   '\t\t\t\t\tuserMessageId: latestUserMessageId,',
   '\t\t\t\t\terrorMessage: transcriptFailure.errorMessage,',
-  '\t\t\t\t\t...transcriptFailure.errorCode ? { errorCode: transcriptFailure.errorCode } : {}',
+  '\t\t\t\t\t...(transcriptFailure.errorCode ? { errorCode: transcriptFailure.errorCode } : {})',
   '\t\t\t\t}',
   '\t\t\t});',
   '\t\t}',
   '\t}',
 ].join('\n');
+
+const LEGACY_CONDITIONAL_SPREADS = [
+  ['...errorCode ? { errorCode } : {}', '...(errorCode ? { errorCode } : {})'],
+  ['...terminal.tlsCauseCode ? { tlsCauseCode: terminal.tlsCauseCode } : {}', '...(terminal.tlsCauseCode ? { tlsCauseCode: terminal.tlsCauseCode } : {})'],
+  ['...pending.ledgerSessionId ? { ledgerSessionId: pending.ledgerSessionId } : {}', '...(pending.ledgerSessionId ? { ledgerSessionId: pending.ledgerSessionId } : {})'],
+  ['...transcriptFailure?.errorCode ? { errorCode: transcriptFailure.errorCode } : {}', '...(transcriptFailure?.errorCode ? { errorCode: transcriptFailure.errorCode } : {})'],
+  ['...error.errorCode || transcriptFailure?.errorCode ? { errorCode: error.errorCode ?? transcriptFailure.errorCode } : {}', '...(error.errorCode || transcriptFailure?.errorCode ? { errorCode: error.errorCode ?? transcriptFailure.errorCode } : {})'],
+  ['...chunk.sessionUpdate === "user_message_chunk" && latestUserMessageId ? { messageId: latestUserMessageId } : {}', '...(chunk.sessionUpdate === "user_message_chunk" && latestUserMessageId ? { messageId: latestUserMessageId } : {})'],
+  ['...transcriptFailure.errorCode ? { errorCode: transcriptFailure.errorCode } : {}', '...(transcriptFailure.errorCode ? { errorCode: transcriptFailure.errorCode } : {})'],
+];
+
+function normalizeLegacyConditionalSpreads(content) {
+  return LEGACY_CONDITIONAL_SPREADS.reduce(
+    (normalized, [source, target]) => normalized.split(source).join(target),
+    content,
+  );
+}
 
 const USER_QUOTA_HELPER_SOURCE = 'function isRateLimitAssistantError(msg) {';
 const USER_QUOTA_HELPER_TARGET = [
@@ -316,7 +333,7 @@ function applyRewrite(content, source, target) {
 }
 
 export function rewriteAcpTerminalErrors(content) {
-  let rewritten = content;
+  let rewritten = normalizeLegacyConditionalSpreads(content);
   let replacements = 0;
   for (const [source, target] of [
     [[ACP_ERROR_HELPER_TERMINAL_PREVIOUS_TARGET, ACP_ERROR_HELPER_PREVIOUS_TARGET, ACP_ERROR_HELPER_LEGACY_TARGET, ACP_ERROR_HELPER_SOURCE], ACP_ERROR_HELPER_TARGET],

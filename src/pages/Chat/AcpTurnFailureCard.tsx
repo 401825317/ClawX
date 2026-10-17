@@ -18,6 +18,7 @@ function failureCopyKey(code: TurnFailureItem['failure']['code']): string {
     case 'MODEL_UNAVAILABLE': return 'modelUnavailable';
     case 'CONTENT_POLICY': return 'contentPolicy';
     case 'CONVERSATION_INVALID': return 'conversationInvalid';
+    case 'CONTEXT_OVERFLOW': return 'contextOverflow';
     case 'IMAGE_TOO_LARGE': return 'imageTooLarge';
     case 'INVALID_REQUEST': return 'invalidRequest';
     case 'CANCELLED': return 'cancelled';

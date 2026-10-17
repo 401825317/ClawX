@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url';
 const SUPPORTED_OPENCLAW_VERSION = '2026.6.10';
 // Accept only the exact previous helper for an in-place upgrade; unknown edits fail closed.
 const PREVIOUS_TERMINAL_HELPER_SHA256 = 'ca76861b96d318b7c4e8ea5de2342ffe4701f9c56934b0fa82133614575ad3b5';
+// 2.0.19 shipped this exact helper with unparenthesized conditional spreads.
+// Accept only this known broken revision so the next bundle can repair it.
+const BROKEN_TERMINAL_HELPER_SHA256 = 'bcd83a4807bdcccc23faf899ee2a5e6ba63ca42d0f7a4f87f1225ab369ad0fd1';
 export const TERMINAL_HELPER_FILE = 'uclaw-provider-terminal-errors.mjs';
 // The generated 6.10 chunks include re-export shims with the same prefixes.
 // Pin full names, not broad prefix matches that could silently patch a shim.
@@ -74,7 +77,7 @@ export function getUclawTerminalFailure(value) {
       if (item[key] !== undefined) queue.push(item[key]);
     }
   }
-  if (tls) return { code: "TLS_CERT_INVALID", errorMessage: "TLS_CERT_INVALID: " + (tlsCauseCode ?? "certificate validation failed"), ...tlsCauseCode ? { tlsCauseCode } : {} };
+  if (tls) return { code: "TLS_CERT_INVALID", errorMessage: "TLS_CERT_INVALID: " + (tlsCauseCode ?? "certificate validation failed"), ...(tlsCauseCode ? { tlsCauseCode } : {}) };
   if (subscription) return { code: "SUBSCRIPTION_UNAVAILABLE", errorMessage: "SUBSCRIPTION_UNAVAILABLE: no active subscription or subscription quota exhausted" };
   if (quota) return { code: "insufficient_user_quota", errorMessage: "insufficient_user_quota: user quota exhausted" };
 }
@@ -82,7 +85,7 @@ export function throwUclawTerminalFailure(value) {
   const failure = getUclawTerminalFailure(value);
   if (!failure) return;
   // Only safe stable metadata is exposed to Gateway/ACP; no transport cause is serialized.
-  throw Object.assign(new Error(failure.errorMessage), { code: failure.code, errorCode: failure.code, ...failure.tlsCauseCode ? { tlsCauseCode: failure.tlsCauseCode } : {} });
+  throw Object.assign(new Error(failure.errorMessage), { code: failure.code, errorCode: failure.code, ...(failure.tlsCauseCode ? { tlsCauseCode: failure.tlsCauseCode } : {}) });
 }
 export function assignUclawTerminalFailure(output, error) {
   const failure = getUclawTerminalFailure(error);
@@ -150,7 +153,7 @@ export function createUclawTerminalFetch(fetchImpl) {
       // preserves the certificate code without modifying trust or SDK globals.
       return new Response(JSON.stringify({ error: {
         code: failure.code, type: failure.code, message: failure.errorMessage,
-        ...failure.tlsCauseCode ? { tlsCauseCode: failure.tlsCauseCode } : {}
+        ...(failure.tlsCauseCode ? { tlsCauseCode: failure.tlsCauseCode } : {})
       } }), { status: 495, headers: { "content-type": "application/json", "x-should-retry": "false" } });
     }
     if (response.ok) return response;
@@ -263,8 +266,10 @@ export async function patchOpenClawProviderTerminalErrorRuntime(openclawDir, fil
   const helperPath = join(dist, TERMINAL_HELPER_FILE);
   let helper;
   try { helper = await readFile(helperPath, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const helperHash = helper === undefined ? undefined : createHash('sha256').update(helper).digest('hex');
   if (helper !== undefined && helper !== TERMINAL_HELPER_SOURCE
-    && createHash('sha256').update(helper).digest('hex') !== PREVIOUS_TERMINAL_HELPER_SHA256) {
+    && helperHash !== PREVIOUS_TERMINAL_HELPER_SHA256
+    && helperHash !== BROKEN_TERMINAL_HELPER_SHA256) {
     throw new Error('Unsupported UClaw terminal helper layout.');
   }
   const writes = plans.filter((plan) => plan.original !== plan.content);

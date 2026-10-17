@@ -114,6 +114,8 @@ vi.mock('react-i18next', () => ({
         'acp.failure.serviceUnavailable.message': 'Try again later.',
         'acp.failure.imageTooLarge.title': 'Image too large',
         'acp.failure.imageTooLarge.message': 'Choose a smaller image.',
+        'acp.failure.contextOverflow.title': 'Conversation context limit reached',
+        'acp.failure.contextOverflow.message': 'Create a new chat and continue with a smaller task.',
         'acp.attachment.loading': 'Loading attachment',
         'acp.attachment.unavailable': 'Attachment unavailable',
         'acp.attachment.open': 'Open {{name}}',
@@ -302,6 +304,24 @@ describe('ACP chat timeline components', () => {
 
     expect(screen.getByText('Model service unavailable')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Recharge' })).not.toBeInTheDocument();
+  });
+
+  it('renders context overflow guidance instead of the generic failure', () => {
+    render(<AcpTurnFailureCard
+      item={{
+        kind: 'turn-failure',
+        id: 'turn-failure:user-context',
+        userMessageId: 'user-context',
+        failure: {
+          code: 'CONTEXT_OVERFLOW',
+          message: 'Context overflow: prompt too large for the model.',
+          retryable: true,
+        },
+      }}
+    />);
+
+    expect(screen.getByText('Conversation context limit reached')).toBeInTheDocument();
+    expect(screen.getByText('Create a new chat and continue with a smaller task.')).toBeInTheDocument();
   });
 
   it('keeps interrupted text visible but muted while a retry is waiting', () => {
