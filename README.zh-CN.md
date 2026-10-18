@@ -297,6 +297,8 @@ UClaw 托管账号操作通过类型化 `managedAuth` Host API 完成。Renderer
 
 ACP assistant 回合会显示整轮耗时。Live 计时跟随客户端观测到的 prompt 生命周期，并在应用内导航后保持连续；历史耗时由 Electron Main 根据有界的 OpenClaw transcript 时间戳计算，而且只能标注 ACP 回放已经恢复出的回合。
 
+长会话压缩会向内置 legacy 运行时传递取消信号，并在恢复再次访问会话文件前短暂等待协作式清理。清理未结束时停止恢复和模型切换；取消、明确的余额/订阅或 TLS 错误不能被转换成仅描述消息大小的“成功摘要”。这不代表上游可用性、图片交付或退款已有保证；客户故障验收见 [10 月 16 日问题核验](docs/customer-incident-20261016.md)。
+
 ACP Chat 会将标准 ACP resource 渲染为附件。用户选择的图片会显示为缩略图，并在悬停蒙层中显示文件名；其它可用的附件卡片会显示文件名，以及灰色、可截断的来源路径。当前 OpenClaw ACP adapter 遗漏 assistant 媒体时，显式的 assistant `MEDIA:` 指令也可恢复为附件卡片，且不会显示原始指令。如果媒体完成回复到达 ACP 时只剩截断前缀，ClawX 可从同一条模型 transcript 记录在原位置补全末尾回复，不会另建一条消息。现有本地文件引用（包括当前 workspace 外的路径）在每次预览或打开前，都会由 Electron Main 按精确的 session 和 generation 重新验证。AI 生成且可预览的本地附件（包括不超过 20 MB 的 `.docx` 和 `.pptx` 文件）会保留主要的只读应用内预览操作，并提供次级菜单，可通过兼容应用打开，或在 Finder、文件资源管理器或系统文件管理器中显示。对于本地 HTML 附件，该菜单第一项会在右侧网页浏览器中打开文件 URL。Office 预览在此处也有相同限制：`.doc` 和 `.ppt` 仍通过系统应用打开，DOCX 的分页效果可能与 Microsoft Word 不同，PPTX 的动画、切换效果和媒体播放不受支持。兼容应用发现仅在 macOS 和 Windows 上可用；在 Linux 上或发现失败时，会静默降级为仅显示文件位置。其它本地文件（包括超过 20 MB 的 Office 文件）会在用户点击后通过系统应用打开；远程 HTTP 和 HTTPS 附件会在用户点击后从外部打开。普通文本中的裸路径或行内路径不会被当作附件。
 
 ACP Chat 也可在 runtime 以可信结构化媒体投递图像生成结果时显示生成图片预览。对于可信的 OpenClaw internal-UI 投递和与生图任务关联的最终回复，ClawX 会保留原始的用户可见完成文案，包括只有文本的失败说明，而不会统一替换成通用图片文案。历史 OpenClaw 回放中，assistant 的图片 `MEDIA:` 标记只有在同一会话已记录图像生成任务启动后才会进入内联图片体验。超出内联预算的原生 ACP 图片数据会先由 Electron Main 写入会话范围内的受控媒体，再以有界缩略图显示；用户打开预览时才读取原图。ClawX 通过 Electron Main 的主机媒体处理加载预览，而不是让 Renderer 任意访问文件系统。标准 ACP 图片和 resource 内容仍是首选路径，并会直接渲染。

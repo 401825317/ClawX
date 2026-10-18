@@ -26,6 +26,7 @@ import { patchOpenClawAcpStreamingRuntime } from './openclaw-acp-streaming-patch
 import { patchOpenClawAcpTerminalErrorRuntime } from './openclaw-acp-terminal-error-patch.mjs';
 import { patchOpenClawAcpBindingIsolationRuntime } from './openclaw-acp-binding-isolation-patch.mjs';
 import { patchOpenClawProviderTerminalErrorRuntime } from './openclaw-provider-terminal-error-patch.mjs';
+import { patchOpenClawCompactionRecoveryRuntime } from './openclaw-compaction-recovery-patch.mjs';
 import { patchOpenClawAcpSessionReplayRuntime } from './openclaw-acp-session-replay-guard-patch.mjs';
 import { patchOpenClawMediaGenerationRuntime } from './openclaw-media-generation-patch.mjs';
 import { patchOpenClawModelCatalogCacheRuntime } from './openclaw-model-catalog-cache-patch.mjs';
@@ -1050,6 +1051,8 @@ echo`   🩹 Verified UClaw ACP streaming patch (${acpStreamingPatch.filesPatche
 // preflights its own files; this sequence is not a transaction across patches.
 const providerTerminalErrorPatch = await patchOpenClawProviderTerminalErrorRuntime(OUTPUT);
 echo`   Verified terminal provider error patch (${providerTerminalErrorPatch.filesPatched} file(s) patched)`;
+const compactionRecoveryPatch = await patchOpenClawCompactionRecoveryRuntime(OUTPUT);
+echo`   Verified compaction recovery patch (${compactionRecoveryPatch.filesPatched} file(s) patched)`;
 // Terminal provider failures must reject the ACP prompt so the renderer can
 // attach the correct recovery message to the originating user turn.
 const acpTerminalErrorPatch = await patchOpenClawAcpTerminalErrorRuntime(OUTPUT);

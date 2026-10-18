@@ -176,6 +176,8 @@ export function normalizeAcpChatError(error: unknown, fallback = 'ACP prompt fai
   ])) return result('CONVERSATION_INVALID', false);
 
   if (includesAny(searchable, [
+    /\bcontext[_ -]overflow\b/u,
+    /\bcontext_length_exceeded\b/u,
     /preflight compaction required but failed/u,
     /context is too large and auto-compaction could not recover/u,
     /auto-compaction could not recover/u,

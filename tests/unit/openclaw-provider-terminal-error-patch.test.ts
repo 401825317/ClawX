@@ -1,6 +1,7 @@
 // @vitest-environment node
 
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
@@ -77,6 +78,18 @@ async function importRuntime(file: string) {
   return await import(/* @vite-ignore */ pathToFileURL(join(runtime, 'dist', file)).href);
 }
 
+// Fault injection must start from a known unpatched boundary even when local
+// postinstall has already patched the installed dependency.
+function unpatchedFaultBoundary(source: string, file: string) {
+  if (file === PROVIDER_RUNTIME_FILES.transport) return source.replace(
+    '\treturn createUclawTerminalFetch(buildUclawOriginalGuardedModelFetch(model, timeoutMs, options));\n}\nfunction buildUclawOriginalGuardedModelFetch(model, timeoutMs, options) {', '',
+  );
+  if (file === PROVIDER_RUNTIME_FILES.completions) return source.replace(
+    '\n\t\tfetch: createUclawTerminalFetch(globalThis.fetch),', '',
+  );
+  return source;
+}
+
 beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), 'uclaw-terminal-e2e-'));
   runtime = join(root, 'runtime');
@@ -91,12 +104,13 @@ beforeAll(async () => {
   await writeFile(join(runtime, 'package.json'), JSON.stringify({ version: '2026.6.10', type: 'module' }));
   // OpenClaw's bare dependencies are siblings in pnpm's virtual node_modules.
   const depDir = actualRoot.includes('/@') ? dirname(dirname(actualRoot)) : dirname(actualRoot);
-  await symlink(depDir, join(runtime, 'node_modules'));
+  await symlink(depDir, join(runtime, 'node_modules'), 'junction');
   for (const entry of await readdir(join(installed, 'dist'), { withFileTypes: true })) {
     const from = join(installed, 'dist', entry.name);
     const to = join(runtime, 'dist', entry.name);
-    if (entry.isFile() && entry.name.endsWith('.js')) await writeFile(to, await readFile(from));
-    else if (entry.name !== TERMINAL_HELPER_FILE) await symlink(from, to);
+    if (entry.name === TERMINAL_HELPER_FILE) continue;
+    if (entry.isDirectory()) await symlink(from, to, 'junction');
+    else if (entry.isFile()) await writeFile(to, await readFile(from));
   }
   await patchOpenClawProviderTerminalErrorRuntime(runtime);
   await patchOpenClawAcpTerminalErrorRuntime(runtime);
@@ -114,7 +128,9 @@ beforeAll(async () => {
   embedded = await importRuntime(PROVIDER_RUNTIME_FILES.embedded);
   await provider.start();
   // Fresh disposable self-signed cert. Neither CA loading nor verification bypass.
-  execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+  const openssl = process.platform === 'win32' && existsSync('C:/Program Files/Git/usr/bin/openssl.exe')
+    ? 'C:/Program Files/Git/usr/bin/openssl.exe' : 'openssl';
+  execFileSync(openssl, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes',
     '-keyout', join(root, 'key.pem'), '-out', join(root, 'cert.pem'),
     '-days', '1', '-subj', '/CN=localhost'], { stdio: 'ignore' });
   tlsServer = createHttpsServer({
@@ -480,7 +496,7 @@ describe('real OpenClaw provider terminal boundaries', () => {
     await writeFile(join(isolated, 'package.json'), JSON.stringify({ version: '2026.6.10' }));
     const originals = new Map<string, string>();
     for (const file of Object.values(PROVIDER_RUNTIME_FILES)) {
-      const original = await readFile(resolve('node_modules/openclaw/dist', file), 'utf8');
+      const original = unpatchedFaultBoundary(await readFile(resolve('node_modules/openclaw/dist', file), 'utf8'), file);
       const filePath = join(isolated, 'dist', file);
       originals.set(filePath, original);
       await writeFile(filePath, original);
@@ -623,6 +639,8 @@ export function createUclawTerminalFetch(fetchImpl) {
     }
     const helperPath = join(isolated, 'dist', TERMINAL_HELPER_FILE);
     await writeFile(helperPath, oldHelper);
+    const transportPath = join(isolated, 'dist', PROVIDER_RUNTIME_FILES.transport);
+    await writeFile(transportPath, unpatchedFaultBoundary(await readFile(transportPath, 'utf8'), PROVIDER_RUNTIME_FILES.transport));
     let writes = 0;
     const failure = new Error('upgrade write failed');
     await expect(patchOpenClawProviderTerminalErrorRuntime(isolated, { rm, writeFile: async (filePath: string, content: string) => {
@@ -646,6 +664,10 @@ export function createUclawTerminalFetch(fetchImpl) {
     const helperPath = join(isolated, 'dist', TERMINAL_HELPER_FILE);
     await writeFile(helperPath, 'unknown helper source');
     const target = join(isolated, 'dist', PROVIDER_RUNTIME_FILES.transport);
+    for (const file of [PROVIDER_RUNTIME_FILES.transport, PROVIDER_RUNTIME_FILES.completions]) {
+      const filePath = join(isolated, 'dist', file);
+      await writeFile(filePath, unpatchedFaultBoundary(await readFile(filePath, 'utf8'), file));
+    }
     const before = await readFile(target, 'utf8');
     await expect(patchOpenClawProviderTerminalErrorRuntime(isolated)).rejects.toThrow('Unsupported UClaw terminal helper layout');
     expect(await readFile(target, 'utf8')).toBe(before);
@@ -660,6 +682,10 @@ export function createUclawTerminalFetch(fetchImpl) {
       await writeFile(join(isolated, 'dist', file), await readFile(resolve('node_modules/openclaw/dist', file)));
     }
     const target = join(isolated, 'dist', PROVIDER_RUNTIME_FILES.transport);
+    for (const file of [PROVIDER_RUNTIME_FILES.transport, PROVIDER_RUNTIME_FILES.completions]) {
+      const filePath = join(isolated, 'dist', file);
+      await writeFile(filePath, unpatchedFaultBoundary(await readFile(filePath, 'utf8'), file));
+    }
     const before = await readFile(target, 'utf8');
     let writes = 0;
     const failure = new Error('provider write failed');
