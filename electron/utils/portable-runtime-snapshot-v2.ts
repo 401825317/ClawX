@@ -39,6 +39,31 @@ const ROOT_SKIPPED_DIRECTORIES = new Set([
   'node-compile-cache',
 ]);
 const RUNTIME_MARKER_FILE = '.uclaw-runtime-state.json';
+const SOURCE_BUSY_RETRY_DELAYS_MS = [100, 250, 500] as const;
+
+function isTransientSourceBusy(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === 'EBUSY' || code === 'EPERM' || code === 'EACCES';
+}
+
+async function waitForSourceBusyRetry(attempt: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => signal?.removeEventListener('abort', abort);
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, SOURCE_BUSY_RETRY_DELAYS_MS[attempt]);
+    const abort = () => {
+      clearTimeout(timer);
+      cleanup();
+      reject(signal?.reason ?? new Error('Snapshot aborted'));
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+    timer.unref?.();
+  });
+  signal?.throwIfAborted();
+}
 
 export type PortableSnapshotV2Layout = {
   stateDir: string;
@@ -402,7 +427,7 @@ async function scanStateFiles(stateDir: string, signal?: AbortSignal): Promise<S
 }
 
 async function hashStableFile(file: ScannedFile, signal?: AbortSignal): Promise<StableFile | undefined> {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt <= SOURCE_BUSY_RETRY_DELAYS_MS.length; attempt += 1) {
     signal?.throwIfAborted();
     try {
       const before = await stat(file.sourcePath);
@@ -421,6 +446,8 @@ async function hashStableFile(file: ScannedFile, signal?: AbortSignal): Promise<
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      if (!isTransientSourceBusy(error) || attempt === SOURCE_BUSY_RETRY_DELAYS_MS.length) throw error;
+      await waitForSourceBusyRetry(attempt, signal);
     }
   }
   return undefined;
@@ -488,7 +515,15 @@ async function persistStableObject(
   try {
     const before = await stat(file.sourcePath);
     if (before.size !== stable.size || before.mtimeMs !== stable.mtimeMs) return 'unstable';
-    await copyFile(file.sourcePath, temporary);
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await copyFile(file.sourcePath, temporary);
+        break;
+      } catch (error) {
+        if (!isTransientSourceBusy(error) || attempt === SOURCE_BUSY_RETRY_DELAYS_MS.length) throw error;
+        await waitForSourceBusyRetry(attempt, signal);
+      }
+    }
     signal?.throwIfAborted();
     const after = await stat(file.sourcePath);
     if (after.size !== stable.size || after.mtimeMs !== stable.mtimeMs) return 'unstable';

@@ -16,6 +16,7 @@ const unstableSqliteBackupOutputs = vi.hoisted(() => ({ value: false }));
 const transientSqliteBackupMutations = vi.hoisted(() => ({ value: 0 }));
 const corruptStableObjectCopies = vi.hoisted(() => ({ value: false }));
 const failStableObjectCopies = vi.hoisted(() => ({ value: false }));
+const busyStableObjectCopies = vi.hoisted(() => ({ value: 0 }));
 const sqliteBackupCompletedHook = vi.hoisted(() => ({
   value: undefined as (() => void | Promise<void>) | undefined,
 }));
@@ -95,6 +96,12 @@ vi.mock('node:fs/promises', async (importOriginal) => {
         error.code = 'EIO';
         throw error;
       }
+      if (isStableObjectCopy && busyStableObjectCopies.value > 0) {
+        busyStableObjectCopies.value -= 1;
+        const error = new Error('Injected transient source lock') as NodeJS.ErrnoException;
+        error.code = 'EBUSY';
+        throw error;
+      }
       await actual.copyFile(source, destination, mode);
       if (isStableObjectCopy && corruptStableObjectCopies.value) {
         const content = await actual.readFile(destination);
@@ -138,6 +145,7 @@ afterEach(async () => {
   transientSqliteBackupMutations.value = 0;
   corruptStableObjectCopies.value = false;
   failStableObjectCopies.value = false;
+  busyStableObjectCopies.value = 0;
   sqliteBackupCompletedHook.value = undefined;
   sqliteBackupCalls.value = 0;
   restorePublishFailureTargets.clear();
@@ -249,6 +257,24 @@ describe('portable runtime snapshot v2 manifest', () => {
 });
 
 describe('portable runtime snapshot v2 sync', () => {
+  it('retries a transient Windows EBUSY while copying an active session file', async () => {
+    const layout = await createLayout();
+    const sessionPath = join(layout.stateDir, 'agents', 'main', 'sessions', 'active.jsonl');
+    await mkdir(join(layout.stateDir, 'agents', 'main', 'sessions'), { recursive: true });
+    await writeFile(sessionPath, '{"type":"message"}\n');
+    busyStableObjectCopies.value = 2;
+
+    const result = await syncPortableRuntimeSnapshotV2(layout, 'periodic');
+
+    expect(result.deferred).toBe(false);
+    expect(result.writtenObjects).toBeGreaterThan(0);
+    const manifest = JSON.parse(await readFile(result.snapshotPath!, 'utf8')) as PortableSnapshotV2Manifest;
+    const entry = manifest.entries['agents/main/sessions/active.jsonl'];
+    expect(entry).toBeDefined();
+    expect(await readFile(join(layout.snapshotDir, 'objects', entry.object.slice(0, 2), entry.object), 'utf8'))
+      .toContain('message');
+  });
+
   it('writes one baseline and performs no USB writes when state is unchanged', async () => {
     const layout = await createLayout();
     await mkdir(join(layout.stateDir, 'agents'), { recursive: true });

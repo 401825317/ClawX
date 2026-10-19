@@ -4386,6 +4386,10 @@ describe('batchSyncConfigFields', () => {
 
   it.each([
     [
+      'directory mode default',
+      { mode: 'directory' },
+    ],
+    [
       'directory default',
       { enabled: true, mode: 'directory' },
     ],
@@ -4398,7 +4402,7 @@ describe('batchSyncConfigFields', () => {
         maxSearchLimit: 12,
       },
     ],
-  ])('migrates the legacy ClawX Tool Search %s', async (_label, toolSearch) => {
+  ])('disables the legacy ClawX Tool Search %s', async (_label, toolSearch) => {
     await writeOpenClawJson({
       gateway: { auth: { mode: 'token', token: 'old' } },
       tools: {
@@ -4412,11 +4416,11 @@ describe('batchSyncConfigFields', () => {
 
     const config = await readOpenClawJson();
     const tools = config.tools as Record<string, unknown>;
-    expect(tools.toolSearch).toEqual({ mode: 'directory' });
+    expect(tools.toolSearch).toBe(false);
     expect(tools.allow).toEqual(['read']);
   });
 
-  it('seeds the Tool Search directory default when it is unset', async () => {
+  it('disables Tool Search by default when it is unset', async () => {
     await writeOpenClawJson({
       gateway: { auth: { mode: 'token', token: 'old' } },
       tools: { allow: ['read'] },
@@ -4427,7 +4431,7 @@ describe('batchSyncConfigFields', () => {
 
     const config = await readOpenClawJson();
     const tools = config.tools as Record<string, unknown>;
-    expect(tools.toolSearch).toEqual({ mode: 'directory' });
+    expect(tools.toolSearch).toBe(false);
     expect(tools.allow).toEqual(['read']);
   });
 

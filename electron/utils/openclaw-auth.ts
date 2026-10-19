@@ -2747,32 +2747,29 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/**
- * Keep the full tool catalog available while deferring heavyweight schemas.
- * Preserve every explicit user choice, and only migrate the exact legacy
- * defaults previously written by UClaw.
- */
-function ensureManagedToolSearchDirectoryDefault(config: Record<string, unknown>): boolean {
+/** Keep executable tool schemas directly visible to models with weak tool search support. */
+function ensureManagedToolSearchDefault(config: Record<string, unknown>): boolean {
   const tools = isPlainRecord(config.tools) ? config.tools : {};
   const current = tools.toolSearch;
 
   if (current === undefined) {
-    tools.toolSearch = { mode: 'directory' };
+    tools.toolSearch = false;
     config.tools = tools;
     return true;
   }
   if (!isPlainRecord(current)) return false;
 
   const keys = Object.keys(current);
-  const isDirectoryDefault = current.enabled === true && current.mode === 'directory';
-  const isBasicDefault = isDirectoryDefault && keys.length === 2;
-  const isLimitedDefault = isDirectoryDefault
-    && keys.length === 4
-    && current.searchDefaultLimit === 8
-    && current.maxSearchLimit === 12;
-  if (!isBasicDefault && !isLimitedDefault) return false;
+  const isDirectoryMode = current.mode === 'directory';
+  const hasOnlyLegacyDefaults = keys.every((key) => (
+    key === 'mode'
+    || (key === 'enabled' && current.enabled === true)
+    || (key === 'searchDefaultLimit' && current.searchDefaultLimit === 8)
+    || (key === 'maxSearchLimit' && current.maxSearchLimit === 12)
+  ));
+  if (!isDirectoryMode || !hasOnlyLegacyDefaults) return false;
 
-  tools.toolSearch = { mode: 'directory' };
+  tools.toolSearch = false;
   config.tools = tools;
   return true;
 }
@@ -3537,10 +3534,11 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
       console.log('[batch-sync] Enabled key-free Parallel web search');
     }
 
-    // Defer full tool schemas by default while preserving explicit user settings.
-    if (ensureManagedToolSearchDirectoryDefault(config)) {
+    // Keep real tools and their exact schemas visible instead of compacting them
+    // behind Tool Search tools that some configured models call incorrectly.
+    if (ensureManagedToolSearchDefault(config)) {
       modified = true;
-      console.log('[batch-sync] Enabled UClaw tools.toolSearch directory default');
+      console.log('[batch-sync] Disabled UClaw tools.toolSearch default');
     }
 
     // UClaw owns these bundled runtime plugins, so every Gateway launch must

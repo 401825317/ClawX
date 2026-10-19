@@ -23,6 +23,12 @@ touchedAreas:
   - tests/unit/chat-input.test.tsx
   - tests/e2e/chat-acp-attachments.spec.ts
   - tests/e2e/chat-run-state-events.spec.ts
+  - resources/openclaw-plugins/clawx-openai-image/index.mjs
+  - tests/unit/clawx-openai-image-plugin.test.ts
+  - electron/utils/openclaw-auth.ts
+  - tests/unit/openclaw-auth.test.ts
+  - electron/utils/portable-runtime-snapshot-v2.ts
+  - tests/unit/portable-runtime-snapshot-v2.test.ts
   - shared/i18n/locales/en/chat.json
   - shared/i18n/locales/zh/chat.json
   - shared/i18n/locales/ja/chat.json
@@ -63,6 +69,7 @@ acceptance:
   - ClawX accepts only trusted ACP or Gateway completion evidence that matches the active ACP session and recent image-generation context.
   - Internal-UI sourceReply text is authoritative for both successful media replies and text-only failure replies.
   - ClawX hydrates previews through hostApi.media.thumbnails before rendering images.
+  - Rejected remote image URLs include bounded, reason-coded diagnostics (policy reason, scheme, port, and hostname) without logging the path, query, credentials, or signed URL; SSRF and private-address rejection behavior remains unchanged.
   - Duplicate completion records and either live arrival order (native ACP reply first or transcript media supplement first) produce one assistant image reply before and after conversation reload.
   - If OpenClaw ends a detached media completion agent on the requester session after the initial bounded transcript window expires, ClawX re-arms only the exact active Turn while its recorded media task remains pending; no conversation switch is required, and later terminal events cannot refresh a settled task.
   - Live background image generation shows its dedicated generating label until its success or failure completion is projected, without changing the existing sending/thinking behavior.

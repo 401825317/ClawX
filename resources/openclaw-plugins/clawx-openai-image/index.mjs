@@ -562,6 +562,22 @@ function unsafeRemoteAddressError() {
   return error;
 }
 
+function remoteUrlPolicyDiagnostics(value, reason) {
+  let parsedUrl;
+  try {
+    parsedUrl = value instanceof URL ? value : new URL(String(value || ''));
+  } catch {
+    return { policyReason: reason, urlScheme: 'invalid' };
+  }
+  const hostname = normalizeRemoteHostname(parsedUrl.hostname);
+  return {
+    policyReason: reason,
+    urlScheme: parsedUrl.protocol.slice(0, -1),
+    urlPort: parsedUrl.port || (parsedUrl.protocol === 'https:' ? '443' : parsedUrl.protocol === 'http:' ? '80' : 'default'),
+    hostname: hostname || undefined,
+  };
+}
+
 function normalizeRemoteHostname(hostname) {
   const value = String(hostname || '').trim().toLowerCase();
   const withoutBrackets = value.startsWith('[') && value.endsWith(']')
@@ -637,7 +653,14 @@ function errorChainHasCode(error, expectedCode) {
   return false;
 }
 
-function remoteUrlBlockedError(context = {}) {
+function remoteUrlBlockedError(context = {}, policyDetails = {}) {
+  const responseSummary = [
+    context.responseSummary,
+    policyDetails.policyReason ? `urlPolicyReason=${policyDetails.policyReason}` : undefined,
+    policyDetails.urlScheme ? `urlScheme=${policyDetails.urlScheme}` : undefined,
+    policyDetails.urlPort ? `urlPort=${policyDetails.urlPort}` : undefined,
+    policyDetails.hostname ? `hostname=${policyDetails.hostname}` : undefined,
+  ].filter(Boolean).join(' ');
   return new ImageProviderError(
     context.kind === 'provider'
       ? 'OpenAI-compatible image provider URL was blocked by network policy'
@@ -645,7 +668,7 @@ function remoteUrlBlockedError(context = {}) {
     {
       code: IMAGE_ERROR_CODES.remoteUrlBlocked,
       providerRequestId: context.providerRequestId,
-      responseSummary: context.responseSummary,
+      responseSummary,
     },
   );
 }
@@ -655,21 +678,21 @@ function validateRemoteHttpUrl(value, context = {}) {
   try {
     parsedUrl = value instanceof URL ? new URL(value.href) : new URL(String(value || '').trim());
   } catch {
-    throw remoteUrlBlockedError(context);
+    throw remoteUrlBlockedError(context, remoteUrlPolicyDiagnostics(value, 'invalid_url'));
   }
   if (
     !['http:', 'https:'].includes(parsedUrl.protocol)
     || parsedUrl.username
     || parsedUrl.password
   ) {
-    throw remoteUrlBlockedError(context);
+    throw remoteUrlBlockedError(context, remoteUrlPolicyDiagnostics(parsedUrl, 'unsupported_scheme_or_credentials'));
   }
   const hostname = normalizeRemoteHostname(parsedUrl.hostname);
-  if (!hostname) throw remoteUrlBlockedError(context);
+  if (!hostname) throw remoteUrlBlockedError(context, remoteUrlPolicyDiagnostics(parsedUrl, 'missing_hostname'));
   const trustedProviderOrigin = normalizeOptionalString(context.trustedProviderOrigin);
   const isTrustedProviderOrigin = Boolean(trustedProviderOrigin && parsedUrl.origin === trustedProviderOrigin);
   if (context.providerOnly === true && !isTrustedProviderOrigin) {
-    throw remoteUrlBlockedError(context);
+    throw remoteUrlBlockedError(context, remoteUrlPolicyDiagnostics(parsedUrl, 'provider_origin_mismatch'));
   }
   if (!isTrustedProviderOrigin) {
     const addressFamily = isIP(hostname);
@@ -677,7 +700,7 @@ function validateRemoteHttpUrl(value, context = {}) {
       isLocalNetworkHostname(hostname)
       || (addressFamily !== 0 && isBlockedRemoteAddress(hostname))
     ) {
-      throw remoteUrlBlockedError(context);
+      throw remoteUrlBlockedError(context, remoteUrlPolicyDiagnostics(parsedUrl, 'local_or_private_address'));
     }
   }
   return { parsedUrl, isTrustedProviderOrigin };
@@ -719,7 +742,7 @@ async function fetchWithValidatedRedirects(inputUrl, init, context = {}) {
     } catch (error) {
       if (isAbortError(error, currentInit.signal)) throw error;
       if (errorChainHasCode(error, 'UCLAW_UNSAFE_REMOTE_ADDRESS')) {
-        throw remoteUrlBlockedError(context);
+        throw remoteUrlBlockedError(context, remoteUrlPolicyDiagnostics(currentUrl, 'dns_resolved_to_private_address'));
       }
       throw new ImageProviderError(
         context.kind === 'provider'
@@ -746,7 +769,7 @@ async function fetchWithValidatedRedirects(inputUrl, init, context = {}) {
     try {
       nextUrl = new URL(location, validated.parsedUrl);
     } catch {
-      throw remoteUrlBlockedError(context);
+      throw remoteUrlBlockedError(context, remoteUrlPolicyDiagnostics(currentUrl, 'invalid_redirect_url'));
     }
     currentInit = redirectedRequestInit(currentInit, response.status, validated.parsedUrl, nextUrl);
     currentUrl = nextUrl;
@@ -974,8 +997,7 @@ async function fetchImageUrl(url, context = {}) {
   logImageTiming('image_url_fetch_start', {
     requestId: context.requestId,
     index: context.index,
-    host: parsedUrl.host,
-    pathHash: createHash('sha256').update(parsedUrl.pathname, 'utf8').digest('hex').slice(0, 12),
+    ...remoteUrlPolicyDiagnostics(parsedUrl, 'fetch_started'),
   });
   try {
     const response = await fetchWithValidatedRedirects(parsedUrl, {

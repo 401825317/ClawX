@@ -1206,18 +1206,21 @@ describe('ClawX OpenAI image plugin request shape', () => {
       name: 'a localhost hostname',
       imageHost: 'localhost',
       credential: 'loopback-query-secret',
+      policyReason: 'local_or_private_address',
     },
     {
       name: 'a direct loopback literal outside the provider origin',
       imageHost: '127.0.0.2',
       credential: 'loopback-literal-query-secret',
+      policyReason: 'local_or_private_address',
     },
     {
       name: 'a hostname that DNS resolves to a private address',
       imageHost: '127.0.0.1.nip.io',
       credential: 'dns-private-query-secret',
+      policyReason: 'dns_resolved_to_private_address',
     },
-  ])('rejects $name before downloading image bytes', async ({ imageHost, credential }) => {
+  ])('rejects $name before downloading image bytes and records actionable policy diagnostics', async ({ imageHost, credential, policyReason }) => {
     let mediaRequests = 0;
     const mediaServer = http.createServer((_req, res) => {
       mediaRequests += 1;
@@ -1270,6 +1273,12 @@ describe('ClawX OpenAI image plugin request shape', () => {
       expect(mediaRequests).toBe(0);
       const diagnostics = [...infoSpy.mock.calls, ...errorSpy.mock.calls].flat().join('\n');
       expect(diagnostics).not.toContain(credential);
+      expect(error.responseSummary).toContain(`urlPolicyReason=${policyReason}`);
+      expect(error.responseSummary).toContain('urlScheme=http');
+      expect(error.responseSummary).toContain(`urlPort=${mediaAddress.port}`);
+      expect(error.responseSummary).toContain(`hostname=${imageHost}`);
+      expect(error.responseSummary).not.toContain('/private.png');
+      expect(diagnostics).toContain(`hostname=${imageHost}`);
     } finally {
       await dispose();
     }
@@ -1341,8 +1350,13 @@ describe('ClawX OpenAI image plugin request shape', () => {
       expectSanitizedImageFailure(error, credential);
       expect(redirectRequests).toBeLessThanOrEqual(1);
       expect(privateTargetRequests).toBe(0);
+      expect(error.responseSummary).toContain('urlPolicyReason=local_or_private_address');
+      expect(error.responseSummary).toContain('urlScheme=http');
+      expect(error.responseSummary).toContain(`urlPort=${privateTargetAddress.port}`);
+      expect(error.responseSummary).not.toContain('/private-target.png');
       const diagnostics = [...infoSpy.mock.calls, ...errorSpy.mock.calls].flat().join('\n');
       expect(diagnostics).not.toContain(credential);
+      expect(diagnostics).toContain('hostname=127.0.0.1');
     } finally {
       await dispose();
     }
