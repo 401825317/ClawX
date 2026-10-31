@@ -115,6 +115,13 @@ describe('app runtime managed gate startup', () => {
     const startup = source.slice(source.indexOf('// Start Gateway automatically'), source.indexOf('// Merge ClawX context'));
 
     expect(startup).toContain('getManagedAuthLocalStatus()');
+    expect(startup).toContain('getManagedAuthStatus({}, gatewayManager)');
+    expect(startup.indexOf('getManagedAuthLocalStatus()')).toBeLessThan(
+      startup.indexOf('getManagedAuthStatus({}, gatewayManager)'),
+    );
+    expect(startup.indexOf('getManagedAuthStatus({}, gatewayManager)')).toBeLessThan(
+      startup.indexOf("event: 'managed_gateway_start_deferred'"),
+    );
     expect(startup).toContain('isManagedRuntimeReady(managedAuthStatus)');
     expect(startup).toContain("gatewayManager.getStatus().state !== 'stopped'");
     expect(startup).toContain('await gatewayManager.stop();');

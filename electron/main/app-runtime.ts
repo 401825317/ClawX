@@ -97,7 +97,7 @@ import { deviceOAuthManager } from '../utils/device-oauth';
 import { browserOAuthManager } from '../utils/browser-oauth';
 import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { syncAllProviderAuthToRuntime } from '../services/providers/provider-runtime-sync';
-import { getManagedAuthLocalStatus } from '../services/managed-auth-service';
+import { getManagedAuthLocalStatus, getManagedAuthStatus } from '../services/managed-auth-service';
 import { ATTACHMENT_VIDEO_STREAM_SCHEME } from '../services/attachment-video-stream';
 import {
   startBlenderBridgeServer,
@@ -1003,7 +1003,17 @@ async function initialize(): Promise<void> {
       if (await hasManagedRuntimeMutationMarker()) {
         logger.warn('Gateway auto-start and Provider sync skipped until managed credentials are recovered');
       } else {
-        const managedAuthStatus = await getManagedAuthLocalStatus();
+        let managedAuthStatus = await getManagedAuthLocalStatus();
+        if (
+          !isManagedRuntimeReady(managedAuthStatus)
+          && (managedAuthStatus.hasAuthToken || managedAuthStatus.hasRefreshToken)
+        ) {
+          // Local status does not refresh an expired access token or verification
+          // cache. The renderer may refresh a few seconds later, but Gateway
+          // startup has already been skipped by then. Refresh the saved session
+          // once before deciding to defer.
+          managedAuthStatus = await getManagedAuthStatus({}, gatewayManager);
+        }
         if (!isManagedRuntimeReady(managedAuthStatus)) {
           // Do not leave a previous or in-flight launch presented as reconnecting when
           // managed credentials are unavailable. The renderer's auth gate can then

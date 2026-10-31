@@ -59,8 +59,15 @@ function summarizeJob(payload) {
   };
 }
 
-const vector3 = Type.Tuple([Type.Number(), Type.Number(), Type.Number()]);
-const rgba = Type.Tuple([Type.Number({ minimum: 0, maximum: 1 }), Type.Number({ minimum: 0, maximum: 1 }), Type.Number({ minimum: 0, maximum: 1 }), Type.Number({ minimum: 0, maximum: 1 })]);
+// OpenAI 协议只接受 `items` 为单个 schema 对象的数组，不接受 `items: [...]` 的元组写法。
+// Type.Tuple 恰好产出数组形态的 items（items + additionalItems），会触发上游
+// `400 Invalid schema for function ... is not of types "boolean", "object"`。
+// 这里用 Type.Array + minItems/maxItems 表达同样的定长约束，语义等价且协议兼容。
+const vector3 = Type.Array(Type.Number(), { minItems: 3, maxItems: 3 });
+const rgba = Type.Array(
+  Type.Number({ minimum: 0, maximum: 1 }),
+  { minItems: 4, maxItems: 4 },
+);
 const transformSchema = Type.Object({
   location: Type.Optional(vector3),
   rotation: Type.Optional(vector3),
